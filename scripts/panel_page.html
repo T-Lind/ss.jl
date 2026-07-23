@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ss.jl mission control</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0d0d0d; color: #c3c2b7;
+         font: 13.5px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .app { display: grid; grid-template-columns: 330px 1fr; gap: 16px;
+         max-width: 1400px; margin: 0 auto; padding: 16px; }
+  @media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
+  h1 { color: #fff; font-size: 17px; margin: 0 0 2px; }
+  h2 { color: #fff; font-size: 13px; margin: 0 0 8px; letter-spacing: .04em;
+       text-transform: uppercase; font-weight: 600; }
+  .sub { color: #898781; font-size: 12px; margin-bottom: 10px; }
+  .card { background: #1a1a19; border: 1px solid rgba(255,255,255,.1);
+          border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  label { display: block; color: #898781; font-size: 11px; margin: 7px 0 2px; }
+  input, select { width: 100%; background: #0d0d0d; color: #fff;
+    border: 1px solid rgba(255,255,255,.15); border-radius: 6px;
+    padding: 5px 8px; font: inherit; font-variant-numeric: tabular-nums; }
+  input:focus, select:focus, button:focus { outline: 2px solid #3987e5; outline-offset: 1px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  button { background: #3987e5; color: #fff; border: 0; border-radius: 7px;
+           padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; width: 100%; }
+  button:hover { background: #4a94ee; }
+  button.ghost { background: #2a2a28; border: 1px solid rgba(255,255,255,.15); }
+  button.ghost:hover { background: #383835; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .status { font-size: 12px; color: #898781; margin-top: 8px; min-height: 17px; }
+  .status.err { color: #e66767; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+           gap: 8px; margin-bottom: 12px; }
+  .tile { background: #1a1a19; border: 1px solid rgba(255,255,255,.1);
+          border-radius: 8px; padding: 7px 11px; }
+  .tile .v { color: #fff; font-size: 16.5px; font-weight: 650;
+             font-variant-numeric: tabular-nums; }
+  .tile .k { color: #898781; font-size: 10.5px; }
+  #scene { width: 100%; height: 430px; display: block; cursor: grab;
+           touch-action: none; border-radius: 8px; background: #131312; }
+  .bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  .bar button { width: auto; }
+  input[type=range] { flex: 1; min-width: 120px; accent-color: #3987e5;
+                      padding: 0; border: 0; background: none; }
+  .legend { display: flex; gap: 12px; font-size: 11.5px; margin: 6px 0 8px;
+            flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 13px; height: 3px; border-radius: 2px;
+              vertical-align: middle; margin-right: 4px; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 1100px) { .charts { grid-template-columns: 1fr; } }
+  .charts canvas { width: 100%; height: 150px; display: block; }
+  .chip { display: inline-block; background: #2a2a28; border: 1px solid rgba(255,255,255,.12);
+          border-radius: 6px; padding: 4px 9px; margin: 0 6px 6px 0; font-size: 11.5px;
+          cursor: pointer; font-variant-numeric: tabular-nums; }
+  .chip:hover { background: #383835; }
+  .chip.sel { border-color: #3987e5; color: #fff; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px;
+          font-variant-numeric: tabular-nums; }
+  td, th { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid #2c2c2a; }
+  th { color: #898781; font-weight: 500; font-size: 11px; }
+  .ro { font-variant-numeric: tabular-nums; font-size: 12px; color: #c3c2b7; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div>
+    <h1>ss.jl mission control</h1>
+    <div class="sub">circumlunar free return — configure, run, explore</div>
+
+    <div class="card">
+      <h2>Mission targets</h2>
+      <div class="row">
+        <div><label for="pod_mass">pod mass [kg]</label><input id="pod_mass" value="350"></div>
+        <div><label for="h_park_km">parking orbit [km]</label><input id="h_park_km" value="200"></div>
+      </div>
+      <div class="row3">
+        <div><label for="incl_deg">inclination [°]</label><input id="incl_deg" value="28.5"></div>
+        <div><label for="hp_moon_km">perilune [km]</label><input id="hp_moon_km" value="2000"></div>
+        <div><label for="hp_return_km">return perigee [km]</label><input id="hp_return_km" value="35"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Launcher</h2>
+      <label>stage 1 — kerolox booster</label>
+      <div class="row"><input id="s1_prop" value="42000" title="propellant kg"><input id="s1_dry" value="3800" title="dry kg"></div>
+      <div class="row"><input id="s1_thrust_kn" value="950" title="vac thrust kN"><input id="s1_isp" value="305" title="vac Isp s"></div>
+      <label>stage 2 — kerolox upper</label>
+      <div class="row"><input id="s2_prop" value="9500" title="propellant kg"><input id="s2_dry" value="900" title="dry kg"></div>
+      <div class="row"><input id="s2_thrust_kn" value="95" title="vac thrust kN"><input id="s2_isp" value="345" title="vac Isp s"></div>
+      <label>stage 3 — kick stage (TLI)</label>
+      <div class="row"><input id="s3_prop" value="950" title="propellant kg"><input id="s3_dry" value="140" title="dry kg"></div>
+      <div class="row"><input id="s3_thrust_kn" value="15" title="vac thrust kN"><input id="s3_isp" value="315" title="vac Isp s"></div>
+      <div class="row" style="margin-top:6px">
+        <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
+        <div><label for="diameter">diameter [m]</label><input id="diameter" value="1.8"></div>
+      </div>
+      <div class="sub" style="margin:6px 0 0">fields per row: mass / dry · thrust / Isp</div>
+    </div>
+
+    <div class="card">
+      <button id="run">Run mission</button>
+      <div class="status" id="status">idle</div>
+    </div>
+
+    <div class="card">
+      <h2>Parameter sweep</h2>
+      <div class="row3">
+        <div><label for="sweep_param">parameter</label>
+          <select id="sweep_param">
+            <option value="pod_mass">pod mass</option>
+            <option value="h_park_km">parking alt</option>
+            <option value="hp_moon_km">perilune</option>
+            <option value="hp_return_km">return perigee</option>
+            <option value="incl_deg">inclination</option>
+            <option value="s3_prop">kick prop</option>
+            <option value="s3_isp">kick Isp</option>
+            <option value="s2_prop">stage-2 prop</option>
+          </select></div>
+        <div><label for="sweep_min">min</label><input id="sweep_min" value="250"></div>
+        <div><label for="sweep_max">max</label><input id="sweep_max" value="450"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label for="sweep_n">steps</label><input id="sweep_n" value="9"></div>
+        <div><label for="sweep_metric">metric</label>
+          <select id="sweep_metric">
+            <option value="peak_g">peak entry g</option>
+            <option value="tli_dv">TLI Δv [m/s]</option>
+            <option value="prop_margin_kg">prop margin [kg]</option>
+            <option value="perilune_km">perilune [km]</option>
+            <option value="vac_perigee_km">return perigee [km]</option>
+            <option value="heat_mj">heat load [MJ/m²]</option>
+            <option value="peak_q_wcm2">peak q̇ [W/cm²]</option>
+            <option value="t_days">mission days</option>
+          </select></div>
+      </div>
+      <div style="margin-top:8px"><button id="sweepbtn" class="ghost">Run sweep</button></div>
+      <canvas id="sweepchart" style="width:100%;height:170px;margin-top:8px"></canvas>
+    </div>
+  </div>
+
+  <div>
+    <div class="tiles" id="tiles"></div>
+
+    <div class="card">
+      <div class="legend">
+        <span><i style="background:#3987e5"></i>parking orbit</span>
+        <span><i style="background:#d95926"></i>TLI burn</span>
+        <span><i style="background:#199e70"></i>outbound</span>
+        <span><i style="background:#c98500"></i>return</span>
+        <span><i style="background:#6b6b66;height:8px;width:8px;border-radius:50%"></i>Moon</span>
+      </div>
+      <canvas id="scene"></canvas>
+      <div class="bar">
+        <button id="play" class="ghost">&#9654; play</button>
+        <input id="scrub" type="range" min="0" max="1000" value="1000">
+        <button id="frame" class="ghost">rotating frame</button>
+        <span class="ro" id="readout"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Profiles</h2>
+      <div class="charts">
+        <canvas id="c_asc_h"></canvas>
+        <canvas id="c_asc_q"></canvas>
+        <canvas id="c_ent_g"></canvas>
+        <canvas id="c_ent_q"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Run history</h2>
+      <div id="history"><span class="sub">runs appear here — click to restore</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Events</h2>
+      <div style="overflow-x:auto"><table id="events"></table></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
+  's1_prop','s1_dry','s1_thrust_kn','s1_isp','s2_prop','s2_dry','s2_thrust_kn','s2_isp',
+  's3_prop','s3_dry','s3_thrust_kn','s3_isp','fairing','diameter'];
+const COL = {0:'#3987e5',1:'#d95926',2:'#199e70',3:'#c98500'};
+const INK='#fff', INK2='#c3c2b7', MUTED='#898781', GRID='#2c2c2a', ACC='#3987e5';
+
+let run = null;              // current run payload
+let history = [];
+let ti = 0, playing = false, lastTs = 0;
+let rotFrame = false, camYaw = 0, camPitch = 1.05, camDist = 1150;
+
+function params() {
+  const u = new URLSearchParams();
+  for (const f of FIELDS) u.set(f, $(f).value);
+  return u;
+}
+
+async function doRun() {
+  $('run').disabled = true;
+  $('status').className = 'status';
+  $('status').textContent = 'designing + flying mission…';
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/api/run', { method: 'POST', body: params() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'run failed');
+    j._params = Object.fromEntries(params());
+    run = j;
+    history.unshift(j);
+    if (history.length > 12) history.pop();
+    renderAll();
+    if (j.metrics.on_target) {
+      $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
+    } else {
+      $('status').className = 'status err';
+      $('status').textContent = 'flown, but OFF TARGET — targeting could not reach ' +
+        'the requested perilune/perigee with this configuration (check prop margin)';
+    }
+  } catch (e) {
+    $('status').className = 'status err';
+    $('status').textContent = String(e.message || e);
+  }
+  $('run').disabled = false;
+}
+
+function fmt(v, d=1) { return (v==null||!isFinite(v)) ? '—' : (+v).toFixed(d); }
+
+function renderAll() {
+  if (!run) return;
+  const m = run.metrics;
+  const tiles = [
+    [fmt(m.liftoff_t,1)+' t','liftoff mass'],
+    [fmt(m.park_perigee_km,0)+'×'+fmt(m.park_apogee_km,0)+' km','parking orbit'],
+    [fmt(m.tli_dv,0)+' m/s','TLI Δv'],
+    [fmt(m.prop_margin_kg,0)+' kg','prop margin'],
+    [fmt(m.perilune_km,0)+' km','perilune'],
+    [fmt(m.vac_perigee_km,1)+' km','return perigee'],
+    [fmt(m.ei_v_ms/1000,2)+' km/s','entry speed'],
+    [fmt(m.peak_g,1)+' g','peak load'],
+    [fmt(m.peak_q_wcm2,0)+' W/cm²','peak heating'],
+    [fmt(m.t_days,1)+' d','mission time'],
+    [fmt(m.splash_lat,1)+'°, '+fmt(m.splash_lon,1)+'°','splashdown'],
+    [fmt(m.v_splash,1)+' m/s','splash speed'],
+  ];
+  $('tiles').innerHTML = tiles.map(t =>
+    `<div class="tile"><div class="v">${t[0]}</div><div class="k">${t[1]}</div></div>`).join('');
+
+  ti = run.cis.t.length - 1;
+  $('scrub').value = 1000;
+  precompute();
+  drawCharts();
+  renderEvents();
+  renderHistory();
+}
+
+function renderEvents() {
+  const rows = run.events.map(e =>
+    `<tr><td>${e.phase}</td><td>${e.name}</td><td>${(e.t/3600).toFixed(2)} h</td>` +
+    `<td>${(e.t/86400).toFixed(2)} d</td></tr>`);
+  $('events').innerHTML =
+    '<tr><th>phase</th><th>event</th><th>T+ hours</th><th>T+ days</th></tr>' + rows.join('');
+}
+
+function renderHistory() {
+  $('history').innerHTML = history.map((h, i) => {
+    const p = h._params, m = h.metrics;
+    const sel = h === run ? ' sel' : '';
+    return `<span class="chip${sel}" data-i="${i}">#${history.length-i} · pod ${p.pod_mass} kg · ` +
+      `peri ${p.hp_moon_km} km · ${fmt(m.peak_g,1)} g · ${fmt(m.t_days,1)} d</span>`;
+  }).join('');
+  for (const el of $('history').querySelectorAll('.chip'))
+    el.onclick = () => { run = history[+el.dataset.i]; renderAll(); };
+}
+
+// ------------------------------------------------------------- 3D scene --
+let rx, ry, ma, moonR;
+function precompute() {
+  const D = run.cis, N = D.t.length;
+  rx = new Float64Array(N); ry = new Float64Array(N); ma = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    ma[i] = Math.atan2(D.my[i], D.mx[i]);
+    const c = Math.cos(-ma[i]), s = Math.sin(-ma[i]);
+    rx[i] = D.x[i]*c - D.y[i]*s;
+    ry[i] = D.x[i]*s + D.y[i]*c;
+  }
+  moonR = Math.hypot(D.mx[0], D.my[0]);
+}
+const P  = i => rotFrame ? [rx[i], ry[i]] : [run.cis.x[i], run.cis.y[i]];
+const Pm = i => rotFrame ? [moonR, 0] : [run.cis.mx[i], run.cis.my[i]];
+
+function project(cv, x, y) {
+  const cyw = Math.cos(camYaw), syw = Math.sin(camYaw);
+  const cp = Math.cos(camPitch), sp = Math.sin(camPitch);
+  const X = x*cyw - y*syw, Y = (x*syw + y*cyw)*sp;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.width/dpr, h = cv.height/dpr;
+  const f = Math.min(w, h) * 0.95 / camDist;
+  return [w/2 + X*f, h*0.52 - Y*f, f];
+}
+
+function circle(ctx, x, y, r, fill) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 2*Math.PI); ctx.fillStyle = fill; ctx.fill();
+}
+
+function drawScene() {
+  const cv = $('scene'), ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!run) return;
+  const D = run.cis, N = D.t.length;
+
+  ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let a = 0; a <= 128; a++) {
+    const th = a/128*2*Math.PI;
+    const p = project(cv, moonR*Math.cos(th), moonR*Math.sin(th));
+    a ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]);
+  }
+  ctx.stroke();
+
+  ctx.lineCap = 'round';
+  let prev = null;
+  for (let i = 0; i < N; i++) {
+    const pos = P(i), pr = project(cv, pos[0], pos[1]);
+    if (prev) {
+      ctx.globalAlpha = i <= ti ? 1 : 0.16;
+      ctx.strokeStyle = COL[D.ph[i]] || INK2;
+      ctx.lineWidth = D.ph[i] === 1 ? 3 : 1.7;
+      ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(pr[0], pr[1]); ctx.stroke();
+    }
+    prev = pr;
+  }
+  ctx.globalAlpha = 1;
+
+  const pe = project(cv, 0, 0);
+  const rE = Math.max(3, 6.371*pe[2]);
+  const g = ctx.createRadialGradient(pe[0]-rE*.3, pe[1]-rE*.3, rE*.2, pe[0], pe[1], rE);
+  g.addColorStop(0, '#4a7fa8'); g.addColorStop(1, '#193349');
+  circle(ctx, pe[0], pe[1], rE, g);
+
+  const pmv = Pm(Math.min(ti, N-1)), pm = project(cv, pmv[0], pmv[1]);
+  const rM = Math.max(2.5, 1.74*pm[2]*3);
+  const g2 = ctx.createRadialGradient(pm[0]-rM*.3, pm[1]-rM*.3, rM*.2, pm[0], pm[1], rM);
+  g2.addColorStop(0, '#8d8d86'); g2.addColorStop(1, '#4a4a45');
+  circle(ctx, pm[0], pm[1], rM, g2);
+
+  const pp = P(Math.min(ti, N-1)), pd = project(cv, pp[0], pp[1]);
+  circle(ctx, pd[0], pd[1], 3.2, '#fff');
+
+  const days = D.t[ti]/86400;
+  const dm = Math.hypot(D.x[ti]-D.mx[ti], D.y[ti]-D.my[ti]);
+  $('readout').textContent =
+    `T+${days.toFixed(2)} d · Moon ${dm.toFixed(0)}k km`;
+}
+
+function tick(ts) {
+  if (playing && run) {
+    const N = run.cis.t.length;
+    ti = Math.min(N-1, ti + Math.max(1, Math.round(N/600)));
+    $('scrub').value = (1000*ti/(N-1))|0;
+    if (ti >= N-1) togglePlay(false);
+  }
+  lastTs = ts;
+  drawScene();
+  requestAnimationFrame(tick);
+}
+function togglePlay(on) {
+  playing = on === undefined ? !playing : on;
+  if (playing && run && ti >= run.cis.t.length-1) ti = 0;
+  $('play').innerHTML = playing ? '&#10074;&#10074; pause' : '&#9654; play';
+}
+
+// --------------------------------------------------------------- charts --
+function drawLine(cvId, xs, ys, title, unit, color) {
+  const cv = $(cvId), ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!xs || !xs.length) return;
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (y1 - y0 < 1e-9) y1 = y0 + 1;
+  const L = 8, R = 8, T = 20, B = 16;
+  const px = x => L + (x-x0)/(x1-x0)*(w-L-R);
+  const py = y => h-B - (y-y0)/(y1-y0)*(h-T-B);
+  ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const y = h-B - i/3*(h-T-B);
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w-R, y); ctx.stroke();
+  }
+  ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < xs.length; i++) {
+    const X = px(xs[i]), Y = py(ys[i]);
+    i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
+  }
+  ctx.stroke();
+  // peak marker + direct label
+  let ipk = 0;
+  for (let i = 1; i < ys.length; i++) if (ys[i] > ys[ipk]) ipk = i;
+  circle(ctx, px(xs[ipk]), py(ys[ipk]), 2.6, color);
+  ctx.fillStyle = INK2; ctx.font = '11px system-ui';
+  const lbl = `${(+ys[ipk]).toPrecision(3)} ${unit}`;
+  const lx = Math.min(px(xs[ipk]) + 6, w - ctx.measureText(lbl).width - 4);
+  ctx.fillText(lbl, lx, Math.max(py(ys[ipk]) - 6, 26));   // stay below the title line
+  ctx.fillStyle = MUTED; ctx.font = '11px system-ui';
+  ctx.fillText(title, L, 12);
+}
+
+function drawCharts() {
+  const A = run.ascent, E = run.entry;
+  drawLine('c_asc_h', A.t, A.h, 'ascent altitude vs time [s]', 'km', ACC);
+  drawLine('c_asc_q', A.t, A.qbar, 'ascent dynamic pressure vs time [s]', 'kPa', ACC);
+  drawLine('c_ent_g', E.t, E.g, 'entry g-load vs time [s]', 'g', ACC);
+  drawLine('c_ent_q', E.t, E.q, 'entry heating vs time [s]', 'W/cm²', ACC);
+}
+
+// ---------------------------------------------------------------- sweep --
+async function doSweep() {
+  $('sweepbtn').disabled = true;
+  $('status').className = 'status';
+  $('status').textContent = 'sweeping…';
+  try {
+    const u = params();
+    for (const f of ['sweep_param','sweep_min','sweep_max','sweep_n'])
+      u.set(f, $(f).value);
+    const r = await fetch('/api/sweep', { method: 'POST', body: u });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'sweep failed');
+    window._sweep = j;
+    drawSweep();
+    const nOk = j.runs.filter(x => x.ok && x.metrics.on_target).length;
+    $('status').textContent = `sweep done: ${nOk}/${j.runs.length} on target` +
+      (nOk < j.runs.length ? ' (off-target runs excluded from the chart)' : '');
+  } catch (e) {
+    $('status').className = 'status err';
+    $('status').textContent = String(e.message || e);
+  }
+  $('sweepbtn').disabled = false;
+}
+
+function drawSweep() {
+  const j = window._sweep;
+  if (!j) return;
+  const key = $('sweep_metric').value;
+  const xs = [], ys = [];
+  for (let i = 0; i < j.values.length; i++)
+    if (j.runs[i].ok && j.runs[i].metrics.on_target && isFinite(j.runs[i].metrics[key])) {
+      xs.push(j.values[i]); ys.push(j.runs[i].metrics[key]);
+    }
+  drawLine('sweepchart', xs, ys,
+    `${$('sweep_metric').selectedOptions[0].text} vs ${$('sweep_param').selectedOptions[0].text}`,
+    '', ACC);
+}
+
+// ---------------------------------------------------------------- wire up --
+$('run').onclick = doRun;
+$('sweepbtn').onclick = doSweep;
+$('sweep_metric').onchange = drawSweep;
+$('play').onclick = () => togglePlay();
+$('scrub').oninput = e => { if (run) ti = Math.round(e.target.value/1000*(run.cis.t.length-1)); };
+$('frame').onclick = e => {
+  rotFrame = !rotFrame;
+  e.target.classList.toggle('on', rotFrame);
+  e.target.textContent = rotFrame ? 'inertial frame' : 'rotating frame';
+};
+const scene = $('scene');
+let drag = null;
+scene.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; scene.setPointerCapture(e.pointerId); });
+scene.addEventListener('pointermove', e => {
+  if (!drag) return;
+  camYaw += (e.clientX - drag[0]) * 0.005;
+  camPitch = Math.min(1.55, Math.max(0.15, camPitch + (e.clientY - drag[1]) * 0.004));
+  drag = [e.clientX, e.clientY];
+});
+scene.addEventListener('pointerup', () => drag = null);
+scene.addEventListener('wheel', e => {
+  e.preventDefault();
+  camDist = Math.min(2400, Math.max(30, camDist * (e.deltaY > 0 ? 1.12 : 0.89)));
+}, { passive: false });
+
+requestAnimationFrame(tick);
+doRun();   // populate on load — the server pre-warms the sim at startup
+</script>
+</body>
+</html>

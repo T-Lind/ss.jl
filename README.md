@@ -175,7 +175,25 @@ python3 scripts/make_plots.py        # reentry plots (matplotlib)
 python3 scripts/make_3d.py           # circumlunar 3D/mission-plane plots
 python3 scripts/make_viewer.py       # interactive HTML mission viewer
 julia --project scripts/make_plots.jl  # requires Plots.jl installed
+
+# mission-control panel: configure, run, and explore in the browser
+julia --project -t auto scripts/panel.jl   # then open http://localhost:8137
 ```
+
+### Mission-control panel
+
+`scripts/panel.jl` serves a local cockpit (pure stdlib — a raw-`Sockets`
+HTTP server, no dependencies): edit the mission targets and all three
+stages' propellant/dry mass/thrust/Isp, hit **Run**, and get the full
+design + flight back in about a second — stat tiles, the interactive 3D
+trajectory with mission-time playback and an inertial/rotating frame
+toggle, ascent & entry profile charts, the event timeline, and a run
+history for side-by-side comparison. A **parameter sweep** tab varies any
+knob across a range (threaded; ~50 missions/min) and plots the outcome
+curve — e.g. sweeping pod mass shows the TLI propellant margin hitting
+zero just above 400 kg, which is the actual payload limit of the default
+launcher. Runs that fly but miss the requested perilune/perigee (e.g. a
+prop-starved TLI) are flagged **off target** rather than silently plotted.
 
 Programmatic use:
 

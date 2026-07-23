@@ -38,9 +38,12 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   hp_moon::Float64 = 2000.0e3,
                   hp_return::Float64 = 35.0e3,
                   inclination::Float64 = deg2rad_(28.5),
+                  lv::Union{Nothing,LaunchVehicle} = nothing,
                   verbose::Bool = false)
     # --- 1. launch to parking orbit ----------------------------------------
-    lv = default_moon_rocket(payload = pod_mass)
+    # a supplied launch vehicle wins; its payload IS the pod
+    lv === nothing && (lv = default_moon_rocket(payload = pod_mass))
+    pod_mass = lv.payload_mass
     az = launch_azimuth(inclination, deg2rad_(28.5))
     guid0 = AscentGuidance(azimuth = az, h_target = h_park)
     guid, asc = tune_ascent(lv, guid0; verbose = verbose)

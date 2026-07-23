@@ -176,6 +176,13 @@ end
     @test ent.peak_gload < 30.0              # inside a survivable ballistic corridor
     # energy sanity on the coast: two-body + moon only, no drag above EI
     @test cis.m < SatelliteSim.liftoff_mass(ms.lv)
+
+    # configurability: a custom launch vehicle flows through the whole chain
+    lv = default_moon_rocket(payload = 300.0)
+    ms2 = moonshot(lv = lv, hp_moon = 1500e3)
+    @test ms2.lv === lv
+    @test ms2.entry_scn.vehicle.mass == 300.0
+    @test isapprox(ms2.cislunar.perilune_alt, 1500e3; atol = 75e3)
 end
 
 @testset "full reentry smoke test" begin
