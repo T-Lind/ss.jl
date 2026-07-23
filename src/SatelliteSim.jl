@@ -38,6 +38,7 @@ using LinearAlgebra
 using Printf
 using Random
 using Statistics
+import TOML
 
 include("constants.jl")
 include("vec3.jl")
@@ -59,6 +60,9 @@ include("simulation.jl")
 include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
+include("mesh.jl")
+include("panelaero.jl")
+include("config.jl")
 include("montecarlo.jl")
 include("output.jl")
 
@@ -109,6 +113,12 @@ export
     design_tcm, fly_cislunar_tcm,
     # mission
     MoonshotResult, CruiseReport, moonshot, print_moonshot_summary,
+    # mesh & panel aero
+    TriMesh, read_stl, write_stl, mesh_area, mesh_volume, mass_properties,
+    lathe_mesh, box_mesh, merge_meshes,
+    PanelAero, panel_aero, cp_max_newtonian, trim_alpha,
+    # config
+    MissionSpec, load_mission, run_mission,
     # output
     write_csv, write_trajectory_csv, write_events_csv, write_montecarlo_csv,
     write_ascent_csv, write_cislunar_csv,

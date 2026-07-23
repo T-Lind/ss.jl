@@ -276,6 +276,85 @@ end
     @test ms.entry.peak_gload < 30.0
 end
 
+@testset "mission config (TOML)" begin
+    spec = load_mission(joinpath(@__DIR__, "..", "missions", "moonshot.toml"))
+    @test spec.pod_mass == 350.0
+    @test spec.h_park == 200e3
+    @test spec.hp_moon == 2000e3
+    @test length(spec.lv.stages) == 3
+    lv0 = default_moon_rocket()
+    @test liftoff_mass(spec.lv) ≈ liftoff_mass(lv0)
+    @test spec.lv.stages[3].isp_vac == lv0.stages[3].isp_vac
+    ms = run_mission(spec)
+    @test ms.cislunar.outcome == :entry_interface
+    @test isapprox(ms.cislunar.perilune_alt, 2000e3; atol = 30e3)
+end
+
+@testset "mesh + mass properties" begin
+    # unit box: exact polyhedral integrals
+    b = box_mesh((0.0, 0.0, 0.0), (2.0, 1.0, 1.0))
+    @test mesh_volume(b) ≈ 2.0
+    mb = mass_properties(b, 12.0)
+    @test all(isapprox.(mb.cg, (1.0, 0.5, 0.5); atol = 1e-12))
+    @test isapprox(mb.inertia[1], 12.0 / 12 * (1 + 1); rtol = 1e-12)
+    @test isapprox(mb.inertia[2], 12.0 / 12 * (4 + 1); rtol = 1e-12)
+    # sphere: analytic within mesh resolution
+    prof = [(cos(s), sin(s)) for s in range(0.0, 1.0 * pi; length = 41)]
+    sph = lathe_mesh([(x, r) for (x, r) in prof]; nseg = 64)
+    @test isapprox(mesh_volume(sph), 4pi / 3; rtol = 0.005)
+    ms_ = mass_properties(sph, 100.0)
+    @test isapprox(ms_.inertia[1], 40.0; rtol = 0.005)
+    # STL round trip preserves the solid
+    path = joinpath(mktempdir(), "sph.stl")
+    write_stl(path, sph)
+    sph2 = read_stl(path)
+    @test length(sph2) == length(sph)
+    @test isapprox(mesh_volume(sph2), mesh_volume(sph); rtol = 1e-6)
+end
+
+@testset "Newtonian panel aero" begin
+    @test isapprox(cp_max_newtonian(1e6), 1.8394; atol = 1e-3)  # M -> inf limit
+    # sphere: CD = Cp_max/2 exactly in Newtonian theory
+    prof = [(cos(s), sin(s)) for s in range(0.0, 1.0 * pi; length = 41)]
+    sph = lathe_mesh([(x, r) for (x, r) in prof]; nseg = 64)
+    pa = panel_aero(sph; sref = 1.0 * pi, lref = 2.0, ref = (0.0, 0.0, 0.0),
+                    machs = [20.0])
+    @test isapprox(cd_coeff(pa, 20.0, 0.0), cp_max_newtonian(20.0) / 2; rtol = 0.01)
+
+    # capsule from committed geometry: stable, damped, trims at zero
+    cap = read_stl(joinpath(@__DIR__, "..", "geometry", "capsule.stl"))
+    mp = mass_properties(cap, 350.0)
+    @test mp.offdiag_frac < 1e-3                    # axisymmetric
+    pac = panel_aero(cap; sref = pi * 0.75^2, lref = 1.5, ref = mp.cg)
+    @test cm_coeff(pac, 20.0, deg2rad_(10.0), 0.0) < 0     # restoring
+    @test SatelliteSim.interp1(pac.cmq, 20.0) < 0          # damped
+    @test abs(trim_alpha(pac)) < deg2rad_(1.0)
+    @test 1.4 < cd_coeff(pac, 20.0, 0.0) < 2.0
+
+    # geometry-to-trajectory: fly the pod on mesh-derived aero
+    veh0 = default_reentry_pod()
+    veh = Vehicle(name = "mesh-pod", mass = 350.0, sref = pi * 0.75^2,
+                  lref = 1.5, rn = 1.8, iyy = mp.inertia[2], aero = pac,
+                  chutes = veh0.chutes)
+    r6 = simulate_entry6(scenario_from_elements(DeorbitElements(), veh);
+                         inertia = mp.inertia, rcs = default_pod_rcs())
+    r0 = simulate(scenario_from_elements(DeorbitElements(), veh0))
+    @test r6.terminated == :splashdown
+    @test isapprox(r6.peak_gload, r0.peak_gload; rtol = 0.15)
+    @test isapprox(r6.heat_load, r0.heat_load; rtol = 0.15)
+
+    # starship demo mesh: lifting body with a passive trim from its flaps
+    ship = read_stl(joinpath(@__DIR__, "..", "geometry", "starship.stl"))
+    mps = mass_properties(ship, 120_000.0)
+    pas = panel_aero(ship; sref = 9.0 * 50.0, lref = 50.0, ref = mps.cg)
+    @test cd_coeff(pas, 20.0, deg2rad_(90.0)) > 5 * cd_coeff(pas, 20.0, 0.0)
+    @test cl_coeff(pas, 20.0, deg2rad_(20.0)) /
+          cd_coeff(pas, 20.0, deg2rad_(20.0)) > 1.0       # slender-body L/D
+    at = trim_alpha(pas)
+    @test deg2rad_(15.0) < at < deg2rad_(65.0)            # stable belly-first trim
+    @test SatelliteSim.interp1(pas.cmq, 20.0) < 0
+end
+
 @testset "full reentry smoke test" begin
     veh = default_reentry_pod()
     scn = scenario_from_elements(DeorbitElements(), veh)

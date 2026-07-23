@@ -119,6 +119,27 @@ rotating-frame figure-8, 3D entry. `scripts/make_viewer.py` builds an
 interactive HTML viewer (`output/moonshot_viewer.html`) with mission-time
 playback and an inertial/rotating frame toggle.
 
+**Missions as data** (`config.jl`, `missions/`): a TOML file fully defines a
+mission — pod, targets, all stages, dispersions — and
+`run_mission("missions/moonshot.toml")` designs and flies it. New vehicles
+and mission variants are files, not code.
+
+**Aerodynamics from geometry** (`mesh.jl`, `panelaero.jl`, `geometry/`):
+load an STL (or build one procedurally), get exact polyhedral mass
+properties (volume, CG, inertia — Eberly's method, validated to machine
+precision on primitives), and generate hypersonic aero tables with a
+modified-Newtonian panel method: CA/CN/Cm over (α, Mach) plus the pitch
+damping derivative Cm_q from a rotating-panel sweep. The sphere reproduces
+the analytic Newtonian drag to 0.2%; the committed capsule mesh flies the
+full 6-DOF entry on mesh-derived aero within ~10% of the handbook-table
+result (7.11 g vs 7.20 g peak). The simplified Starship mesh
+(`geometry/starship.stl`: 9 m × 50 m body + four flaps) comes out as a
+proper lifting body — L/D 1.2 at 20°, a stable passive belly-first trim at
+35° set by its flap geometry, negative Cm_q — ready for the flap-control
+and propulsive-landing work that a real Starship entry needs. Newtonian
+aero is hypersonic-only (tables clamp below Mach ~4; pair with drogues
+before transonic, as the capsule missions do).
+
 ## What the reentry sim models
 
 **4 degrees of freedom** — 3 translational + 1 rotational (the body pitch
@@ -201,6 +222,12 @@ julia --project scripts/run_moonshot.jl
 # TCM Monte Carlo over TLI execution errors -> output/tcm_montecarlo.csv
 julia --project -t auto scripts/run_tcm_mc.jl 100 0.2 0.25
 
+# missions from TOML specs
+julia --project scripts/run_mission.jl missions/moonshot.toml
+
+# regenerate the demo geometry (capsule + simplified Starship)
+julia --project scripts/make_meshes.jl
+
 # Monte Carlo (threaded) -> output/montecarlo.csv + summary
 julia --project -t auto scripts/run_montecarlo.jl 300
 
@@ -280,8 +307,13 @@ src/
                     RCS wind-hold / rate damping)
   scenarios.jl      deorbit design + splashdown targeting
   mission.jl        the full launch->Moon->splashdown chain (moonshot)
+  mesh.jl           STL I/O, polyhedral mass properties, mesh builders
+  panelaero.jl      modified-Newtonian panel aero (CA/CN/Cm + Cm_q) from meshes
+  config.jl         missions/vehicles as TOML specs (load_mission/run_mission)
   montecarlo.jl     dispersions, threaded MC, footprint statistics
   output.jl         CSV writers, console summaries
+missions/           TOML mission specs (moonshot.toml = the reference)
+geometry/           demo STL meshes (capsule, simplified Starship)
 ```
 
 ### Extension points (built in on purpose)
