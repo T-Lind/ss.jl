@@ -60,6 +60,7 @@ include("simulation.jl")
 include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
+include("maneuvers.jl")
 include("mesh.jl")
 include("panelaero.jl")
 include("config.jl")
@@ -113,6 +114,9 @@ export
     design_tcm, fly_cislunar_tcm,
     # mission
     MoonshotResult, CruiseReport, moonshot, print_moonshot_summary,
+    # maneuvers
+    lambert, hohmann, plane_change_dv, impulsive_prop, stumpff,
+    cw_stm, cw_propagate, cw_two_impulse,
     # mesh & panel aero
     TriMesh, read_stl, write_stl, mesh_area, mesh_volume, mass_properties,
     lathe_mesh, box_mesh, merge_meshes,

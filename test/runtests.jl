@@ -355,6 +355,69 @@ end
     @test SatelliteSim.interp1(pas.cmq, 20.0) < 0
 end
 
+@testset "maneuvers" begin
+    a = RE_MEAN + 500e3
+    vc = sqrt(MU_EARTH / a)
+    T = 2pi * sqrt(a^3 / MU_EARTH)
+    # lambert: quarter arc of a circular orbit recovers circular velocity
+    v1, v2 = lambert((a, 0.0, 0.0), (0.0, a, 0.0), T / 4)
+    @test all(isapprox.(v1, (0.0, vc, 0.0); atol = 1e-3))
+    @test all(isapprox.(v2, (-vc, 0.0, 0.0); atol = 1e-3))
+    # lambert vs a known ellipse: recover the velocity at nu1
+    ae, ee = 10_000e3, 0.3
+    E_of(nu) = 2 * atan(sqrt((1 - ee) / (1 + ee)) * tan(nu / 2))
+    t_of(nu) = (E_of(nu) - ee * sin(E_of(nu))) / sqrt(MU_EARTH / ae^3)
+    nu1, nu2 = deg2rad_(30.0), deg2rad_(150.0)
+    r1v, v1a = state_from_elements(ae, ee, 0.0, 0.0, 0.0, nu1)
+    r2v, _ = state_from_elements(ae, ee, 0.0, 0.0, 0.0, nu2)
+    vl1, _ = lambert(r1v, r2v, t_of(nu2) - t_of(nu1))
+    @test all(isapprox.(vl1, v1a; rtol = 1e-5))
+    # hohmann sanity: LEO -> GEO
+    dv1, dv2, tofh = hohmann(a, 42_164e3)
+    @test isapprox(dv1 + dv2, 3900.0; atol = 150.0)   # the classic ~3.9 km/s
+    @test isapprox(tofh / 3600, 5.2; atol = 0.3)
+    @test isapprox(plane_change_dv(vc, deg2rad_(60.0)), vc; rtol = 1e-12)
+    # CW two-impulse: transfer nulls the position, braking nulls the velocity
+    n = sqrt(MU_EARTH / a^3)
+    r0 = (-2000.0, -10_000.0, 500.0)
+    v0 = (0.5, 1.0, -0.2)
+    dvc1, dvc2, vreq = cw_two_impulse(r0, v0, n, 2000.0)
+    rT, vT = cw_propagate(r0, vreq, n, 2000.0)
+    @test sqrt(sum(abs2, rT)) < 1e-6
+    @test all(isapprox.(vT .+ dvc2, (0.0, 0.0, 0.0); atol = 1e-9))
+    @test isapprox(stumpff(0.0)[1], 0.5; atol = 1e-12)
+    @test isapprox(stumpff(1e-8)[1], stumpff(-1e-8)[1]; atol = 1e-8)  # slope 1/24
+end
+
+@testset "propagation & burn correctness" begin
+    # circular orbit through the cislunar coast: radius drift over one rev
+    a = RE_MEAN + 200e3
+    r0, v0 = state_from_elements(a, 0.0, deg2rad_(28.5), 0.0, 0.0, 0.0)
+    eph = coplanar_moon(r0, v0; phase0 = deg2rad_(90.0))
+    T = 2pi * sqrt(a^3 / MU_EARTH)
+    L = SatelliteSim.CislunarLog()
+    leg = SatelliteSim._coast_leg!(L, r0, v0, 0.0, eph;
+                                   theta_g0 = 0.0, h_stop = 0.0, t_end = T,
+                                   stop_after_flyby = false, log_every = 10^9)
+    @test abs(sqrt(sum(abs2, leg.r)) - a) < 100.0     # meters after one rev
+    eps0 = sum(abs2, v0) / 2 - MU_EARTH / a
+    eps1 = sum(abs2, leg.v) / 2 - MU_EARTH / sqrt(sum(abs2, leg.r))
+    @test isapprox(eps1, eps0; rtol = 1e-6)
+    # TLI burn: duration matches the rocket equation, arc stays modest
+    ms = moonshot()
+    kick = ms.lv.stages[end]
+    mdot = stage_mdot(kick)
+    m0 = ms.cislunar.m * exp(ms.cislunar.dv_tli / (G0 * kick.isp_vac))
+    @test isapprox(ms.cislunar.burn_duration, (m0 - ms.cislunar.m) / mdot; rtol = 1e-3)
+    Tpark = 2pi * sqrt(ms.ascent.elements.a^3 / MU_EARTH)
+    @test ms.cislunar.burn_duration / Tpark * 360 < 20.0   # burn arc < 20 deg
+    # burn log rows carry instantaneous velocity (monotone speed increase)
+    Lc = ms.cislunar.log
+    ib = findall(p -> p == 1, Lc.phase)
+    sp = [hypot(Lc.vx[i], Lc.vy[i], Lc.vz[i]) for i in ib]
+    @test issorted(sp) && sp[end] - sp[1] > 2000.0
+end
+
 @testset "full reentry smoke test" begin
     veh = default_reentry_pod()
     scn = scenario_from_elements(DeorbitElements(), veh)
