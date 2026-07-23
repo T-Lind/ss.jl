@@ -103,6 +103,81 @@ end
     @test res.terminated == :timeout
 end
 
+@testset "propulsion" begin
+    st = Stage(:test, 100.0, 900.0, 10.0e3, 300.0, 0.1)
+    @test isapprox(stage_mdot(st), 10.0e3 / (9.80665 * 300.0); rtol = 1e-12)
+    @test isapprox(stage_burn_time(st), 900.0 / stage_mdot(st); rtol = 1e-12)
+    # pressure correction: sea level thrust < vacuum thrust
+    @test stage_thrust(st, 101325.0) < st.thrust_vac
+    @test stage_thrust(st, 0.0) == st.thrust_vac
+    # Tsiolkovsky
+    dv = stage_dv(st, 400.0)
+    @test isapprox(dv, 9.80665 * 300.0 * log(1400.0 / 500.0); rtol = 1e-12)
+
+    lv = default_moon_rocket()
+    @test liftoff_mass(lv) > 50e3
+    # the stack should carry ~LEO + TLI ideal delta-v with generous losses
+    m_above(k) = SatelliteSim.stack_mass_above(lv, k + 1; fairing = k < 2)
+    total_dv = sum(stage_dv(lv.stages[k], m_above(k)) for k in 1:3)
+    @test 12.0e3 < total_dv < 15.0e3
+end
+
+@testset "moon ephemeris" begin
+    r0, v0 = state_from_elements(RE_EQ + 200e3, 0.0, deg2rad_(28.5), 0.2, 0.0, 0.0)
+    eph = coplanar_moon(r0, v0; phase0 = deg2rad_(90.0))
+    # circular at the lunar distance for all t
+    for t in (0.0, 1e5, 1e6)
+        @test isapprox(sqrt(sum(abs2, moon_position(eph, t))), A_MOON; rtol = 1e-12)
+    end
+    # period: back to the same spot after a sidereal month
+    s0 = moon_position(eph, 0.0)
+    s1 = moon_position(eph, 2pi / N_MOON)
+    @test all(isapprox.(s0, s1; atol = 1.0))
+    # coplanar with the orbit: moon position ⟂ orbit normal
+    h = (r0[2]*v0[3]-r0[3]*v0[2], r0[3]*v0[1]-r0[1]*v0[3], r0[1]*v0[2]-r0[2]*v0[1])
+    hn = sqrt(sum(abs2, h))
+    @test abs(sum(moon_position(eph, 12345.0) .* h) / (hn * A_MOON)) < 1e-12
+    # velocity is the analytic derivative
+    dt = 1.0
+    sfd = (moon_position(eph, 1e5 + dt) .- moon_position(eph, 1e5 - dt)) ./ 2dt
+    @test all(isapprox.(moon_velocity(eph, 1e5), sfd; rtol = 1e-6))
+end
+
+@testset "ascent to orbit" begin
+    lv = default_moon_rocket()
+    guid, asc = tune_ascent(lv, AscentGuidance())
+    @test asc.reached_orbit
+    el = asc.elements
+    @test 180e3 < el.rp - RE_MEAN < 220e3     # near-circular parking orbit
+    @test 180e3 < el.ra - RE_MEAN < 220e3
+    @test isapprox(rad2deg_(el.i), 28.5; atol = 1.0)
+    @test abs(asc.gamma_cut) < deg2rad_(0.1)
+    @test asc.prop_left[end] == lv.stages[end].mprop  # kick stage untouched
+    names = [e.name for e in asc.events]
+    @test :liftoff in names && :seco in names
+    @test :fairing_jettison in names
+    # max-q in a sane band for a small launcher
+    @test 20e3 < maximum(asc.log.qbar) < 90e3
+end
+
+@testset "circumlunar free return" begin
+    ms = moonshot()
+    cis = ms.cislunar
+    @test cis.outcome == :entry_interface
+    @test isapprox(cis.perilune_alt, 2000e3; atol = 30e3)
+    @test isapprox(cis.vac_perigee_alt, 35e3; atol = 5e3)
+    @test 2.5e3 < cis.dv_tli < 3.4e3
+    # entry interface speed near lunar-return values
+    ent = ms.entry
+    ei = ent.events[findfirst(e -> e.name == :entry_interface, ent.events)]
+    @test 10.5e3 < ei.vrel < 11.3e3
+    @test ent.terminated == :splashdown
+    @test ent.v_splash < 8.0
+    @test ent.peak_gload < 30.0              # inside a survivable ballistic corridor
+    # energy sanity on the coast: two-body + moon only, no drag above EI
+    @test cis.m < SatelliteSim.liftoff_mass(ms.lv)
+end
+
 @testset "full reentry smoke test" begin
     veh = default_reentry_pod()
     scn = scenario_from_elements(DeorbitElements(), veh)

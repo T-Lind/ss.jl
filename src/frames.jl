@@ -70,6 +70,45 @@ function haversine(lat1, lon1, lat2, lon2)
 end
 
 """
+    elements_from_state(r, v; mu=MU_EARTH) -> NamedTuple
+
+Osculating classical elements from an ECI Cartesian state. Returns
+`(a, e, i, raan, argp, nu, rp, ra, energy)` with `rp`/`ra` the periapsis and
+apoapsis radii (`ra = Inf` for `e >= 1`). Angles in radians.
+"""
+function elements_from_state(r::V3, v::V3; mu::Float64 = MU_EARTH)
+    rn = vnorm(r); vn = vnorm(v)
+    h = vcross(r, v)
+    hn = vnorm(h)
+    energy = 0.5 * vn * vn - mu / rn
+    a = -mu / (2 * energy)
+    # eccentricity vector
+    ev = vsub(vscale(vcross(v, h), 1 / mu), vscale(r, 1 / rn))
+    e = vnorm(ev)
+    i = acos(clamp(h[3] / hn, -1.0, 1.0))
+    nvec = vcross((0.0, 0.0, 1.0), h)          # node vector
+    nn = vnorm(nvec)
+    raan = nn > 1e-12 ? atan(nvec[2], nvec[1]) : 0.0
+    argp = if nn > 1e-12 && e > 1e-12
+        w = acos(clamp(vdot(nvec, ev) / (nn * e), -1.0, 1.0))
+        ev[3] < 0 ? 2pi - w : w
+    else
+        0.0
+    end
+    nu = if e > 1e-12
+        f = acos(clamp(vdot(ev, r) / (e * rn), -1.0, 1.0))
+        vdot(r, v) < 0 ? 2pi - f : f
+    else
+        0.0
+    end
+    p = hn * hn / mu
+    rp = p / (1 + e)
+    ra = e < 1 ? p / (1 - e) : Inf
+    (a = a, e = e, i = i, raan = raan, argp = argp, nu = nu,
+     rp = rp, ra = ra, energy = energy)
+end
+
+"""
     state_from_elements(a, e, i, raan, argp, nu; mu=MU_EARTH) -> (r, v)
 
 Classical Keplerian elements (angles in radians, `a` in meters) to ECI
