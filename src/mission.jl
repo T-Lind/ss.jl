@@ -14,6 +14,22 @@
 # after insertion. Real missions achieve the same alignment by choosing
 # launch time and azimuth; modeling that wait costs nothing physically here.
 
+"""
+    CruiseReport
+
+Products of flying the cruise with TLI execution errors: the applied
+dispersion, the mid-course correction that fixed it, its kick-stage
+propellant cost, and the analytic RCS attitude budget for the coast.
+"""
+struct CruiseReport
+    tli_mag_err::Float64       # fractional delta-v execution error
+    tli_point_err::Float64     # in-plane pointing error [rad]
+    tcm_dv::Float64            # correction magnitude [m/s]
+    tcm_time::Float64          # correction epoch [s]
+    tcm_prop::Float64          # kick-stage propellant for the TCM [kg]
+    rcs::NamedTuple            # cruise_rcs_budget output
+end
+
 struct MoonshotResult
     lv::LaunchVehicle
     guid::AscentGuidance
@@ -22,6 +38,7 @@ struct MoonshotResult
     cislunar::CislunarResult
     entry_scn::Scenario
     entry::SimResult
+    cruise::Union{Nothing,CruiseReport}
 end
 
 """
@@ -38,9 +55,15 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   hp_moon::Float64 = 2000.0e3,
                   hp_return::Float64 = 35.0e3,
                   inclination::Float64 = deg2rad_(28.5),
+                  lv::Union{Nothing,LaunchVehicle} = nothing,
+                  tli_mag_err::Float64 = 0.0,
+                  tli_point_err::Float64 = 0.0,
+                  tcm_delay::Float64 = 86400.0,
                   verbose::Bool = false)
     # --- 1. launch to parking orbit ----------------------------------------
-    lv = default_moon_rocket(payload = pod_mass)
+    # a supplied launch vehicle wins; its payload IS the pod
+    lv === nothing && (lv = default_moon_rocket(payload = pod_mass))
+    pod_mass = lv.payload_mass
     az = launch_azimuth(inclination, deg2rad_(28.5))
     guid0 = AscentGuidance(azimuth = az, h_target = h_park)
     guid, asc = tune_ascent(lv, guid0; verbose = verbose)
@@ -79,6 +102,42 @@ function moonshot(; pod_mass::Float64 = 350.0,
     cis.outcome == :entry_interface ||
         error("free-return design did not come home (outcome: $(cis.outcome))")
 
+    # --- 3b. optional dispersed execution + mid-course correction ----------
+    cruise = nothing
+    if tli_mag_err != 0.0 || tli_point_err != 0.0
+        # measure the nominal design's proxy perigee (flyby-exit osculating
+        # value) so the TCM reproduces the same physical return, and grab the
+        # nominal perilune-epoch position as the return-to-reference target
+        nomfly = fly_cislunar(asc.r, asc.v, asc.t, eph;
+                              t_ign = t_ign, dv = dv, stage = kick,
+                              m_stack = m_stack, prop_avail = asc.prop_left[end],
+                              stop_after_flyby = true, t_max = 10.0 * 86400.0)
+        proxy = nomfly.vac_perigee_alt
+        refleg = fly_cislunar(asc.r, asc.v, asc.t, eph;
+                              t_ign = t_ign, dv = dv, stage = kick,
+                              m_stack = m_stack, prop_avail = asc.prop_left[end],
+                              t_max = nomfly.t_perilune - asc.t)
+        cis_d, tcm_dv = fly_cislunar_tcm(asc.r, asc.v, asc.t, eph;
+                                         t_ign = t_ign, dv = dv, stage = kick,
+                                         m_stack = m_stack,
+                                         prop_avail = asc.prop_left[end],
+                                         r_ref = refleg.r, t_ref = refleg.t,
+                                         dv_scale = 1.0 + tli_mag_err,
+                                         point_err = tli_point_err,
+                                         tcm_delay = tcm_delay,
+                                         hp_moon_target = hp_moon,
+                                         hp_perigee_proxy = proxy,
+                                         verbose = verbose)
+        cis_d.outcome == :entry_interface ||
+            error("dispersed cruise did not come home (outcome: $(cis_d.outcome))")
+        tcm_prop = cis_d.m * (exp(tcm_dv / (G0 * kick.isp_vac)) - 1)
+        rcs_budget = cruise_rcs_budget(default_kick_rcs(), 1000.0;
+                                       duration = cis_d.t - cis_d.t_tli)
+        cruise = CruiseReport(tli_mag_err, tli_point_err, tcm_dv,
+                              cis_d.t_tli + tcm_delay, tcm_prop, rcs_budget)
+        cis = cis_d
+    end
+
     # --- 4. entry handoff: jettison the spent kick stage, fly the pod ------
     pod = default_reentry_pod(mass = pod_mass)
     scn = Scenario(vehicle = pod, r0 = cis.r, v0 = cis.v,
@@ -86,7 +145,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
                    alpha0 = deg2rad_(5.0))
     entry = simulate(scn)
 
-    MoonshotResult(lv, guid, asc, eph, cis, scn, entry)
+    MoonshotResult(lv, guid, asc, eph, cis, scn, entry, cruise)
 end
 
 function print_moonshot_summary(io::IO, ms::MoonshotResult)
@@ -104,6 +163,15 @@ function print_moonshot_summary(io::IO, ms::MoonshotResult)
             cis.perilune_alt / 1e3, cis.t_perilune / 86400)
     @printf(io, "  Return perigee  : %.1f km vacuum  gamma_EI-ish=%.2f°\n",
             cis.vac_perigee_alt / 1e3, rad2deg_(cis.gamma_end))
+    if ms.cruise !== nothing
+        c = ms.cruise
+        @printf(io, "  TLI dispersion  : %+.2f%% magnitude, %+.2f° pointing\n",
+                100 * c.tli_mag_err, rad2deg_(c.tli_point_err))
+        @printf(io, "  TCM at T+%.1f h : dv=%.1f m/s  (%.1f kg kick propellant)\n",
+                c.tcm_time / 3600, c.tcm_dv, c.tcm_prop)
+        @printf(io, "  Cruise RCS      : %.2f kg (%.2f limit-cycle + %.2f slews + %.2f settling), margin %.2f kg\n",
+                c.rcs.total, c.rcs.limit_cycle, c.rcs.slews, c.rcs.settling, c.rcs.margin)
+    end
     ei = findfirst(e -> e.name == :entry_interface, ent.events)
     if ei !== nothing
         e = ent.events[ei]

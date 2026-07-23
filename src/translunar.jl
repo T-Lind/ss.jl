@@ -99,19 +99,28 @@ physical rather than modeled.
 """
 function tli_burn(r::V3, v::V3, t::Float64, m0::Float64, stage::Stage,
                   dv_target::Float64, eph::CircularMoonEphemeris,
-                  prop_avail::Float64; dt::Float64 = 0.5)
+                  prop_avail::Float64; dt::Float64 = 0.5,
+                  dv_scale::Float64 = 1.0, point_err::Float64 = 0.0)
     vex = G0 * stage.isp_vac
-    m_cut = m0 * exp(-dv_target / vex)
+    m_cut = m0 * exp(-dv_target * dv_scale / vex)
     m_dry_limit = m0 - prop_avail
     m = m0
     md = stage_mdot(stage)
     ts = Float64[]; rs = NTuple{3,Float64}[]
     t0 = t
+    sp, cp = sincos(point_err)
     while m > m_cut && m > m_dry_limit + 1e-9
         step = min(dt, (m - max(m_cut, m_dry_limit)) / md)
-        # RK4 on (r, v, m) with prograde thrust
-        acc(rr, vv, mm, tt) = vadd(_cis_accel(rr, tt, eph),
-                                   vscale(vunit(vv), stage.thrust_vac / mm))
+        # RK4 on (r, v, m); thrust prograde with an optional in-plane
+        # pointing bias (guidance execution error)
+        function acc(rr, vv, mm, tt)
+            vhat = vunit(vv)
+            if point_err != 0.0
+                hhat = vunit(vcross(rr, vv))
+                vhat = vadd(vscale(vhat, cp), vscale(vcross(hhat, vhat), sp))
+            end
+            vadd(_cis_accel(rr, tt, eph), vscale(vhat, stage.thrust_vac / mm))
+        end
         k1r = v;                       k1v = acc(r, v, m, t)
         r2 = vadd(r, vscale(k1r, step/2)); v2 = vadd(v, vscale(k1v, step/2)); m2 = m - md*step/2
         k2r = v2;                      k2v = acc(r2, v2, m2, t + step/2)
@@ -144,6 +153,7 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
                       h_stop::Float64 = 140.0e3,
                       t_max::Float64 = 30.0 * 86400.0,
                       stop_after_flyby::Bool = false,
+                      dv_scale::Float64 = 1.0, point_err::Float64 = 0.0,
                       log_every::Int = 4)
     L = CislunarLog()
     r, v, t = r0, v0, t0
@@ -158,22 +168,48 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
         kount += 1
     end
 
-    # --- TLI burn -----------------------------------------------------------
-    r, v, t, m, dv_del, tburn, bts, brs = tli_burn(r, v, t, m_stack, stage, dv, eph, prop_avail)
+    # --- TLI burn (optionally with execution errors) -----------------------
+    r, v, t, m, dv_del, tburn, bts, brs =
+        tli_burn(r, v, t, m_stack, stage, dv, eph, prop_avail;
+                 dv_scale = dv_scale, point_err = point_err)
     for (tb, rb) in zip(bts, brs)
         _cis_push!(L, tb, rb, v, eph, theta_g0, 1)
     end
 
     # --- translunar / return coast -----------------------------------------
+    leg = _coast_leg!(L, r, v, t, eph;
+                      theta_g0 = theta_g0, h_stop = h_stop,
+                      t_end = t0 + t_max, stop_after_flyby = stop_after_flyby,
+                      log_every = log_every)
+
+    CislunarResult(L, leg.outcome, leg.r, leg.v, leg.t, m, dv_del, t_ign, tburn,
+                   leg.peri_alt, leg.t_peri, leg.vac_perigee, leg.gamma_end)
+end
+
+"""
+    _coast_leg!(L, r, v, t, eph; theta_g0, h_stop, t_end, stop_after_flyby,
+                log_every, t_stop=Inf, outbound=true, peri_alt=Inf,
+                t_peri=NaN, vac_perigee=NaN)
+
+Shared cislunar coast: integrates from (r, v, t) until entry handoff, lunar
+impact, escape, `t_stop` (mid-course pause), flyby completion (design mode)
+or `t_end`. Carry-in state (`outbound`, running perilune minimum, measured
+return perigee) lets a leg resume after a mid-course correction.
+"""
+function _coast_leg!(L::CislunarLog, r::V3, v::V3, t::Float64,
+                     eph::CircularMoonEphemeris;
+                     theta_g0::Float64, h_stop::Float64, t_end::Float64,
+                     stop_after_flyby::Bool, log_every::Int,
+                     t_stop::Float64 = Inf,
+                     outbound::Bool = true,
+                     peri_alt::Float64 = Inf, t_peri::Float64 = NaN,
+                     vac_perigee::Float64 = NaN)
     outcome = :timeout
-    peri_alt = Inf; t_peri = NaN
-    vac_perigee = NaN
     d_prev = moon_distance(eph, r, t)
-    outbound = true
     kount = 0
     gamma_end = NaN
-    while t < t0 + t_max
-        dtc = _cis_dt(r, t, eph)
+    while t < t_end
+        dtc = min(_cis_dt(r, t, eph), max(t_stop - t, 1.0e-3))
         (kount % log_every == 0) && _cis_push!(L, t, r, v, eph, theta_g0, outbound ? 2 : 3)
         kount += 1
         rn_, vn_ = _cis_step(r, v, t, dtc, eph)
@@ -207,6 +243,14 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
             r, v, t = rn_, vn_, tn
             outcome = :flyby_complete
             _cis_push!(L, t, r, v, eph, theta_g0, 3)
+            break
+        end
+
+        # mid-course pause point
+        if tn >= t_stop - 1e-6
+            r, v, t = rn_, vn_, tn
+            outcome = :t_stop
+            _cis_push!(L, t, r, v, eph, theta_g0, outbound ? 2 : 3)
             break
         end
 
@@ -244,9 +288,9 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
         end
         r, v, t = rn_, vn_, tn
     end
-
-    CislunarResult(L, outcome, r, v, t, m, dv_del, t_ign, tburn,
-                   peri_alt, t_peri, vac_perigee, gamma_end)
+    (r = r, v = v, t = t, outcome = outcome, peri_alt = peri_alt,
+     t_peri = t_peri, vac_perigee = vac_perigee, gamma_end = gamma_end,
+     outbound = outbound)
 end
 
 """
@@ -400,10 +444,16 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
                                       stage = stage, m_stack = m_stack,
                                       prop_avail = prop_avail, theta_g0 = theta_g0)
     local full
-    for outer in 1:6
+    stalls = 0
+    for outer in 1:8
         converged = newton!()
+        if !converged && stalls == 0
+            stalls += 1
+            converged = newton!()          # warm restart usually finishes it
+        end
         full = verify(tig, dvv)
         if converged && full.outcome == :entry_interface
+            stalls = 0
             err = full.vac_perigee_alt - hp_return_target
             verbose && @info "free-return corrector" outer true_perigee_km = full.vac_perigee_alt/1e3 err_km = err/1e3
             abs(err) < 3.0e3 && return (tig, dvv, full)
@@ -416,4 +466,165 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
     f1, f2, res = resid(tig, dvv)
     @warn "free-return targeting did not fully converge" f_perilune_km = f1 f_perigee_km = f2 outcome = full.outcome
     (tig, dvv, full)
+end
+
+# ---------------------------------------------------------------------------
+# Mid-course correction (TCM)
+# ---------------------------------------------------------------------------
+
+"""
+    design_tcm(r, v, t, eph; r_ref, t_ref, hp_moon_target, hp_perigee_proxy,
+               theta_g0, verbose=false) -> (dv_vec, resid1_km, resid2_km)
+
+Two-stage impulsive mid-course correction (along-track + in-plane-radial):
+
+1. **Return to reference**: solve the delta-v that re-joins the NOMINAL
+   trajectory's position `r_ref` at the nominal perilune epoch `t_ref`.
+   Downstream position is nearly linear in the correction, so this Newton
+   converges from arbitrarily large injection errors — terminal conditions
+   (the b-plane) are hopelessly nonlinear at that range and would rail a
+   direct shooter.
+2. **Terminal polish**: from the re-joined solution, drive (perilune
+   altitude, post-flyby proxy perigee) onto their targets with the same
+   flyby-terminated 2x2 Newton the TLI design uses. `hp_perigee_proxy` must
+   be the nominal design's proxy value (measured at flyby exit) so the TCM
+   reproduces the same physical return.
+"""
+function design_tcm(r::V3, v::V3, t::Float64, eph::CircularMoonEphemeris;
+                    r_ref::V3, t_ref::Float64,
+                    hp_moon_target::Float64, hp_perigee_proxy::Float64,
+                    theta_g0::Float64 = 0.0, verbose::Bool = false)
+    vhat = vunit(v)
+    rhat = vunit(r)
+    nhat = vunit(vsub(rhat, vscale(vhat, vdot(rhat, vhat))))   # in-plane, ⊥ v
+    ctrl(da, dr) = vadd(v, vadd(vscale(vhat, da), vscale(nhat, dr)))
+
+    # --- stage 1: position matching at the nominal perilune epoch ----------
+    function pos_err(da, dr)
+        L = CislunarLog()
+        leg = _coast_leg!(L, r, ctrl(da, dr), t, eph;
+                          theta_g0 = theta_g0, h_stop = 0.0,
+                          t_end = t_ref + 1.0, stop_after_flyby = false,
+                          log_every = 1_000_000, t_stop = t_ref)
+        d = vsub(leg.r, r_ref)
+        (vdot(d, vhat) / 1e3, vdot(d, nhat) / 1e3)   # in-plane components [km]
+    end
+    da = 0.0; dr = 0.0
+    for it in 1:8
+        e1, e2 = pos_err(da, dr)
+        verbose && @info "tcm rejoin" it e_along_km = e1 e_radial_km = e2 da dr
+        hypot(e1, e2) < 20.0 && break
+        d = 0.5
+        e1a, e2a = pos_err(da + d, dr)
+        e1b, e2b = pos_err(da, dr + d)
+        j11 = (e1a - e1) / d; j21 = (e2a - e2) / d
+        j12 = (e1b - e1) / d; j22 = (e2b - e2) / d
+        det = j11 * j22 - j12 * j21
+        abs(det) < 1e-14 && break
+        da -= ( j22 * e1 - j12 * e2) / det
+        dr -= (-j21 * e1 + j11 * e2) / det
+    end
+
+    # --- stage 2: terminal polish on (perilune, proxy perigee) -------------
+    function resid(da_, dr_)
+        L = CislunarLog()
+        leg = _coast_leg!(L, r, ctrl(da_, dr_), t, eph;
+                          theta_g0 = theta_g0, h_stop = 140.0e3,
+                          t_end = t + 25.0 * 86400.0, stop_after_flyby = true,
+                          log_every = 1_000_000)
+        r1 = isfinite(leg.peri_alt) ? (leg.peri_alt - hp_moon_target) / 1e3 : 1.0e5
+        r2 = isnan(leg.vac_perigee) ? 1.0e5 : (leg.vac_perigee - hp_perigee_proxy) / 1e3
+        (r1, r2)
+    end
+    local f1, f2
+    for it in 1:10
+        f1, f2 = resid(da, dr)
+        verbose && @info "tcm polish" it f_perilune_km = f1 f_perigee_km = f2 da dr
+        (abs(f1) < 25.0 && abs(f2) < 2.0) && break
+        d = 0.2
+        f1a, f2a = resid(da + d, dr)
+        f1b, f2b = resid(da, dr + d)
+        j11 = (f1a - f1) / d; j21 = (f2a - f2) / d
+        j12 = (f1b - f1) / d; j22 = (f2b - f2) / d
+        det = j11 * j22 - j12 * j21
+        abs(det) < 1e-14 && break
+        da += clamp(0.8 * (-( j22 * f1 - j12 * f2) / det), -10.0, 10.0)
+        dr += clamp(0.8 * (-(-j21 * f1 + j11 * f2) / det), -10.0, 10.0)
+    end
+    dv_vec = vadd(vscale(vhat, da), vscale(nhat, dr))
+    (dv_vec, f1, f2)
+end
+
+"""
+    fly_cislunar_tcm(r0, v0, t0, eph; t_ign, dv, stage, m_stack, prop_avail,
+                     dv_scale, point_err, tcm_delay, hp_moon_target,
+                     hp_perigee_proxy, theta_g0) -> (CislunarResult, tcm_dv)
+
+Fly the mission with TLI execution errors, pause `tcm_delay` seconds after
+ignition, design and apply the impulsive correction, and coast home. The
+returned `tcm_dv` is the correction magnitude [m/s]; the kick stage's
+propellant cost of realizing it impulsively is `m·(1 − exp(−dv/vex))`.
+"""
+function fly_cislunar_tcm(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
+                          t_ign::Float64, dv::Float64, stage::Stage,
+                          m_stack::Float64, prop_avail::Float64,
+                          r_ref::V3, t_ref::Float64,
+                          dv_scale::Float64 = 1.0, point_err::Float64 = 0.0,
+                          tcm_delay::Float64 = 86400.0,
+                          hp_moon_target::Float64 = 2000.0e3,
+                          hp_perigee_proxy::Float64 = 35.0e3,
+                          theta_g0::Float64 = 0.0,
+                          h_stop::Float64 = 140.0e3,
+                          t_max::Float64 = 30.0 * 86400.0,
+                          verbose::Bool = false)
+    L = CislunarLog()
+    r, v, t = r0, v0, t0
+
+    kount = 0
+    while t < t_ign
+        dtp = min(_cis_dt(r, t, eph; dt_max = 30.0), t_ign - t)
+        (kount % 4 == 0) && _cis_push!(L, t, r, v, eph, theta_g0, 0)
+        r, v = _cis_step(r, v, t, dtp, eph)
+        t += dtp
+        kount += 1
+    end
+
+    r, v, t, m, dv_del, tburn, bts, brs =
+        tli_burn(r, v, t, m_stack, stage, dv, eph, prop_avail;
+                 dv_scale = dv_scale, point_err = point_err)
+    for (tb, rb) in zip(bts, brs)
+        _cis_push!(L, tb, rb, v, eph, theta_g0, 1)
+    end
+
+    # coast to the correction epoch
+    leg1 = _coast_leg!(L, r, v, t, eph;
+                       theta_g0 = theta_g0, h_stop = h_stop, t_end = t0 + t_max,
+                       stop_after_flyby = false, log_every = 4,
+                       t_stop = t_ign + tcm_delay)
+    if leg1.outcome != :t_stop
+        # something dramatic happened before the TCM epoch (impact/escape)
+        return (CislunarResult(L, leg1.outcome, leg1.r, leg1.v, leg1.t, m,
+                               dv_del, t_ign, tburn, leg1.peri_alt, leg1.t_peri,
+                               leg1.vac_perigee, leg1.gamma_end), NaN)
+    end
+
+    dv_vec, f1, f2 = design_tcm(leg1.r, leg1.v, leg1.t, eph;
+                                r_ref = r_ref, t_ref = t_ref,
+                                hp_moon_target = hp_moon_target,
+                                hp_perigee_proxy = hp_perigee_proxy,
+                                theta_g0 = theta_g0, verbose = verbose)
+    tcm_dv = vnorm(dv_vec)
+    v_corr = vadd(leg1.v, dv_vec)
+    m_after = m * exp(-tcm_dv / (G0 * stage.isp_vac))
+
+    leg2 = _coast_leg!(L, leg1.r, v_corr, leg1.t, eph;
+                       theta_g0 = theta_g0, h_stop = h_stop, t_end = t0 + t_max,
+                       stop_after_flyby = false, log_every = 4,
+                       outbound = leg1.outbound,
+                       peri_alt = leg1.peri_alt, t_peri = leg1.t_peri,
+                       vac_perigee = leg1.vac_perigee)
+
+    (CislunarResult(L, leg2.outcome, leg2.r, leg2.v, leg2.t, m_after,
+                    dv_del, t_ign, tburn, leg2.peri_alt, leg2.t_peri,
+                    leg2.vac_perigee, leg2.gamma_end), tcm_dv)
 end

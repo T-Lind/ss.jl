@@ -176,6 +176,183 @@ end
     @test ent.peak_gload < 30.0              # inside a survivable ballistic corridor
     # energy sanity on the coast: two-body + moon only, no drag above EI
     @test cis.m < SatelliteSim.liftoff_mass(ms.lv)
+
+    # configurability: a custom launch vehicle flows through the whole chain
+    lv = default_moon_rocket(payload = 300.0)
+    ms2 = moonshot(lv = lv, hp_moon = 1500e3)
+    @test ms2.lv === lv
+    @test ms2.entry_scn.vehicle.mass == 300.0
+    @test isapprox(ms2.cislunar.perilune_alt, 1500e3; atol = 75e3)
+end
+
+@testset "rigid body" begin
+    # rotation basics
+    q = quat_axis_angle((0.0, 0.0, 1.0), pi/2)
+    v = qrotate(q, (1.0, 0.0, 0.0))
+    @test all(isapprox.(v, (0.0, 1.0, 0.0); atol = 1e-12))
+    @test all(isapprox.(qrotate_inv(q, v), (1.0, 0.0, 0.0); atol = 1e-12))
+    q2 = quat_from_to((1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+    @test all(isapprox.(qrotate(q2, (1.0, 0.0, 0.0)), (0.0, 1.0, 0.0); atol = 1e-12))
+
+    # torque-free tumble: energy and |angular momentum| conserved (RK4)
+    I = (110.0, 137.0, 150.0)
+    w = (0.3, -0.5, 0.8)
+    q = (1.0, 0.0, 0.0, 0.0)
+    E0 = rot_energy(I, w)
+    L0 = sqrt(sum(abs2, ang_momentum(I, w)))
+    dt = 0.01
+    for _ in 1:20_000
+        k1 = euler_wdot(I, w, (0.0, 0.0, 0.0))
+        w2 = w .+ 0.5dt .* k1
+        k2 = euler_wdot(I, w2, (0.0, 0.0, 0.0))
+        w3 = w .+ 0.5dt .* k2
+        k3 = euler_wdot(I, w3, (0.0, 0.0, 0.0))
+        w4 = w .+ dt .* k3
+        k4 = euler_wdot(I, w4, (0.0, 0.0, 0.0))
+        w = w .+ (dt / 6) .* (k1 .+ 2 .* k2 .+ 2 .* k3 .+ k4)
+    end
+    @test isapprox(rot_energy(I, w), E0; rtol = 1e-8)
+    @test isapprox(sqrt(sum(abs2, ang_momentum(I, w))), L0; rtol = 1e-8)
+end
+
+@testset "rcs" begin
+    sys = default_pod_rcs()
+    auth = torque_authority(sys)
+    @test all(a -> a > 0, auth)                    # every axis controllable
+    # couples are pure torques: net force cancels
+    F = (0.0, 0.0, 0.0)
+    for t in sys.thrusters
+        F = F .+ t.thrust .* t.dir
+    end
+    @test all(abs.(F) .< 1e-9)
+    # limit cycle: hand formula
+    lc = limit_cycle_prop(1000.0, 28.0, 220.0, 0.01, deg2rad_(5.0), 86400.0;
+                          nthr = 2, thrust = 10.0)
+    w = 28.0 * 0.01 / 1000.0
+    cycles = 86400.0 / (2 * deg2rad_(5.0) / w)
+    @test isapprox(lc, cycles * 2 * 10.0 / (9.80665 * 220.0) * 0.01; rtol = 1e-12)
+    # slew: bang-bang time
+    p, ts = slew_prop(1000.0, 28.0, 220.0, 1.0 * pi)
+    @test isapprox(ts, 2 * sqrt(pi * 1000.0 / 28.0); rtol = 1e-12)
+    b = cruise_rcs_budget(default_kick_rcs(), 1000.0; duration = 20 * 86400.0)
+    @test b.margin > 0                             # sized for the cruise
+end
+
+@testset "6-DOF entry vs 4-DOF" begin
+    veh = default_reentry_pod()
+    scn = scenario_from_elements(DeorbitElements(), veh)
+    r4 = simulate(scn)
+    r6 = simulate_entry6(scn; rcs = default_pod_rcs())   # wind-hold coast
+    @test r6.terminated == :splashdown
+    @test isapprox(r6.peak_gload, r4.peak_gload; rtol = 0.05)
+    @test isapprox(r6.heat_load, r4.heat_load; rtol = 0.05)
+    @test haversine(r4.lat_splash, r4.lon_splash,
+                    r6.lat_splash, r6.lon_splash) < 20e3
+    @test r6.rcs_used < 0.05                       # grams, not kilograms
+    @test r6.max_alpha_after_peak < deg2rad_(10.0) # stable through supersonic
+    # uncontrolled coast arrives far off-trim yet the shape self-rights
+    r6f = simulate_entry6(scn)
+    @test r6f.terminated == :splashdown
+    ei = findfirst(e -> e.name == :entry_interface, r6f.events)
+    i = findfirst(t -> t >= r6f.events[ei].t, r6f.log.t)
+    @test r6f.log.alpha_t[i] > deg2rad_(45.0)      # broadside at EI...
+    @test r6f.peak_gload < 1.10 * r4.peak_gload    # ...still survivable
+    # tipoff-rate damping costs grams
+    r6r = simulate_entry6(scn; rcs = default_pod_rcs(), rcs_mode = :rate_damp,
+                          w0 = (deg2rad_(3.0), deg2rad_(-2.0), deg2rad_(1.5)))
+    @test r6r.rcs_used < 0.05
+end
+
+@testset "TLI dispersion + TCM" begin
+    ms = moonshot(tli_mag_err = 0.003, tli_point_err = deg2rad_(0.3))
+    @test ms.cruise !== nothing
+    c = ms.cruise
+    @test 5.0 < c.tcm_dv < 150.0
+    @test c.tcm_prop < 23.0                        # inside the kick margin
+    @test c.rcs.margin > 0
+    @test isapprox(ms.cislunar.perilune_alt, 2000e3; atol = 60e3)
+    @test abs(ms.cislunar.vac_perigee_alt - 35e3) < 25e3
+    @test ms.entry.terminated == :splashdown
+    @test ms.entry.peak_gload < 30.0
+end
+
+@testset "mission config (TOML)" begin
+    spec = load_mission(joinpath(@__DIR__, "..", "missions", "moonshot.toml"))
+    @test spec.pod_mass == 350.0
+    @test spec.h_park == 200e3
+    @test spec.hp_moon == 2000e3
+    @test length(spec.lv.stages) == 3
+    lv0 = default_moon_rocket()
+    @test liftoff_mass(spec.lv) ≈ liftoff_mass(lv0)
+    @test spec.lv.stages[3].isp_vac == lv0.stages[3].isp_vac
+    ms = run_mission(spec)
+    @test ms.cislunar.outcome == :entry_interface
+    @test isapprox(ms.cislunar.perilune_alt, 2000e3; atol = 30e3)
+end
+
+@testset "mesh + mass properties" begin
+    # unit box: exact polyhedral integrals
+    b = box_mesh((0.0, 0.0, 0.0), (2.0, 1.0, 1.0))
+    @test mesh_volume(b) ≈ 2.0
+    mb = mass_properties(b, 12.0)
+    @test all(isapprox.(mb.cg, (1.0, 0.5, 0.5); atol = 1e-12))
+    @test isapprox(mb.inertia[1], 12.0 / 12 * (1 + 1); rtol = 1e-12)
+    @test isapprox(mb.inertia[2], 12.0 / 12 * (4 + 1); rtol = 1e-12)
+    # sphere: analytic within mesh resolution
+    prof = [(cos(s), sin(s)) for s in range(0.0, 1.0 * pi; length = 41)]
+    sph = lathe_mesh([(x, r) for (x, r) in prof]; nseg = 64)
+    @test isapprox(mesh_volume(sph), 4pi / 3; rtol = 0.005)
+    ms_ = mass_properties(sph, 100.0)
+    @test isapprox(ms_.inertia[1], 40.0; rtol = 0.005)
+    # STL round trip preserves the solid
+    path = joinpath(mktempdir(), "sph.stl")
+    write_stl(path, sph)
+    sph2 = read_stl(path)
+    @test length(sph2) == length(sph)
+    @test isapprox(mesh_volume(sph2), mesh_volume(sph); rtol = 1e-6)
+end
+
+@testset "Newtonian panel aero" begin
+    @test isapprox(cp_max_newtonian(1e6), 1.8394; atol = 1e-3)  # M -> inf limit
+    # sphere: CD = Cp_max/2 exactly in Newtonian theory
+    prof = [(cos(s), sin(s)) for s in range(0.0, 1.0 * pi; length = 41)]
+    sph = lathe_mesh([(x, r) for (x, r) in prof]; nseg = 64)
+    pa = panel_aero(sph; sref = 1.0 * pi, lref = 2.0, ref = (0.0, 0.0, 0.0),
+                    machs = [20.0])
+    @test isapprox(cd_coeff(pa, 20.0, 0.0), cp_max_newtonian(20.0) / 2; rtol = 0.01)
+
+    # capsule from committed geometry: stable, damped, trims at zero
+    cap = read_stl(joinpath(@__DIR__, "..", "geometry", "capsule.stl"))
+    mp = mass_properties(cap, 350.0)
+    @test mp.offdiag_frac < 1e-3                    # axisymmetric
+    pac = panel_aero(cap; sref = pi * 0.75^2, lref = 1.5, ref = mp.cg)
+    @test cm_coeff(pac, 20.0, deg2rad_(10.0), 0.0) < 0     # restoring
+    @test SatelliteSim.interp1(pac.cmq, 20.0) < 0          # damped
+    @test abs(trim_alpha(pac)) < deg2rad_(1.0)
+    @test 1.4 < cd_coeff(pac, 20.0, 0.0) < 2.0
+
+    # geometry-to-trajectory: fly the pod on mesh-derived aero
+    veh0 = default_reentry_pod()
+    veh = Vehicle(name = "mesh-pod", mass = 350.0, sref = pi * 0.75^2,
+                  lref = 1.5, rn = 1.8, iyy = mp.inertia[2], aero = pac,
+                  chutes = veh0.chutes)
+    r6 = simulate_entry6(scenario_from_elements(DeorbitElements(), veh);
+                         inertia = mp.inertia, rcs = default_pod_rcs())
+    r0 = simulate(scenario_from_elements(DeorbitElements(), veh0))
+    @test r6.terminated == :splashdown
+    @test isapprox(r6.peak_gload, r0.peak_gload; rtol = 0.15)
+    @test isapprox(r6.heat_load, r0.heat_load; rtol = 0.15)
+
+    # starship demo mesh: lifting body with a passive trim from its flaps
+    ship = read_stl(joinpath(@__DIR__, "..", "geometry", "starship.stl"))
+    mps = mass_properties(ship, 120_000.0)
+    pas = panel_aero(ship; sref = 9.0 * 50.0, lref = 50.0, ref = mps.cg)
+    @test cd_coeff(pas, 20.0, deg2rad_(90.0)) > 5 * cd_coeff(pas, 20.0, 0.0)
+    @test cl_coeff(pas, 20.0, deg2rad_(20.0)) /
+          cd_coeff(pas, 20.0, deg2rad_(20.0)) > 1.0       # slender-body L/D
+    at = trim_alpha(pas)
+    @test deg2rad_(15.0) < at < deg2rad_(65.0)            # stable belly-first trim
+    @test SatelliteSim.interp1(pas.cmq, 20.0) < 0
 end
 
 @testset "full reentry smoke test" begin

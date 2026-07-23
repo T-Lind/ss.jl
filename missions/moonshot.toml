@@ -1,0 +1,47 @@
+# Reference circumlunar free-return mission — the same numbers the Julia
+# defaults use, spelled out as data. Copy this file and edit to define new
+# missions; every field is optional and falls back to these values.
+#
+#   julia --project scripts/run_mission.jl missions/moonshot.toml
+
+[mission]
+name = "circumlunar-free-return"
+pod_mass_kg = 350.0
+parking_altitude_km = 200.0
+inclination_deg = 28.5
+perilune_km = 2000.0
+return_perigee_km = 35.0
+
+[mission.dispersions]
+# nonzero values fly a dispersed cruise with an automatic mid-course
+# correction (see README: execution dispersions & TCM)
+tli_mag_err_pct = 0.0
+tli_point_err_deg = 0.0
+tcm_delay_hr = 24.0
+
+[vehicle]
+name = "Sable"
+fairing_kg = 150.0
+diameter_m = 1.8
+
+[[vehicle.stage]]           # stage 1 — kerolox booster
+name = "sable1"
+dry_kg = 3800.0
+prop_kg = 42000.0
+thrust_vac_kn = 950.0
+isp_vac_s = 305.0
+exit_area_m2 = 0.8
+
+[[vehicle.stage]]           # stage 2 — kerolox upper
+name = "sable2"
+dry_kg = 900.0
+prop_kg = 9500.0
+thrust_vac_kn = 95.0
+isp_vac_s = 345.0
+
+[[vehicle.stage]]           # stage 3 — storable kick stage (TLI)
+name = "sablek"
+dry_kg = 140.0
+prop_kg = 950.0
+thrust_vac_kn = 15.0
+isp_vac_s = 315.0

@@ -78,6 +78,37 @@ instead of 7.6. Tauber–Sutton radiative heating switches itself on above
 9 km/s, peak loads reach ~18 g on this ballistic corridor, and the drogue +
 main sequence flies unchanged.
 
+**6-DOF attitude & RCS** (`rigidbody.jl`, `rcs.jl`, `entry6.jl`): full
+quaternion entry with total-angle-of-attack aerodynamics from the same Mach
+tables, Euler rotational dynamics on a diagonal inertia tensor, and RCS
+hardware (thruster couples with torque authority, PWM duty cycles, real
+propellant drawdown). `simulate_entry6` cross-validates against the 4-DOF
+sim to a fraction of a percent — and exposes what the 4-DOF assumes away:
+an uncontrolled pod arrives at entry interface **broadside** (the velocity
+vector rotates >100° during the coast while the body stays inertially
+fixed), and the statically stable shape genuinely self-rights from
+α = 122°. The RCS wind-hold mode holds trim through the coast for about a
+gram of propellant; damping 3°/s of tipoff costs ~9 grams. Long-coast
+attitude budgets (deadband limit cycling, slews, settling) use the standard
+closed-form results — which immediately re-sized the kick stage's thrusters:
+the first cut (25 N, 20 ms pulses) would have emptied its tank limit-cycling
+across the 19-day cruise.
+
+**Execution dispersions & mid-course correction** (`translunar.jl`): the TLI
+burn accepts magnitude and pointing errors, and they matter enormously — a
+0.3% overburn alone moves perilune by +10,000 km and drops the return
+perigee 6,300 km below the Earth's surface. `design_tcm` recovers the
+mission with the classical two-stage scheme: a return-to-reference Newton
+(re-join the nominal trajectory's position at the nominal perilune epoch —
+nearly linear, converges from arbitrarily large errors) followed by a
+terminal polish on (perilune, proxy perigee). `moonshot(tli_mag_err=...,
+tli_point_err=...)` flies the dispersed cruise with the correction at
+T+24 h and reports the TCM Δv, its kick-propellant cost, and the cruise RCS
+budget. `scripts/run_tcm_mc.jl` runs the Monte Carlo: at σ = 0.2% / 0.25°,
+the TCM budget is ~36 m/s mean / 95 m/s p99 — p95 propellant 13.3 kg
+against the 22.9 kg post-TLI kick margin, with 98% of samples reaching the
+entry corridor.
+
 Nominal circumlunar numbers (v0.2): TLI Δv 3151 m/s of a 3330 m/s budget,
 perilune 2000 ± 30 km, return vacuum perigee 35.5 km (γ ≈ −7.3° at 140 km),
 entry peak 17.9 g / 247 W/cm², stagnation heat load 104 MJ/m², splashdown
@@ -87,6 +118,27 @@ Plots: `output/plots/moonshot_*` — 3D ascent, Earth-Moon trajectory,
 rotating-frame figure-8, 3D entry. `scripts/make_viewer.py` builds an
 interactive HTML viewer (`output/moonshot_viewer.html`) with mission-time
 playback and an inertial/rotating frame toggle.
+
+**Missions as data** (`config.jl`, `missions/`): a TOML file fully defines a
+mission — pod, targets, all stages, dispersions — and
+`run_mission("missions/moonshot.toml")` designs and flies it. New vehicles
+and mission variants are files, not code.
+
+**Aerodynamics from geometry** (`mesh.jl`, `panelaero.jl`, `geometry/`):
+load an STL (or build one procedurally), get exact polyhedral mass
+properties (volume, CG, inertia — Eberly's method, validated to machine
+precision on primitives), and generate hypersonic aero tables with a
+modified-Newtonian panel method: CA/CN/Cm over (α, Mach) plus the pitch
+damping derivative Cm_q from a rotating-panel sweep. The sphere reproduces
+the analytic Newtonian drag to 0.2%; the committed capsule mesh flies the
+full 6-DOF entry on mesh-derived aero within ~10% of the handbook-table
+result (7.11 g vs 7.20 g peak). The simplified Starship mesh
+(`geometry/starship.stl`: 9 m × 50 m body + four flaps) comes out as a
+proper lifting body — L/D 1.2 at 20°, a stable passive belly-first trim at
+35° set by its flap geometry, negative Cm_q — ready for the flap-control
+and propulsive-landing work that a real Starship entry needs. Newtonian
+aero is hypersonic-only (tables clamp below Mach ~4; pair with drogues
+before transonic, as the capsule missions do).
 
 ## What the reentry sim models
 
@@ -167,6 +219,15 @@ julia --project scripts/run_nominal.jl
 # full circumlunar mission (design + fly) -> output/moonshot_*.csv
 julia --project scripts/run_moonshot.jl
 
+# TCM Monte Carlo over TLI execution errors -> output/tcm_montecarlo.csv
+julia --project -t auto scripts/run_tcm_mc.jl 100 0.2 0.25
+
+# missions from TOML specs
+julia --project scripts/run_mission.jl missions/moonshot.toml
+
+# regenerate the demo geometry (capsule + simplified Starship)
+julia --project scripts/make_meshes.jl
+
 # Monte Carlo (threaded) -> output/montecarlo.csv + summary
 julia --project -t auto scripts/run_montecarlo.jl 300
 
@@ -175,7 +236,25 @@ python3 scripts/make_plots.py        # reentry plots (matplotlib)
 python3 scripts/make_3d.py           # circumlunar 3D/mission-plane plots
 python3 scripts/make_viewer.py       # interactive HTML mission viewer
 julia --project scripts/make_plots.jl  # requires Plots.jl installed
+
+# mission-control panel: configure, run, and explore in the browser
+julia --project -t auto scripts/panel.jl   # then open http://localhost:8137
 ```
+
+### Mission-control panel
+
+`scripts/panel.jl` serves a local cockpit (pure stdlib — a raw-`Sockets`
+HTTP server, no dependencies): edit the mission targets and all three
+stages' propellant/dry mass/thrust/Isp, hit **Run**, and get the full
+design + flight back in about a second — stat tiles, the interactive 3D
+trajectory with mission-time playback and an inertial/rotating frame
+toggle, ascent & entry profile charts, the event timeline, and a run
+history for side-by-side comparison. A **parameter sweep** tab varies any
+knob across a range (threaded; ~50 missions/min) and plots the outcome
+curve — e.g. sweeping pod mass shows the TLI propellant margin hitting
+zero just above 400 kg, which is the actual payload limit of the default
+launcher. Runs that fly but miss the requested perilune/perigee (e.g. a
+prop-starved TLI) are flagged **off target** rather than silently plotted.
 
 Programmatic use:
 
@@ -216,15 +295,25 @@ src/
   heating.jl        Sutton-Graves, Tauber-Sutton, wall temperature
   dynamics.jl       4-DOF equations of motion + phase logic (EI at 120 km)
   integrator.jl     RK4 (phase-scheduled step sizes)
+  rigidbody.jl      quaternions + Euler rotational dynamics
+  rcs.jl            RCS thrusters, PWM control laws, analytic coast budgets
   propulsion.jl     Stage / LaunchVehicle, pressure-corrected thrust
   moon.jl           circular lunar ephemeris (mission-plane construction)
   launch.jl         3-DOF+mass ascent, staging, guidance, Newton tuning
-  translunar.jl     cislunar propagation, finite TLI burn, free-return design
+  translunar.jl     cislunar propagation, TLI burn + execution errors,
+                    free-return design, two-stage TCM
   simulation.jl     entry driver: events, bisection, logging
+  entry6.jl         full 6-DOF entry (quaternion attitude, total-AoA aero,
+                    RCS wind-hold / rate damping)
   scenarios.jl      deorbit design + splashdown targeting
   mission.jl        the full launch->Moon->splashdown chain (moonshot)
+  mesh.jl           STL I/O, polyhedral mass properties, mesh builders
+  panelaero.jl      modified-Newtonian panel aero (CA/CN/Cm + Cm_q) from meshes
+  config.jl         missions/vehicles as TOML specs (load_mission/run_mission)
   montecarlo.jl     dispersions, threaded MC, footprint statistics
   output.jl         CSV writers, console summaries
+missions/           TOML mission specs (moonshot.toml = the reference)
+geometry/           demo STL meshes (capsule, simplified Starship)
 ```
 
 ### Extension points (built in on purpose)
