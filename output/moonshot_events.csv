@@ -1,0 +1,16 @@
+phase,event,t_s,alt_m,v_ms
+ascent,liftoff,0.00,0.0,0.0
+ascent,pitchover,7.30,145.2,40.6
+ascent,gravity_turn,21.30,1319.7,134.4
+ascent,sep_sable1,132.30,48092.8,2923.5
+ascent,ignition_sable2,136.40,50656.4,2914.0
+ascent,fairing_jettison,265.00,120029.3,3688.2
+ascent,seco,466.20,200189.2,7364.7
+cislunar,tli_ignition,3294.54,,
+cislunar,tli_cutoff,3481.79,,
+cislunar,perilune,284465.22,1999967.9,
+cislunar,entry_handoff,1699689.40,140000,
+entry,entry_interface,1699704.41,120000.0,10589.1
+entry,deploy_drogue,1699964.86,8995.0,106.1
+entry,deploy_main,1700175.26,2996.6,23.8
+entry,splashdown,1700781.87,-0.0,4.5

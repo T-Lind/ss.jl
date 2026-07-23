@@ -65,6 +65,31 @@ function write_montecarlo_csv(path::AbstractString, samples::Vector{MCSample})
     ))
 end
 
+function write_ascent_csv(path::AbstractString, asc::AscentResult)
+    L = asc.log
+    write_csv(path, (
+        t_s = L.t,
+        x_m = L.rx, y_m = L.ry, z_m = L.rz,
+        alt_m = L.h, v_rel_ms = L.vrel, v_inertial_ms = L.vin,
+        gamma_deg = rad2deg_.(L.gamma), mach = L.mach, qbar_pa = L.qbar,
+        mass_kg = L.m, thrust_n = L.thrust,
+        lat_deg = rad2deg_.(L.lat), lon_deg = rad2deg_.(L.lon),
+        downrange_m = L.downrange,
+    ))
+end
+
+function write_cislunar_csv(path::AbstractString, cis::CislunarResult)
+    L = cis.log
+    write_csv(path, (
+        t_s = L.t,
+        x_m = L.rx, y_m = L.ry, z_m = L.rz,
+        vx_ms = L.vx, vy_ms = L.vy, vz_ms = L.vz,
+        alt_m = L.h, d_moon_m = L.d_moon,
+        moon_x_m = L.mx, moon_y_m = L.my, moon_z_m = L.mz,
+        phase = L.phase,
+    ))
+end
+
 function print_summary(io::IO, res::SimResult, scn::Scenario)
     ei = findfirst(e -> e.name == :entry_interface, res.events)
     println(io, "== Flight summary ==")

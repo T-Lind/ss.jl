@@ -1,14 +1,94 @@
 # SatelliteSim.jl (`ss.jl`)
 
 Mid-fidelity, extensible satellite mission simulation in pure Julia
-(standard library only — no package dependencies). The current mission is an
-**unpropelled reentry pod returning from low Earth orbit to a Pacific
-splashdown off the US west coast**, but the architecture is deliberately
-built to grow into launch, mid-course, and multi-body mission phases.
+(standard library only — no package dependencies). Two reference missions:
 
-![ground track](output/plots/groundtrack.png)
+1. **LEO reentry** — an unpropelled pod returning from low Earth orbit to a
+   Pacific splashdown off the US west coast (the original v0.1 mission).
+2. **Circumlunar free return** (v0.2) — the whole flight: a three-stage
+   rocket launches the same pod from a Cape-like site, a tuned gravity-turn
+   ascent inserts into a 200 km parking orbit, the kick stage performs a
+   finite trans-lunar-injection burn, the pod coasts around the Moon on a
+   free-return trajectory (2000 km perilune, no burns after TLI), and comes
+   home to a ballistic 10.6 km/s entry and Pacific splashdown.
 
-## What it models
+![free return](output/plots/moonshot_3d_cislunar.png)
+
+## The circumlunar mission at a glance
+
+```
+launch (57.8 t, 3 stages)  ──►  200 km parking orbit, i = 28.5°
+        tuned pitch program        insertion by closed-loop cutoff
+                                        │  coast <1 rev
+                                        ▼
+                       TLI: kick stage, Δv ≈ 3.15 km/s finite burn
+                                        │  3.3 d outbound
+                                        ▼
+                          lunar flyby, perilune 2000 km (free return)
+                                        │  ~16 d coast home
+                                        ▼
+              vacuum perigee 35 km  ──►  EI at 10.6 km/s, Mach 28
+                                        │  4-DOF ballistic entry, 18 g
+                                        ▼
+                          drogue + main chutes, Pacific splashdown
+```
+
+Everything is designed by the code, not hand-tuned: the ascent pitch program
+is closed by a 2×2 Newton shooting method, the TLI ignition time and Δv are
+closed by a patched-conic-seeded Newton iteration on (perilune altitude,
+return perigee altitude) with an outer corrector for the multi-day lunar
+tide drift, and the whole chain — design included — runs in about a second.
+
+![rotating frame](output/plots/moonshot_rotating.png)
+
+## What the circumlunar chain models
+
+**Launch** (`src/propulsion.jl`, `src/launch.jl`): 3-DOF + mass point
+dynamics over the rotating WGS-84 Earth. Stages burn at constant vacuum mass
+flow with nozzle-pressure thrust correction; drag uses a Mach-indexed
+slender-body CD table on the USSA76 atmosphere. Guidance is the classic
+sequence — vertical rise, pitch-over kick toward the launch azimuth, gravity
+turn (thrust along the relative wind) through stage 1, then a linear-tangent
+pitch law for the upper stages with cutoff at the target orbit energy.
+`tune_ascent` closes (pitch0, pitch rate) on (insertion altitude, γ = 0) by
+damped-Newton shooting — a stand-in for PEG-class guidance. Staging drops
+dry mass, the fairing jettisons at 120 km, and unspent kick-stage propellant
+is the TLI budget. The default `Sable` launcher (S1 kerolox 950 kN, S2
+kerolox 95 kN, S3 storable 15 kN) puts ~1.4 t through TLI from a 57.8 t
+liftoff.
+
+**Trans-lunar injection & free return** (`src/moon.jl`, `src/translunar.jl`):
+the Moon is a circular ephemeris in the achieved parking-orbit plane (the
+coplanar-launch-window assumption real missions buy with launch timing), and
+cislunar flight integrates Earth point-mass + differential lunar gravity
+with a step size scheduled by the local dynamical timescale of whichever
+body dominates. The TLI burn is finite (prograde thrust on the actual kick
+stage; gravity losses are physical, not modeled). `design_free_return`
+seeds from a patched conic — transfer apogee past the lunar distance, Kepler
+time-of-flight to the crossing, Moon lead angle — scans the encounter window
+(1 min of ignition time sweeps the b-plane by ~27,000 km, so the impact zone
+and its escape-side and free-return-side flanks are all a few minutes wide),
+then Newton-iterates (ignition time, Δv) onto (perilune altitude, return
+vacuum perigee), with an outer corrector that absorbs the few-hundred-km
+perigee drift the Moon's tides add over the long coast home.
+
+**Entry**: the pod hands off at 140 km to the original 4-DOF reentry
+simulation — same vehicle, same aero/heating models — now at 10.6 km/s
+instead of 7.6. Tauber–Sutton radiative heating switches itself on above
+9 km/s, peak loads reach ~18 g on this ballistic corridor, and the drogue +
+main sequence flies unchanged.
+
+Nominal circumlunar numbers (v0.2): TLI Δv 3151 m/s of a 3330 m/s budget,
+perilune 2000 ± 30 km, return vacuum perigee 35.5 km (γ ≈ −7.3° at 140 km),
+entry peak 17.9 g / 247 W/cm², stagnation heat load 104 MJ/m², splashdown
+19.7 days after liftoff at 4.5 m/s under main.
+
+Plots: `output/plots/moonshot_*` — 3D ascent, Earth-Moon trajectory,
+rotating-frame figure-8, 3D entry. `scripts/make_viewer.py` builds an
+interactive HTML viewer (`output/moonshot_viewer.html`) with mission-time
+playback and an inertial/rotating frame toggle.
+
+## What the reentry sim models
 
 **4 degrees of freedom** — 3 translational + 1 rotational (the body pitch
 angle):
@@ -76,18 +156,24 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (49 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
-# orbit-propagation accuracy, full end-to-end reentry)
+# tests (80 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
+# circumlunar chain, and end-to-end reentry)
 julia --project -e 'push!(LOAD_PATH, "src"); using SatelliteSim; include("test/runtests.jl")'
 
 # targeted nominal trajectory -> output/*.csv
 julia --project scripts/run_nominal.jl
 
+# full circumlunar mission (design + fly) -> output/moonshot_*.csv
+julia --project scripts/run_moonshot.jl
+
 # Monte Carlo (threaded) -> output/montecarlo.csv + summary
 julia --project -t auto scripts/run_montecarlo.jl 300
 
-# plots (either)
-python3 scripts/make_plots.py        # matplotlib (+ basemap for coastlines)
+# plots
+python3 scripts/make_plots.py        # reentry plots (matplotlib)
+python3 scripts/make_3d.py           # circumlunar 3D/mission-plane plots
+python3 scripts/make_viewer.py       # interactive HTML mission viewer
 julia --project scripts/make_plots.jl  # requires Plots.jl installed
 ```
 
@@ -102,6 +188,17 @@ print_summary(res, scn)
 
 samples = run_montecarlo(scn, Dispersions(mass_frac = 0.05); n = 500)
 mc_statistics(samples)
+
+ms = moonshot()                            # design + fly the lunar mission
+print_moonshot_summary(ms)
+ms.ascent.elements                         # parking-orbit insertion
+ms.cislunar.perilune_alt                   # 2000 km
+ms.entry.peak_gload                        # ~18 g
+
+# pieces are usable on their own:
+lv = default_moon_rocket()
+guid, asc = tune_ascent(lv, AscentGuidance(h_target = 250e3))
+eph = coplanar_moon(asc.r, asc.v)
 ```
 
 ## Architecture
@@ -109,18 +206,23 @@ mc_statistics(samples)
 ```
 src/
   SatelliteSim.jl   module root & exports
-  constants.jl      physical/planetary constants
+  constants.jl      physical/planetary constants (Earth + Moon)
   vec3.jl           allocation-free 3-vector helpers
   atmosphere.jl     AbstractAtmosphere: USSA76, ScaledAtmosphere
   gravity.jl        AbstractGravity: PointMass, J2, ThirdBody, Composite
-  frames.jl         ECI/ECEF/WGS-84 geodetic, Kepler elements, ENU, haversine
+  frames.jl         ECI/ECEF/WGS-84 geodetic, Kepler elements <-> states, ENU
   aerodynamics.jl   Mach-interpolated capsule coefficient tables
   vehicle.jl        Vehicle + Parachute definitions
   heating.jl        Sutton-Graves, Tauber-Sutton, wall temperature
   dynamics.jl       4-DOF equations of motion + phase logic (EI at 120 km)
   integrator.jl     RK4 (phase-scheduled step sizes)
-  simulation.jl     driver: events, bisection, logging
+  propulsion.jl     Stage / LaunchVehicle, pressure-corrected thrust
+  moon.jl           circular lunar ephemeris (mission-plane construction)
+  launch.jl         3-DOF+mass ascent, staging, guidance, Newton tuning
+  translunar.jl     cislunar propagation, finite TLI burn, free-return design
+  simulation.jl     entry driver: events, bisection, logging
   scenarios.jl      deorbit design + splashdown targeting
+  mission.jl        the full launch->Moon->splashdown chain (moonshot)
   montecarlo.jl     dispersions, threaded MC, footprint statistics
   output.jl         CSV writers, console summaries
 ```
@@ -129,13 +231,17 @@ src/
 
 | Goal | How |
 |---|---|
-| Launch / mid-course burns | `Scenario.extra_accel(r, v, t)` — return thrust acceleration; phases already integrate in ECI Cartesian so no reformulation is needed |
-| Moon/Sun perturbations | implement an ephemeris `t -> V3` and add `ThirdBodyGravity(mu, eph)` to a `CompositeGravity` |
+| Different rockets | build a `LaunchVehicle` from `Stage`s; `tune_ascent` re-closes the pitch program for any stack that can reach orbit |
+| Faster (Apollo-class) returns | add a third design parameter (e.g. burn direction or a mid-course trim) and target flight time alongside perilune/perigee in `design_free_return` |
+| Real lunar ephemeris | any callable `t -> V3` plugs into `ThirdBodyGravity` and `fly_cislunar`; swap `CircularMoonEphemeris` for DE-series data to get eccentricity + plane evolution |
+| Out-of-plane launch windows | replace `coplanar_moon` with a real ephemeris + a plane-targeting layer on `AscentGuidance.azimuth` and launch time |
+| Sun perturbation | append another `ThirdBodyGravity` to the cislunar acceleration |
 | Better atmosphere | subtype `AbstractAtmosphere` (NRLMSISE-00, GRAM dispersions, Mars…) |
 | Richer aero | subtype `AbstractAeroDatabase` with full (Mach, α) CN/CA/Cm maps |
-| Guidance | wrap `simulate` — `bank` and trim α (`cl_trim`) are the control channels a bank-angle guidance law would command |
+| Entry guidance | wrap `simulate` — `bank` and trim α (`cl_trim`) are the control channels a bank-angle guidance law would command; a lifting entry shrinks the 18 g lunar-return load dramatically |
 | 6-DOF | the pitch channel is isolated in `dynamics.jl`; adding roll/yaw states extends the same pattern |
 | Higher-order integration | swap `rk4_step!` behind the same signature |
+| Mission Monte Carlo | disperse `Stage` performance, TLI execution errors, and ephemeris phase through `moonshot` the same way `run_montecarlo` disperses entry |
 
 ### Fidelity notes & current limits
 
@@ -145,8 +251,19 @@ src/
 * Above ~86 km, "Mach" and continuum aero coefficients are bookkeeping
   conveniences (free-molecular regime); forces there are negligible anyway.
 * Radiative heating is ~0 below 9 km/s (LEO return) by construction of the
-  Tauber–Sutton correlation; it activates automatically for faster entries.
+  Tauber–Sutton correlation; it activates automatically for faster entries
+  (and does, at 10.6 km/s on the lunar return).
 * Earth rotation angle starts at 0 by convention; longitudes are consistent
   internally (targeting absorbs the choice).
-* No propulsion, per the mission: the sim starts on the post-deorbit-burn
-  coast ellipse.
+* The LEO-reentry scenario starts on the post-deorbit-burn coast ellipse;
+  the circumlunar mission models all burns explicitly.
+* The lunar model is a circular, coplanar ephemeris: right for designing and
+  flying the free-return class, but real launch windows, the Moon's 5.1°
+  plane and ±21,000 km eccentricity, and solar perturbation belong to the
+  ephemeris upgrade (see extension points).
+* The designed free return is the slow, near-minimum-energy family (3.3 d
+  out, ~16 d home). Apollo flew a faster, higher-energy family — reachable
+  here by adding flight time as a third design target.
+* Splashdown of the lunar return lands wherever the geometry says; targeting
+  a specific site couples TLI epoch to Earth rotation and is a
+  straightforward outer loop that is not yet closed.

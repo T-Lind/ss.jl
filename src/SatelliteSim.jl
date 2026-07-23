@@ -49,8 +49,13 @@ include("vehicle.jl")
 include("heating.jl")
 include("dynamics.jl")
 include("integrator.jl")
+include("propulsion.jl")
+include("moon.jl")
+include("launch.jl")
+include("translunar.jl")
 include("simulation.jl")
 include("scenarios.jl")
+include("mission.jl")
 include("montecarlo.jl")
 include("output.jl")
 
@@ -63,7 +68,8 @@ export
     AbstractGravity, PointMassGravity, J2Gravity, ThirdBodyGravity,
     CompositeGravity, gravity_accel,
     # frames
-    geodetic_from_ecef, ecef_from_geodetic, state_from_elements, haversine,
+    geodetic_from_ecef, ecef_from_geodetic, state_from_elements,
+    elements_from_state, haversine,
     # aero / vehicle
     Table1D, interp1, CapsuleAero, default_capsule_aero, scaled_aero,
     cd_coeff, cl_coeff, cm_coeff,
@@ -77,8 +83,22 @@ export
     WEST_COAST_TARGET_LAT, WEST_COAST_TARGET_LON,
     # monte carlo
     Dispersions, MCSample, run_montecarlo, mc_statistics,
+    # propulsion / launch vehicle
+    Stage, LaunchVehicle, default_moon_rocket, stage_thrust, stage_mdot,
+    stage_burn_time, stage_dv, liftoff_mass,
+    # moon
+    MU_MOON, R_MOON, A_MOON, N_MOON,
+    CircularMoonEphemeris, coplanar_moon, moon_position, moon_velocity,
+    moon_distance, moon_altitude,
+    # launch
+    AscentGuidance, AscentResult, simulate_ascent, tune_ascent, launch_azimuth,
+    # translunar
+    CislunarResult, fly_cislunar, tli_burn, design_free_return, seed_free_return,
+    # mission
+    MoonshotResult, moonshot, print_moonshot_summary,
     # output
     write_csv, write_trajectory_csv, write_events_csv, write_montecarlo_csv,
+    write_ascent_csv, write_cislunar_csv,
     print_summary
 
 end # module

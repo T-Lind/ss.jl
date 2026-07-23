@@ -17,5 +17,12 @@ const SIGMA_SB     = 5.670374419e-8      # Stefan-Boltzmann [W/(m^2 K^4)]
 # q_dot = K_SG * sqrt(rho / R_n) * V^3   [W/m^2]
 const K_SUTTON_GRAVES = 1.74153e-4
 
+# Moon (mean values; circular-orbit ephemeris fidelity)
+const MU_MOON      = 4.9048695e12        # lunar gravitational parameter [m^3/s^2]
+const R_MOON       = 1737.4e3            # mean lunar radius [m]
+const A_MOON       = 384400.0e3          # mean Earth-Moon distance [m]
+const T_SIDEREAL_MOON = 27.321661 * 86400.0  # sidereal month [s]
+const N_MOON       = 2pi / T_SIDEREAL_MOON   # lunar mean motion [rad/s]
+
 deg2rad_(x) = x * (pi / 180)
 rad2deg_(x) = x * (180 / pi)
