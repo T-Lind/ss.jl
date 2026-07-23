@@ -106,7 +106,7 @@ function tli_burn(r::V3, v::V3, t::Float64, m0::Float64, stage::Stage,
     m_dry_limit = m0 - prop_avail
     m = m0
     md = stage_mdot(stage)
-    ts = Float64[]; rs = NTuple{3,Float64}[]
+    ts = Float64[]; rs = NTuple{3,Float64}[]; vs = NTuple{3,Float64}[]
     t0 = t
     sp, cp = sincos(point_err)
     while m > m_cut && m > m_dry_limit + 1e-9
@@ -132,10 +132,10 @@ function tli_burn(r::V3, v::V3, t::Float64, m0::Float64, stage::Stage,
         v = vadd(v, vscale(vadd(vadd(k1v, vscale(vadd(k2v, k3v), 2.0)), k4v), step/6))
         m -= md * step
         t += step
-        push!(ts, t); push!(rs, r)
+        push!(ts, t); push!(rs, r); push!(vs, v)
     end
     dv_delivered = vex * log(m0 / m)
-    (r, v, t, m, dv_delivered, t - t0, ts, rs)
+    (r, v, t, m, dv_delivered, t - t0, ts, rs, vs)
 end
 
 """
@@ -169,11 +169,11 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
     end
 
     # --- TLI burn (optionally with execution errors) -----------------------
-    r, v, t, m, dv_del, tburn, bts, brs =
+    r, v, t, m, dv_del, tburn, bts, brs, bvs =
         tli_burn(r, v, t, m_stack, stage, dv, eph, prop_avail;
                  dv_scale = dv_scale, point_err = point_err)
-    for (tb, rb) in zip(bts, brs)
-        _cis_push!(L, tb, rb, v, eph, theta_g0, 1)
+    for (tb, rb, vb) in zip(bts, brs, bvs)
+        _cis_push!(L, tb, rb, vb, eph, theta_g0, 1)
     end
 
     # --- translunar / return coast -----------------------------------------
@@ -589,11 +589,11 @@ function fly_cislunar_tcm(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeri
         kount += 1
     end
 
-    r, v, t, m, dv_del, tburn, bts, brs =
+    r, v, t, m, dv_del, tburn, bts, brs, bvs =
         tli_burn(r, v, t, m_stack, stage, dv, eph, prop_avail;
                  dv_scale = dv_scale, point_err = point_err)
-    for (tb, rb) in zip(bts, brs)
-        _cis_push!(L, tb, rb, v, eph, theta_g0, 1)
+    for (tb, rb, vb) in zip(bts, brs, bvs)
+        _cis_push!(L, tb, rb, vb, eph, theta_g0, 1)
     end
 
     # coast to the correction epoch

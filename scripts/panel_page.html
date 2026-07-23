@@ -19,6 +19,10 @@
   .card { background: #1a1a19; border: 1px solid rgba(255,255,255,.1);
           border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
   label { display: block; color: #898781; font-size: 11px; margin: 7px 0 2px; }
+  .stagehdr { color: #c3c2b7; font-size: 11.5px; font-weight: 600;
+              letter-spacing: .03em; margin: 10px 0 0;
+              border-top: 1px solid #2c2c2a; padding-top: 8px; }
+  .stagehdr:first-of-type { border-top: 0; margin-top: 2px; padding-top: 0; }
   input, select { width: 100%; background: #0d0d0d; color: #fff;
     border: 1px solid rgba(255,255,255,.15); border-radius: 6px;
     padding: 5px 8px; font: inherit; font-variant-numeric: tabular-nums; }
@@ -92,20 +96,37 @@
 
     <div class="card">
       <h2>Launcher</h2>
-      <label>stage 1 — kerolox booster</label>
-      <div class="row"><input id="s1_prop" value="42000" title="propellant kg"><input id="s1_dry" value="3800" title="dry kg"></div>
-      <div class="row"><input id="s1_thrust_kn" value="950" title="vac thrust kN"><input id="s1_isp" value="305" title="vac Isp s"></div>
-      <label>stage 2 — kerolox upper</label>
-      <div class="row"><input id="s2_prop" value="9500" title="propellant kg"><input id="s2_dry" value="900" title="dry kg"></div>
-      <div class="row"><input id="s2_thrust_kn" value="95" title="vac thrust kN"><input id="s2_isp" value="345" title="vac Isp s"></div>
-      <label>stage 3 — kick stage (TLI)</label>
-      <div class="row"><input id="s3_prop" value="950" title="propellant kg"><input id="s3_dry" value="140" title="dry kg"></div>
-      <div class="row"><input id="s3_thrust_kn" value="15" title="vac thrust kN"><input id="s3_isp" value="315" title="vac Isp s"></div>
-      <div class="row" style="margin-top:6px">
+      <div class="stagehdr">stage 1 — kerolox booster</div>
+      <div class="row">
+        <div><label for="s1_prop">propellant [kg]</label><input id="s1_prop" value="42000"></div>
+        <div><label for="s1_dry">dry mass [kg]</label><input id="s1_dry" value="3800"></div>
+      </div>
+      <div class="row">
+        <div><label for="s1_thrust_kn">vac thrust [kN]</label><input id="s1_thrust_kn" value="950"></div>
+        <div><label for="s1_isp">vac Isp [s]</label><input id="s1_isp" value="305"></div>
+      </div>
+      <div class="stagehdr">stage 2 — kerolox upper</div>
+      <div class="row">
+        <div><label for="s2_prop">propellant [kg]</label><input id="s2_prop" value="9500"></div>
+        <div><label for="s2_dry">dry mass [kg]</label><input id="s2_dry" value="900"></div>
+      </div>
+      <div class="row">
+        <div><label for="s2_thrust_kn">vac thrust [kN]</label><input id="s2_thrust_kn" value="95"></div>
+        <div><label for="s2_isp">vac Isp [s]</label><input id="s2_isp" value="345"></div>
+      </div>
+      <div class="stagehdr">stage 3 — kick stage (TLI + TCM)</div>
+      <div class="row">
+        <div><label for="s3_prop">propellant [kg]</label><input id="s3_prop" value="950"></div>
+        <div><label for="s3_dry">dry mass [kg]</label><input id="s3_dry" value="140"></div>
+      </div>
+      <div class="row">
+        <div><label for="s3_thrust_kn">vac thrust [kN]</label><input id="s3_thrust_kn" value="15"></div>
+        <div><label for="s3_isp">vac Isp [s]</label><input id="s3_isp" value="315"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
         <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
         <div><label for="diameter">diameter [m]</label><input id="diameter" value="1.8"></div>
       </div>
-      <div class="sub" style="margin:6px 0 0">fields per row: mass / dry · thrust / Isp</div>
     </div>
 
     <div class="card">
@@ -174,6 +195,8 @@
       <div class="charts">
         <canvas id="c_asc_h"></canvas>
         <canvas id="c_asc_q"></canvas>
+        <canvas id="c_dist"></canvas>
+        <canvas id="c_corridor"></canvas>
         <canvas id="c_ent_g"></canvas>
         <canvas id="c_ent_q"></canvas>
       </div>
@@ -205,6 +228,8 @@ let run = null;              // current run payload
 let history = [];
 let ti = 0, playing = false, lastTs = 0;
 let rotFrame = false, camYaw = 0, camPitch = 1.05, camDist = 1150;
+{ const z = new URLSearchParams(location.search).get('zoom');
+  if (z) camDist = Math.min(2400, Math.max(30, +z)); }
 
 function params() {
   const u = new URLSearchParams();
@@ -294,6 +319,60 @@ function renderHistory() {
     el.onclick = () => { run = history[+el.dataset.i]; renderAll(); };
 }
 
+
+// ---------------------------------------------------------- textured globe --
+// 256x128 equirect land mask (1 bit/px, GLOBE/NOAA-derived dataset),
+// packed row-major north-to-south
+const LAND_B64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//AABf/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/v0f/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAT9v8H////9AAABfgAAAAAABaAAAAAAAAAAAAAAAAAEGx/+f/////gAAAXQAAAAAAAAHgAAAAAAAAAAAAAAAcAAE/A//////gAAAQAAAAAAAAAMAAAAAAAAAAAAAAAAeY4Y4AA////8AAAAAAAAA8AAA//4AAfAAAAAAAAAAA4AAAAAAA////gAAAAAAAAcAAB//9AAAAAAAAAAAAAAD2GW5/wAB///0AAAAAAAADAAB/////8AAAAADAAAAAAO/8DO/4AF//+4AAAAAAAAcA6//////y/+AAAQAH/6AUB/8OLXwAX//3AAAAAvAAACDv/////////4AAgD/////+yBPcHwAP//gAAAAf/+AE/3X////////////wD//////v9/xH4D//AAAAAB//+T//7/////////////x/////////aA9wP/wBvAAAf/+H////////////////BAP////////cT8AP4AD8AAH+f7////////////////wAH////////wADQA/AAAAAA/n//////////////////gA////////8AHgAB4AAAAAP8f///////////////j/gAH/2P/////gAfgAAgAAAAA/5x//////////////8GIAABGAC/////AD9YAAAAAAADvB/////////////8ABgAAAAsAB////8AD/wAAAAAB4AcX/////////////gAeAAAAYAAH/////AP/gAAAAABAJB/////////////4AD4AAAEAAAD/////z//gAAAAA3Akv/////////////wAPAAACAAAAn/////v//AAAAAHcP///////////////wAYAAAAAAAAf////+//8AAAAAT5////////////////QBAAAAAAAAB///////jQAAAAAIf///////////////9AAAAAAAAAAB//////7DwAAAAAH////////////////iAAAAAAAAAAD//////8BgAAAAA////////////////+AAAAAAAAAAAP///////AAAAAAB///8n///////////wAAAAAAAAAAA//////9gAAAAAAH/n/gf//////////+IAAAAAAAAAAD//////AAAAAAAf8nP8Af//////////h4AAAAAAAAAAP/////8AAAAAAA/wmPxg//////////wEAAAAAAAAAAA//////AAAAAAAD8CG4//////////+eAQAAAAAAAAAAD/////4AAAAAAAfwARn//////////gYBAAAAAAAAAAAH/////AAAAAAAA+AGGf//////////YwMAAAAAAAAAAAP////8AAAAAAAAD+AAB/////////+DDwAAAAAAAAAAAf////wAAAAAAAH/8AAH/////////4RuAAAAAAAAAAAAf///8AAAAAAAA//wAAf/////////xYAAAAAAAAAAAAB////AAAAAAAAH//48B//////////AgAAAAAAAAAAAAC///8AAAAAAAAf//7///////////8CAAAAAAAAAAAAAF/+AYAAAAAAAB//////8////////wAAAAAAAAAAAAAAT/gBgAAAAAAAf////9/5////////AAAAAAAAAAAAAAAn+ACAAAAAAAD/////z/wf//////4IAAAAAAAAAAAAADf4AAAAAAAAAf/////v/EA//////AAAAAAAAAAAAAAAAfgAAAAAAAAB/////+f/8B/////5AAAAAAAAAAAAAAAB+ABgAAAAAAP/////8//wG//f/8AAAAAAAAAAAAAAAAH4OBgAAAAAA//////z/+AD/w/8AAAAAAAAAAAQAAAAAPxwA4AAAAAD//////H/4AP8D/kAAAAAAAAAAAAAAAAAP+AAAAAAAAH/////+P+AA/gH+AGAAAAAAAAAAAAAAAAP4AACAAAAA//////8/gAD8AX+AYAAAAAAAAAAAAAAAAD+AAAAAACD//////78AAHgAf4BgAAAAAAAAAAAAAAAAB4AAAAAAAP//////2AAAeAAvgHAAIAAAAAAAAAAAAAABgEAAAAAA///////gAAB4AC+ACAAAAAAAAAAAAAAAAAGB84AAAAA//////+8AADgEBwA4AAAAAAAAAAAAAAAAAFu/gAAAAB///////wAAMAACABAAAAAAAAAAAAAAAAAAB//AAAAAH//////+AAAEACAADAAAAAAAAAAAAAAAAAAH/+AAAAAP/f////4AAAQAEAIIAAAAAAAAAAAAAAAAAAf//gAAAAMg/////AAAAACYBwAAAAAAAAAAAAAAAAAAB///AAAAAAAf///4AAAAAEgPAAAAAAAAAAAAAAAAAAAP//8AAAAAAB////AAAAAAtB8AAAAAAAAAAAAAAAAAAB///wAAAAAAH///4AAAAAA8fnIAAAAAAAAAAAAAAAAQH///4AAAAAA////AAAAAABh+AmAAAAAAAAAAAAAAAAAf///wAAAAAB///4AAAAAAHDzAJgAAAAAAAAAAAAAAAB////8AAAAAD///AAAAAAAOBCS/wAAAAAAAAAAAAAAAH////8AAAAAP//8AAAAAAAYAAAfhAAAAAAAAAAAAAAAf////4AAAAAf//wAAAAAAAYAAA/gAAAAAAAAAAAAAAA/////gAAAAB///AAAAAAAAOAQD2AgAAAAAAAAAAAAAD////+AAAAAH//8AAAAAAAAACAAMAAAAAAAAAAAAAAAH////wAAAAAP//4AAAAAAAAAAAAIAAAAAAAAAAAAAAAf///+AAAAAA///gAAAAAAAAAA4AAAAAAAAAAAAAAAAA////wAAAAAH//+CAAAAAAAAAPjAAAAAAAAAAAAAAAAD////AAAAAAf//4MAAAAAAAAG8OAAAAAAAAAAAAAAAAD///8AAAAAD///HgAAAAAAAA/84AAAAAAAAAAAAAAAAH///wAAAAAP//weAAAAAAAAH//wAAAgAAAAAAAAAAAAP///AAAAAAf/+B4AAAAAAAA///AAAAAAAAAAAAAAAAA///4AAAAAB//4HAAAAAAAAP//+ACAAAAAAAAAAAAAAD///gAAAAAD//gcAAAAAAAH///8AAAAAAAAAAAAAAAAP//wAAAAAAP/+BwAAAAAAAf///4AAAAAAAAAAAAAAAA//8AAAAAAA//4GAAAAAAAB////wAAAAAAAAAAAAAAAD//wAAAAAAB/+AAAAAAAAAH////AAAAAAAAAAAAAAAAP//AAAAAAAH/4AAAAAAAAAf///+AAAAAAAAAAAAAAAB//4AAAAAAAP/AAAAAAAAAB////4AAAAAAAAAAAAAAAH//AAAAAAAA/8AAAAAAAAAD////AAAAAAAAAAAAAAAAf/4AAAAAAAB/gAAAAAAAAAP+P/8AAAAAAAAAAAAAAAB//gAAAAAAAH8AAAAAAAAAA/Ab/gAAAAAAAAAAAAAAAH/sAAAAAAAAAAAAAAAAAAADAAf+AAAAAAAAAAAAAAAA/+AAAAAAAAAAAAAAAAAAAAAAAfwAAQAAAAAAAAAAAAD/8AAAAAAAAAAAAAAAAAAAAAAB/AAAgAAAAAAAAAAAAP+AAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAAAAAA/wAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAGAADAAAAAAAAAAAAAfwAAAAAAAAAAAAAAAAAAAAAAAAQAAQAAAAAAAAAAAAA/AAAAAAAAAAAAAAAAAAAAAAAAAAAGAAAAAAAAAAAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAAAAAfgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWBgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAAAAAAAAAAAfwAAf//+///wAAAAAAAAAAAAAAAAAYAAAAAAAAAAAB///gf////////QAAAAAAAAAAAAAACfwAAAAAAAAAAH///+P/////////8AAAAAAAAAAAAAAH/AAAAAB/v///////7///////////wAAAAAAAAAAAYCg+AAAAAP/////////////////////AAAAAAAAQED////wAAAAB/////////////////////gAAAAAP////////8AAAAH/////////////////////4AAAAOL////////AAAAAf//////////////////////wAAAAP///////+4EAD4P///////////////////////gAAAAD////////gAAfgB//////////////////////wAAAAD//////////gAA////////////////////////AAAAAP//////////h//////////////////////////wAAAH///////////////////////////////////////7//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////w==';
+const LAND = (() => {
+  const raw = atob(LAND_B64);
+  const b = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) b[i] = raw.charCodeAt(i);
+  return b;
+})();
+const LW = 256, LH = 128;
+function isLand(lat, lon) {
+  lon = ((lon + Math.PI) % (2*Math.PI) + 2*Math.PI) % (2*Math.PI);
+  let x = Math.min(LW-1, Math.max(0, Math.floor(lon / (2*Math.PI) * LW)));
+  let y = Math.min(LH-1, Math.max(0, Math.floor((Math.PI/2 - lat) / Math.PI * LH)));
+  const idx = y*LW + x;
+  return (LAND[idx >> 3] >> (7 - (idx & 7))) & 1;
+}
+let globeCv = null, globeCtx = null;
+function drawGlobe(ctx, cx, cy, R, spin, tilt) {
+  const D = Math.ceil(2*R) + 2;
+  if (!globeCv || globeCv.width < D) {
+    globeCv = document.createElement('canvas');
+    globeCv.width = globeCv.height = D;
+    globeCtx = globeCv.getContext('2d');
+  }
+  const img = globeCtx.createImageData(D, D);
+  const px = img.data;
+  const st = Math.sin(tilt), ct = Math.cos(tilt);
+  for (let j = 0; j < D; j++) {
+    for (let i = 0; i < D; i++) {
+      const nx = (i - D/2) / R, nyS = -(j - D/2) / R;
+      const rr = nx*nx + nyS*nyS;
+      if (rr > 1) continue;
+      const nz = Math.sqrt(1 - rr);
+      // un-tilt about the screen-x axis: tilt = camPitch (pole-on at pi/2)
+      const ny2 = nyS*ct + nz*st;
+      const nz2 = -nyS*st + nz*ct;
+      const lat = Math.asin(Math.max(-1, Math.min(1, ny2)));
+      const lon = Math.atan2(nx, nz2) + spin;
+      const land = isLand(lat, lon);
+      const sh = 0.45 + 0.55*nz;              // limb shading
+      let r, g, b;
+      if (land) { r = 92*sh; g = 128*sh; b = 84*sh; }
+      else      { r = 34*sh; g = 74*sh;  b = 112*sh; }
+      const o = (j*D + i) * 4;
+      px[o] = r; px[o+1] = g; px[o+2] = b; px[o+3] = 255;
+    }
+  }
+  globeCtx.putImageData(img, 0, 0);
+  ctx.drawImage(globeCv, 0, 0, D, D, cx - D/2, cy - D/2, D, D);
+}
+
 // ------------------------------------------------------------- 3D scene --
 let rx, ry, ma, moonR;
 function precompute() {
@@ -359,9 +438,14 @@ function drawScene() {
 
   const pe = project(cv, 0, 0);
   const rE = Math.max(3, 6.371*pe[2]);
-  const g = ctx.createRadialGradient(pe[0]-rE*.3, pe[1]-rE*.3, rE*.2, pe[0], pe[1], rE);
-  g.addColorStop(0, '#4a7fa8'); g.addColorStop(1, '#193349');
-  circle(ctx, pe[0], pe[1], rE, g);
+  if (rE >= 7) {
+    // Earth rotates at the sidereal rate over mission time
+    drawGlobe(ctx, pe[0], pe[1], rE, 7.2921159e-5 * run.cis.t[ti], camPitch);
+  } else {
+    const g = ctx.createRadialGradient(pe[0]-rE*.3, pe[1]-rE*.3, rE*.2, pe[0], pe[1], rE);
+    g.addColorStop(0, '#4a7fa8'); g.addColorStop(1, '#193349');
+    circle(ctx, pe[0], pe[1], rE, g);
+  }
 
   const pmv = Pm(Math.min(ti, N-1)), pm = project(cv, pmv[0], pmv[1]);
   const rM = Math.max(2.5, 1.74*pm[2]*3);
@@ -396,17 +480,25 @@ function togglePlay(on) {
 }
 
 // --------------------------------------------------------------- charts --
-function drawLine(cvId, xs, ys, title, unit, color) {
+// series: [{xs, ys, color, label, unit}] — peak of the FIRST series is
+// direct-labeled; additional series get end labels
+function drawLine(cvId, series, title, opts) {
+  opts = opts || {};
   const cv = $(cvId), ctx = cv.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth, h = cv.clientHeight;
   if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  if (!xs || !xs.length) return;
-  const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  series = series.filter(s => s.xs && s.xs.length);
+  if (!series.length) return;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const s of series) {
+    for (const v of s.xs) { if (v < x0) x0 = v; if (v > x1) x1 = v; }
+    for (const v of s.ys) { if (v < y0) y0 = v; if (v > y1) y1 = v; }
+  }
   if (y1 - y0 < 1e-9) y1 = y0 + 1;
+  if (opts.y0 !== undefined) y0 = opts.y0;
   const L = 8, R = 8, T = 20, B = 16;
   const px = x => L + (x-x0)/(x1-x0)*(w-L-R);
   const py = y => h-B - (y-y0)/(y1-y0)*(h-T-B);
@@ -415,31 +507,59 @@ function drawLine(cvId, xs, ys, title, unit, color) {
     const y = h-B - i/3*(h-T-B);
     ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w-R, y); ctx.stroke();
   }
-  ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.lineJoin = 'round';
-  ctx.beginPath();
-  for (let i = 0; i < xs.length; i++) {
-    const X = px(xs[i]), Y = py(ys[i]);
-    i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
+  for (const s of series) {
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.8; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (let i = 0; i < s.xs.length; i++) {
+      const X = px(s.xs[i]), Y = py(s.ys[i]);
+      i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
-  // peak marker + direct label
+  ctx.font = '11px system-ui';
+  // peak marker + direct label on the primary series
+  const p = series[0];
   let ipk = 0;
-  for (let i = 1; i < ys.length; i++) if (ys[i] > ys[ipk]) ipk = i;
-  circle(ctx, px(xs[ipk]), py(ys[ipk]), 2.6, color);
-  ctx.fillStyle = INK2; ctx.font = '11px system-ui';
-  const lbl = `${(+ys[ipk]).toPrecision(3)} ${unit}`;
-  const lx = Math.min(px(xs[ipk]) + 6, w - ctx.measureText(lbl).width - 4);
-  ctx.fillText(lbl, lx, Math.max(py(ys[ipk]) - 6, 26));   // stay below the title line
-  ctx.fillStyle = MUTED; ctx.font = '11px system-ui';
+  for (let i = 1; i < p.ys.length; i++) if (p.ys[i] > p.ys[ipk]) ipk = i;
+  circle(ctx, px(p.xs[ipk]), py(p.ys[ipk]), 2.6, p.color);
+  ctx.fillStyle = INK2;
+  const lbl = `${(+p.ys[ipk]).toPrecision(3)} ${p.unit || ''}`;
+  const lx = Math.min(px(p.xs[ipk]) + 6, w - ctx.measureText(lbl).width - 4);
+  ctx.fillText(lbl, lx, Math.max(py(p.ys[ipk]) - 6, 26));
+  // series name labels at line ends (identity not by color alone)
+  if (series.length > 1) {
+    for (const s of series) {
+      const n = s.xs.length - 1;
+      ctx.fillStyle = s.color;
+      const tx = Math.min(px(s.xs[n]) - ctx.measureText(s.label).width - 4, w - 60);
+      ctx.fillText(s.label, Math.max(tx, L + 2), py(s.ys[n]) - 5);
+    }
+  }
+  ctx.fillStyle = MUTED;
   ctx.fillText(title, L, 12);
 }
 
 function drawCharts() {
-  const A = run.ascent, E = run.entry;
-  drawLine('c_asc_h', A.t, A.h, 'ascent altitude vs time [s]', 'km', ACC);
-  drawLine('c_asc_q', A.t, A.qbar, 'ascent dynamic pressure vs time [s]', 'kPa', ACC);
-  drawLine('c_ent_g', E.t, E.g, 'entry g-load vs time [s]', 'g', ACC);
-  drawLine('c_ent_q', E.t, E.q, 'entry heating vs time [s]', 'W/cm²', ACC);
+  const A = run.ascent, E = run.entry, D = run.cis;
+  drawLine('c_asc_h', [{xs: A.t, ys: A.h, color: ACC, unit: 'km'}],
+           'ascent altitude vs time [s]');
+  drawLine('c_asc_q', [{xs: A.t, ys: A.qbar, color: ACC, unit: 'kPa'}],
+           'ascent dynamic pressure vs time [s]');
+  // full-mission geometry: distance from Earth and from the Moon
+  const td = D.t.map(t => t/86400);
+  const rE = D.x.map((x, i) => Math.hypot(x, D.y[i]));
+  const dM = D.x.map((x, i) => Math.hypot(x - D.mx[i], D.y[i] - D.my[i]));
+  drawLine('c_dist', [
+      {xs: td, ys: dM, color: '#199e70', label: 'to Moon', unit: 'k km'},
+      {xs: td, ys: rE, color: ACC, label: 'to Earth', unit: 'k km'},
+    ], 'distance vs mission time [days] — 1000 km', {y0: 0});
+  // the classic entry corridor: altitude vs velocity
+  drawLine('c_corridor', [{xs: E.v.map(v => v/1000), ys: E.h, color: '#d55181', unit: 'km'}],
+           'entry altitude [km] vs velocity [km/s]');
+  drawLine('c_ent_g', [{xs: E.t, ys: E.g, color: ACC, unit: 'g'}],
+           'entry g-load vs time [s]');
+  drawLine('c_ent_q', [{xs: E.t, ys: E.q, color: ACC, unit: 'W/cm²'}],
+           'entry heating vs time [s]');
 }
 
 // ---------------------------------------------------------------- sweep --

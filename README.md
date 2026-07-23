@@ -119,6 +119,16 @@ rotating-frame figure-8, 3D entry. `scripts/make_viewer.py` builds an
 interactive HTML viewer (`output/moonshot_viewer.html`) with mission-time
 playback and an inertial/rotating frame toggle.
 
+**Maneuver planning** (`maneuvers.jl`): the two-body transfer toolbox — a
+universal-variables Lambert solver (validated against analytic ellipse
+states to 1e-5), Hohmann transfers, plane changes, impulsive propellant
+costs, and Clohessy-Wiltshire relative motion with the two-impulse
+rendezvous solution. `scripts/run_rendezvous.jl` closes a 10 km approach
+for 3.2 m/s and verifies the linearized design against a full nonlinear
+propagation (113 m arrival miss — the 1% linearization error a terminal
+prox-ops phase absorbs). These are the building blocks for faster lunar
+transfers, orbital refueling, and intercepts.
+
 **Missions as data** (`config.jl`, `missions/`): a TOML file fully defines a
 mission — pod, targets, all stages, dispersions — and
 `run_mission("missions/moonshot.toml")` designs and flies it. New vehicles
@@ -307,6 +317,7 @@ src/
                     RCS wind-hold / rate damping)
   scenarios.jl      deorbit design + splashdown targeting
   mission.jl        the full launch->Moon->splashdown chain (moonshot)
+  maneuvers.jl      Lambert, Hohmann, plane change, Clohessy-Wiltshire
   mesh.jl           STL I/O, polyhedral mass properties, mesh builders
   panelaero.jl      modified-Newtonian panel aero (CA/CN/Cm + Cm_q) from meshes
   config.jl         missions/vehicles as TOML specs (load_mission/run_mission)
