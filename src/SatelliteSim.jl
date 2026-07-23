@@ -49,11 +49,14 @@ include("vehicle.jl")
 include("heating.jl")
 include("dynamics.jl")
 include("integrator.jl")
+include("rigidbody.jl")
+include("rcs.jl")
 include("propulsion.jl")
 include("moon.jl")
 include("launch.jl")
 include("translunar.jl")
 include("simulation.jl")
+include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
 include("montecarlo.jl")
@@ -92,10 +95,20 @@ export
     moon_distance, moon_altitude,
     # launch
     AscentGuidance, AscentResult, simulate_ascent, tune_ascent, launch_azimuth,
+    # rigid body / attitude
+    Quat, qmul, qconj, qnormalize, qrotate, qrotate_inv, quat_axis_angle,
+    quat_from_to, qdot, euler_wdot, rot_energy, ang_momentum,
+    # rcs
+    RCSThruster, RCSystem, thruster_torque, torque_authority, rate_damp_command,
+    limit_cycle_prop, slew_prop, cruise_rcs_budget,
+    default_pod_rcs, default_kick_rcs, rcs_mdot,
+    # 6-DOF entry
+    Entry6Result, Entry6Log, simulate_entry6,
     # translunar
     CislunarResult, fly_cislunar, tli_burn, design_free_return, seed_free_return,
+    design_tcm, fly_cislunar_tcm,
     # mission
-    MoonshotResult, moonshot, print_moonshot_summary,
+    MoonshotResult, CruiseReport, moonshot, print_moonshot_summary,
     # output
     write_csv, write_trajectory_csv, write_events_csv, write_montecarlo_csv,
     write_ascent_csv, write_cislunar_csv,

@@ -185,6 +185,97 @@ end
     @test isapprox(ms2.cislunar.perilune_alt, 1500e3; atol = 75e3)
 end
 
+@testset "rigid body" begin
+    # rotation basics
+    q = quat_axis_angle((0.0, 0.0, 1.0), pi/2)
+    v = qrotate(q, (1.0, 0.0, 0.0))
+    @test all(isapprox.(v, (0.0, 1.0, 0.0); atol = 1e-12))
+    @test all(isapprox.(qrotate_inv(q, v), (1.0, 0.0, 0.0); atol = 1e-12))
+    q2 = quat_from_to((1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+    @test all(isapprox.(qrotate(q2, (1.0, 0.0, 0.0)), (0.0, 1.0, 0.0); atol = 1e-12))
+
+    # torque-free tumble: energy and |angular momentum| conserved (RK4)
+    I = (110.0, 137.0, 150.0)
+    w = (0.3, -0.5, 0.8)
+    q = (1.0, 0.0, 0.0, 0.0)
+    E0 = rot_energy(I, w)
+    L0 = sqrt(sum(abs2, ang_momentum(I, w)))
+    dt = 0.01
+    for _ in 1:20_000
+        k1 = euler_wdot(I, w, (0.0, 0.0, 0.0))
+        w2 = w .+ 0.5dt .* k1
+        k2 = euler_wdot(I, w2, (0.0, 0.0, 0.0))
+        w3 = w .+ 0.5dt .* k2
+        k3 = euler_wdot(I, w3, (0.0, 0.0, 0.0))
+        w4 = w .+ dt .* k3
+        k4 = euler_wdot(I, w4, (0.0, 0.0, 0.0))
+        w = w .+ (dt / 6) .* (k1 .+ 2 .* k2 .+ 2 .* k3 .+ k4)
+    end
+    @test isapprox(rot_energy(I, w), E0; rtol = 1e-8)
+    @test isapprox(sqrt(sum(abs2, ang_momentum(I, w))), L0; rtol = 1e-8)
+end
+
+@testset "rcs" begin
+    sys = default_pod_rcs()
+    auth = torque_authority(sys)
+    @test all(a -> a > 0, auth)                    # every axis controllable
+    # couples are pure torques: net force cancels
+    F = (0.0, 0.0, 0.0)
+    for t in sys.thrusters
+        F = F .+ t.thrust .* t.dir
+    end
+    @test all(abs.(F) .< 1e-9)
+    # limit cycle: hand formula
+    lc = limit_cycle_prop(1000.0, 28.0, 220.0, 0.01, deg2rad_(5.0), 86400.0;
+                          nthr = 2, thrust = 10.0)
+    w = 28.0 * 0.01 / 1000.0
+    cycles = 86400.0 / (2 * deg2rad_(5.0) / w)
+    @test isapprox(lc, cycles * 2 * 10.0 / (9.80665 * 220.0) * 0.01; rtol = 1e-12)
+    # slew: bang-bang time
+    p, ts = slew_prop(1000.0, 28.0, 220.0, 1.0 * pi)
+    @test isapprox(ts, 2 * sqrt(pi * 1000.0 / 28.0); rtol = 1e-12)
+    b = cruise_rcs_budget(default_kick_rcs(), 1000.0; duration = 20 * 86400.0)
+    @test b.margin > 0                             # sized for the cruise
+end
+
+@testset "6-DOF entry vs 4-DOF" begin
+    veh = default_reentry_pod()
+    scn = scenario_from_elements(DeorbitElements(), veh)
+    r4 = simulate(scn)
+    r6 = simulate_entry6(scn; rcs = default_pod_rcs())   # wind-hold coast
+    @test r6.terminated == :splashdown
+    @test isapprox(r6.peak_gload, r4.peak_gload; rtol = 0.05)
+    @test isapprox(r6.heat_load, r4.heat_load; rtol = 0.05)
+    @test haversine(r4.lat_splash, r4.lon_splash,
+                    r6.lat_splash, r6.lon_splash) < 20e3
+    @test r6.rcs_used < 0.05                       # grams, not kilograms
+    @test r6.max_alpha_after_peak < deg2rad_(10.0) # stable through supersonic
+    # uncontrolled coast arrives far off-trim yet the shape self-rights
+    r6f = simulate_entry6(scn)
+    @test r6f.terminated == :splashdown
+    ei = findfirst(e -> e.name == :entry_interface, r6f.events)
+    i = findfirst(t -> t >= r6f.events[ei].t, r6f.log.t)
+    @test r6f.log.alpha_t[i] > deg2rad_(45.0)      # broadside at EI...
+    @test r6f.peak_gload < 1.10 * r4.peak_gload    # ...still survivable
+    # tipoff-rate damping costs grams
+    r6r = simulate_entry6(scn; rcs = default_pod_rcs(), rcs_mode = :rate_damp,
+                          w0 = (deg2rad_(3.0), deg2rad_(-2.0), deg2rad_(1.5)))
+    @test r6r.rcs_used < 0.05
+end
+
+@testset "TLI dispersion + TCM" begin
+    ms = moonshot(tli_mag_err = 0.003, tli_point_err = deg2rad_(0.3))
+    @test ms.cruise !== nothing
+    c = ms.cruise
+    @test 5.0 < c.tcm_dv < 150.0
+    @test c.tcm_prop < 23.0                        # inside the kick margin
+    @test c.rcs.margin > 0
+    @test isapprox(ms.cislunar.perilune_alt, 2000e3; atol = 60e3)
+    @test abs(ms.cislunar.vac_perigee_alt - 35e3) < 25e3
+    @test ms.entry.terminated == :splashdown
+    @test ms.entry.peak_gload < 30.0
+end
+
 @testset "full reentry smoke test" begin
     veh = default_reentry_pod()
     scn = scenario_from_elements(DeorbitElements(), veh)

@@ -124,6 +124,8 @@ function run_mission(p)::Dict{String,Any}
         hp_return = getf(p, "hp_return_km", 35.0) * 1e3,
         inclination = deg2rad_(getf(p, "incl_deg", 28.5)),
         lv = lv_from_params(p),
+        tli_mag_err = getf(p, "tli_mag_err_pct", 0.0) / 100,
+        tli_point_err = deg2rad_(getf(p, "tli_point_err_deg", 0.0)),
     )
     asc, cis, ent = ms.ascent, ms.cislunar, ms.entry
     el = asc.elements
@@ -175,6 +177,9 @@ function run_mission(p)::Dict{String,Any}
         "ok" => true,
         "metrics" => Dict(
             "on_target" => on_target,
+            "tcm_dv" => ms.cruise === nothing ? nothing : ms.cruise.tcm_dv,
+            "tcm_prop_kg" => ms.cruise === nothing ? nothing : ms.cruise.tcm_prop,
+            "rcs_margin_kg" => ms.cruise === nothing ? nothing : ms.cruise.rcs.margin,
             "liftoff_t" => liftoff_mass(ms.lv) / 1e3,
             "park_perigee_km" => (el.rp - RE_MEAN) / 1e3,
             "park_apogee_km" => (el.ra - RE_MEAN) / 1e3,

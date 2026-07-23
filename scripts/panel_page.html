@@ -82,6 +82,12 @@
         <div><label for="hp_moon_km">perilune [km]</label><input id="hp_moon_km" value="2000"></div>
         <div><label for="hp_return_km">return perigee [km]</label><input id="hp_return_km" value="35"></div>
       </div>
+      <div class="row" style="margin-top:6px">
+        <div><label for="tli_mag_err_pct">TLI Δv error [%]</label><input id="tli_mag_err_pct" value="0"></div>
+        <div><label for="tli_point_err_deg">TLI pointing error [°]</label><input id="tli_point_err_deg" value="0"></div>
+      </div>
+      <div class="sub" style="margin:6px 0 0">nonzero TLI errors fly a dispersed
+        cruise with an automatic mid-course correction at T+24 h</div>
     </div>
 
     <div class="card">
@@ -190,7 +196,8 @@
 const $ = id => document.getElementById(id);
 const FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
   's1_prop','s1_dry','s1_thrust_kn','s1_isp','s2_prop','s2_dry','s2_thrust_kn','s2_isp',
-  's3_prop','s3_dry','s3_thrust_kn','s3_isp','fairing','diameter'];
+  's3_prop','s3_dry','s3_thrust_kn','s3_isp','fairing','diameter',
+  'tli_mag_err_pct','tli_point_err_deg'];
 const COL = {0:'#3987e5',1:'#d95926',2:'#199e70',3:'#c98500'};
 const INK='#fff', INK2='#c3c2b7', MUTED='#898781', GRID='#2c2c2a', ACC='#3987e5';
 
@@ -252,6 +259,11 @@ function renderAll() {
     [fmt(m.splash_lat,1)+'°, '+fmt(m.splash_lon,1)+'°','splashdown'],
     [fmt(m.v_splash,1)+' m/s','splash speed'],
   ];
+  if (m.tcm_dv != null) {
+    tiles.push([fmt(m.tcm_dv,1)+' m/s','TCM Δv']);
+    tiles.push([fmt(m.tcm_prop_kg,1)+' kg','TCM propellant']);
+    tiles.push([fmt(m.rcs_margin_kg,1)+' kg','cruise RCS margin']);
+  }
   $('tiles').innerHTML = tiles.map(t =>
     `<div class="tile"><div class="v">${t[0]}</div><div class="k">${t[1]}</div></div>`).join('');
 
