@@ -1,0 +1,12 @@
+# Julia
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+Manifest.toml
+
+# Python
+__pycache__/
+*.pyc
+
+# scratch
+*.tmp
