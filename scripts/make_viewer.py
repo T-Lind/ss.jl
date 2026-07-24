@@ -182,6 +182,115 @@ function Pm(i) {  // scene position of the Moon
   return rotFrame ? [moonR, 0] : [D.mx[i], D.my[i]];
 }
 
+// ------------------------------------------------------------- starfield --
+// The sky is at infinity, so it belongs to the CAMERA, not the canvas: these
+// stars are real directions on a celestial sphere, projected gnomonically
+// through the same yaw/pitch the scene uses. Drag and the sky swings with the
+// view; zoom and it holds still, which is what an infinitely distant sky does.
+// (The previous version was 90 fixed screen-space pixels — they sat where
+// they were painted however the camera moved, which read as dirt on the
+// monitor rather than as stars.)
+// Most of these are off-screen on any given frame; the cull is three dot
+// products, and only the survivors ever touch the 2D context.
+const NSTAR = 4200;
+const SKY = (() => {
+  let s = 20250724;                        // fixed seed: same sky every load
+  const rnd = () => (s = (s*1103515245 + 12345) & 0x7fffffff)/0x7fffffff;
+  // galactic plane: an arbitrary but fixed pole, so the band sits still
+  const gp = [0.3714, 0.8571, 0.3571];
+  const ga = [-0.9226, 0.3857, 0.0]; // in-plane basis (perp to gp)
+  const gb = [gp[1]*ga[2]-gp[2]*ga[1], gp[2]*ga[0]-gp[0]*ga[2],
+              gp[0]*ga[1]-gp[1]*ga[0]];
+  const stars = [], band = [];
+  for (let i = 0; i < NSTAR; i++) {
+    // uniform on the sphere, then pulled toward the galactic plane for a
+    // third of them so the band has its own star excess
+    let z = 2*rnd() - 1, th = 2*Math.PI*rnd();
+    if (i % 3 === 0) z *= 0.13;
+    const r = Math.sqrt(Math.max(0, 1 - z*z));
+    const d = [ga[0]*r*Math.cos(th) + gb[0]*r*Math.sin(th) + gp[0]*z,
+               ga[1]*r*Math.cos(th) + gb[1]*r*Math.sin(th) + gp[1]*z,
+               ga[2]*r*Math.cos(th) + gb[2]*r*Math.sin(th) + gp[2]*z];
+    const mag = Math.pow(rnd(), 3.4);      // few bright, many faint
+    const t = rnd()*2 - 1;
+    const tint = Math.sign(t)*Math.pow(Math.abs(t), 1.9);
+    // near-white with amber and blue tails, as a real field reads
+    const c = tint < 0
+      ? [255, 255 + tint*62, 255 + tint*122]
+      : [255 - tint*72, 255 - tint*46, 255];
+    stars.push({d, mag, c: `${c[0]|0},${c[1]|0},${c[2]|0}`});
+  }
+  // Diffuse band light: overlapping soft patches sized in ANGLE, not pixels,
+  // so they scale with the projection and merge into one glow. Sparse or
+  // pixel-sized, they read as smudges on the lens instead.
+  // Few and large rather than many and small: each gradient the browser
+  // composites carries its own dither, and 300 of them stacked at alpha 0.02
+  // print a visible checkerboard across the band.
+  for (let i = 0; i < 120; i++) {
+    const z = (rnd() + rnd() + rnd() - 1.5)*0.11, th = 2*Math.PI*rnd();
+    const r = Math.sqrt(Math.max(0, 1 - z*z));
+    band.push({d: [ga[0]*r*Math.cos(th) + gb[0]*r*Math.sin(th) + gp[0]*z,
+                   ga[1]*r*Math.cos(th) + gb[1]*r*Math.sin(th) + gp[1]*z,
+                   ga[2]*r*Math.cos(th) + gb[2]*r*Math.sin(th) + gp[2]*z],
+               ang: 0.17 + 0.24*rnd(), a: 0.010 + 0.015*rnd()});
+  }
+  return {stars, band};
+})();
+
+// camera basis matching project(): right, up, and the view direction
+function skyBasis() {
+  const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+  const cp = Math.cos(camPitch), sp = Math.sin(camPitch);
+  return {r: [cy, -sy, 0], u: [sy*sp, cy*sp, cp], w: [sy*cp, cy*cp, -sp]};
+}
+
+function drawSky(w, h) {
+  const B = skyBasis();
+  const f = 0.95*Math.max(w, h);           // synthetic focal length [px]
+  const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+  const put = (d) => {
+    const z = dot(d, B.w);
+    if (z < 0.30) return null;             // behind us, or too far off-axis
+    return [w/2 + f*dot(d, B.r)/z, h*0.52 - f*dot(d, B.u)/z];
+  };
+  // unresolved band light first, so stars sit on top of it
+  for (const b of SKY.band) {
+    const z = dot(b.d, B.w);
+    if (z < 0.30) continue;
+    const p = [w/2 + f*dot(b.d, B.r)/z, h*0.52 - f*dot(b.d, B.u)/z];
+    const s = f*b.ang/z;
+    if (p[0] < -s || p[0] > w+s || p[1] < -s || p[1] > h+s) continue;
+    const g = ctx.createRadialGradient(p[0], p[1], 0, p[0], p[1], s);
+    g.addColorStop(0, `rgba(176,186,214,${b.a})`);
+    g.addColorStop(1, 'rgba(176,186,214,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(p[0]-s, p[1]-s, 2*s, 2*s);
+  }
+  for (const st of SKY.stars) {
+    const p = put(st.d);
+    if (!p) continue;
+    if (p[0] < -4 || p[0] > w+4 || p[1] < -4 || p[1] > h+4) continue;
+    const a = 0.26 + 0.70*st.mag;
+    const rr = 0.5 + 1.3*st.mag;
+    if (st.mag > 0.55) {                   // the bright ones get a soft bloom
+      const gr = rr*4.5;
+      const g = ctx.createRadialGradient(p[0], p[1], 0, p[0], p[1], gr);
+      g.addColorStop(0, `rgba(${st.c},${a*0.32})`);
+      g.addColorStop(1, `rgba(${st.c},0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(p[0]-gr, p[1]-gr, 2*gr, 2*gr);
+    }
+    ctx.fillStyle = `rgba(${st.c},${a})`;
+    if (rr < 0.75) {                       // the faint majority: cheapest path
+      ctx.fillRect(p[0], p[1], 1, 1);
+    } else {
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], rr, 0, 2*Math.PI);
+      ctx.fill();
+    }
+  }
+}
+
 function project(x, y) {
   // camera: orbit about origin, looking at origin; z=0 plane scene
   const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
@@ -205,15 +314,7 @@ function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, 620);
 
-  // stars (deterministic)
-  ctx.fillStyle = 'rgba(255,255,255,.35)';
-  let seed = 7;
-  for (let i = 0; i < 90; i++) {
-    seed = (seed*16807) % 2147483647;
-    const sx = (seed % 1000)/1000*w; seed = (seed*16807) % 2147483647;
-    const sy = (seed % 1000)/1000*620;
-    ctx.fillRect(sx, sy, 1, 1);
-  }
+  drawSky(w, 620);
 
   // moon orbit
   ctx.strokeStyle = '#2c2c2a'; ctx.lineWidth = 1;

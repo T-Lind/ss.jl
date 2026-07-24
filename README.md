@@ -153,6 +153,22 @@ rotating-frame figure-8, 3D entry — plus the full analysis suite from
 builds an interactive HTML viewer (`output/moonshot_viewer.html`) with
 mission-time playback and an inertial/rotating frame toggle.
 
+`scripts/make_analysis_plots.py` asks the other question. The flight suite
+shows what the vehicle did; this one shows why. **`ascent_budget.png`** is a
+Δv ledger: ideal Δv against the speed actually gained, with the gravity loss
+integrated as ∫g·sinγ dt and everything else — drag, and steering the thrust
+off the velocity vector — falling out as the residual. On the reference
+vehicle that is 8975 m/s of propellant buying 7367 m/s of orbital speed, with
+720 m/s to gravity and 888 m/s to drag and steering; the residual's time
+history tracks dynamic pressure through max-q and then flattens onto the
+linear-tangent upper stage's steering loss, which is where most of it goes.
+**`montecarlo_sensitivity.png`** replaces one-input-at-a-time scatter with
+standardized regression coefficients across every dispersed input and every
+flight outcome at once, so peak load reading −0.85 on density and −0.41 on
+C_D is directly comparable, alongside the R² that says how much of each
+outcome the dispersions explain at all — and a noise floor drawn at 2/√n,
+because with a few dozen samples most of the small coefficients are nothing.
+
 **Maneuver planning** (`maneuvers.jl`): the two-body transfer toolbox — a
 universal-variables Lambert solver (validated against analytic ellipse
 states to 1e-5), Hohmann transfers, plane changes, impulsive propellant
@@ -162,6 +178,20 @@ for 3.2 m/s and verifies the linearized design against a full nonlinear
 propagation (113 m arrival miss — the 1% linearization error a terminal
 prox-ops phase absorbs). These are the building blocks for faster lunar
 transfers, orbital refueling, and intercepts.
+
+The run logs both trajectories to `output/rendezvous.csv` in the target's
+*instantaneous* RIC frame — the frame the CW solution is written in, so the
+gap between the design and the flown arc on those axes IS the linearization
+error, where in ECI it would be buried inside the 7.7 km/s both spacecraft
+share — plus `output/rendezvous_tof.csv`, the same geometry re-solved for
+every time of flight. Plotted by `make_analysis_plots.py`, that sweep is the
+more instructive half: cost falls steeply with transfer time, but the
+two-impulse solution has a pole wherever n·t is a multiple of π, because the
+transfer matrix loses rank there and the burn that has to cover the offset in
+the time remaining goes to infinity with it. Half an orbit is a choice made
+between two poles, not a natural constant — the cheapest transfer in that
+first basin is 1.99 m/s at 60 minutes, against 3.20 m/s at the 46-minute
+reference.
 
 **Missions as data** (`config.jl`, `missions/`): a TOML file fully defines a
 mission — pod, targets, all stages, dispersions — and
@@ -342,6 +372,9 @@ python3 scripts/make_mission_plots.py  # full mission analysis suite: broken-
                                        # time-axis overview, orbital energy,
                                        # ascent/entry profiles, ground track,
                                        # TCM Monte Carlo -> output/plots/
+python3 scripts/make_analysis_plots.py # "why" rather than "what": the ascent
+                                       # Δv ledger, Monte Carlo sensitivity,
+                                       # and the rendezvous figures
 python3 scripts/make_viewer.py         # interactive HTML mission viewer
 julia --project scripts/make_plots.jl  # requires Plots.jl installed
 
@@ -476,6 +509,31 @@ cover exterior, onboard and in-cabin views:
   member is shaken along with the vehicle rather than watching it shake.
   The director cuts inside when the fairing splits and daylight first
   reaches the cabin, and again through peak heating.
+
+The **sky** is a procedural star catalogue rather than a texture. Stars sit
+at hashed positions inside a cube-face cell grid and are drawn as smooth
+points whose angular radius is tied to the *pixel* solid angle, which is the
+whole trick: a star stays about a pixel across at any zoom, so it antialiases
+instead of stair-stepping and holds still when the camera turns. Brightness
+follows a steep magnitude law, color comes off a blackbody-ish ramp that
+keeps most stars near white and puts only the tails at amber and blue, and
+the galactic plane both glows — noise-modulated, with dust lanes — and
+carries roughly twice the local star count. Because the limiting magnitude
+tracks the pixel size, the 8° tracker camera reaches deeper than the 83° pad
+view instead of showing an empty sky at a hundredth the solid angle, and
+brightness is measured *from* that limit so the visible population always
+spans the full range. Inside the atmosphere the field is extinguished by the
+air column, reddened toward the horizon, and scintillates on a wall clock
+that ignores the time warp; above ~35 km it is clean. Its predecessor
+quantized the view direction into cells and lit whole cells — the "stars"
+were squares that grew with every zoom-in.
+
+The 2D mission viewer (`make_viewer.py`) got the same treatment on a smaller
+budget: its sky is now real directions on a celestial sphere, projected
+gnomonically through the same yaw and pitch as the scene, so it swings when
+you drag and holds still when you zoom, as an infinitely distant sky does.
+It was 90 fixed screen-space pixels, which sat where they were painted
+however the camera moved.
 
 The vehicle wears a **livery**: a decal sheet painted procedurally in
 (station, roll) space and wrapped cylindrically over the skin — roll-pattern

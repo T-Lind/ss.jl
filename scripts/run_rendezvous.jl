@@ -7,6 +7,10 @@
 # should be a few hundred meters at this range (and is exactly the error a
 # terminal proximity-ops phase absorbs in a real rendezvous).
 #
+# Writes output/rendezvous.csv (both trajectories in the target's RIC frame)
+# and output/rendezvous_tof.csv (cost against transfer time); plot them with
+# python3 scripts/make_analysis_plots.py
+#
 # Usage: julia --project scripts/run_rendezvous.jl
 
 push!(LOAD_PATH, joinpath(@__DIR__, "..", "src"))
@@ -61,13 +65,48 @@ function two_body_step(r, v, dt)
      S.vadd(v, S.vscale(S.vadd(S.vadd(k1v, S.vscale(S.vadd(k2v, k3v), 2.0)), k4v), dt/6)))
 end
 
-rtn, vtn, rcn, vcn = rt, vt, rc, vc
-dt = 0.5
-steps = round(Int, tof / dt)
-for _ in 1:steps
-    global rtn, vtn = two_body_step(rtn, vtn, dt)
-    global rcn, vcn = two_body_step(rcn, vcn, dt)
+"""
+Fly both spacecraft to `tof` and log the approach. Samples are written in the
+target's INSTANTANEOUS RIC frame — the frame the CW solution is stated in —
+alongside the linearized prediction for the same instant, so the file holds
+the design and the truth on the same axes and their difference IS the
+linearization error. Comparing them in ECI would bury that error inside the
+7.7 km/s of orbital motion the two share.
+"""
+function fly_and_log(path, rt, vt, rc, vc, ric0, vreq, n, tof, dt)
+    steps = round(Int, tof / dt)
+    every = max(1, steps ÷ 400)
+    rtn, vtn, rcn, vcn = rt, vt, rc, vc
+    open(path, "w") do io
+        println(io, "t_s,cw_r_m,cw_i_m,cw_c_m,nl_r_m,nl_i_m,nl_c_m,",
+                    "range_m,range_rate_ms")
+        for k in 0:steps
+            if k % every == 0 || k == steps
+                bx, by, bz = ric_basis(rtn, vtn)
+                d = S.vsub(rcn, rtn)
+                dv = S.vsub(vcn, vtn)
+                rng = S.vnorm(d)
+                cwr, _ = cw_propagate(ric0, vreq, n, k * dt)
+                @printf(io, "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                        k * dt, cwr[1], cwr[2], cwr[3],
+                        S.vdot(d, bx), S.vdot(d, by), S.vdot(d, bz),
+                        rng, S.vdot(d, dv) / max(rng, 1e-9))
+            end
+            if k < steps
+                rtn, vtn = two_body_step(rtn, vtn, dt)
+                rcn, vcn = two_body_step(rcn, vcn, dt)
+            end
+        end
+    end
+    (rtn, vtn, rcn, vcn)
 end
+
+outdir = joinpath(@__DIR__, "..", "output")
+mkpath(outdir)
+
+dt = 0.5
+rtn, vtn, rcn, vcn = fly_and_log(joinpath(outdir, "rendezvous.csv"),
+                                 rt, vt, rc, vc, ric0, vreq, n, tof, dt)
 miss = S.vnorm(S.vsub(rcn, rtn))
 relv = S.vnorm(S.vsub(S.vadd(vcn, to_eci(dv2)), vtn))  # after braking burn... (basis rotated; approx)
 @printf("nonlinear check: miss at arrival %.0f m  (%.2f%% of initial range)\n",
@@ -76,3 +115,27 @@ relv = S.vnorm(S.vsub(S.vadd(vcn, to_eci(dv2)), vtn))  # after braking burn... (
         impulsive_prop(500.0, S.vnorm(dv1) + S.vnorm(dv2), 220.0))
 miss < 500 || error("rendezvous verification failed: miss $(miss) m")
 println("OK — CW design verified against nonlinear propagation")
+
+# --- cost against transfer time --------------------------------------------
+# The same geometry solved for every time of flight. Sweeping it is the only
+# way to see the shape of the problem: cost falls steeply with time, but the
+# two-impulse solution is singular wherever n*tof is a multiple of pi (the
+# transfer matrix loses rank, and the burn that has to cover the offset in
+# the time remaining goes to infinity with it). Those poles are why picking
+# "half an orbit" as the reference case is a choice, not an accident.
+open(joinpath(outdir, "rendezvous_tof.csv"), "w") do io
+    println(io, "tof_s,dv1_ms,dv2_ms,dv_total_ms")
+    nsweep = 240
+    for k in 1:nsweep
+        tf = k / nsweep * 1.6 * T
+        try
+            d1, d2, _ = cw_two_impulse(ric0, vric0, n, tf)
+            @printf(io, "%.2f,%.4f,%.4f,%.4f\n", tf, S.vnorm(d1), S.vnorm(d2),
+                    S.vnorm(d1) + S.vnorm(d2))
+        catch err
+            err isa ErrorException || rethrow()   # singular tof: no solution
+        end
+    end
+end
+
+println("wrote output/rendezvous.csv, output/rendezvous_tof.csv")
