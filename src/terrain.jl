@@ -14,11 +14,14 @@
 # The surface is *procedural*: there is no height map, no data file, and no
 # resolution limit. `terrain_height` is a pure function of direction, built
 # from an integer hash, so the same query returns the same metre anywhere on
-# the Moon, at any zoom, in Julia and in the browser's renderer alike — the
-# hash is 32-bit precisely so that `Math.imul` reproduces it bit for bit.
-# Sampling a 5 m footpad separation costs the same as sampling a 500 km
-# region, which is what lets the guidance evaluate a landing site at the
-# resolution that matters while the viewer draws the same ground.
+# the Moon, at any zoom, in Julia and in the browser's renderer alike. The
+# hash is 32-bit precisely so that `Math.imul` reproduces it exactly: every
+# crater lands in the same place in both, and the two heights then agree to
+# about a nanometre, the last bit of disagreement being what `sin` does
+# differently in two libms. Sampling a 5 m footpad separation costs the same
+# as sampling a 500 km region, which is what lets the guidance evaluate a
+# landing site at the resolution that matters while the viewer draws exactly
+# the ground that was flown over.
 #
 # Three layers, largest first:
 #

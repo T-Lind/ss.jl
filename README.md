@@ -260,10 +260,12 @@ free return, perilune 100 km  ──►  LOI: 925 m/s retrograde, circular lunar
         powered descent ignition ──►  braking: full thrust, linear pitch program
                                         │  1573 m/s, 250 s, shot onto high gate
                                         ▼
-              high gate: 2.3 km, 45 m/s down, 150 m/s forward
-                                        │  terminal: throttled, 286 m/s
+              high gate: 2 km, 45 m/s down, 150 m/s forward
+                                        │  hazard scan → aim point moves 608 m
+                                        │  terminal: throttled, 326 m/s
                                         ▼
-                    touchdown at 1.2 m/s, 1486 kg and 9 minutes of hover left
+                    touchdown at 1.29 m/s on 0.1° ground, 1420 kg and
+                    9 minutes of hover left
 ```
 
 **Why insertion happens at perilune.** At closest approach the relative
@@ -328,20 +330,91 @@ far side are exact; the latitude is relative to the ephemeris plane, which
 with a coplanar circular Moon is the mission plane rather than the true lunar
 equator.
 
-Not modelled: terrain (the surface is a sphere of radius `R_MOON`), mascons,
-landing radar, redesignation and hazard avoidance, abort modes, and the ascent
-back off the surface. The lunar-orbit coast is Keplerian, which real missions
-cannot assume — mascons perturb a low lunar orbit by kilometres per revolution,
-which is why they navigate rather than propagate.
+### How much Moon to land on
+
+A descent onto a smooth sphere, under a point mass, flown by a vehicle that
+reads the integrator's own state vector, lands every time — and tells you
+about the guidance law rather than about the Moon. `moonlanding` takes four
+switches, all off by default so every figure predating them still reproduces,
+and [`apollo_landing`](src/landing.jl) turns on all four:
+
+| switch | what it adds | what it costs |
+|---|---|---|
+| `terrain` | procedural ground, ±3 km relief, craters 40 km → 50 m (`src/terrain.jl`) | altitude means height above *ground*, and the ground is nowhere near the sphere |
+| `field` | lunar J2 and five near-side mascons (`src/moon.jl`) | the parking orbit stops being the ellipse the burn put it in |
+| `nav` | orbit-determination error, an onboard point-mass model, landing radar (`src/landingnav.jl`) | the vehicle no longer knows where it is |
+| `hazard` | scan the reachable footprint at high gate and redesignate | the aim point is chosen, not inherited |
+
+Switch them on one at a time and the same mission fails a different way each
+time. This is the whole argument for having them:
+
+| configuration | outcome |
+|---|---|
+| sphere, point mass, perfect nav | lands, 1.2 m/s |
+| + terrain | **tips over** — 22° ground |
+| + mascons | **tips over** — 15° ground |
+| + nav, no radar, no site survey | **crashes at 25 m/s** into a 1.4 km plateau it thought was sea level |
+| + landing radar | altitude right to 12 m — and still crashes: the braking phase was aimed at the sphere, so high gate arrived 600 m over ground instead of 2000 |
+| + site survey | lands at 1.2 m/s — on a 15° slope |
+| + hazard avoidance | **lands at 1.1 m/s on 0.2° ground**, having moved its aim point 600 m |
+
+Three things had to be right for that last row, and each was wrong first:
+the terminal phase must not restart its own clock (the radar never updated
+and terrain was looked up half a kilometre from the vehicle); the guidance
+must null velocity **relative to the ground**, which moves at 4.6 m/s, or
+every landing arrives sliding sideways at four times the tipping limit and
+every hover drifts 400 m off the chosen site; and the chosen site must be
+expressed in the navigation frame, not in absolute coordinates, because a
+sensor sees real terrain but has to be flown to on an estimate.
 
 ```julia
-ls = moonlanding(lander = default_lander(),
-                 lv = starship_expendable(payload = lander_mass(default_lander())),
-                 kick_angle = deg2rad_(5.0))
+ls = apollo_landing(lander = default_lander(), orbiter = Orbiter(),
+                    lv = starship_expendable(payload = 22_500.0),
+                    kick_angle = deg2rad_(5.0))
 print_landing_summary(ls)
-ls.descent.v_vertical      # 1.21 m/s
-ls.descent.hover_s         # 559 s of hover left at touchdown mass
-ls.lon_land                # -9.7 deg — near side
+ls.descent.v_vertical      # 1.29 m/s
+ls.descent.slope           # 0.1 deg of ground to stand on
+ls.descent.redesignated    # 608 m to get it
+ls.descent.hover_s         # 543 s of hover left at touchdown mass
+```
+
+## The trip home
+
+Leaving the Moon from the surface costs about 1.85 km/s to orbit and another
+0.9 to leave lunar orbit for Earth. Carry all of it on the thing you land and
+you land something enormous; leave most of it in orbit and rendezvous with it
+afterwards and you land something small. That is the whole argument for
+lunar-orbit rendezvous, and `src/lunarreturn.jl` is it, priced
+(`moonlanding(orbiter = Orbiter())` puts something up there to come back to):
+
+```
+surface, 21.6 h stay  ──►  ascent: 1791 m/s, 243 s, shot on (pitch, pitch rate)
+                                        │   to a 15 × 85 km orbit, level
+                                        ▼
+              rendezvous: 23 m/s over 55 min, Lambert-targeted
+                                        │   lift-off time is a search variable
+                                        ▼   too — you cannot leave whenever
+        docking, 244 kg unused           you like
+                                        │
+                                        ▼
+              TEI: 816 m/s prograde, swept for the ignition point and
+              closed by secant on the perigee that actually arrives
+                                        │   4.7 days home
+                                        ▼
+        entry interface, γ = −6.8°  ──►  splashdown at 8.84 days, 5.8 g,
+                                         232 W/cm², 180 MJ/m²
+```
+
+Ten metres per second at the Moon is thousands of kilometres of perigee at the
+Earth, which is why the cheap model — read the osculating elements once you
+are 80,000 km clear — picks the ignition point and nothing else. The magnitude
+is closed with the full coast in the loop.
+
+```julia
+rr = moonreturn(ls)                 # ls must have left an orbiter behind
+print_return_summary(rr, ls)
+rr.dv_tei                           # 816 m/s
+rr.entry.peak_gload                 # 5.8 g
 ```
 
 ## What the reentry sim models
@@ -412,14 +485,19 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (355 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (450 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
 # propellant/engine consistency and stage sizing, scalar targeting including
 # infeasible-design retreat, parallel-burn strap-on boosters, the lunar
 # landing chain (insertion and descent-orbit burns against closed-form
 # two-body values, a powered descent that touches down inside the lander's
-# limits, and a fixed-thrust lander that cannot), RK4 order and
+# limits, and a fixed-thrust lander that cannot), procedural terrain
+# (continuity, statistics, hazard scoring, Moon-fixed round trips), the lunar
+# gravity field (mascon pairs adding no net mass, anomalies the right size at
+# orbital altitude, a low orbit that visibly wanders), landing radar driving
+# navigation onto truth, the layer-by-layer descent story from smooth sphere
+# to hazard avoidance, the return trip end to end, RK4 order and
 # the Jacobi constant of the cislunar coast, step-size independence of the
 # flown mission, meshes/panel aero including interstage transition cones,
 # capsule watertightness and cabin clearances, maneuvers, end-to-end reentry)
@@ -431,7 +509,7 @@ julia --project scripts/run_nominal.jl
 # full circumlunar mission (design + fly) -> output/moonshot_*.csv
 julia --project scripts/run_moonshot.jl
 
-# lunar landing: pad to the surface -> output/landing_*.csv
+# lunar landing and the trip home -> output/landing_*.csv
 julia --project -t auto scripts/run_landing.jl
 
 # TCM Monte Carlo over TLI execution errors -> output/tcm_montecarlo.csv
@@ -598,6 +676,22 @@ cover exterior, onboard and in-cabin views:
   for the TLI burn against the limb, and cruise out with the Moon growing
   from a disc (sim ephemeris) to a cratered sphere filling the frame at
   the 2 000 km far-side flyby.
+* **The lunar descent** — a landing configuration replaces the return leg
+  with the powered descent itself, flown over *the same procedural ground the
+  simulation flew over*: the height field in the viewer is a line-by-line port
+  of `src/terrain.jl`, sharing its 32-bit hash so that `Math.imul` reproduces
+  the crater lattice exactly and the two surfaces agree to a nanometre. A
+  crater the guidance steered around is a crater you can watch it steer
+  around. Concentric rings of terrain, each four times wider and four times
+  coarser than the one inside it, run from two thirds of a metre at the
+  footpads out past the horizon. The director cuts from the vehicle firing
+  retrograde eight kilometres up, through the pitch-over onto the approach and
+  the view down the last kilometre, to a camera *standing on the surface* —
+  placed by searching a ring of candidate spots for one with high ground and
+  an unobstructed sight line, because ground chosen by a hazard scan for being
+  flat very often has a crater next to it. Below forty metres the plume starts
+  moving the surface, and what leaves travels almost flat and very fast: no
+  air to slow it, so it does not billow, does not rise and does not settle.
 * **Entry** — the pod hits the interface at ~10.6 km/s with a shock layer
   standing on the heat shield and an incandescent wake streaming behind
   it, driven by the logged heating rate; then drogue, gored
@@ -900,16 +994,29 @@ frame of pure GC churn, now packed straight into the GL staging buffer.
 * Booster drag sums each strap-on's full frontal area onto the core's, with
   no shielding between neighbours and no change to the CD table shape — it
   errs high, and only while they are attached.
-* The lunar surface is a sphere: no terrain, no slope, no boulders, and so no
-  landing radar, redesignation or hazard avoidance. The powered descent flies
-  the guidance open-loop while braking and closed-loop on velocity below high
-  gate; there is no navigation error, because there is no navigation.
-* The lunar parking orbit is Keplerian about a point-mass Moon. Mascons move a
-  real low lunar orbit by kilometres per revolution, so the loiter time before
-  the descent is cheaper here than it is in reality.
-* Nothing comes back off the surface: lunar ascent, rendezvous and trans-Earth
-  injection are not modelled (see extension points).
-* The cinematic launch view flies the free-return profile. From a landing
-  configuration it launches the same vehicle on the flyby mission rather than
-  descending to the surface; the landing has the panel's descent card and
-  Moon-frame view instead.
+* The lunar terrain is *statistically* a Moon and not the Moon: the right
+  relief, crater size distribution and footpad-scale roughness, at no
+  particular place. Mare Tranquillitatis is not at longitude 23° E here.
+  Craters superpose rather than degrade, so every one of them is young, and
+  there are no boulders, rilles or ejecta rays as distinct objects.
+* The mascons are five point-mass anomalies at roughly the right selenographic
+  positions, buried at the depth that matches the observed ratio between the
+  surface anomaly and the anomaly at orbital altitude. That gets the field
+  right where a spacecraft flies and not where a geologist works.
+* The landing radar is an altimeter and a velocimeter, not a position fix, so
+  the horizontal navigation error at touchdown is whatever orbit determination
+  left — a few hundred metres, as it was on Apollo. Hazard avoidance registers
+  its chosen site to the navigation frame once, at high gate; there is no
+  continuous terrain-relative navigation, and so no drift correction after it.
+* No aborts, no staging during descent, no plume–surface interaction, and no
+  attitude dynamics anywhere in the lunar chain: thrust points where guidance
+  asks, with no rate limit and no RCS budget to pay for it.
+* The trip home assumes the landing site stays in the orbiter's plane, which
+  it does here because the coplanar model puts the Moon's spin axis along the
+  mission-plane normal. On the real Moon a site drifts out of plane at up to
+  half a degree an hour, and the plane change to catch up is what limits a
+  surface stay to a few days.
+* Rendezvous is a single Lambert transfer plus a braking burn, searched over
+  lift-off and transfer time. Real ones are a phasing sequence with a
+  mid-course correction and a manual terminal phase, and they carry a much
+  bigger dispersion budget than one impulse pair implies.

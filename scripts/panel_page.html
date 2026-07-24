@@ -169,10 +169,22 @@
         <div><label for="h_pdi_km">descent orbit [km]</label><input id="h_pdi_km" value="15"></div>
         <div><label for="n_rev">revs before DOI</label><input id="n_rev" value="1"></div>
       </div>
+      <div class="row" style="margin-top:6px">
+        <label for="plain_moon" style="display:flex;gap:7px;align-items:flex-start;
+               flex-wrap:wrap;cursor:pointer" title="fly the descent onto a smooth
+               sphere with perfect navigation, as everything here did before
+               terrain existed">
+          <input type="checkbox" id="plain_moon" style="width:auto;margin:2px 0 0">
+          <span>smooth sphere, perfect navigation</span></label>
+      </div>
       <div class="sub" style="margin:6px 0 0">the lander flies insertion,
         descent-orbit initiation and the descent on its own propellant; the
         launcher only has to throw its wet mass through TLI. Arrival is on a
-        free return, so a failed insertion still comes home.</div>
+        free return, so a failed insertion still comes home.
+        <b>By default it lands on the real thing</b>: procedural terrain,
+        mascons, orbit-determination error corrected by landing radar, and
+        hazard avoidance choosing the touchdown point at high gate. Tick the
+        box to take all of that away and watch what each of them was for.</div>
     </div>
 
     <div class="card" id="card_launcher">
@@ -345,7 +357,7 @@ const BASE_FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_k
 // the landing mission adds a lander and a descent plan; everything else — the
 // launcher, the ascent, the trans-lunar leg — is the same mission underneath
 const LANDING_FIELDS = ['l_dry','l_prop','l_thrust_kn','l_isp','l_throttle_min',
-  'h_moon_park_km','h_pdi_km','n_rev'];
+  'h_moon_park_km','h_pdi_km','n_rev','plain_moon'];
 let MODE = 'flyby';
 let VNAME = 'Sable';
 const landing = () => MODE === 'landing';
@@ -520,7 +532,8 @@ const METRIC_LABEL = { prop_margin_kg: 'launcher prop margin [kg]',
 const LPARAM_LABEL = { l_dry: 'lander dry mass', l_prop: 'lander propellant',
   l_thrust_kn: 'lander thrust', l_isp: 'lander Isp',
   l_throttle_min: 'lander min throttle', h_moon_park_km: 'lunar orbit altitude',
-  h_pdi_km: 'descent-orbit altitude', n_rev: 'revs before DOI' };
+  h_pdi_km: 'descent-orbit altitude', n_rev: 'revs before DOI',
+  plain_moon: 'smooth sphere, perfect navigation' };
 function fillSolveParams() {
   const n = nStages();
   const opts = Object.keys(PARAM_LABEL).map(k => [k, PARAM_LABEL[k]]);
@@ -784,6 +797,12 @@ function renderAll() {
     [fmt(m.hover_s,0)+' s','hover margin'],
     [fmt(m.min_throttle_pct,0)+' %','deepest throttle'],
     [fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°','landing site'],
+    [(m.ground_elev_m>=0?'+':'')+fmt(m.ground_elev_m,0)+' m','ground off the sphere'],
+    [fmt(m.ground_slope_deg,1)+'°','slope at touchdown'],
+    [m.redesignate_m>0 ? fmt(m.site_score_deg,1)+'° ← '+fmt(m.site_was_deg,1)+'°' : '—',
+     'site chosen (was)'],
+    [m.redesignate_m>0 ? fmt(m.redesignate_m,0)+' m' : '—','aim point moved'],
+    [fmt(m.nav_alt_err_m,0)+' m','nav altitude error'],
     [fmt(m.t_days,2)+' d','pad to surface'],
   ] : [
     [fmt(m.liftoff_t,1)+' t','liftoff mass'],

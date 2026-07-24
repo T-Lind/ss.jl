@@ -586,6 +586,10 @@ const EVNAME = {
   tli_cutoff: 'TLI CUTOFF — GO FOR THE MOON',
   entry_handoff: 'KICK STAGE JETTISON', entry_interface: 'ENTRY INTERFACE',
   splashdown: 'SPLASHDOWN',
+  loi: 'LUNAR ORBIT INSERTION', doi: 'DESCENT ORBIT INSERTION',
+  pdi: 'POWERED DESCENT IGNITION', high_gate: 'HIGH GATE',
+  touchdown: 'TOUCHDOWN — CONTACT LIGHT', crash: 'IMPACT',
+  tipped: 'TIPPED OVER', propellant: 'PROPELLANT DEPLETION',
 };
 const EVSUF = { sep: 'SEPARATION', ignition: 'IGNITION', deploy: 'DEPLOY',
                 jettison: 'JETTISON', burnout: 'BURNOUT' };
@@ -597,6 +601,14 @@ function eventLabel(name) {
 }
 // entry pacing: real time through peak heating and the last seconds before
 // the water, compressed through the long glide and the chute ride
+// descent pacing: the braking phase is eight minutes of the same thing, the
+// last hundred seconds are the landing
+function descentWarp(t) {
+  if (t < MS.t_pdi - 2) return 600;
+  if (t < MS.t_gate - 30) return 6;
+  if (t < MS.t_td - 100) return 3;
+  return 1;
+}
 function entryWarp(t) {
   if (isFinite(tEI) && t < tEI + 130) return 1;
   const dep = isFinite(tDrog) ? tDrog : tMain;
@@ -680,7 +692,14 @@ function buildData() {
     ENT = { t: te, h: he, v: E.v, g: E.g, q: E.q, gam: ge,
             dr: dre.map(v => v - drTot), n: ne };
   }
+  // a landing run brings its own last act: the powered descent, in a frame
+  // anchored on the point it lands at
+  if (run.descent && run.site && run.descent.t && run.descent.t.length > 2) {
+    MD = run.descent; MS = run.site;
+    MDIA = MS.diameter || 4.2;
+  }
   tEnd = isFinite(tSplash) ? tSplash + 12
+       : MS ? MS.t_td + 16
        : hasEnt ? ENT.t[ENT.n-1] + 10
        : hasCis ? CIS.t[CIS.n-1] : A.t[A.t.length-1] + 30;
 
@@ -739,9 +758,11 @@ function buildData() {
       add('TRANSLUNAR', tPeri - win, 'eci', { pace: 26 });
       add('FLYBY', tPeri + win, 'eci', { pace: 45 });
     }
-    add('RETURN', hasEnt && isFinite(tEI) ? Math.min(tEI - 20, cisEnd) : cisEnd,
-        'eci', { pace: 26 });
+    if (MS) add('LUNAR ORBIT', MS.t_pdi - 25, 'eci', { pace: 12 });
+    else add('RETURN', hasEnt && isFinite(tEI) ? Math.min(tEI - 20, cisEnd) : cisEnd,
+             'eci', { pace: 26 });
   }
+  if (MS) add('DESCENT', MS.t_td + 16, 'moon', { warp: descentWarp });
   if (hasEnt) add('ENTRY', tEnd, 'entry', { warp: entryWarp });
   if (!PH.length) add('FLIGHT', tEnd, 'pad');
   // a paced phase compresses to roughly a fixed wall-clock length, so a
@@ -827,11 +848,417 @@ function entState(t) {
            bx: V.scale(vdir, -1) };    // heatshield into the wind
 }
 
+// ------------------------------------------------------- lunar descent ----
+// The powered descent, flown over the same procedural ground the simulation
+// flew over. Not a picture of it — the same surface: the height field below is
+// a line-by-line port of `src/terrain.jl`, sharing its 32-bit hash, its
+// cube-sphere crater lattice and its constants, so a crater the guidance
+// steered around is a crater you can see it steer around. That is why the
+// mixer is 32-bit: `Math.imul` is an exact 32-bit multiply, and there is no
+// other way to make JavaScript agree with Julia about an integer. The two
+// then agree to a nanometre — every crater in the same place, and the last
+// bit of difference is `sin` in two different libms.
+//
+// Everything here lives in a frame anchored at the touchdown point: x is
+// surface arc along the direction of travel (negative on the way in), y is
+// height above the mean sphere, z is crossrange. The server sends the track in
+// that frame, along with the Moon-fixed basis at the site, which is all the
+// terrain function needs to be evaluated anywhere in the scene.
+
+let MD = null, MS = null;              // descent track, site + terrain params
+let moonRings = [], landerBuf = null, landerN = 0, MDIA = 4.2;
+
+function hash32(a, b, c, d) {
+  let h = Math.imul(a | 0, 0x9E3779B1);
+  h = Math.imul(h ^ (b | 0), 0x85EBCA77);
+  h = Math.imul(h ^ (c | 0), 0xC2B2AE3D);
+  h = Math.imul(h ^ (d | 0), 0x27D4EB2F);
+  h ^= h >>> 15; h = Math.imul(h, 0x2545F491);
+  h ^= h >>> 13; h = Math.imul(h, 0x9E3779B1);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+const cellHash = (i, j, k, salt) => hash32(i, j, k, salt);
+const cellRand = (h, n) => hash32(h, 0x000000FF, n, 0x165667B1) / 4294967296;
+
+function domFace(u) {
+  const ax = Math.abs(u[0]), ay = Math.abs(u[1]), az = Math.abs(u[2]);
+  if (ax >= ay && ax >= az) return u[0] >= 0 ? 0 : 1;
+  if (ay >= az) return u[1] >= 0 ? 2 : 3;
+  return u[2] >= 0 ? 4 : 5;
+}
+// [ok, s, t] on face f's square chart; false where the face is edge-on
+function faceProject(u, f, out) {
+  const sg = (f & 1) ? -1 : 1;
+  let w, s, t;
+  if (f < 2)      { w = sg*u[0]; if (w <= 0.35) return false; s = sg*u[1]/w; t = u[2]/w; }
+  else if (f < 4) { w = sg*u[1]; if (w <= 0.35) return false; s = sg*u[2]/w; t = u[0]/w; }
+  else            { w = sg*u[2]; if (w <= 0.35) return false; s = sg*u[0]/w; t = u[1]/w; }
+  out[0] = s; out[1] = t;
+  return true;
+}
+function faceUnit(f, s, t) {
+  const sg = (f & 1) ? -1 : 1;
+  const v = f < 2 ? [sg, sg*s, t] : f < 4 ? [t, sg, sg*s] : [sg*s, t, sg];
+  const l = Math.hypot(v[0], v[1], v[2]);
+  return [v[0]/l, v[1]/l, v[2]/l];
+}
+function craterProfile(s) {
+  if (s <= 1.0) return -1.0 + 1.15*s*s*(3.0 - 2.0*s);
+  if (s < 2.2) { const e = (2.2 - s)/1.2; return 0.15*e*e*(3.0 - 2.0*e); }
+  return 0.0;
+}
+const craterDepth = d => Math.min(0.2*d, 1044.0*Math.pow(d/1000.0, 0.301));
+
+const _fp = [0, 0];
+function cratersClass(tr, u, cls) {
+  const d0 = tr.d_max / Math.pow(tr.ratio, cls - 1);
+  const reach = 1.15*d0/RM;
+  let n = Math.max(2, Math.ceil(1.0/Math.max(reach, 1e-9)));
+  if (n > 1000000) n = 1000000;
+  const cell = 2.0/n;
+  const salt = (tr.seed ^ Math.imul(0x51ED270B, cls)) >>> 0;
+  let h = 0.0;
+  for (let f = 0; f < 6; f++) {
+    if (!faceProject(u, f, _fp)) continue;
+    const s = _fp[0], t = _fp[1];
+    if (Math.abs(s) > 1.0 + 2*cell || Math.abs(t) > 1.0 + 2*cell) continue;
+    const i0 = Math.floor((s + 1.0)/cell), j0 = Math.floor((t + 1.0)/cell);
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      const i = i0 + di, j = j0 + dj;
+      const ch = cellHash(i, j, f, salt);
+      if (!(cellRand(ch, 0) < tr.density)) continue;
+      const cs = -1.0 + (i + cellRand(ch, 1))*cell;
+      const ct = -1.0 + (j + cellRand(ch, 2))*cell;
+      if (Math.abs(cs) > 1.0 || Math.abs(ct) > 1.0) continue;
+      const cu = faceUnit(f, cs, ct);
+      if (domFace(cu) !== f) continue;               // someone else's crater
+      const dia = d0*(0.55 + 0.9*cellRand(ch, 3));
+      const rad = 0.5*dia;
+      const dot = Math.max(-1, Math.min(1, u[0]*cu[0] + u[1]*cu[1] + u[2]*cu[2]));
+      const dist = RM*Math.acos(dot);
+      if (dist > 2.2*rad) continue;
+      h += craterDepth(dia)*craterProfile(dist/rad);
+    }
+  }
+  return h;
+}
+const smoothstep = x => x*x*(3.0 - 2.0*x);
+function valueNoise(u, wave, salt) {
+  const px = u[0]*RM/wave, py = u[1]*RM/wave, pz = u[2]*RM/wave;
+  const i0 = Math.floor(px), j0 = Math.floor(py), k0 = Math.floor(pz);
+  const fx = smoothstep(px - i0), fy = smoothstep(py - j0), fz = smoothstep(pz - k0);
+  let acc = 0;
+  for (let dk = 0; dk < 2; dk++) { const wz = dk ? fz : 1 - fz;
+    for (let dj = 0; dj < 2; dj++) { const wy = dj ? fy : 1 - fy;
+      for (let di = 0; di < 2; di++) { const wx = di ? fx : 1 - fx;
+        const g = cellHash(i0 + di, j0 + dj, k0 + dk, salt)/4294967296;
+        acc += wx*wy*wz*(2.0*g - 1.0);
+      } } }
+  return acc;
+}
+function terrainHeight(tr, u) {
+  const p1 = cellRand(tr.seed, 1)*6.2831853;
+  const p2 = cellRand(tr.seed, 2)*6.2831853;
+  const p3 = cellRand(tr.seed, 3)*6.2831853;
+  const x = u[0], y = u[1], z = u[2];
+  let s = 0.55*Math.sin(1.7*x + 2.1*y + p1)*Math.cos(1.3*z - 0.9*y + p2);
+  s += 0.28*Math.sin(3.9*y - 2.7*z + p2)*Math.cos(3.1*x + p3);
+  s += 0.17*Math.sin(7.3*z + 5.1*x + p3)*Math.sin(6.1*y + p1);
+  let h = tr.relief*s;
+  for (let c = 1; c <= tr.classes; c++) h += cratersClass(tr, u, c);
+  h += tr.rough*valueNoise(u, 40.0, (tr.seed ^ 0x7A5C1E39) >>> 0);
+  h += 0.45*tr.rough*valueNoise(u, 15.0, (tr.seed ^ 0x1B873593) >>> 0);
+  return h;
+}
+
+// site frame <-> Moon-fixed direction. The same spherical parameterisation is
+// used for the scene position, so the vehicle and the ground it lands on can
+// never disagree about where the surface is.
+function moonDir(x, z) {
+  const a = x/RM, b = z/RM;
+  const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b);
+  const U = MS.u, E = MS.ed, C = MS.ec;
+  return [U[0]*ca*cb + E[0]*sa*cb + C[0]*sb,
+          U[1]*ca*cb + E[1]*sa*cb + C[1]*sb,
+          U[2]*ca*cb + E[2]*sa*cb + C[2]*sb];
+}
+function moonPos(x, z, h) {
+  const a = x/RM, b = z/RM, R = RM + h;
+  return [R*Math.sin(a)*Math.cos(b), R*Math.cos(a)*Math.cos(b) - RM, R*Math.sin(b)];
+}
+const groundY = (x, z) => moonPos(x, z, terrainHeight(MS.terrain, moonDir(x, z)))[1];
+
+// Where to stand to watch it land. The obvious answer — a fixed offset from
+// the site — puts the camera in whatever the terrain happens to be doing
+// there, and on ground chosen by a hazard scan for being flat, what is next
+// to it is very often a crater. So the spot is *found*: candidate positions
+// on a ring around the site, rejected unless the line of sight to the vehicle
+// clears the ground the whole way, then scored on standing high and having
+// the sun behind the lens.
+let MOONCAM = null;
+function pickGroundCam() {
+  const g0 = groundY(0, 0);
+  const az = 2.4;                    // down-sun and off to one side of the track
+  let best = null;
+  for (let k = 0; k < 32; k++) {
+    const a = 2*Math.PI*k/32;
+    for (const r of [55, 78, 105, 140]) {
+      const x = r*Math.cos(a), z = r*Math.sin(a);
+      const gy = groundY(x, z);
+      // sight line to the vehicle *on the ground*, not to where it is at a
+      // hundred metres: a spot that can see the approach and not the landing
+      // is the one spot that is no use
+      if (gy < g0 - 1.5) continue;
+      let clear = true;
+      for (let f = 0.06; f < 0.99; f += 0.04) {
+        const sight = (gy + 2.6)*(1 - f) + (g0 + 2.0)*f;
+        if (groundY(x*(1 - f), z*(1 - f)) > sight - 0.3) { clear = false; break; }
+      }
+      if (!clear) continue;
+      const score = (gy - g0) + 9*Math.cos(a - az) - 0.02*r;
+      if (!best || score > best.score) best = { x, z, y: gy + 2.6, score };
+    }
+  }
+  MOONCAM = best || { x: 78*Math.cos(az), z: 78*Math.sin(az),
+                      y: groundY(78*Math.cos(az), 78*Math.sin(az)) + 2.6 };
+}
+
+// --- terrain mesh: concentric rings, each four times wider and four times
+// coarser than the one inside it, from two thirds of a metre at the footpads
+// out past the horizon. One ring at metre resolution would need a hundred
+// million triangles to reach the horizon and one ring at horizon resolution
+// would land the vehicle on a facet the size of a car park. The ratio is
+// exactly four and the ring is exactly 120 cells across so that the hole for
+// the next ring in falls on cell boundaries — off by half a cell and every
+// ring boundary is a visible crack.
+function buildMoonTerrain() {
+  const tr = MS.terrain;
+  const N = 120, EX = [40, 160, 640, 2560, 10240, 40960, 163840, 655360];
+  const rings = [];
+  let inner = 0;
+  // Regolith reflects about a tenth of what falls on it, and a picture of it
+  // exposed that way is a black rectangle. These are Apollo-magazine values —
+  // what the surface looks like through a camera stopped for it, which is the
+  // only way anyone has ever seen the Moon from close up.
+  const dark = [0.44, 0.43, 0.405], light = [0.66, 0.65, 0.62];
+  for (const E of EX) {
+    const step = 2*E/N, H = new Float32Array((N+1)*(N+1));
+    for (let i = 0; i <= N; i++) for (let j = 0; j <= N; j++)
+      H[i*(N+1) + j] = terrainHeight(tr, moonDir(-E + i*step, -E + j*step));
+    const P = (i, j) => moonPos(-E + i*step, -E + j*step, H[i*(N+1) + j]);
+    const out = [];
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      const x0 = -E + i*step, z0 = -E + j*step;
+      if (inner && x0 >= -inner && x0 + step <= inner &&
+                   z0 >= -inner && z0 + step <= inner) continue;
+      const q = [P(i,j), P(i+1,j), P(i+1,j+1), P(i,j+1)];
+      // vertex normals from the height field, so adjacent rings shade alike
+      const nAt = (ii, jj) => {
+        const a = ii > 0 ? H[(ii-1)*(N+1)+jj] : H[ii*(N+1)+jj];
+        const b = ii < N ? H[(ii+1)*(N+1)+jj] : H[ii*(N+1)+jj];
+        const c = jj > 0 ? H[ii*(N+1)+jj-1] : H[ii*(N+1)+jj];
+        const d = jj < N ? H[ii*(N+1)+jj+1] : H[ii*(N+1)+jj];
+        const u = moonPos(-E + ii*step, -E + jj*step, 0);
+        const up = V.norm(V.add(u, [0, RM, 0]));
+        const t1 = V.norm(V.cross([0,1,0], up)), t2 = V.cross(up, t1);
+        const g1 = (b - a)/(2*step), g2 = (d - c)/(2*step);
+        return V.norm(V.sub(up, V.add(V.scale(t2, g1), V.scale(t1, g2))));
+      };
+      const nq = [nAt(i,j), nAt(i+1,j), nAt(i+1,j+1), nAt(i,j+1)];
+      const emit = k => {
+        // regolith is grey and nearly uniform; what varies is how much of it
+        // has slid downhill, so steep ground reads lighter and hollows darker
+        const sl = 1 - nq[k][1];
+        const f = Math.min(1, Math.max(0, 0.35 + 3.2*sl));
+        const c = V.lerp(dark, light, f);
+        out.push(q[k][0], q[k][1], q[k][2], nq[k][0], nq[k][1], nq[k][2],
+                 c[0], c[1], c[2], 0, 0, 0);
+      };
+      emit(0); emit(1); emit(2); emit(0); emit(2); emit(3);
+    }
+    if (out.length) rings.push({ buf: buffer(new Float32Array(out)),
+                                 n: out.length/VST, e: E });
+    inner = E;
+  }
+  return rings;
+}
+
+// --- the lander: a descent stage that stays, an ascent stage that does not.
+// Built y-up with +x forward, which is how it is flown.
+function buildLander() {
+  const out = [];
+  const R = MDIA/2;
+  const FOIL = [0.66, 0.53, 0.20], WHITE = [0.78, 0.78, 0.80],
+        DARK = [0.13, 0.13, 0.15], STEEL = [0.42, 0.43, 0.46];
+  const Y0 = 0.95, Y1 = 3.05;                     // descent-stage drum
+  tube(out, [0, Y0, 0], [0, Y1, 0], R, FOIL, 8);
+  tube(out, [0, Y1, 0], [0, Y1 + 0.12, 0], R*0.99, STEEL, 8);
+  // descent engine, hanging in the middle of it
+  tube(out, [0, Y0, 0], [0, 0.34, 0], 0.38, DARK, 14, 0.92, true);
+  // four legs: strut out and down to a footpad on the ground plane
+  for (let k = 0; k < 4; k++) {
+    const a = Math.PI/4 + k*Math.PI/2;
+    const cx = Math.cos(a), cz = Math.sin(a);
+    const hip = [cx*R*0.92, Y0 + 0.35, cz*R*0.92];
+    const pad = [cx*R*1.62, 0.10, cz*R*1.62];
+    tube(out, hip, pad, 0.085, STEEL, 7);
+    tube(out, [cx*R*0.55, Y1 - 0.15, cz*R*0.55],
+              [cx*R*1.30, 0.62, cz*R*1.30], 0.055, STEEL, 6);
+    tube(out, [pad[0], 0.0, pad[2]], [pad[0], 0.16, pad[2]], 0.46, STEEL, 12);
+  }
+  // ascent stage: the part that comes back
+  tube(out, [0, Y1 + 0.12, 0], [0, Y1 + 1.75, 0], R*0.62, WHITE, 12);
+  tube(out, [0, Y1 + 1.75, 0], [0, Y1 + 2.35, 0], R*0.62, WHITE, 12, R*0.30);
+  tube(out, [0, Y1 + 2.35, 0], [0, Y1 + 2.62, 0], 0.42, STEEL, 12);
+  // forward face: the window you look out of on the way down
+  boxAt(out, [R*0.60, Y1 + 1.20, 0], [0.10, 0.44, 0.72], [0.06, 0.07, 0.09]);
+  // RCS quads
+  for (let k = 0; k < 4; k++) {
+    const a = Math.PI/4 + k*Math.PI/2;
+    const p = [Math.cos(a)*R*0.72, Y1 + 1.5, Math.sin(a)*R*0.72];
+    boxAt(out, p, [0.34, 0.30, 0.34], DARK);
+  }
+  landerBuf = buffer(new Float32Array(out));
+  landerN = out.length/VST;
+  return Y1 + 2.62;
+}
+
+// --- state in the site frame ------------------------------------------------
+function moonState(t) {
+  const T = MD.t, tp = Math.max(T[0], t - MS.t_pdi);
+  const x = samp(T, MS.lx, tp), y = samp(T, MS.ly, tp), z = samp(T, MS.lz, tp);
+  const a = x/RM, b = z/RM, R = RM + y;
+  const pos = [R*Math.sin(a)*Math.cos(b), R*Math.cos(a)*Math.cos(b) - RM, R*Math.sin(b)];
+  const up = V.norm([Math.sin(a)*Math.cos(b), Math.cos(a)*Math.cos(b), Math.sin(b)]);
+  let fwd = [Math.cos(a)*Math.cos(b), -Math.sin(a)*Math.cos(b), 0];
+  fwd = V.norm(V.sub(fwd, V.scale(up, V.dot(fwd, up))));
+  const pit = samp(T, MD.pitch, tp)*Math.PI/180;
+  // thrust points up and retrograde: that is what stopping looks like
+  const thrust = V.norm(V.add(V.scale(up, Math.sin(pit)),
+                              V.scale(fwd, -Math.cos(pit))));
+  // the body frame degenerates if the thrust axis and the direction of travel
+  // ever line up; fall back to the local vertical, which they never both are
+  const fp = V.sub(fwd, V.scale(thrust, V.dot(fwd, thrust)));
+  const fm = V.len(fp) > 1e-6 ? V.norm(fp) :
+             V.norm(V.sub(up, V.scale(thrust, V.dot(up, thrust))));
+  return { pos, up, fwd, thrust, bx: fm, by: thrust, bz: V.cross(fm, thrust),
+           h: samp(T, MD.h, tp)*1000, v: samp(T, MD.v, tp),
+           vh: samp(T, MD.vh, tp), vv: samp(T, MD.vv, tp),
+           thr: samp(T, MD.thr, tp)/100, m: samp(T, MD.m, tp),
+           elev: samp(T, MD.elev, tp), navdh: samp(T, MD.navdh, tp),
+           x, y, z, dr: -x };
+}
+
+function autoPickMoon(t) {
+  const g = MS.t_gate, td = MS.t_td;
+  // The braking phase is eight minutes of a vehicle pointing backwards at
+  // full thrust a hundred kilometres up, and the ground under it is too far
+  // away to have any texture: that is a shot of the vehicle, not of the Moon.
+  // The approach is the other way round — by then the site is what matters.
+  if (t < MS.t_pdi + 30) return 'wide';
+  if (t < g + 15) return 'chase';
+  if (t < td - 32) return 'onboard';
+  return 'ground';
+}
+function cameraMoon(t, ms, M) {
+  const mode = camMode === 'auto' ? autoPickMoon(t) : camMode;
+  const mid = V.add(ms.pos, V.scale(ms.up, 2.4));
+  let eye, look = mid, up = ms.up, fov = 0.5, shake = 0;
+  const tn = ms.thr*Math.min(1, 60/Math.max(ms.h, 6));
+  if (mode === 'chase' || mode === 'wide') {
+    const k = 1 + Math.min(1.6, ms.h/5000);
+    const back = (mode === 'wide' ? 52 : 26)*k, side = (mode === 'wide' ? 38 : 17)*k;
+    const s = V.cross(ms.up, ms.fwd);
+    // slightly below the vehicle, so the surface it is falling towards is in
+    // the frame with it — but only slightly, or from 12 km up the shot is
+    // nothing but ground
+    eye = V.add(V.add(mid, V.scale(ms.fwd, -back)),
+                V.add(V.scale(s, side), V.scale(ms.up, -6*k)));
+    look = V.add(mid, V.scale(ms.up, -Math.min(ms.h*0.25, 14)));
+    fov = fitFov(V.len(V.sub(mid, eye)), 34*k);
+  } else if (mode === 'onboard') {
+    // out of the forward window, looking down the approach at the site
+    eye = V.add(V.add(ms.pos, V.scale(ms.up, 4.2)), V.scale(ms.fwd, MDIA*0.55));
+    const ahead = Math.max(120, Math.min(9000, ms.h*3.2));
+    look = V.add(V.add(ms.pos, V.scale(ms.fwd, ahead)),
+                 V.scale(ms.up, -Math.max(ms.h, 8)*0.92));
+    fov = 1.0; shake = tn*0.18;
+  } else if (mode === 'ground') {
+    // A camera standing off to one side of the site, watching it come down.
+    // Framed on the point between the vehicle and the ground under it, so the
+    // shot holds both all the way in and ends on the landing rather than on
+    // the sky above it.
+    if (!MOONCAM) pickGroundCam();
+    const gp = moonPos(MOONCAM.x, MOONCAM.z, 0);
+    eye = [gp[0], MOONCAM.y, gp[2]];
+    const site = [moonPos(0, 0, 0)[0], groundY(0, 0), moonPos(0, 0, 0)[2]];
+    const aim = V.add(ms.pos, V.scale(ms.up, 2.6));
+    // hold both the vehicle and the ground it is heading for while it is
+    // still high, then tighten onto the vehicle as it arrives — a shot framed
+    // for a descent from a hundred metres has nothing in it once it lands
+    look = V.lerp(site, aim, ms.h < 25 ? 0.85 : 0.55);
+    up = [0, 1, 0];
+    const span = Math.max(15, Math.min(220, 13 + ms.h*1.15));
+    fov = fitFov(Math.max(30, V.len(V.sub(ms.pos, eye))), span);
+  } else {
+    const Rd = freeDist || 40;
+    const cp = Math.cos(freePitch), sp = Math.sin(freePitch);
+    eye = V.add(mid, [Rd*cp*Math.cos(freeYaw), Rd*sp, Rd*cp*Math.sin(freeYaw)]);
+    fov = 0.5;
+  }
+  if (shake > 0) eye = V.add(eye, shakeVec(shake));
+  return { eye, look, up, fov, mode };
+}
+
+// --- plume and dust ---------------------------------------------------------
+// There is no air, so nothing billows: the exhaust leaves in a straight cone
+// and keeps going. What does happen, and what every crew remarked on, is that
+// from about thirty metres the plume starts moving the surface and the ground
+// disappears under a sheet of dust travelling almost horizontally — no
+// atmosphere to slow it, so it does not rise and it does not settle.
+function spawnDescent(dt, ms) {
+  // contact stops the engine, and with no air to hold it up the dust it threw
+  // is simply gone: every grain is on a ballistic arc and most of them left
+  if (!(ms.thr > 0.01) || ms.h < 0.25) return;
+  const noz = V.add(ms.pos, V.scale(ms.thrust, -0.6));
+  const ex = V.scale(ms.thrust, -1);
+  const n = Math.min(26, Math.ceil(70*ms.thr*dt));
+  for (let i = 0; i < n; i++) {
+    const sp = 900 + 600*Math.random();
+    const spread = 0.20 + 0.16*Math.random();
+    const v = V.add(V.scale(ex, sp), V.scale(jit(1), sp*spread));
+    spawn(V.add(noz, V.scale(jit(0.35), 1)), v, 0.30 + 0.25*Math.random(),
+          0.5 + 1.6*ms.thr, 14, 0);
+  }
+  if (ms.h > 40) return;
+  // The dust sheet. Below about forty metres the plume starts moving the
+  // surface, and what leaves travels almost flat and very fast — no air to
+  // slow it, so it does not billow, does not rise and does not settle. Every
+  // crew that landed said the same thing: from a hundred feet down you cannot
+  // see the ground, only something moving across it.
+  const f = 1 - ms.h/40;
+  const nd = Math.ceil(46*f*f*dt*ms.thr*8);
+  const gy = groundY(ms.x, ms.z);
+  const c = V.cross(ms.up, ms.fwd);
+  for (let i = 0; i < nd; i++) {
+    const a = Math.random()*2*Math.PI, sp = 16 + 40*Math.random();
+    const r = 1 + 3*Math.random();
+    const rad = V.add(V.scale(ms.fwd, Math.cos(a)), V.scale(c, Math.sin(a)));
+    const p = V.add([ms.pos[0], gy + 0.15, ms.pos[2]], V.scale(rad, r));
+    spawn(p, V.add(V.scale(rad, sp), V.scale(ms.up, 0.4 + 1.4*Math.random())),
+          1.1 + 1.1*Math.random(), 0.30 + 0.55*Math.random(), 0.7, 3);
+  }
+}
+
 // ------------------------------------------------------------- geometries --
 // The sim doesn't model the sun, so its direction is an aesthetic choice —
 // per world, since pad/entry coordinates are anchor-local (y = up) while
 // cruise coordinates are ECI. SUNE is set from the ephemeris at boot.
 const SUN = V.norm([0.50, 0.58, 0.42]);
+// Apollo landed with the sun behind the vehicle and well up: no glare down the
+// approach, and every rock still throwing a shadow long enough to judge it by.
+const MOONSUN = V.norm([-0.82, 0.53, 0.21]);
 let SUNE = V.norm([0.5, 0.5, 0.5]);
 let rocketBuf, secDraw = [], halfDraw = [], LEN = 30, DIA = 1.8;
 let towerBuf, towerN, armBuf, armDraw = [], padBuf, padN, cloudBuf;
@@ -1905,6 +2332,7 @@ function updateAudio(sc, camEye) {
 let camMode = 'auto', freeYaw = -2.4, freePitch = 0.12, freeDist = 0;
 let headYaw = 0, headPitch = 0;      // look around from inside the capsule
 const CAMS = ['auto','wide','chase','onboard','cabin','window','free'];
+const CAMS_MOON = ['auto','wide','chase','onboard','ground','free'];
 
 // Camera stations inside the crew capsule, in vehicle model coordinates.
 // These mirror pod_mesh's layout (heat-shield sagitta, 32.5 deg afterbody,
@@ -2353,6 +2781,31 @@ function buildScene(ph) {
       spawn: dt => { if (cs.burning) spawnTli(dt, cs); },
     };
   }
+  if (ph.w === 'moon') {
+    const ms = moonState(simT);
+    const craftM = mBasis(ms.bx, ms.by, ms.bz, ms.pos);
+    const cam = cameraMoon(simT, ms, craftM);
+    const noz = V.add(ms.pos, V.scale(ms.thrust, -0.6));
+    PUP = null;                  // vacuum: nothing rises, nothing settles
+    TRENCH = false;
+    // the Earth hangs in one place in this sky, because the Moon keeps one
+    // face to it — the only sky in the solar system where that is true
+    const eDir = MS.earth;
+    return {
+      world: 'moon', ms, cam, craftM, craftPos: ms.pos, sun: MOONSUN,
+      // depth range follows the altitude: at 15 km the nearest thing worth
+      // drawing is 30 m away, and spending the depth buffer on the first
+      // 35 cm instead loses the horizon to z-fighting
+      nearZ: Math.max(0.4, Math.min(400, ms.h/900)),
+      earthC: V.add([0, -RM, 0], V.scale(V.norm([eDir[0], eDir[1], eDir[2]]),
+                                         MS.earth_d)),
+      moonC: null, eMat: [1,0,0, 0,1,0, 0,0,1], spin: 0, near: 0,
+      loud: 0.35*ms.thr,
+      engI: ms.thr > 0.01 ? ms.thr*(0.7 + 0.4*Math.random()) : 0,
+      engW: noz, engC: [0.85, 0.72, 0.45],
+      spawn: dt => spawnDescent(dt, ms),
+    };
+  }
   const es = entState(simT);
   const pr = podRange();
   const bze = [0, 0, 1];
@@ -2482,11 +2935,14 @@ function drawScene(sc) {
   const view = mLookAt(cam.eye, cam.look, cam.up);
   // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
   // nearer clip plane than the outside views
-  const proj = mPersp(cam.fov, asp, inCab ? 0.04 : 0.35, 3.0e6);
+  const proj = mPersp(cam.fov, asp,
+                      inCab ? 0.04 : sc.nearZ || 0.35, 3.0e6);
   const camAlt = Math.max(V.len(V.sub(cam.eye, sc.earthC)) - RE, 2);
-  const dens = Math.exp(-camAlt/9000);
+  // no air on the Moon, so no haze, no scattered fill, and a black sky at
+  // noon — the single most recognisable thing about the place
+  const dens = sc.world === 'moon' ? 0 : Math.exp(-camAlt/9000);
   const fogCol = [0.62*dens + 0.02, 0.75*dens + 0.04, 0.92*dens + 0.08];
-  const fogDen = sc.world === 'eci' ? 0 : 5e-5*dens + 2e-7;
+  const fogDen = (sc.world === 'eci' || sc.world === 'moon') ? 0 : 5e-5*dens + 2e-7;
   gl.enable(gl.DEPTH_TEST);
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -2525,7 +2981,8 @@ function drawScene(sc) {
   const engV = mApply(view, sc.engW);
   // a cabin has its own lighting: raise the fill so interior surfaces facing
   // away from the sun still read (the plasma/engine point light still applies)
-  const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 : 0.30 + 0.16*dens;
+  const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 :
+              sc.world === 'moon' ? 0.22 : 0.30 + 0.16*dens;
   beginMeshes(view, V.norm(rotSun), fogDen, fogCol, amb, sc.engI, engV, sc.engC);
   // from inside, the cabin is drawn and the window panes are dropped, so the
   // apertures in the pressure shell become real openings onto the world
@@ -2574,6 +3031,13 @@ function drawScene(sc) {
         drawRange(m2, proj, s.first, s.count);
       }
     }
+  } else if (sc.world === 'moon') {
+    // The ground, coarsest ring first: they nest, and the depth buffer would
+    // sort them anyway, but drawing outward-in means the near ring overwrites
+    // the far one's edge rather than fighting it.
+    for (let k = moonRings.length - 1; k >= 0; k--)
+      drawWhole(moonRings[k].buf, moonRings[k].n, mIdent(), proj);
+    if (landerBuf) drawWhole(landerBuf, landerN, sc.craftM, proj);
   } else {
     const es = sc.es;
     const podM = sc.craftM;
@@ -2595,7 +3059,8 @@ function drawScene(sc) {
   }
 
   drawParticles(view, proj, cam.fov,
-                sc.world === 'entry' ? [0.60, 0.50, 0.45] : undefined);
+                sc.world === 'entry' ? [0.60, 0.50, 0.45] :
+                sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined);
 }
 function drawClouds(view, proj, fogCol, fogDen, camY) {
   if (camY > 45000) return;
@@ -2654,6 +3119,17 @@ function drawHUD(sc, ph) {
             ['MOON', fmtDist(cs.rM - RM)],
             ['VELOCITY', (cs.speed/1000).toFixed(2) + ' km/s'],
             ['MET', (simT/86400).toFixed(2) + ' days'],
+            ['CAMERA', sc.cam.mode.toUpperCase()]];
+  } else if (sc.world === 'moon') {
+    const ms = sc.ms;
+    rows = [['ALTITUDE', ms.h < 1e4 ? ms.h.toFixed(0)+' m' : (ms.h/1000).toFixed(1)+' km'],
+            ['SINK RATE', (-ms.vv).toFixed(1) + ' m/s'],
+            ['FORWARD', ms.vh.toFixed(1) + ' m/s'],
+            ['TO SITE', Math.abs(ms.dr) < 2000 ? ms.dr.toFixed(0)+' m'
+                                               : (ms.dr/1000).toFixed(1)+' km'],
+            ['THROTTLE', (100*ms.thr).toFixed(0) + '%'],
+            ['GROUND', (ms.elev >= 0 ? '+' : '') + ms.elev.toFixed(0) + ' m'],
+            ['NAV ERROR', ms.navdh.toFixed(0) + ' m'],
             ['CAMERA', sc.cam.mode.toUpperCase()]];
   } else {
     const es = sc.es;
@@ -2728,7 +3204,7 @@ function chipRow(el, items, cur, cb) {
   }
 }
 function initControls() {
-  chipRow($('cams'), CAMS, 'auto', m => camMode = m);
+  chipRow($('cams'), MS ? CAMS_MOON : CAMS, 'auto', m => camMode = m);
   // the hint has done its job by the time the vehicle is off the pad
   setTimeout(() => $('keys').classList.remove('show'), 9000);
   for (const el of [$('cams'), $('speed')]) {
@@ -2824,13 +3300,21 @@ async function boot() {
     buildRocket();
     buildStatics();
     buildLandTex();
+    if (MS) {
+      $('ov_sub').textContent = 'building the ground…';
+      moonRings = buildMoonTerrain();
+      buildLander();
+      pickGroundCam();
+    }
     buildToasts();
     skyBuf = quadBuf();
     partDyn = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, partDyn);
     gl.bufferData(gl.ARRAY_BUFFER, partArr.byteLength, gl.DYNAMIC_DRAW);
     initControls();
-    $('ov_sub').textContent =
+    $('ov_sub').textContent = MS ?
+      `${run.metrics.liftoff_t.toFixed(1)} t · ${LEN.toFixed(1)} m — ` +
+      `pad to the surface of the Moon in ${run.metrics.t_days.toFixed(1)} days` :
       `${run.metrics.liftoff_t.toFixed(1)} t · ${LEN.toFixed(1)} m — ` +
       `around the Moon and home in ${run.metrics.t_days.toFixed(1)} days`;
     $('ov_go').classList.remove('hidden');

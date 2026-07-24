@@ -1068,6 +1068,7 @@ function powered_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
         verbose && @info "redesignation" lead score_deg = rad2deg_(score) nominal_deg = rad2deg_(score0) moved
     end
 
+    n_before = length(L.t)
     term = terminal_descent(l, leg.r, leg.v, leg.m; m_dry = m_dry, log = L,
                             t0 = leg.t, r_ref = r0, cfg = cfg, nav = nav,
                             target = target,
@@ -1079,8 +1080,13 @@ function powered_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
                                     18.0 : cfg.hazard.tau,
                             vh_cap = max(60.0, 1.2 * abs(vdot(leg.v, ut_gate))))
     dv_term = G0 * l.isp * log(leg.m / term.m)
+    # the touchdown sample carries the attitude it landed in, not a zero: the
+    # thrust elevation is what says which way up the vehicle is, and a vehicle
+    # logged as thrusting horizontally at the moment of contact is a vehicle
+    # lying on its side
     _log_descent!(L, leg.t + term.t, term.r, term.v, term.m, term.min_throttle,
-                  0.0, r0, hhat, cfg, nav, target)
+                  length(L.pitch) > n_before ? L.pitch[end] : deg2rad_(90.0),
+                  r0, hhat, cfg, nav, target)
     prop_left = term.m - m_dry
     # what the residual is actually worth: seconds of hover at touchdown mass
     hover = prop_left / (term.m * MU_MOON / vnorm(term.r)^2 / (G0 * l.isp))

@@ -49,6 +49,8 @@ function parse_form(body::AbstractString)
 end
 
 getf(d, k, def) = haskey(d, k) && !isempty(d[k]) ? parse(Float64, d[k]) : def
+"A form checkbox: present and truthy, absent and defaulted."
+getb(d, k, def) = haskey(d, k) ? gets(d, k, "0") in ("1", "true", "on") : def
 
 "Tiny JSON writer: handles Dict/Vector/String/Number/Bool/Nothing/Symbol."
 function json(io::IO, x)
@@ -278,6 +280,58 @@ function scene_payload(asc, cis)
     (cis = cisd, asc3d = asc3d, ascent = ascent)
 end
 
+"""
+    descent_local(ls) -> Dict
+
+The powered descent in a frame anchored at the touchdown point: `lx` metres of
+surface arc along the direction of travel (negative before touchdown, zero at
+it), `ly` metres above the mean sphere, `lz` metres of crossrange. Plus the
+Moon-fixed basis at the site, so the viewer can rebuild the *same* terrain the
+descent was flown over — the surface is a pure function of direction, and this
+is the direction.
+
+Anchoring at touchdown rather than at ignition is what makes the view work:
+the interesting part of a descent is the last kilometre, and a frame pinned
+250 km upstream puts it at the far end of a float.
+"""
+function descent_local(ls)
+    S = SatelliteSim
+    eph = ls.eph
+    D = ls.descent.log
+    t_td = ls.t_touchdown
+    utd = S.vunit(moonfixed(ls.descent.r, t_td, eph))
+    # the descent plane, from the state at ignition
+    r0 = (D.x[1], D.y[1], D.z[1])
+    r1 = (D.x[2], D.y[2], D.z[2])
+    hf = S.vunit(S.vcross(moonfixed(r0, ls.t_pdi, eph),
+                          moonfixed(S.vsub(r1, r0), ls.t_pdi, eph)))
+    ed = S.vunit(S.vcross(hf, utd))          # direction of travel
+    ec = S.vcross(ed, utd)                   # crossrange, right-handed with up
+    lx = Float64[]; ly = Float64[]; lz = Float64[]
+    for i in eachindex(D.t)
+        r = (D.x[i], D.y[i], D.z[i])
+        uf = S.vunit(moonfixed(r, ls.t_pdi + D.t[i], eph))
+        b = asin(clamp(S.vdot(uf, ec), -1.0, 1.0))
+        a = atan(S.vdot(uf, ed), S.vdot(uf, utd))
+        push!(lx, R_MOON * a); push!(lz, R_MOON * b)
+        push!(ly, S.vnorm(r) - R_MOON)
+    end
+    Dict("lx" => lx, "ly" => ly, "lz" => lz,
+         "u" => collect(utd), "ed" => collect(ed), "ec" => collect(ec),
+         # the Earth never moves in this sky: the Moon keeps one face to it, so
+         # longitude zero is the sub-Earth point and everything else is fixed
+         "earth" => [ed[1], utd[1], ec[1]], "earth_d" => A_MOON)
+end
+
+"Terrain parameters, so the viewer draws the ground the descent was flown over."
+terrain_payload(tr::Union{Nothing,LunarTerrain}) =
+    tr === nothing ?
+    Dict("seed" => 0, "relief" => 0.0, "d_max" => 1.0, "classes" => 0,
+         "ratio" => 2.6, "density" => 0.0, "rough" => 0.0) :
+    Dict("seed" => Int(tr.seed), "relief" => tr.relief, "d_max" => tr.d_max,
+         "classes" => tr.classes, "ratio" => tr.ratio, "density" => tr.density,
+         "rough" => tr.rough)
+
 "Ascent events, named by the vehicle's own stages."
 ascent_events(asc) = Any[Dict("phase" => "ascent", "name" => string(e.name),
                               "t" => e.t) for e in asc.events]
@@ -297,8 +351,19 @@ function panel_landing(p)::Dict{String,Any}
                        fairing_mass = lv0.fairing_mass,
                        payload_mass = lander_mass(lander),
                        sref = lv0.sref, cd = lv0.cd, boosters = lv0.boosters)
+    # The real Moon by default: terrain under the vehicle, mascons around it,
+    # navigation error corrected by landing radar, hazard avoidance choosing
+    # the touchdown point. Untick it and the descent is flown onto a smooth
+    # sphere by a vehicle that knows exactly where it is, which is what every
+    # figure in this repo predating terrain was flown against.
+    real_moon = !getb(p, "plain_moon", false)
+    terr = real_moon ? LunarTerrain() : nothing
     ls = moonlanding(
         lander = lander, lv = lv,
+        terrain = terr,
+        field = real_moon ? LunarGravity() : nothing,
+        nav = real_moon ? DescentNav() : nothing,
+        hazard = real_moon ? HazardScan() : nothing,
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
         h_moon_park = getf(p, "h_moon_park_km", 100.0) * 1e3,
         h_pdi = getf(p, "h_pdi_km", 15.0) * 1e3,
@@ -363,6 +428,14 @@ function panel_landing(p)::Dict{String,Any}
             "hover_s" => d.hover_s,
             "land_lat" => rad2deg_(ls.lat_land),
             "land_lon" => rad2deg_(ls.lon_land),
+            "ground_elev_m" => d.elev,
+            "ground_slope_deg" => rad2deg_(d.slope),
+            "site_score_deg" => isnan(d.site_score) ? 0.0 : rad2deg_(d.site_score),
+            "site_was_deg" => isnan(d.site_score_nominal) ? 0.0 :
+                              rad2deg_(d.site_score_nominal),
+            "redesignate_m" => d.redesignated,
+            "nav_err_m" => d.nav_err,
+            "nav_alt_err_m" => d.nav_dh,
             "t_pdi_d" => ls.t_pdi / 86400,
             "t_days" => ls.t_touchdown / 86400,
         ),
@@ -391,7 +464,14 @@ function panel_landing(p)::Dict{String,Any}
             "vv" => [D.vv[i] for i in didx],
             "thr" => [100 * D.throttle[i] for i in didx],
             "pitch" => [rad2deg_(D.pitch[i]) for i in didx],
+            "elev" => [D.elev[i] for i in didx],
+            "navdh" => [D.nav_dh[i] for i in didx],
             "m" => [D.m[i] for i in didx]),
+        "site" => merge(descent_local(ls),
+                        Dict("terrain" => terrain_payload(terr),
+                             "diameter" => ls.lander.diameter,
+                             "t_pdi" => ls.t_pdi, "t_gate" => ls.t_pdi + d.t_gate,
+                             "t_td" => ls.t_touchdown)),
         "events" => events,
     )
 end
@@ -505,8 +585,10 @@ const SOLVE_METRICS = ["prop_margin_kg", "perilune_km", "vac_perigee_km",
 
 "Metrics a landing mission can be solved against."
 const LANDING_METRICS = ["prop_left_kg", "hover_s", "descent_dv", "loi_dv",
-                         "touchdown_v", "downrange_km", "prop_margin_kg",
-                         "min_throttle_pct", "liftoff_t", "tli_dv", "t_days"]
+                         "touchdown_v", "touchdown_vh", "downrange_km",
+                         "prop_margin_kg", "min_throttle_pct", "liftoff_t",
+                         "tli_dv", "t_days", "ground_slope_deg",
+                         "ground_elev_m", "redesignate_m", "nav_alt_err_m"]
 
 "The metric list for whichever mission the panel is configured for."
 solve_metrics(p) = mission_mode(p) === :landing ? LANDING_METRICS : SOLVE_METRICS
