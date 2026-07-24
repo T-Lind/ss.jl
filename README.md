@@ -1,7 +1,7 @@
 # SatelliteSim.jl (`ss.jl`)
 
 Mid-fidelity, extensible satellite mission simulation in pure Julia
-(standard library only — no package dependencies). Two reference missions:
+(standard library only — no package dependencies). Three reference missions:
 
 1. **LEO reentry** — an unpropelled pod returning from low Earth orbit to a
    Pacific splashdown off the US west coast (the original v0.1 mission).
@@ -10,8 +10,13 @@ Mid-fidelity, extensible satellite mission simulation in pure Julia
    ascent inserts into a 200 km parking orbit, the kick stage performs a
    finite trans-lunar-injection burn, the pod coasts around the Moon on a
    free-return trajectory (2000 km perilune, no burns after TLI), and comes
-   straight home — 6.5 days pad to Pacific splashdown — to a ballistic
-   10.6 km/s entry.
+   straight home — 6.5 days pad to Pacific splashdown — to a
+   10.6 km/s lifting entry.
+3. **Lunar landing** (v0.3) — the same launch and the same free return, flown
+   to a 100 km perilune and then *stopped there*: insertion into lunar orbit,
+   a descent-orbit burn, and a guided powered descent to touchdown on the
+   surface, 3 days after lift-off. Arrival is on a free return for Apollo's
+   reason — a failed insertion is a trip home rather than a lunar impact.
 
 ![free return](output/plots/moonshot_3d_cislunar.png)
 
@@ -28,8 +33,8 @@ launch (57.8 t, 3 stages)  ──►  200 km parking orbit, i = 28.5°
                           lunar flyby, perilune 2000 km (free return)
                                         │  3.2 d coast home (first-pass entry)
                                         ▼
-              vacuum perigee ~35 km  ──►  EI at 10.6 km/s, Mach 28
-                                        │  4-DOF ballistic entry, 19 g
+              vacuum perigee 50 km  ──►  EI at 10.6 km/s, Mach 28
+                                        │  lifting entry (L/D 0.3), 6.5 g
                                         ▼
                           drogue + main chutes, Pacific splashdown
 ```
@@ -239,6 +244,106 @@ and propulsive-landing work that a real Starship entry needs. Newtonian
 aero is hypersonic-only (tables clamp below Mach ~4; pair with drogues
 before transonic, as the capsule missions do).
 
+## The lunar landing
+
+The flyby mission treats perilune as a place to pass through. The landing
+mission stops there, and everything after it is Apollo's sequence for
+Apollo's reasons (`src/landing.jl`):
+
+```
+free return, perilune 100 km  ──►  LOI: 925 m/s retrograde, circular lunar orbit
+                                        │  n revolutions of coast (this is what
+                                        ▼   moves the landing site)
+                       DOI: 19 m/s retrograde, periapsis to 15 km
+                                        │  half a revolution
+                                        ▼
+        powered descent ignition ──►  braking: full thrust, linear pitch program
+                                        │  1573 m/s, 250 s, shot onto high gate
+                                        ▼
+              high gate: 2.3 km, 45 m/s down, 150 m/s forward
+                                        │  terminal: throttled, 286 m/s
+                                        ▼
+                    touchdown at 1.2 m/s, 1486 kg and 9 minutes of hover left
+```
+
+**Why insertion happens at perilune.** At closest approach the relative
+velocity is exactly perpendicular to the relative position — that is what
+closest approach *means* — so the cheapest circularisation is purely
+retrograde and its size is just the speed excess over circular. Nothing is
+targeted: the altitude of the resulting orbit is the perilune the trans-lunar
+design already flew to, which is why the panel's "lunar orbit" field is the
+free return's perilune target.
+
+**The braking phase is a shooting problem, and the gate is a velocity.** Full
+thrust, thrust elevation following `theta(t) = theta0 + theta_dot * t`, and a
+2x2 damped Newton on `(theta0, theta_dot)` against altitude and sink rate at
+high gate — the same machinery `tune_ascent` uses for the climb out of the
+atmosphere, because it is the same problem upside down. The phase *ends* when
+forward speed falls through 150 m/s rather than at a chosen altitude: braking
+is nearly all horizontal, so altitude is the free variable the pitch program
+controls, and fixing it instead would pin the one thing the guidance has
+authority over while leaving the speed — the thing that has to be gone — as
+whatever fell out. The residual surface has a fold in it (programs that point
+too high never come down; programs that point too low reach the ground still
+moving at hundreds of metres per second), so a coarse grid seeds the Newton
+and a local refinement restarts it if the first pass lands on the wrong side.
+
+**The terminal phase is closed-loop.** Below high gate the guidance holds a
+commanded sink rate that tapers as `v = -(0.8 + 0.85*sqrt(h))` and nulls the
+along-track drift on a 18-second time constant. Two details decide whether it
+lands or craters:
+
+* **Feed-forward on the profile.** The commanded sink rate is a function of
+  altitude, so it moves as the vehicle descends; a pure proportional law lags
+  it by `tau * dv/dt`, which near the ground — where the profile steepens as
+  `1/sqrt(h)` — is metres per second of extra sink exactly where it hurts.
+  Differentiating the profile along the trajectory and commanding that
+  outright took touchdown from **7.9 m/s to 1.2 m/s**.
+* **The vertical channel is served first.** Thrust is finite and the two
+  channels are not equally important: arriving with a metre per second of
+  drift is a bad landing, arriving with an unchecked sink rate is a crater.
+  The lateral command gets whatever acceleration is left over after gravity
+  and the sink-rate demand are paid.
+
+Touchdown limits are the lander's, not the trajectory's: over 3 m/s of sink
+or 1.5 m/s of drift is reported as a **crash**, which is the whole point of
+flying the last kilometre rather than assuming it.
+
+The default `Lander` is Apollo-LM-class — 12.5 t wet, 9 t of propellant, one
+45 kN engine throttleable to 10% — and it needs about 2.8 km/s for insertion,
+descent-orbit initiation and the descent itself. That is why the landing
+mission ships with a Starship-class launcher: the reference Sable tops out
+around 400 kg through TLI, and a lander is thirty times that. The throttle is
+not a detail either — a lander arrives light, and at touchdown mass a
+fixed-thrust engine is pushing five lunar g upward. A `throttle_min = 1.0`
+lander does not land, and the sim says so.
+
+**Frames.** Everything from perilune on is integrated in a Moon-centred frame
+that falls freely with the Moon. That is not a convenience: the residual
+Earth term in that frame is the *tidal* difference, `2*mu_E*r/d^3`, which at a
+100 km lunar orbit is 2.5e-5 m/s² — four orders below the modelling error in
+a point-mass Moon. The landing site is reported in the tidally-locked
+Moon-fixed frame, longitude zero at the sub-Earth meridian, so near side and
+far side are exact; the latitude is relative to the ephemeris plane, which
+with a coplanar circular Moon is the mission plane rather than the true lunar
+equator.
+
+Not modelled: terrain (the surface is a sphere of radius `R_MOON`), mascons,
+landing radar, redesignation and hazard avoidance, abort modes, and the ascent
+back off the surface. The lunar-orbit coast is Keplerian, which real missions
+cannot assume — mascons perturb a low lunar orbit by kilometres per revolution,
+which is why they navigate rather than propagate.
+
+```julia
+ls = moonlanding(lander = default_lander(),
+                 lv = starship_expendable(payload = lander_mass(default_lander())),
+                 kick_angle = deg2rad_(5.0))
+print_landing_summary(ls)
+ls.descent.v_vertical      # 1.21 m/s
+ls.descent.hover_s         # 559 s of hover left at touchdown mass
+ls.lon_land                # -9.7 deg — near side
+```
+
 ## What the reentry sim models
 
 **4 degrees of freedom** — 3 translational + 1 rotational (the body pitch
@@ -307,11 +412,14 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (329 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (355 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
 # propellant/engine consistency and stage sizing, scalar targeting including
-# infeasible-design retreat, parallel-burn strap-on boosters, RK4 order and
+# infeasible-design retreat, parallel-burn strap-on boosters, the lunar
+# landing chain (insertion and descent-orbit burns against closed-form
+# two-body values, a powered descent that touches down inside the lander's
+# limits, and a fixed-thrust lander that cannot), RK4 order and
 # the Jacobi constant of the cislunar coast, step-size independence of the
 # flown mission, meshes/panel aero including interstage transition cones,
 # capsule watertightness and cabin clearances, maneuvers, end-to-end reentry)
@@ -322,6 +430,9 @@ julia --project scripts/run_nominal.jl
 
 # full circumlunar mission (design + fly) -> output/moonshot_*.csv
 julia --project scripts/run_moonshot.jl
+
+# lunar landing: pad to the surface -> output/landing_*.csv
+julia --project -t auto scripts/run_landing.jl
 
 # TCM Monte Carlo over TLI execution errors -> output/tcm_montecarlo.csv
 julia --project -t auto scripts/run_tcm_mc.jl 100 0.2 0.25
@@ -354,17 +465,53 @@ julia --project -t auto scripts/panel.jl   # then open http://localhost:8137
 `scripts/panel.jl` serves a local cockpit (pure stdlib — a raw-`Sockets`
 HTTP server, no dependencies): edit the mission targets and all three
 stages' propellant/dry mass/thrust/Isp, hit **Run** (or pick a one-click
-**preset** — heavy pod, low/high flyby, steep/shallow entry, inclined,
-dispersed TLI), and get the full design + flight back in about a second —
+**preset**), and get the full design + flight back in about a second —
 stat tiles, the interactive 3D scene, ascent & entry profile charts, the
 event timeline, and a run history for side-by-side comparison.
+
+A switch at the top picks the **mission**: the free-return flyby, or the
+lunar landing. They share every launch field — the launcher, the ascent, the
+trans-lunar leg are the same mission underneath — so switching keeps the
+vehicle and swaps the half that differs: pod and entry corridor for lander
+and descent plan. The landing view adds its own tiles (insertion, descent-
+orbit and descent Δv, touchdown sink and drift, propellant left, hover
+margin, deepest throttle, landing site), a **powered-descent card** —
+altitude against downrange with high gate called out, the two velocity
+components, and the commanded throttle — and a **Moon-frame view** of the
+parking orbit, the descent ellipse and the descent arc, with the sub-Earth
+direction drawn so near side and far side are obvious. Every landing metric
+is sweepable and solvable: *vary lander propellant until hover margin = 200 s*
+is a search over whole missions like any other.
+
+**Vehicle presets** sit beside the mission presets and configure the entire
+launcher — stack height, engines, propellant loads, diameters, and the
+pitch-over kick the stack needs: Sable (the reference), Sable with four
+strap-ons, a Falcon-class Merlin stack, a hydrolox upper stage, and an
+**expendable Starship** — 9 m across, 33 Raptors under 3400 t, a six-engine
+ship that does insertion and TLI itself. The kick angle is a field now,
+because it is the one guidance number that does not scale: 8° suits the
+reference vehicle, a Starship-class stack wants about 5°, and anything with
+strap-ons lofts on either. Get it wrong and the shooting method closes on the
+target *energy* with the perigee underground — which the chain now catches and
+reports instead of designing a trans-lunar injection off a garbage orbit.
+Engine-driven stages can also **estimate their own dry mass** from the design
+(the server always accepted this; the page now offers it), which is what makes
+a preset like Starship weigh 4867 t instead of whatever was left in the boxes.
 
 The 3D scene is true ECI geometry: the full pad-to-splashdown track
 (ascent, parking orbit, TLI burn, outbound, return, entry — each its own
 color), a textured globe spinning about the real pole with **launch-site
 and splashdown markers riding the rotating surface**, correct
 depth-occlusion of trajectory lines behind the Earth, mission-time
-playback, an inertial/rotating frame toggle, and Earth/full zoom shortcuts.
+playback, an inertial/rotating frame toggle, and Earth/fit zoom shortcuts.
+The camera **frames whatever the run turned out to be** rather than a fixed
+number — a 500 km flyby and a 6000 km one are not the same picture — and an
+adaptive scale bar says how big the frame is, because across one mission it
+spans five orders of magnitude. On a landing run the lunar parking orbit and
+the descent are drawn in the same scene, each sample offset by where the Moon
+actually was at that moment, so zooming in on the Moon shows them in place.
+The timeline, the frame toggle, the zooms and Run all have keys
+(`R`, `space`, `←`/`→`, `F`, `E`, `Z`, `L`), listed on the page.
 The **stage count** is a field (2–5) and the whole launcher form is generated
 from it — nothing in the page or the server counts stages itself, so the
 geometry viewer, the sweep list and the solver all pick up a new stage the
@@ -487,6 +634,18 @@ itself stays clean. The insignia is an original mark rather than any real
 agency's; it is all drawn in one function (`buildLiveryTex`) if you want a
 different scheme.
 
+The **launch complex is dimensioned off the vehicle**, which matters the
+moment you fly something that is not the reference rocket. The plume
+aperture, the flame-trench width and the launch table already followed the
+core diameter; the service tower, the hardstand extents, the table height and
+the pad cameras now do too. Left fixed, a 9 m vehicle gets a tower standing
+*inside* its own launch table, a table hanging off the edge of the concrete,
+and a pad camera framing a tank barrel. The site outside the fence line grows
+as the square root of the diameter — a pad five times as wide is not a site
+five times as large — and the connections that have to meet the hardstand are
+pre-divided by that scale so they land on the deck edge rather than short of
+it. The reference vehicle's pad is unchanged, to the metre.
+
 Earth and Moon are **exact ray-traced spheres** rendered in a single
 fullscreen pass with camera-relative centers — the limb, horizon dip, and
 atmosphere shell are geometrically correct from the pad, from orbit, and
@@ -559,6 +718,8 @@ src/
                     RCS wind-hold / rate damping)
   scenarios.jl      deorbit design + splashdown targeting
   mission.jl        the full launch->Moon->splashdown chain (moonshot)
+  landing.jl        lunar-orbit insertion, descent orbit, powered descent
+                    to touchdown (moonlanding)
   maneuvers.jl      Lambert, Hohmann, plane change, Clohessy-Wiltshire
   mesh.jl           STL I/O, polyhedral mass properties, mesh builders
   panelaero.jl      modified-Newtonian panel aero (CA/CN/Cm + Cm_q) from meshes
@@ -582,6 +743,8 @@ geometry/           demo STL meshes (capsule, simplified Starship)
 | Richer aero | subtype `AbstractAeroDatabase` with full (Mach, α) CN/CA/Cm maps |
 | Entry guidance | wrap `simulate` — `bank` and trim α (`cl_trim`) are the control channels a bank-angle guidance law would command; a lifting entry shrinks the 18 g lunar-return load dramatically |
 | 6-DOF | the pitch channel is isolated in `dynamics.jl`; adding roll/yaw states extends the same pattern |
+| Lunar ascent & rendezvous | `powered_descent` run backwards is the ascent; `maneuvers.jl` already has the Lambert and Clohessy-Wiltshire pieces for the rendezvous that follows |
+| Landing site targeting | the site is wherever the ground track goes; targeting one couples the number of parking revolutions and the descent-orbit geometry, which is an outer loop on `moonlanding` |
 | Higher-order integration | swap `rk4_step!` behind the same signature |
 | Mission Monte Carlo | disperse `Stage` performance, TLI execution errors, and ephemeris phase through `moonshot` the same way `run_montecarlo` disperses entry |
 
@@ -737,3 +900,16 @@ frame of pure GC churn, now packed straight into the GL staging buffer.
 * Booster drag sums each strap-on's full frontal area onto the core's, with
   no shielding between neighbours and no change to the CD table shape — it
   errs high, and only while they are attached.
+* The lunar surface is a sphere: no terrain, no slope, no boulders, and so no
+  landing radar, redesignation or hazard avoidance. The powered descent flies
+  the guidance open-loop while braking and closed-loop on velocity below high
+  gate; there is no navigation error, because there is no navigation.
+* The lunar parking orbit is Keplerian about a point-mass Moon. Mascons move a
+  real low lunar orbit by kilometres per revolution, so the loiter time before
+  the descent is cheaper here than it is in reality.
+* Nothing comes back off the surface: lunar ascent, rendezvous and trans-Earth
+  injection are not modelled (see extension points).
+* The cinematic launch view flies the free-return profile. From a landing
+  configuration it launches the same vehicle on the flyby mission rather than
+  descending to the surface; the landing has the panel's descent card and
+  Moon-frame view instead.

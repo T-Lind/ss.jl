@@ -279,6 +279,76 @@ end
     @test isapprox(ms2.cislunar.perilune_alt, 1500e3; atol = 75e3)
 end
 
+@testset "lunar landing" begin
+    S = SatelliteSim
+    # --- the burns, against closed-form two-body values -------------------
+    # circularising at periapsis of a 100 x 15 km ellipse is exactly the
+    # speed difference, and the DOI is the same statement run backwards
+    rp = R_MOON + 100e3
+    v_circ = sqrt(MU_MOON / rp)
+    r0 = (rp, 0.0, 0.0)
+    dv, vafter = loi_burn(r0, (0.0, 1.15 * v_circ, 0.0))
+    @test isapprox(dv, 0.15 * v_circ; rtol = 1e-12)
+    @test isapprox(SatelliteSim.vnorm(vafter), v_circ; rtol = 1e-12)
+
+    dv2, v2 = doi_burn(r0, (0.0, v_circ, 0.0), 15e3)
+    a_t = 0.5 * (rp + R_MOON + 15e3)
+    @test isapprox(dv2, v_circ - sqrt(MU_MOON * (2 / rp - 1 / a_t)); rtol = 1e-12)
+    @test 15.0 < dv2 < 30.0                       # a couple of dozen m/s, as flown
+    @test_throws ArgumentError doi_burn(r0, (0.0, v_circ, 0.0), 150e3)
+
+    # --- powered descent from a descent-orbit periapsis --------------------
+    rpdi = R_MOON + 15e3
+    a_d = 0.5 * (rpdi + R_MOON + 100e3)
+    vpdi = sqrt(MU_MOON * (2 / rpdi - 1 / a_d))
+    lander = Lander(mdry = 3500.0, mprop = 5700.0, thrust = 45e3, isp = 311.0,
+                    throttle_min = 0.10)
+    d = powered_descent(lander, (rpdi, 0.0, 0.0), (0.0, vpdi, 0.0), 9200.0)
+    @test d.outcome == :touchdown
+    @test d.v_vertical < 3.0                       # survivable sink rate
+    @test d.v_horizontal < 2.0
+    @test isapprox(SatelliteSim.vnorm(d.r), R_MOON; atol = 5.0)  # actually on the surface
+    # the descent has to cost about what the orbital speed was, plus the
+    # gravity losses of holding altitude while shedding it
+    @test vpdi < d.dv_braking + d.dv_terminal < 1.35 * vpdi
+    @test d.prop_left > 0.0
+    @test d.min_throttle >= lander.throttle_min - 1e-9
+    # propellant bookkeeping closes against the rocket equation
+    @test isapprox(d.prop_used + d.prop_left, lander.mprop; atol = 1.0)
+
+    # a lander that cannot throttle cannot fly the last kilometre: at
+    # touchdown mass a fixed-thrust engine is pushing 5 g upward
+    stiff = Lander(mdry = 3500.0, mprop = 5700.0, thrust = 45e3, isp = 311.0,
+                   throttle_min = 1.0)
+    d2 = powered_descent(stiff, (rpdi, 0.0, 0.0), (0.0, vpdi, 0.0), 9200.0)
+    @test d2.outcome != :touchdown
+
+    # --- the whole mission -------------------------------------------------
+    lnd = default_lander()
+    lv = starship_expendable(payload = lander_mass(lnd))
+    ls = moonlanding(lander = lnd, lv = lv, kick_angle = deg2rad_(5.0))
+    @test ls.cislunar.outcome == :perilune
+    @test isapprox(ls.cislunar.perilune_alt, 100e3; atol = 25e3)
+    @test 750.0 < ls.dv_loi < 1100.0               # LOI from a free return
+    @test 10.0 < ls.dv_doi < 40.0
+    @test ls.descent.outcome == :touchdown
+    @test ls.prop_margin > 0.0
+    @test ls.descent.hover_s > 30.0                # a real, not notional, margin
+    # the free return is still a free return: arriving without burning would
+    # have brought the stack home
+    @test ls.t_touchdown / 86400 < 6.0
+    # touchdown is on the sphere and the site is reported consistently
+    lat, lon = selenographic(ls.descent.r, ls.t_touchdown, ls.eph)
+    @test isapprox(lat, ls.lat_land; atol = 1e-9)
+    @test isapprox(lon, ls.lon_land; atol = 1e-9)
+    @test -pi <= ls.lon_land <= pi
+
+    # a launcher carrying something other than this lander is not flying this
+    # mission, and says so rather than quietly flying the wrong mass
+    @test_throws ErrorException moonlanding(lander = lnd,
+                                            lv = starship_expendable(payload = 9000.0))
+end
+
 @testset "numerics: order, invariants, step independence" begin
     # --- RK4 is actually 4th order --------------------------------------
     # A closed two-body orbit must return to where it started; the closure

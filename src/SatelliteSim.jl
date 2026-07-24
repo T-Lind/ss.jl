@@ -61,6 +61,7 @@ include("simulation.jl")
 include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
+include("landing.jl")
 include("maneuvers.jl")
 include("solve.jl")
 include("mesh.jl")
@@ -100,7 +101,7 @@ export
     Propellant, PROPELLANTS, propellant, bulk_density, propellant_volumes,
     Engine, ENGINES, engine, lookup_engine, stage_mass, sized_stage,
     # propulsion / launch vehicle
-    Stage, LaunchVehicle, BoosterSet, default_moon_rocket,
+    Stage, LaunchVehicle, BoosterSet, default_moon_rocket, starship_expendable,
     stage_thrust, stage_mdot, booster_mass, booster_thrust, booster_mdot,
     frontal_area, core_diameter, pad_thrust,
     stage_burn_time, stage_dv, liftoff_mass, stack_mass_above,
@@ -125,6 +126,12 @@ export
     design_tcm, fly_cislunar_tcm,
     # mission
     MoonshotResult, CruiseReport, moonshot, print_moonshot_summary,
+    translunar_design,
+    # lunar landing
+    Lander, default_lander, lander_mass, lander_dv, LandingResult, DescentResult,
+    DescentLog, LunarOrbitLog, moonlanding, print_landing_summary,
+    fly_to_perilune, loi_burn, doi_burn, powered_descent, tune_braking,
+    terminal_descent, mci_state, selenographic,
     # maneuvers
     lambert, hohmann, plane_change_dv, impulsive_prop, stumpff,
     cw_stm, cw_propagate, cw_two_impulse,

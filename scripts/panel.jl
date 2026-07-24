@@ -200,7 +200,9 @@ function lv_from_params(p)
                           ptype = d.ptype, nedef = d.ne)
     end
     LaunchVehicle(
-        name = "Sable (panel)",
+        # the page sends the name of whatever preset is loaded, so the livery
+        # and the launch view say what you are actually flying
+        name = gets(p, "vname", "Sable (panel)"),
         stages = stages,
         fairing_mass = getf(p, "fairing", 150.0),
         payload_mass = getf(p, "pod_mass", 350.0),
@@ -215,6 +217,22 @@ end
 "Should the ascent tuner also search for the best pitch-over kick?"
 opt_kick(p) = gets(p, "opt_kick", "0") in ("1", "true", "on")
 
+"Pitch-over kick angle [rad] — the one guidance number a big stack has to change."
+kick_rad(p) = deg2rad_(clamp(getf(p, "kick_deg", 8.0), 0.5, 30.0))
+
+"Which mission the panel is flying: the free-return flyby or a landing."
+mission_mode(p) = gets(p, "mode", "flyby") == "landing" ? :landing : :flyby
+
+"Build the lander from the panel's `l_*` fields."
+lander_from_params(p) = Lander(
+    name = :lander,
+    mdry = max(100.0, getf(p, "l_dry", 3500.0)),
+    mprop = max(10.0, getf(p, "l_prop", 9000.0)),
+    thrust = max(1.0e3, getf(p, "l_thrust_kn", 45.0) * 1e3),
+    isp = clamp(getf(p, "l_isp", 311.0), 100.0, 500.0),
+    throttle_min = clamp(getf(p, "l_throttle_min", 10.0) / 100, 0.02, 1.0),
+    diameter = max(0.5, getf(p, "l_diameter", 4.2)))
+
 "Decimate a vector to at most n points (keeping ends)."
 function deci(v, n)
     length(v) <= n && return collect(Float64, v)
@@ -224,25 +242,12 @@ end
 deci_idx(len, n) = len <= n ? collect(1:len) :
                    unique(round.(Int, range(1, len; length = n)))
 
-function panel_mission(p)::Dict{String,Any}
-    ms = moonshot(
-        pod_mass = getf(p, "pod_mass", 350.0),
-        h_park = getf(p, "h_park_km", 200.0) * 1e3,
-        hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3,
-        hp_return = getf(p, "hp_return_km", 35.0) * 1e3,
-        inclination = deg2rad_(getf(p, "incl_deg", 28.5)),
-        lv = lv_from_params(p),
-        tli_mag_err = getf(p, "tli_mag_err_pct", 0.0) / 100,
-        tli_point_err = deg2rad_(getf(p, "tli_point_err_deg", 0.0)),
-        optimize_kick = opt_kick(p),
-    )
-    asc, cis, ent = ms.ascent, ms.cislunar, ms.entry
-    el = asc.elements
-
-    # 3D scene payload: true ECI geometry in units of 1000 km. The client
-    # renders the inclined trajectory plane, the textured globe about the real
-    # pole (scene z = ECI z), and launch/splashdown markers fixed to the
-    # rotating surface — all in one consistent frame.
+"""
+Shared 3D-scene payload: the pad-to-wherever track in true ECI geometry,
+units of 1000 km, decimated for the wire. Both missions fly the same launch
+and trans-lunar legs, so both scenes are built from the same code.
+"""
+function scene_payload(asc, cis)
     L = cis.log
     k = max(2, length(L.t) ÷ 3)
     nrm = SatelliteSim.vunit(SatelliteSim.vcross((L.mx[1], L.my[1], L.mz[1]),
@@ -256,17 +261,168 @@ function panel_mission(p)::Dict{String,Any}
         push!(mx, L.mx[i] / 1e6); push!(my, L.my[i] / 1e6); push!(mz, L.mz[i] / 1e6)
         push!(tt, L.t[i]); push!(pp, L.phase[i])
     end
+    AL = asc.log
+    aidx = deci_idx(length(AL.t), 400)
+    cisd = Dict("t" => tt, "x" => px, "y" => py, "z" => pz,
+                "mx" => mx, "my" => my, "mz" => mz, "ph" => pp,
+                "n" => [nrm[1], nrm[2], nrm[3]])
+    asc3d = Dict("t" => [AL.t[i] for i in aidx],
+                 "x" => [AL.rx[i] / 1e6 for i in aidx],
+                 "y" => [AL.ry[i] / 1e6 for i in aidx],
+                 "z" => [AL.rz[i] / 1e6 for i in aidx])
+    ascent = Dict("t" => deci(AL.t[aidx], 400), "h" => deci(AL.h[aidx] ./ 1e3, 400),
+                  "v" => deci(AL.vrel[aidx], 400), "qbar" => deci(AL.qbar[aidx] ./ 1e3, 400),
+                  "gamma" => deci(AL.gamma[aidx], 400), "mach" => deci(AL.mach[aidx], 400),
+                  "thrust" => deci(AL.thrust[aidx], 400), "m" => deci(AL.m[aidx], 400),
+                  "dr" => deci(AL.downrange[aidx], 400))
+    (cis = cisd, asc3d = asc3d, ascent = ascent)
+end
+
+"Ascent events, named by the vehicle's own stages."
+ascent_events(asc) = Any[Dict("phase" => "ascent", "name" => string(e.name),
+                              "t" => e.t) for e in asc.events]
+
+"""
+Fly the lunar landing mission for the panel: the same launch and trans-lunar
+legs as the flyby, then insertion, the lunar-orbit coast and the powered
+descent. The lunar phase is returned in Moon-centred coordinates (km),
+because that is the only frame in which a 15 km descent is visible at all
+next to a 384,000 km transfer.
+"""
+function panel_landing(p)::Dict{String,Any}
+    lander = lander_from_params(p)
+    lv0 = lv_from_params(p)
+    # the launcher carries the lander, whatever the pod-mass field says
+    lv = LaunchVehicle(name = lv0.name, stages = lv0.stages,
+                       fairing_mass = lv0.fairing_mass,
+                       payload_mass = lander_mass(lander),
+                       sref = lv0.sref, cd = lv0.cd, boosters = lv0.boosters)
+    ls = moonlanding(
+        lander = lander, lv = lv,
+        h_park = getf(p, "h_park_km", 200.0) * 1e3,
+        h_moon_park = getf(p, "h_moon_park_km", 100.0) * 1e3,
+        h_pdi = getf(p, "h_pdi_km", 15.0) * 1e3,
+        n_rev = clamp(round(Int, getf(p, "n_rev", 1.0)), 0, 12),
+        inclination = deg2rad_(getf(p, "incl_deg", 28.5)),
+        hp_return = getf(p, "hp_return_km", 50.0) * 1e3,
+        kick_angle = kick_rad(p),
+        optimize_kick = opt_kick(p),
+    )
+    asc, cis, d = ls.ascent, ls.cislunar, ls.descent
+    el = asc.elements
+    sc = scene_payload(asc, cis)
+
+    # Moon-centred tracks, in km: the parking orbit, the descent ellipse and
+    # the powered descent itself
+    O = ls.orbit
+    oidx = deci_idx(length(O.t), 900)
+    D = d.log
+    didx = deci_idx(length(D.t), 700)
+
+    events = ascent_events(asc)
+    push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
+    push!(events, Dict("phase" => "cislunar", "name" => "tli_cutoff",
+                       "t" => cis.t_tli + cis.burn_duration))
+    push!(events, Dict("phase" => "lunar", "name" => "loi", "t" => ls.t_loi))
+    push!(events, Dict("phase" => "lunar", "name" => "doi", "t" => ls.t_doi))
+    push!(events, Dict("phase" => "lunar", "name" => "pdi", "t" => ls.t_pdi))
+    push!(events, Dict("phase" => "lunar", "name" => "high_gate",
+                       "t" => ls.t_pdi + d.t_gate))
+    push!(events, Dict("phase" => "lunar", "name" => string(d.outcome),
+                       "t" => ls.t_touchdown))
+
+    prop_margin = cis.m - (ls.lv.stages[end].mdry + ls.lv.payload_mass)
+    Dict{String,Any}(
+        "ok" => true, "mode" => "landing",
+        "metrics" => Dict(
+            "on_target" => d.outcome === :touchdown,
+            "outcome" => string(d.outcome),
+            "liftoff_t" => liftoff_mass(ls.lv) / 1e3,
+            "park_perigee_km" => (el.rp - RE_MEAN) / 1e3,
+            "park_apogee_km" => (el.ra - RE_MEAN) / 1e3,
+            "incl_deg" => rad2deg_(el.i),
+            "tli_dv" => cis.dv_tli,
+            "tli_burn_s" => cis.burn_duration,
+            "prop_margin_kg" => prop_margin,
+            "lander_wet_t" => lander_mass(lander) / 1e3,
+            "lander_dv" => lander_dv(lander),
+            "perilune_km" => cis.perilune_alt / 1e3,
+            "t_perilune_d" => cis.t_perilune / 86400,
+            "loi_dv" => ls.dv_loi,
+            "doi_dv" => ls.dv_doi,
+            "braking_dv" => d.dv_braking,
+            "terminal_dv" => d.dv_terminal,
+            "descent_dv" => d.dv_braking + d.dv_terminal,
+            "descent_s" => d.t_touchdown,
+            "gate_s" => d.t_gate,
+            "downrange_km" => d.downrange / 1e3,
+            "touchdown_v" => d.v_vertical,
+            "touchdown_vh" => d.v_horizontal,
+            "min_throttle_pct" => 100 * d.min_throttle,
+            "prop_left_kg" => d.prop_left,
+            "hover_s" => d.hover_s,
+            "land_lat" => rad2deg_(ls.lat_land),
+            "land_lon" => rad2deg_(ls.lon_land),
+            "t_pdi_d" => ls.t_pdi / 86400,
+            "t_days" => ls.t_touchdown / 86400,
+        ),
+        "cis" => sc.cis, "asc3d" => sc.asc3d, "ascent" => sc.ascent,
+        # no entry leg on a landing mission; the client draws whatever is here
+        "ent3d" => Dict("t" => Float64[], "x" => Float64[], "y" => Float64[],
+                        "z" => Float64[]),
+        "sites" => Dict("launch_lat" => rad2deg_(ls.guid.site_lat),
+                        "launch_lon" => rad2deg_(ls.guid.site_lon)),
+        "moon" => Dict(
+            "r_km" => R_MOON / 1e3,
+            "orbit" => Dict("t" => [O.t[i] for i in oidx],
+                            "x" => [O.x[i] / 1e3 for i in oidx],
+                            "y" => [O.y[i] / 1e3 for i in oidx],
+                            "z" => [O.z[i] / 1e3 for i in oidx],
+                            "ph" => [O.phase[i] for i in oidx]),
+            "descent" => Dict("x" => [D.x[i] / 1e3 for i in didx],
+                              "y" => [D.y[i] / 1e3 for i in didx],
+                              "z" => [D.z[i] / 1e3 for i in didx])),
+        "descent" => Dict(
+            "t" => [D.t[i] for i in didx],
+            "h" => [D.h[i] / 1e3 for i in didx],
+            "dr" => [D.downrange[i] / 1e3 for i in didx],
+            "v" => [D.v[i] for i in didx],
+            "vh" => [D.vh[i] for i in didx],
+            "vv" => [D.vv[i] for i in didx],
+            "thr" => [100 * D.throttle[i] for i in didx],
+            "pitch" => [rad2deg_(D.pitch[i]) for i in didx],
+            "m" => [D.m[i] for i in didx]),
+        "events" => events,
+    )
+end
+
+function panel_mission(p)::Dict{String,Any}
+    mission_mode(p) === :landing && return panel_landing(p)
+    ms = moonshot(
+        pod_mass = getf(p, "pod_mass", 350.0),
+        h_park = getf(p, "h_park_km", 200.0) * 1e3,
+        hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3,
+        hp_return = getf(p, "hp_return_km", 50.0) * 1e3,
+        inclination = deg2rad_(getf(p, "incl_deg", 28.5)),
+        lv = lv_from_params(p),
+        tli_mag_err = getf(p, "tli_mag_err_pct", 0.0) / 100,
+        tli_point_err = deg2rad_(getf(p, "tli_point_err_deg", 0.0)),
+        kick_angle = kick_rad(p),
+        optimize_kick = opt_kick(p),
+    )
+    asc, cis, ent = ms.ascent, ms.cislunar, ms.entry
+    el = asc.elements
+
+    # 3D scene payload: true ECI geometry in units of 1000 km. The client
+    # renders the inclined trajectory plane, the textured globe about the real
+    # pole (scene z = ECI z), and launch/splashdown markers fixed to the
+    # rotating surface — all in one consistent frame.
+    sc = scene_payload(asc, cis)
 
     EL = ent.log
     eidx = deci_idx(length(EL.t), 500)
-    AL = asc.log
-    aidx = deci_idx(length(AL.t), 400)
 
-    # ascent track is already ECI; the entry log is geodetic — rebuild ECI
-    ax3 = [AL.rx[i] / 1e6 for i in aidx]
-    ay3 = [AL.ry[i] / 1e6 for i in aidx]
-    az3 = [AL.rz[i] / 1e6 for i in aidx]
-    at3 = [AL.t[i] for i in aidx]
+    # the entry log is geodetic — rebuild ECI so it joins the same scene
     ex3 = Float64[]; ey3 = Float64[]; ez3 = Float64[]; et3 = Float64[]
     for i in eidx
         re_ = ecef_from_geodetic(EL.lat[i], EL.lon[i], EL.h[i])
@@ -282,14 +438,11 @@ function panel_mission(p)::Dict{String,Any}
     # did the free-return design actually hit its targets? (a prop-starved
     # TLI still "flies", but the result is not the requested mission)
     hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3
-    hp_ret = getf(p, "hp_return_km", 35.0) * 1e3
+    hp_ret = getf(p, "hp_return_km", 50.0) * 1e3
     on_target = abs(cis.perilune_alt - hp_moon) <= max(0.05 * hp_moon, 50e3) &&
                 abs(cis.vac_perigee_alt - hp_ret) <= 20e3
 
-    events = Any[]
-    for e in asc.events
-        push!(events, Dict("phase" => "ascent", "name" => string(e.name), "t" => e.t))
-    end
+    events = ascent_events(asc)
     push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
     push!(events, Dict("phase" => "cislunar", "name" => "tli_cutoff",
                        "t" => cis.t_tli + cis.burn_duration))
@@ -300,7 +453,7 @@ function panel_mission(p)::Dict{String,Any}
     end
 
     Dict{String,Any}(
-        "ok" => true,
+        "ok" => true, "mode" => "flyby",
         "metrics" => Dict(
             "on_target" => on_target,
             "tcm_dv" => ms.cruise === nothing ? nothing : ms.cruise.tcm_dv,
@@ -325,10 +478,8 @@ function panel_mission(p)::Dict{String,Any}
             "v_splash" => ent.v_splash,
             "t_days" => ent.t_splash / 86400,
         ),
-        "cis" => Dict("t" => tt, "x" => px, "y" => py, "z" => pz,
-                      "mx" => mx, "my" => my, "mz" => mz, "ph" => pp,
-                      "n" => [nrm[1], nrm[2], nrm[3]]),
-        "asc3d" => Dict("t" => at3, "x" => ax3, "y" => ay3, "z" => az3),
+        "cis" => sc.cis,
+        "asc3d" => sc.asc3d,
         "ent3d" => Dict("t" => et3, "x" => ex3, "y" => ey3, "z" => ez3),
         "sites" => Dict(
             "launch_lat" => rad2deg_(ms.guid.site_lat),
@@ -336,11 +487,7 @@ function panel_mission(p)::Dict{String,Any}
             "splash_lat" => rad2deg_(ent.lat_splash),
             "splash_lon" => rad2deg_(ent.lon_splash),
         ),
-        "ascent" => Dict("t" => deci(AL.t[aidx], 400), "h" => deci(AL.h[aidx] ./ 1e3, 400),
-                         "v" => deci(AL.vrel[aidx], 400), "qbar" => deci(AL.qbar[aidx] ./ 1e3, 400),
-                         "gamma" => deci(AL.gamma[aidx], 400), "mach" => deci(AL.mach[aidx], 400),
-                         "thrust" => deci(AL.thrust[aidx], 400), "m" => deci(AL.m[aidx], 400),
-                         "dr" => deci(AL.downrange[aidx], 400)),
+        "ascent" => sc.ascent,
         "entry" => Dict("t" => deci(EL.t[eidx] .- EL.t[1], 500), "h" => deci(EL.h[eidx] ./ 1e3, 500),
                         "v" => deci(EL.vrel[eidx], 500), "g" => deci(EL.gload[eidx], 500),
                         "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500)),
@@ -356,6 +503,14 @@ const SOLVE_METRICS = ["prop_margin_kg", "perilune_km", "vac_perigee_km",
                        "peak_g", "peak_q_wcm2", "t_days", "liftoff_t",
                        "park_apogee_km", "v_splash", "tli_dv", "heat_mj"]
 
+"Metrics a landing mission can be solved against."
+const LANDING_METRICS = ["prop_left_kg", "hover_s", "descent_dv", "loi_dv",
+                         "touchdown_v", "downrange_km", "prop_margin_kg",
+                         "min_throttle_pct", "liftoff_t", "tli_dv", "t_days"]
+
+"The metric list for whichever mission the panel is configured for."
+solve_metrics(p) = mission_mode(p) === :landing ? LANDING_METRICS : SOLVE_METRICS
+
 """
 Lock every field but one and solve it so a mission metric hits a target —
 "the heaviest pod that still leaves propellant in the kick stage" is
@@ -370,7 +525,7 @@ function run_solve(p)::Dict{String,Any}
     metric = get(p, "solve_metric", "prop_margin_kg")
     param in sweepable(p) || return Dict{String,Any}("ok" => false,
         "error" => "cannot solve for: $param")
-    metric in SOLVE_METRICS || return Dict{String,Any}("ok" => false,
+    metric in solve_metrics(p) || return Dict{String,Any}("ok" => false,
         "error" => "cannot target metric: $metric")
     lo = getf(p, "solve_min", 200.0)
     hi = getf(p, "solve_max", 600.0)
@@ -472,7 +627,10 @@ end
 "Numeric parameters that may be swept or solved for, for this stack height."
 sweepable(p) = vcat(
     ["pod_mass", "h_park_km", "hp_moon_km", "hp_return_km", "incl_deg",
-     "diameter", "fairing"],
+     "diameter", "fairing", "kick_deg"],
+    mission_mode(p) === :landing ?
+        ["l_dry", "l_prop", "l_thrust_kn", "l_isp", "l_throttle_min",
+         "h_moon_park_km", "h_pdi_km", "n_rev"] : String[],
     ["s$(k)_$f" for k in 1:n_stages(p)
                 for f in ("prop", "dry", "isp", "thrust_kn", "engines")],
     n_boosters(p) == 0 ? String[] :
@@ -577,6 +735,7 @@ function handle(sock)
                                    "propellant" => string(v.prop.name))
                               for (k, v) in sort(collect(ENGINES), by = first)],
                 "solve_metrics" => SOLVE_METRICS,
+                "landing_metrics" => LANDING_METRICS,
                 "max_stages" => 5)
             respond(sock, "200 OK", "application/json", json(out))
         else

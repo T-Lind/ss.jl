@@ -1,0 +1,12 @@
+== Lunar landing summary ==
+  Liftoff mass    : 4866.9 t   (Starship (expendable), 2 stages)
+  Lander          : 12.5 t wet / 3.5 t dry, 45 kN, Isp 311 s, 3882 m/s ideal
+  Parking orbit   : 200.6 x 205.6 km  i=28.47°
+  TLI             : dv=3159.2 m/s at t=0.90 h
+  Perilune / LOI  : 99.9 km at t=2.90 d, dv=924.8 m/s
+  Lunar orbit     : 100 km circular, 1 rev, DOI dv=19.4 m/s to 15.0 km
+  Powered descent : 351.3 s, dv 1573 m/s braking + 286 m/s terminal, 247 km downrange
+  Braking program : pitch -6.5° + 0.0995 °/s, min throttle 21%
+  TOUCHDOWN       : 1.21 m/s down, 0.57 m/s lateral at 0.00°N, 9.71°W (near side)
+  Propellant      : 4186 kg used, 1486 kg left (559 s of hover)
+  Mission elapsed : 3.02 days pad to surface

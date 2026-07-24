@@ -58,3 +58,9 @@ jobs:
             echo "::error::committed outputs differ from a fresh run — rerun scripts/run_moonshot.jl and scripts/make_meshes.jl, then commit"
             exit 1
           }
+      # the landing chain is exercised as a smoke test, not diffed: the search
+      # layers under it (the braking shooter especially) are stable in what
+      # they land on and not in the last bit of it. This runs last because it
+      # rewrites output/landing_*.csv.
+      - name: fly the lunar landing
+        run: julia --project=. scripts/run_landing.jl

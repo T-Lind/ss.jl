@@ -1,0 +1,15 @@
+phase,event,t_s
+ascent,liftoff,0.00
+ascent,pitchover,7.80
+ascent,gravity_turn,21.80
+ascent,sep_superheavy,152.44
+ascent,ignition_ship,156.54
+ascent,fairing_jettison,205.64
+ascent,seco,391.74
+cislunar,tli_ignition,3246.62
+cislunar,tli_cutoff,3294.43
+lunar,loi,250172.78
+lunar,doi,257238.28
+lunar,pdi,260649.29
+lunar,high_gate,260899.73
+lunar,touchdown,261000.55
