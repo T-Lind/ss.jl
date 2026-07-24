@@ -111,6 +111,7 @@ export
     moon_distance, moon_altitude,
     # launch
     AscentGuidance, AscentResult, simulate_ascent, tune_ascent, launch_azimuth,
+    launch_window, next_launch_window, site_geocentric_lat,
     # rigid body / attitude
     Quat, qmul, qconj, qnormalize, qrotate, qrotate_inv, quat_axis_angle,
     quat_from_to, qdot, euler_wdot, rot_energy, ang_momentum,

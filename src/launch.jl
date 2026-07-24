@@ -39,6 +39,86 @@ end
 launch_azimuth(inc::Float64, lat::Float64) =
     asin(clamp(cos(inc) / cos(lat), -1.0, 1.0))
 
+# ------------------------------------------------------------ launch window --
+# `tune_ascent` closes the pitch program on (insertion altitude, gamma = 0),
+# which pins the orbit's SIZE and SHAPE but says nothing about where its plane
+# sits in inertial space. The plane is set by when you launch: the site is
+# carried around by the Earth, and the vehicle inherits wherever it happens to
+# be. That is fine for a single flight designed in isolation — every mission in
+# this repo so far has simply accepted whatever RAAN it got — but the moment a
+# second vehicle has to reach the first one, the launch epoch stops being free.
+#
+# So the free variable for plane targeting is TIME, not pitch, and it is
+# closed-form rather than another shooting problem.
+
+"Geocentric latitude [rad] of a site, via the same WGS-84 point the ascent starts from."
+function site_geocentric_lat(lat::Float64, lon::Float64)
+    r = ecef_from_geodetic(lat, lon, 0.0)
+    atan(r[3], hypot(r[1], r[2]))
+end
+
+"""
+    launch_window(guid, inc, raan; theta_g0=0.0, after=0.0) -> Vector{NamedTuple}
+
+Epochs at or after `after` [s] when the site of `guid` rotates into the orbit
+plane `(inc, raan)`, so a direct ascent inserts into that plane.
+
+A direct launch has the vehicle in the target plane from liftoff, so the site's
+inertial position must lie in it — `u_site · ĥ = 0`. With this codebase's
+element convention that reduces to
+
+    sin(raan − α) = −tan(φ) · cot(inc),   α = lon + θ_g0 + ω⊕·t
+
+for the site's geocentric latitude φ. Two roots per sidereal day, returned in
+time order as `(t, node, azimuth)` with `node ∈ (:ascending, :descending)`;
+the descending pass enters the same plane heading south, so it flies the
+supplementary azimuth. **No** roots when `|tan φ · cot inc| > 1`, which is the
+familiar "a site cannot reach an inclination below its own latitude" — here it
+is the arcsine running out of domain rather than a rule bolted on.
+
+The two latitudes in play are deliberately different. The epoch uses the
+geocentric latitude, because the condition is about where the site's position
+vector actually points and geodetic would misplace it by up to 0.19° (~21 km).
+The azimuth uses the geodetic latitude, because that is what `launch_azimuth`
+and the guidance already fly — one imperfect convention beats two disagreeing
+ones, and neither corrects for the rotating launch site, which is the larger
+error and shows up as the achieved-vs-target plane residual.
+"""
+function launch_window(guid::AscentGuidance, inc::Float64, raan::Float64;
+                       theta_g0::Float64 = 0.0, after::Float64 = 0.0)
+    out = NamedTuple[]
+    abs(sin(inc)) < 1e-12 && return out          # equatorial: no node defined
+    phi = site_geocentric_lat(guid.site_lat, guid.site_lon)
+    k = -tan(phi) / tan(inc)
+    abs(k) > 1.0 && return out                   # plane never passes overhead
+    base = asin(k)
+    sidereal = 2pi / OMEGA_EARTH
+    az0 = launch_azimuth(inc, guid.site_lat)
+    for (node, dO) in ((:ascending, base), (:descending, pi - base))
+        alpha = raan - dO
+        t = (alpha - guid.site_lon - theta_g0) / OMEGA_EARTH
+        t = after + mod(t - after, sidereal)
+        push!(out, (t = t, node = node,
+                    azimuth = node === :ascending ? az0 : pi - az0))
+    end
+    sort!(out, by = w -> w.t)
+    out
+end
+
+"""
+    next_launch_window(guid, inc, raan; node=:ascending, theta_g0=0.0, after=0.0)
+
+The next `launch_window` opportunity of the requested `node`, or `nothing` if
+the plane is unreachable from the site.
+"""
+function next_launch_window(guid::AscentGuidance, inc::Float64, raan::Float64;
+                            node::Symbol = :ascending, theta_g0::Float64 = 0.0,
+                            after::Float64 = 0.0)
+    ws = launch_window(guid, inc, raan; theta_g0 = theta_g0, after = after)
+    i = findfirst(w -> w.node === node, ws)
+    i === nothing ? nothing : ws[i]
+end
+
 mutable struct AscentCtx
     stage::Int                # index of the currently-burning stage (0 = none)
     phase::Symbol             # :prelaunch | :vertical | :kick | :gravity_turn | :closed_loop | :coast
