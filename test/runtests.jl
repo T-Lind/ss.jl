@@ -171,6 +171,126 @@ end
     @test isapprox(sep1.t, stage_burn_time(lv.stages[1]); atol = 0.05)
 end
 
+@testset "launch window" begin
+    guid = AscentGuidance()
+    OM = OMEGA_EARTH
+    sidereal = 2pi / OM
+    # the plane's unit normal, in the same convention elements_from_state uses
+    hhat(i, O) = (sin(i) * sin(O), -sin(i) * cos(O), cos(i))
+    site(t, tg) = begin
+        r = ecef_from_geodetic(guid.site_lat, guid.site_lon, 0.0)
+        SatelliteSim.vunit(SatelliteSim.rot_z(r, -(tg + OM * t)))
+    end
+
+    # 1. a solved epoch really does put the site in the plane
+    for i in deg2rad_.((28.5, 40.0, 51.6, 90.0)),
+        O in deg2rad_.((0.0, 73.0, 199.0, 300.0))
+
+        ws = launch_window(guid, i, O)
+        @test length(ws) == 2
+        for w in ws
+            @test abs(SatelliteSim.vdot(site(w.t, 0.0), hhat(i, O))) < 1e-9
+        end
+    end
+
+    # 2. the site latitude is a hard floor on inclination — and it falls out
+    #    of the arcsine losing its domain, not from a bolted-on rule
+    @test isempty(launch_window(guid, deg2rad_(20.0), 0.0))
+    @test length(launch_window(guid, deg2rad_(28.5), 0.0)) == 2
+
+    # 3. one opportunity per node per SIDEREAL day (not solar)
+    asc_t(after) = begin
+        ws = launch_window(guid, deg2rad_(51.6), deg2rad_(120.0); after = after)
+        ws[findfirst(w -> w.node === :ascending, ws)].t
+    end
+    t0 = asc_t(0.0)
+    @test isapprox(asc_t(t0 + 1.0) - t0, sidereal; atol = 1e-6)
+    # the two nodes are genuinely different times of day
+    ws = launch_window(guid, deg2rad_(51.6), deg2rad_(120.0))
+    @test abs(ws[1].t - ws[2].t) > 60.0
+    @test ws[1].node !== ws[2].node
+
+    # 4. shifting the target RAAN just waits for the Earth to catch up
+    a = next_launch_window(guid, deg2rad_(51.6), deg2rad_(100.0)).t
+    b = next_launch_window(guid, deg2rad_(51.6), deg2rad_(110.0)).t
+    @test isapprox(mod(b - a, sidereal), deg2rad_(10.0) / OM; atol = 1e-6)
+
+    # 5. theta_g0 shifts every window by exactly its own rotation
+    c = next_launch_window(guid, deg2rad_(51.6), deg2rad_(100.0);
+                           theta_g0 = 0.7).t
+    @test isapprox(mod(a - c, sidereal), 0.7 / OM; atol = 1e-6)
+
+    # 6. the descending pass flies the supplementary azimuth
+    for i in deg2rad_.((40.0, 51.6))
+        w = launch_window(guid, i, 0.0)
+        ia = findfirst(x -> x.node === :ascending, w)
+        id = findfirst(x -> x.node === :descending, w)
+        @test isapprox(w[ia].azimuth, launch_azimuth(i, guid.site_lat); atol = 1e-12)
+        @test isapprox(w[id].azimuth, pi - w[ia].azimuth; atol = 1e-12)
+    end
+
+    # 7. geocentric latitude sits inside geodetic, by the WGS-84 flattening
+    @test site_geocentric_lat(guid.site_lat, guid.site_lon) < guid.site_lat
+    # 0.161 deg at the Cape; the ~0.19 deg maximum is up at 45 deg
+    @test isapprox(rad2deg_(guid.site_lat -
+                            site_geocentric_lat(guid.site_lat, guid.site_lon)),
+                   0.161; atol = 0.005)
+    @test isapprox(rad2deg_(deg2rad_(45.0) - site_geocentric_lat(deg2rad_(45.0), 0.0)),
+                   0.192; atol = 0.005)
+    # and vanishes on the equator and at the poles, where the ellipsoid normal
+    # passes through the centre
+    @test isapprox(site_geocentric_lat(0.0, 0.0), 0.0; atol = 1e-15)
+    @test isapprox(site_geocentric_lat(pi / 2, 0.0), pi / 2; atol = 1e-9)
+end
+
+@testset "launch window flown end to end" begin
+    # A closed form is only worth having if the vehicle it steers arrives where
+    # it promised, so this flies the REAL ascent at a solved epoch and reads
+    # back the achieved plane.
+    #
+    # Two separate things decide that plane, and the window owns only one of
+    # them. The epoch fixes the RAAN; the azimuth fixes the inclination — and
+    # `launch_azimuth` is the classic non-rotating formula, so the inclination
+    # it actually delivers is not the one asked for. That error is nearly free
+    # at the reference mission's almost-due-east azimuth (28.40 deg for a 28.5
+    # deg target) and expensive away from it: commanding 44.98 deg for a 51.6
+    # deg orbit gets 46.8 deg, because at that heading the site's own 408 m/s
+    # of eastward motion is across the flight path rather than along it.
+    #
+    # So the window is solved for the inclination the vehicle WILL achieve, not
+    # the one nominally requested — one extra flight to measure it, since the
+    # achieved inclination depends on the azimuth and not on the epoch. That is
+    # the same design-then-correct shape as the free-return corrector, and it
+    # tests the epoch solver rather than the azimuth approximation underneath.
+    lv = default_moon_rocket()
+    inc_cmd = deg2rad_(51.6)
+    guid0 = AscentGuidance(azimuth = launch_azimuth(inc_cmd, deg2rad_(28.5)))
+
+    probe_guid, probe = tune_ascent(lv, guid0)
+    @test probe.reached_orbit
+    inc_ach = probe.elements.i
+    # the approximation is real and worth pinning: several degrees, one way
+    @test rad2deg_(inc_cmd - inc_ach) > 3.0
+
+    for raan_deg in (40.0, 215.0)
+        raan = deg2rad_(raan_deg)
+        w = next_launch_window(guid0, inc_ach, raan)
+        @test w !== nothing
+        # theta_g0 IS the launch epoch: rotating the Earth to where it will be
+        # at time w.t and lifting off at t = 0 is the same flight
+        _, asc = tune_ascent(lv, guid0; theta_g0 = OMEGA_EARTH * w.t)
+        @test asc.reached_orbit
+        el = asc.elements
+        # inclination is epoch-independent, so the probe's value still holds
+        @test isapprox(rad2deg_(el.i), rad2deg_(inc_ach); atol = 0.05)
+        # ...and the RAAN is now the window's to answer for. What is left is
+        # the ~8 min of ascent during which the site keeps turning under a
+        # plane that was matched at liftoff.
+        dO = rad2deg_(mod(el.raan - raan + pi, 2pi) - pi)
+        @test abs(dO) < 2.0
+    end
+end
+
 @testset "strap-on boosters" begin
     base = default_moon_rocket()
     strap = Stage(:strap, 900.0, 12000.0, 380.0e3, 285.0, 0.32,

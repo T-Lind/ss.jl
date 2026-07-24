@@ -174,6 +174,58 @@ C_D is directly comparable, alongside the R² that says how much of each
 outcome the dispersions explain at all — and a noise floor drawn at 2/√n,
 because with a few dozen samples most of the small coefficients are nothing.
 
+**Launch windows and the mission epoch** (`launch.jl`, `mission.jl`):
+`tune_ascent` closes the pitch program on (insertion altitude, γ = 0), which
+pins the orbit's size and shape but says nothing about where its *plane* sits
+in inertial space. The plane is decided by when you launch — the site is
+carried around by the Earth and the vehicle inherits wherever it happens to
+be. Every mission here used to simply accept whatever RAAN it got, because
+`moonshot` never passed a launch epoch and so every flight implicitly lifted
+off at Greenwich hour angle 0. That is fine for one flight designed alone, and
+untenable the moment a second vehicle has to reach the first.
+
+`moonshot` now takes `theta_g0`, threaded through the ascent, the cislunar
+coast and the entry scenario alike (every simulator already accepted it), so a
+flight lands in a *definite* inertial plane and two flights can share one
+clock. `launch_window(guid, inc, raan)` supplies the epoch. A direct ascent is
+in the target plane from liftoff, so the site's inertial position must lie in
+it — `u·ĥ = 0` — which reduces to
+
+```
+sin(raan − α) = −tan(φ)·cot(inc),    α = lon + θ_g0 + ω⊕·t
+```
+
+for the site's geocentric latitude φ: two opportunities per sidereal day, the
+ascending and descending node passes, the second flying the supplementary
+(southerly) azimuth. When `|tan φ · cot inc| > 1` there are none, which is the
+familiar rule that a site cannot reach an inclination below its own latitude —
+here it is the arcsine running out of domain rather than a check bolted on.
+
+The two latitudes in that paragraph are deliberately different. The epoch uses
+the **geocentric** latitude, because the condition is about where the site's
+position vector actually points and geodetic would misplace it — by 0.161° at
+the Cape, and by up to 0.192° near 45°, which is ~21 km of position. The
+azimuth uses the **geodetic** latitude, because that is what `launch_azimuth`
+and the guidance already fly, and one imperfect convention beats two that
+disagree.
+
+Which leaves the honest limit. The epoch fixes the RAAN; the *azimuth* fixes
+the inclination, and `launch_azimuth` is the classic non-rotating formula, so
+the inclination it delivers is not the one asked for. That is nearly free at
+the reference mission's almost-due-east heading — 28.40° achieved for a 28.5°
+target — and expensive away from it: commanding 44.98° for a 51.6° orbit gets
+**46.8°**, because at that heading the site's own 408 m/s of eastward motion
+lies across the flight path rather than along it. Correcting it would move
+every committed number in this repo, so it is measured and left alone.
+
+The window is therefore solved for the inclination the vehicle *will* achieve,
+which costs one extra flight to measure (the achieved inclination depends on
+the azimuth, not on the epoch) and is the same design-then-correct shape as the
+free-return corrector. Done that way the suite solves a window, flies the real
+ascent at that epoch, and closes the **achieved** RAAN to under 2° on both the
+ascending and descending opportunities — the remainder being the eight minutes
+of ascent during which the site keeps turning under a plane matched at liftoff.
+
 **Maneuver planning** (`maneuvers.jl`): the two-body transfer toolbox — a
 universal-variables Lambert solver (validated against analytic ellipse
 states to 1e-5), Hohmann transfers, plane changes, impulsive propellant
