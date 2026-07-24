@@ -88,25 +88,132 @@ json(x) = sprint(json, x)
 
 # ------------------------------------------------------------ mission api --
 
+"Panel string parameter with a default."
+gets(p, k, def) = (v = get(p, k, ""); isempty(strip(String(v))) ? def : strip(String(v)))
+
+"""
+Build one stage from the panel's `s<k>_*` fields.
+
+Naming an engine from the catalogue derives thrust, Isp, exit area and
+propellant from it (times the engine count), and estimates dry mass unless
+one is given. Leaving the engine on "manual" keeps the explicit numbers and
+only takes the propellant, which still sets the tank's physical size.
+"""
+function stage_from_params(p, pre::String, name::Symbol, dia::Float64;
+                           dry, prop, thrust_kn, isp, ae, ptype = "kerolox",
+                           nedef = 1)
+    ne = clamp(round(Int, getf(p, pre * "engines", Float64(nedef))), 1, 33)
+    eng = gets(p, pre * "engine", "manual")
+    dst = max(0.3, getf(p, pre * "diameter", dia))     # this stage's own width
+    mdry_in = getf(p, pre * "dry", dry)
+    # the propellant has to be resolved first: sizing a stage by its length
+    # needs the bulk density to say how much that volume actually holds
+    pr = eng != "manual" ? lookup_engine(Symbol(eng)).prop :
+                           propellant(Symbol(gets(p, pre * "propellant", ptype)))
+    mprop = if gets(p, pre * "size_by", "prop") == "length"
+        # invert the barrel-length rule: a wider stage of the same length
+        # holds proportionally more
+        L = max(getf(p, pre * "len", 10.0), 0.95 * dst)
+        max(1.0, (L - 0.9dst) * bulk_density(pr) * pi * (dst/2)^2 / 1.15)
+    else
+        getf(p, pre * "prop", prop)
+    end
+    if eng != "manual"
+        auto = gets(p, pre * "dry_auto", "0") in ("1", "true", "on")
+        return sized_stage(name; engine = Symbol(eng), n_engines = ne,
+                           prop_mass = mprop, diameter = dst,
+                           dry_mass = auto ? nothing : mdry_in)
+    end
+    Stage(name, mdry_in, mprop, getf(p, pre * "thrust_kn", thrust_kn) * 1e3,
+          getf(p, pre * "isp", isp), ae, pr, ne, dst)
+end
+
+"Barrel length a stage needs for its propellant load [m]."
+stage_length(st::Stage, vehicle_d::Float64) =
+    (d = stage_diameter(st, vehicle_d);
+     stage_volume(st) / (pi * (d/2)^2) * 1.15 + 0.9d)
+
+"""
+Per-role stage defaults. Stage 1 is the booster, the last stage is the kick
+stage that performs TLI, and anything between them is an upper stage — so
+the form still has sensible starting numbers whatever the stack height.
+"""
+const STAGE_ROLE = Dict(
+    :booster => (dry = 3800.0, prop = 42000.0, thrust = 950.0, isp = 305.0,
+                 ae = 0.80, ptype = "kerolox", ne = 5),
+    :upper   => (dry =  900.0, prop =  9500.0, thrust =  95.0, isp = 345.0,
+                 ae = 0.0,  ptype = "kerolox", ne = 1),
+    :kick    => (dry =  140.0, prop =   950.0, thrust =  15.0, isp = 315.0,
+                 ae = 0.0,  ptype = "hypergolic", ne = 1),
+)
+stage_role(k, nst) = k == 1 ? :booster : k == nst ? :kick : :upper
+
+"""
+Default scale for an inserted upper stage. Stage 2 keeps the reference
+figures; each stage above it starts a quarter the size, so raising the
+stack height does not silently make the vehicle too heavy to fly.
+"""
+stage_scale(k, nst) = stage_role(k, nst) === :upper ? 0.25^(k - 2) : 1.0
+
+"Number of stages the panel is configured for (2-5)."
+n_stages(p) = clamp(round(Int, getf(p, "nstages", 3.0)), 2, 5)
+
+"Number of strap-on boosters (0 = none, i.e. a plain serial stack)."
+n_boosters(p) = clamp(round(Int, getf(p, "nboost", 0.0)), 0, 8)
+
+"""
+Default strap-on: a kerolox booster roughly a third of the reference first
+stage, sized so a pair meaningfully changes the vehicle without swamping it.
+"""
+const BOOSTER_ROLE = (dry = 900.0, prop = 12000.0, thrust = 380.0, isp = 285.0,
+                      ae = 0.32, ptype = "kerolox", ne = 2)
+
+"""
+Build the strap-on booster sets from the panel's `b_*` fields. `nboost` is
+the number of boosters in the (single) set; zero means a plain serial stack
+and returns nothing at all, so a vehicle without strap-ons is exactly the
+vehicle it was before they existed.
+"""
+function boosters_from_params(p, dia::Float64)
+    nb = n_boosters(p)
+    nb == 0 && return BoosterSet[]
+    d = BOOSTER_ROLE
+    st = stage_from_params(p, "b_", :strap, dia * 0.85; dry = d.dry, prop = d.prop,
+                           thrust_kn = d.thrust, isp = d.isp, ae = d.ae,
+                           ptype = d.ptype, nedef = d.ne)
+    [BoosterSet(stage = st, count = nb,
+                ignition_delay = max(0.0, getf(p, "b_ign_delay", 0.0)),
+                sep_delay = max(0.0, getf(p, "b_sep_delay", 0.0)),
+                core_throttle = clamp(getf(p, "b_throttle", 100.0) / 100, 0.2, 1.0))]
+end
+
 "Build a LaunchVehicle from panel parameters."
 function lv_from_params(p)
-    payload = getf(p, "pod_mass", 350.0)
+    dia = getf(p, "diameter", 1.8)
+    nst = n_stages(p)
+    stages = map(1:nst) do k
+        d = STAGE_ROLE[stage_role(k, nst)]
+        f = stage_scale(k, nst)
+        nm = k == nst ? :sablek : Symbol(:sable, k)
+        stage_from_params(p, "s$(k)_", nm, dia; dry = d.dry * f, prop = d.prop * f,
+                          thrust_kn = d.thrust * f, isp = d.isp, ae = d.ae * f,
+                          ptype = d.ptype, nedef = d.ne)
+    end
     LaunchVehicle(
         name = "Sable (panel)",
-        stages = [
-            Stage(:sable1, getf(p, "s1_dry", 3800.0), getf(p, "s1_prop", 42000.0),
-                  getf(p, "s1_thrust_kn", 950.0) * 1e3, getf(p, "s1_isp", 305.0), 0.80),
-            Stage(:sable2, getf(p, "s2_dry", 900.0), getf(p, "s2_prop", 9500.0),
-                  getf(p, "s2_thrust_kn", 95.0) * 1e3, getf(p, "s2_isp", 345.0), 0.0),
-            Stage(:sablek, getf(p, "s3_dry", 140.0), getf(p, "s3_prop", 950.0),
-                  getf(p, "s3_thrust_kn", 15.0) * 1e3, getf(p, "s3_isp", 315.0), 0.0),
-        ],
+        stages = stages,
         fairing_mass = getf(p, "fairing", 150.0),
-        payload_mass = payload,
-        sref = pi * (getf(p, "diameter", 1.8) / 2)^2,
+        payload_mass = getf(p, "pod_mass", 350.0),
+        # drag acts on the widest cross-section in the stack; strap-ons add
+        # their own frontal area on top, but only while they are attached
+        sref = pi * (maximum(stage_diameter(s, dia) for s in stages) / 2)^2,
         cd = SatelliteSim.LV_CD_TABLE,
+        boosters = boosters_from_params(p, dia),
     )
 end
+
+"Should the ascent tuner also search for the best pitch-over kick?"
+opt_kick(p) = gets(p, "opt_kick", "0") in ("1", "true", "on")
 
 "Decimate a vector to at most n points (keeping ends)."
 function deci(v, n)
@@ -127,6 +234,7 @@ function panel_mission(p)::Dict{String,Any}
         lv = lv_from_params(p),
         tli_mag_err = getf(p, "tli_mag_err_pct", 0.0) / 100,
         tli_point_err = deg2rad_(getf(p, "tli_point_err_deg", 0.0)),
+        optimize_kick = opt_kick(p),
     )
     asc, cis, ent = ms.ascent, ms.cislunar, ms.entry
     el = asc.elements
@@ -240,16 +348,120 @@ function panel_mission(p)::Dict{String,Any}
     )
 end
 
-"Procedural rocket geometry for the panel's vehicle viewer."
+"""
+Metrics a solve can target. All are scalars from a completed mission, so
+each evaluation is a full design-and-fly of the chain.
+"""
+const SOLVE_METRICS = ["prop_margin_kg", "perilune_km", "vac_perigee_km",
+                       "peak_g", "peak_q_wcm2", "t_days", "liftoff_t",
+                       "park_apogee_km", "v_splash", "tli_dv", "heat_mj"]
+
+"""
+Lock every field but one and solve it so a mission metric hits a target —
+"the heaviest pod that still leaves propellant in the kick stage" is
+`pod_mass` against `prop_margin_kg` = 0.
+
+Each step costs a whole mission, so this is a bracketing search with a hard
+iteration budget rather than a scan; a run that fails outright counts as
+past the feasible edge and the search retreats from it.
+"""
+function run_solve(p)::Dict{String,Any}
+    param  = get(p, "solve_param", "pod_mass")
+    metric = get(p, "solve_metric", "prop_margin_kg")
+    param in sweepable(p) || return Dict{String,Any}("ok" => false,
+        "error" => "cannot solve for: $param")
+    metric in SOLVE_METRICS || return Dict{String,Any}("ok" => false,
+        "error" => "cannot target metric: $metric")
+    lo = getf(p, "solve_min", 200.0)
+    hi = getf(p, "solve_max", 600.0)
+    target = getf(p, "solve_target", 0.0)
+    budget = clamp(round(Int, getf(p, "solve_iters", 14.0)), 4, 30)
+    res = find_root(lo, hi; target = target, max_iter = budget) do x
+        q = copy(p)
+        q[param] = string(x)
+        v = panel_mission(q)["metrics"][metric]
+        v === nothing ? NaN : Float64(v)
+    end
+    Dict{String,Any}(
+        "ok" => true, "param" => param, "metric" => metric,
+        "target" => target, "x" => res.x, "value" => res.value,
+        "status" => string(res.status), "iterations" => res.iterations,
+        # the bounds actually searched: an end that produced no valid mission
+        # was walked inward, which is worth saying out loud
+        "lo" => res.lo, "hi" => res.hi,
+        "asked_lo" => min(lo, hi), "asked_hi" => max(lo, hi),
+        "history" => [Dict("x" => h[1], "value" => h[2]) for h in res.history],
+    )
+end
+
+"""
+Procedural rocket geometry for the panel's vehicle viewer.
+
+Built from the same `LaunchVehicle` the mission flies, so the drawing and
+the trajectory can never disagree: tank lengths come from each stage's
+propellant density and the bells from its engine count.
+"""
 function rocket_geometry(p)::Dict{String,Any}
     d = getf(p, "diameter", 1.8)
-    props = [getf(p, "s1_prop", 42000.0), getf(p, "s2_prop", 9500.0),
-             getf(p, "s3_prop", 950.0)]
-    mesh, secs = rocket_mesh(diameter = d, prop_masses = props, nseg = 36)
+    lv = lv_from_params(p)
+    mesh, secs = rocket_mesh(lv; diameter = d, nseg = 36)
+    nst = length(lv.stages)
+    # Static performance, so a bad stack is obvious before it is flown: the
+    # mass each stage actually pushes is everything above it (the fairing
+    # only while it is still on, which through ascent means stage 1).
+    payload_above(k) = stack_mass_above(lv, k + 1; fairing = k == 1)
+    dv(k) = stage_dv(lv.stages[k], payload_above(k))
+    twr(k) = (s = lv.stages[k];
+              stage_thrust(s, k == 1 ? SatelliteSim.P0_SEA : 0.0) /
+              ((payload_above(k) + s.mdry + s.mprop) * G0))
+    # Leaving the pad it is the whole stack that has to be lifted, strap-ons
+    # and all, by whatever is lit at t = 0.
+    pad_twr = pad_thrust(lv) / (liftoff_mass(lv) * G0)
+    # A booster set's delta-v is not additive with the core's — they push the
+    # same stack at the same time — so it is reported as the impulse it adds.
+    bdv(b) = b.count * b.stage.mprop * G0 * b.stage.isp_vac / liftoff_mass(lv)
     Dict{String,Any}(
         "ok" => true,
-        "length" => secs[end].x1,
+        # boosters are appended after the core stack, so the tallest section
+        # is not necessarily the last one
+        "length" => maximum(s.x1 for s in secs),
         "diameter" => d,
+        "liftoff_mass_kg" => liftoff_mass(lv),
+        "liftoff_twr" => pad_twr,
+        "total_dv_mps" => sum(dv(k) for k in 1:nst) +
+                          sum(bdv, lv.boosters; init = 0.0),
+        "boosters" => [Dict("name" => string(b.stage.name),
+                            "count" => b.count,
+                            "propellant" => string(b.stage.prop.name),
+                            "engines" => b.stage.n_engines,
+                            "dry_kg" => b.stage.mdry, "prop_kg" => b.stage.mprop,
+                            "thrust_kn" => b.stage.thrust_vac / 1e3,
+                            "isp_s" => b.stage.isp_vac,
+                            "diameter_m" => stage_diameter(b.stage, d),
+                            "length_m" => stage_length(b.stage, d),
+                            "burn_s" => stage_burn_time(b.stage),
+                            "set_mass_kg" => booster_mass(b),
+                            "dv_mps" => bdv(b),
+                            "core_throttle" => b.core_throttle,
+                            "ignition_delay_s" => b.ignition_delay,
+                            "sep_delay_s" => b.sep_delay)
+                       for b in lv.boosters],
+        "stages" => [Dict("name" => string(s.name),
+                          "propellant" => string(s.prop.name),
+                          "engines" => s.n_engines,
+                          "dry_kg" => s.mdry, "prop_kg" => s.mprop,
+                          "thrust_kn" => s.thrust_vac / 1e3,
+                          "isp_s" => s.isp_vac,
+                          "diameter_m" => stage_diameter(s, d),
+                          "length_m" => stage_length(s, d),
+                          "volume_m3" => stage_volume(s),
+                          "dv_mps" => dv(k),
+                          "twr" => twr(k),
+                          "burn_s" => stage_burn_time(s),
+                          "interstage_m" => k < nst ?
+                              interstage_length(stage_diameter(s, d),
+                                  stage_diameter(lv.stages[k+1], d)) : 0.0)
+                     for (k, s) in enumerate(lv.stages)],
         "sections" => [Dict("name" => string(s.name), "x0" => s.x0, "x1" => s.x1,
                             "t0" => s.t0, "t1" => s.t1)
                        for s in secs],
@@ -257,12 +469,19 @@ function rocket_geometry(p)::Dict{String,Any}
     )
 end
 
-const SWEEPABLE = ["pod_mass", "h_park_km", "hp_moon_km", "hp_return_km", "incl_deg",
-                   "s3_prop", "s3_isp", "s2_prop", "diameter"]
+"Numeric parameters that may be swept or solved for, for this stack height."
+sweepable(p) = vcat(
+    ["pod_mass", "h_park_km", "hp_moon_km", "hp_return_km", "incl_deg",
+     "diameter", "fairing"],
+    ["s$(k)_$f" for k in 1:n_stages(p)
+                for f in ("prop", "dry", "isp", "thrust_kn", "engines")],
+    n_boosters(p) == 0 ? String[] :
+        ["nboost", "b_prop", "b_dry", "b_isp", "b_thrust_kn", "b_engines",
+         "b_throttle", "b_diameter"])
 
 function run_sweep(p)::Dict{String,Any}
     param = get(p, "sweep_param", "pod_mass")
-    param in SWEEPABLE || return Dict{String,Any}("ok" => false,
+    param in sweepable(p) || return Dict{String,Any}("ok" => false,
         "error" => "unknown sweep parameter: $param")
     lo = getf(p, "sweep_min", 250.0)
     hi = getf(p, "sweep_max", 450.0)
@@ -335,6 +554,30 @@ function handle(sock)
             catch err
                 Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
             end
+            respond(sock, "200 OK", "application/json", json(out))
+        elseif method == "POST" && path == "/api/solve"
+            p = parse_form(body)
+            out = try
+                run_solve(p)
+            catch err
+                Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
+            end
+            respond(sock, "200 OK", "application/json", json(out))
+        elseif method == "GET" && path == "/api/catalogue"
+            # the page builds its dropdowns from this, so the UI can never
+            # offer a propellant or engine the simulator does not have
+            out = Dict{String,Any}(
+                "propellants" => [Dict("name" => string(k),
+                                       "bulk" => bulk_density(v))
+                                  for (k, v) in sort(collect(PROPELLANTS), by = first)],
+                "engines" => [Dict("name" => string(k),
+                                   "thrust_kn" => v.thrust_vac / 1e3,
+                                   "isp_vac" => v.isp_vac, "isp_sl" => v.isp_sl,
+                                   "mass_kg" => v.mass,
+                                   "propellant" => string(v.prop.name))
+                              for (k, v) in sort(collect(ENGINES), by = first)],
+                "solve_metrics" => SOLVE_METRICS,
+                "max_stages" => 5)
             respond(sock, "200 OK", "application/json", json(out))
         else
             respond(sock, "404 Not Found", "text/plain", "not found")

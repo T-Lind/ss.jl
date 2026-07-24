@@ -47,6 +47,33 @@ mutable struct AscentCtx
     t_loop0::Float64          # closed-loop steering start time
     fairing_on::Bool
     burning::Bool
+    burned::Float64           # propellant drawn from the current stage [kg]
+    bstate::Vector{Symbol}    # per booster set: :waiting | :burning | :spent | :gone
+    b_tign::Vector{Float64}   # ignition time of each set [s]
+    b_tspent::Vector{Float64} # burnout time of each set [s]
+end
+
+AscentCtx(stage, phase, t_ign, t_kick0, t_loop0, fairing_on, burning, nb::Int = 0) =
+    AscentCtx(stage, phase, t_ign, t_kick0, t_loop0, fairing_on, burning, 0.0,
+              fill(:waiting, nb), fill(NaN, nb), fill(NaN, nb))
+
+"Booster sets still physically attached to the stack."
+booster_attached(ctx::AscentCtx) = [s !== :gone for s in ctx.bstate]
+
+"""
+    core_throttle(lv, ctx) -> Float64
+
+Thrust fraction the first stage is held at. While any set that asks for a
+throttled core is burning, the core runs down to the deepest such setting;
+once the sides are away it goes back to full.
+"""
+function core_throttle(lv::LaunchVehicle, ctx::AscentCtx)
+    ctx.stage == 1 || return 1.0
+    thr = 1.0
+    for (i, b) in enumerate(lv.boosters)
+        ctx.bstate[i] === :burning && (thr = min(thr, b.core_throttle))
+    end
+    thr
 end
 
 struct AscentEvent
@@ -128,22 +155,36 @@ function _ascent_deriv!(dx::Vector{Float64}, x::Vector{Float64},
         rho, _, pamb, asnd = atmosphere_state(atm, max(h, 0.0))
     end
 
+    # Core stage, throttled while strap-ons carry the load, plus every
+    # booster set that is currently lit. They all push along the same
+    # commanded direction, so thrust simply sums.
     if ctx.burning && ctx.stage >= 1
         st = lv.stages[ctx.stage]
-        thrust_mag = stage_thrust(st, pamb)
-        dm = -stage_mdot(st)
+        thr = core_throttle(lv, ctx)
+        thrust_mag = thr * stage_thrust(st, pamb)
+        dm = -thr * stage_mdot(st)
+    end
+    for (i, b) in enumerate(lv.boosters)
+        ctx.bstate[i] === :burning || continue
+        thrust_mag += booster_thrust(b, pamb)
+        dm -= booster_mdot(b)
+    end
+    if thrust_mag > 0.0
         dhat = _steer(guid, ctx, r, v, t, theta_g0)
         a = vadd(a, vscale(dhat, thrust_mag / m))
     end
 
-    # aerodynamic drag on the stack (relative wind)
+    # aerodynamic drag on the stack (relative wind); attached boosters put
+    # their own frontal area into the flow
     if rho > 0
         omega = (0.0, 0.0, OMEGA_EARTH)
         vrel = vsub(v, vcross(omega, r))
         Vr = vnorm(vrel)
         if Vr > 1.0
             M = Vr / asnd
-            D = 0.5 * rho * Vr * Vr * lv.sref * interp1(lv.cd, M)
+            sref = isempty(lv.boosters) ? lv.sref :
+                   frontal_area(lv, booster_attached(ctx))
+            D = 0.5 * rho * Vr * Vr * sref * interp1(lv.cd, M)
             a = vadd(a, vscale(vrel, -D / (m * Vr)))
         end
     end
@@ -195,7 +236,7 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
 
     nst = length(lv.stages)
     prop_left = [s.mprop for s in lv.stages]
-    ctx = AscentCtx(1, :vertical, 0.0, NaN, NaN, true, true)
+    ctx = AscentCtx(1, :vertical, 0.0, NaN, NaN, true, true, length(lv.boosters))
     events = AscentEvent[]
     L = AscentLog()
     r_site0 = r0
@@ -221,8 +262,6 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
     end
     ev!(:liftoff)
 
-    burn_elapsed(st) = t - ctx.t_stage_ign
-
     while t < t_max
         # --- phase transitions ------------------------------------------------
         d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
@@ -239,11 +278,35 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
             ev!(:fairing_jettison)
         end
 
+        # --- strap-on boosters: light, burn out, then drop --------------------
+        # Each transition is checked in turn rather than as a chain of
+        # elseifs, so a set with no separation delay goes on the same step it
+        # runs dry instead of hanging on for one more.
+        for (i, b) in enumerate(lv.boosters)
+            if ctx.bstate[i] === :waiting && t >= b.ignition_delay
+                ctx.bstate[i] = :burning
+                ctx.b_tign[i] = t
+                ev!(Symbol(:ignition_, b.stage.name))
+            end
+            if ctx.bstate[i] === :burning &&
+               t - ctx.b_tign[i] >= stage_burn_time(b.stage) - 1e-9
+                ctx.bstate[i] = :spent
+                ctx.b_tspent[i] = t
+                ev!(Symbol(:burnout_, b.stage.name))
+            end
+            if ctx.bstate[i] === :spent && t - ctx.b_tspent[i] >= b.sep_delay
+                ctx.bstate[i] = :gone
+                x[7] -= b.count * b.stage.mdry     # the propellant is already gone
+                ev!(Symbol(:sep_, b.stage.name))
+            end
+        end
+
         # --- burnout / staging / cutoff --------------------------------------
         if ctx.burning
             st = lv.stages[ctx.stage]
-            tb = stage_burn_time(st)
-            if burn_elapsed(st) >= tb - 1e-9
+            # Depletion is tracked by propellant drawn, not elapsed time: a
+            # throttled core burns for longer than its rated burn time.
+            if ctx.burned >= st.mprop - 1e-9
                 prop_left[ctx.stage] = 0.0
                 x[7] -= st.mdry                       # drop the spent stage
                 ev!(Symbol(:sep_, st.name))
@@ -264,7 +327,7 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
                 eps_now = 0.5 * d.vin^2 - MU_EARTH / vnorm((x[1], x[2], x[3]))
                 if eps_now >= e_target
                     st = lv.stages[ctx.stage]
-                    prop_left[ctx.stage] -= stage_mdot(st) * burn_elapsed(st)
+                    prop_left[ctx.stage] = st.mprop - ctx.burned
                     ctx.burning = false; ctx.phase = :coast
                     reached = true
                     h_cut = d.h; gam_cut = d.gamma
@@ -274,6 +337,7 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
             end
         elseif ctx.stage >= 1 && ctx.stage <= nst && t >= ctx.t_stage_ign
             ctx.burning = true
+            ctx.burned = 0.0
             ctx.phase = :closed_loop                  # upper stages steer closed-loop
             isnan(ctx.t_loop0) && (ctx.t_loop0 = t)
             ev!(Symbol(:ignition_, lv.stages[ctx.stage].name))
@@ -284,8 +348,25 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
             next_log += log_dt
         end
 
-        _rk4_ascent!(xnew, x, t, dt, w, lv, guid, ctx, atmosphere, gravity, theta_g0)
-        copyto!(x, xnew); t += dt
+        # Step to the next event rather than past it. Burnouts are the one
+        # boundary a fixed step gets visibly wrong: overshooting it burns
+        # propellant the stage does not have, so the last step of a burn is
+        # trimmed to land exactly on depletion.
+        thr_now = ctx.burning && ctx.stage >= 1 ? core_throttle(lv, ctx) : 0.0
+        dts = dt
+        if thr_now > 0
+            mdot_core = thr_now * stage_mdot(lv.stages[ctx.stage])
+            dts = min(dts, (lv.stages[ctx.stage].mprop - ctx.burned) / mdot_core)
+        end
+        for (i, b) in enumerate(lv.boosters)
+            ctx.bstate[i] === :burning || continue
+            dts = min(dts, stage_burn_time(b.stage) - (t - ctx.b_tign[i]))
+        end
+        dts = clamp(dts, 1e-6, dt)
+        _rk4_ascent!(xnew, x, t, dts, w, lv, guid, ctx, atmosphere, gravity, theta_g0)
+        copyto!(x, xnew); t += dts
+        ctx.burning && ctx.stage >= 1 &&
+            (ctx.burned += thr_now * stage_mdot(lv.stages[ctx.stage]) * dts)
     end
     # final log point
     d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
@@ -311,7 +392,13 @@ function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0
     rhat = vunit(r)
     vin = vnorm(v)
     gamma = vin > 1 ? asin(clamp(vdot(rhat, vscale(v, 1 / vin)), -1.0, 1.0)) : pi / 2
-    thrust = ctx.burning && ctx.stage >= 1 ? stage_thrust(lv.stages[ctx.stage], pamb) : 0.0
+    # logged thrust is what the stack is actually producing: the throttled
+    # core plus every strap-on still burning
+    thrust = ctx.burning && ctx.stage >= 1 ?
+             core_throttle(lv, ctx) * stage_thrust(lv.stages[ctx.stage], pamb) : 0.0
+    for (i, b) in enumerate(lv.boosters)
+        ctx.bstate[i] === :burning && (thrust += booster_thrust(b, pamb))
+    end
     # downrange: great-circle from the launch site's inertial position
     dr = RE_MEAN * acos(clamp(vdot(vunit(r_site0), rhat), -1.0, 1.0))
     (h = h, vrel = Vr, vin = vin, gamma = gamma, mach = Vr / asnd, qbar = qbar,
@@ -319,15 +406,28 @@ function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0
 end
 
 """
-    tune_ascent(lv, guid; tol_h=1.0e3, tol_gamma=deg2rad_(0.05), max_iter=12)
-        -> (guid_tuned, result)
+    tune_ascent(lv, guid; tol_h, tol_gamma, max_iter, optimize_kick) -> (guid, result)
 
 Damped-Newton shooting on (pitch0, pitch_rate) of the linear-tangent law,
 driving cutoff altitude and flight-path angle to (h_target, 0).
+
+The pitch-over kick is left alone by default. It is not a constraint — the
+2x2 above already pins the insertion state — but it decides how much of the
+climb is spent fighting gravity, and the best value moves with thrust-to-
+weight: a stack with strap-on boosters lifts off so hard that the reference
+8-degree kick lofts it, and it arrives at the target energy having wasted
+much of the extra impulse. `optimize_kick = true` scans kick angles, solves
+the 2x2 inside each, and keeps whichever puts the most mass in orbit. It
+costs a few seconds, so it is opt-in.
 """
 function tune_ascent(lv::LaunchVehicle, guid::AscentGuidance;
                      tol_h::Float64 = 1.0e3, tol_gamma::Float64 = deg2rad_(0.05),
-                     max_iter::Int = 12, verbose::Bool = false, kwargs...)
+                     max_iter::Int = 30, verbose::Bool = false,
+                     optimize_kick::Bool = false, kwargs...)
+    if optimize_kick
+        return _tune_with_kick(lv, guid; tol_h = tol_h, tol_gamma = tol_gamma,
+                               max_iter = max_iter, verbose = verbose, kwargs...)
+    end
     p1, p2 = guid.pitch0, guid.pitch_rate
     local res
     resid(g) = begin
@@ -360,4 +460,47 @@ function tune_ascent(lv::LaunchVehicle, guid::AscentGuidance;
     g = rebuild(p1, p2)
     _, _, res = resid(g)
     (g, res)
+end
+
+"Guidance with the pitch-over kick replaced (the struct is positional)."
+_with_kick(g::AscentGuidance, ka::Float64) =
+    AscentGuidance(g.site_lat, g.site_lon, g.azimuth, g.v_pitchover, ka,
+                   g.kick_duration, g.pitch0, g.pitch_rate, g.h_target,
+                   g.fairing_alt, g.stage_gap)
+
+"""
+    _tune_with_kick(lv, guid; ...) -> (guid, result)
+
+Scan the pitch-over kick, solving the 2x2 pitch problem inside each
+candidate, and keep the trajectory that reaches the target orbit with the
+most mass. A coarse ladder locates the peak; one refinement pass at half the
+spacing sharpens it. Candidates that miss the insertion tolerance or run out
+of propellant score nothing, so the search never trades the orbit away for
+mass.
+"""
+function _tune_with_kick(lv::LaunchVehicle, guid::AscentGuidance;
+                         tol_h, tol_gamma, max_iter, verbose, kwargs...)
+    best_g, best_r, best_m = guid, nothing, -Inf
+    try_kick(ka) = begin
+        ka <= 0 && return
+        g, r = tune_ascent(lv, _with_kick(guid, ka); tol_h = tol_h,
+                           tol_gamma = tol_gamma, max_iter = max_iter,
+                           optimize_kick = false, kwargs...)
+        ok = r.reached_orbit && abs(r.h_cut - g.h_target) < tol_h &&
+             abs(r.gamma_cut) < tol_gamma
+        verbose && @info "kick scan" kick_deg = rad2deg_(ka) ok m = r.m
+        if ok && r.m > best_m
+            best_g, best_r, best_m = g, r, r.m
+        end
+        ka
+    end
+    step = deg2rad_(3.0)
+    ladder = [deg2rad_(4.0) + i * step for i in 0:5]        # 4..19 degrees
+    foreach(try_kick, ladder)
+    if best_r !== nothing                                    # refine around the peak
+        foreach(try_kick, (best_g.kick_angle - step / 2, best_g.kick_angle + step / 2))
+    end
+    best_r === nothing ? tune_ascent(lv, guid; tol_h = tol_h, tol_gamma = tol_gamma,
+                                     max_iter = max_iter, optimize_kick = false,
+                                     kwargs...) : (best_g, best_r)
 end

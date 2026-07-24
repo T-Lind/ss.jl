@@ -37,6 +37,8 @@
   button:disabled { opacity: .5; cursor: wait; }
   .status { font-size: 12px; color: #898781; margin-top: 8px; min-height: 17px; }
   .status.err { color: #e66767; }
+  /* verdict colours for the static vehicle check (T/W, delta-v budget) */
+  .good { color: #8fbf7f; } .warn { color: #d9a95c; } .bad { color: #e66767; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
            gap: 8px; margin-bottom: 12px; }
   .tile { background: #1a1a19; border: 1px solid rgba(255,255,255,.1);
@@ -103,37 +105,32 @@
 
     <div class="card">
       <h2>Launcher</h2>
-      <div class="stagehdr">stage 1 — kerolox booster</div>
       <div class="row">
-        <div><label for="s1_prop">propellant [kg]</label><input id="s1_prop" value="42000"></div>
-        <div><label for="s1_dry">dry mass [kg]</label><input id="s1_dry" value="3800"></div>
+        <div><label for="nstages">stages</label>
+          <select id="nstages">
+            <option>2</option><option selected>3</option>
+            <option>4</option><option>5</option></select></div>
+        <div><label for="nboost">strap-on boosters</label>
+          <select id="nboost">
+            <option value="0" selected>none</option>
+            <option value="2">2</option><option value="3">3</option>
+            <option value="4">4</option><option value="6">6</option></select></div>
       </div>
-      <div class="row">
-        <div><label for="s1_thrust_kn">vac thrust [kN]</label><input id="s1_thrust_kn" value="950"></div>
-        <div><label for="s1_isp">vac Isp [s]</label><input id="s1_isp" value="305"></div>
-      </div>
-      <div class="stagehdr">stage 2 — kerolox upper</div>
-      <div class="row">
-        <div><label for="s2_prop">propellant [kg]</label><input id="s2_prop" value="9500"></div>
-        <div><label for="s2_dry">dry mass [kg]</label><input id="s2_dry" value="900"></div>
-      </div>
-      <div class="row">
-        <div><label for="s2_thrust_kn">vac thrust [kN]</label><input id="s2_thrust_kn" value="95"></div>
-        <div><label for="s2_isp">vac Isp [s]</label><input id="s2_isp" value="345"></div>
-      </div>
-      <div class="stagehdr">stage 3 — kick stage (TLI + TCM)</div>
-      <div class="row">
-        <div><label for="s3_prop">propellant [kg]</label><input id="s3_prop" value="950"></div>
-        <div><label for="s3_dry">dry mass [kg]</label><input id="s3_dry" value="140"></div>
-      </div>
-      <div class="row">
-        <div><label for="s3_thrust_kn">vac thrust [kN]</label><input id="s3_thrust_kn" value="15"></div>
-        <div><label for="s3_isp">vac Isp [s]</label><input id="s3_isp" value="315"></div>
-      </div>
+      <!-- stage blocks are generated from the stage count -->
+      <div id="stagebox"></div>
       <div class="row" style="margin-top:8px">
         <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
         <div><label for="diameter">diameter [m]</label><input id="diameter" value="1.8"></div>
       </div>
+      <div class="row" style="margin-top:6px">
+        <div style="flex:1"><label style="display:flex;gap:6px;align-items:center">
+          <input type="checkbox" id="opt_kick" style="width:auto;margin:0">
+          search for the best pitch-over kick</label></div>
+      </div>
+      <div class="sub" style="margin:2px 0 0">off, the ascent flies the
+        reference 8° kick. A high thrust-to-weight stack — anything with
+        strap-ons — lofts on that and wastes the extra impulse; the search
+        costs a few seconds and can multiply the mass delivered to orbit.</div>
     </div>
 
     <div class="card">
@@ -146,22 +143,14 @@
       <canvas id="geo" style="width:100%;height:230px;display:block;cursor:grab;touch-action:none"></canvas>
       <div class="sub" id="geo_state" style="margin:6px 0 0">full stack</div>
       <div class="sub" id="geo_info" style="margin:2px 0 0">—</div>
+      <div class="sub" id="geo_perf" style="margin:2px 0 0">—</div>
     </div>
 
     <div class="card">
       <h2>Parameter sweep</h2>
       <div class="row3">
         <div><label for="sweep_param">parameter</label>
-          <select id="sweep_param">
-            <option value="pod_mass">pod mass</option>
-            <option value="h_park_km">parking alt</option>
-            <option value="hp_moon_km">perilune</option>
-            <option value="hp_return_km">return perigee</option>
-            <option value="incl_deg">inclination</option>
-            <option value="s3_prop">kick prop</option>
-            <option value="s3_isp">kick Isp</option>
-            <option value="s2_prop">stage-2 prop</option>
-          </select></div>
+          <select id="sweep_param" data-solvable></select></div>
         <div><label for="sweep_min">min</label><input id="sweep_min" value="250"></div>
         <div><label for="sweep_max">max</label><input id="sweep_max" value="450"></div>
       </div>
@@ -181,6 +170,28 @@
       </div>
       <div style="margin-top:8px"><button id="sweepbtn" class="ghost">Run sweep</button></div>
       <canvas id="sweepchart" style="width:100%;height:170px;margin-top:8px"></canvas>
+    </div>
+
+    <div class="card">
+      <h2>Solve for a target</h2>
+      <div class="sub" style="margin:0 0 6px">
+        Lock everything else and search one field until a mission metric
+        reaches a value. Each step flies the whole mission.
+      </div>
+      <div class="row">
+        <div><label for="solve_param">vary</label>
+          <select id="solve_param" data-solvable></select></div>
+        <div><label for="solve_metric">until</label>
+          <select id="solve_metric"></select></div>
+      </div>
+      <div class="row3" style="margin-top:6px">
+        <div><label for="solve_target">equals</label><input id="solve_target" value="3000"></div>
+        <div><label for="solve_min">search from</label><input id="solve_min" value="1000"></div>
+        <div><label for="solve_max">to</label><input id="solve_max" value="4000"></div>
+      </div>
+      <div style="margin-top:8px"><button id="solvebtn" class="ghost">Solve</button></div>
+      <div class="sub" id="solve_out" style="margin-top:6px">—</div>
+      <canvas id="solvechart" style="width:100%;height:150px;margin-top:6px"></canvas>
     </div>
   </div>
 
@@ -240,10 +251,252 @@
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
-const FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
-  's1_prop','s1_dry','s1_thrust_kn','s1_isp','s2_prop','s2_dry','s2_thrust_kn','s2_isp',
-  's3_prop','s3_dry','s3_thrust_kn','s3_isp','fairing','diameter',
+const BASE_FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
+  'fairing','diameter','nstages','nboost','opt_kick',
   'tli_mag_err_pct','tli_point_err_deg'];
+const STAGE_FIELDS = ['prop','dry','thrust_kn','isp','propellant','engines','engine',
+                      'diameter','size_by','len'];
+// A booster set is configured exactly like a stage, plus how it behaves in
+// parallel with the core.
+const BOOST_FIELDS = STAGE_FIELDS.concat(['throttle','ign_delay','sep_delay']);
+// The whole form is derived from the stage count, so nothing here has to
+// know how tall the stack is.
+const nStages = () => +($('nstages') || {}).value || 3;
+const nBoost = () => +($('nboost') || {}).value || 0;
+const FIELDS = () => BASE_FIELDS.concat(
+  [].concat(...Array.from({length: nStages()}, (_, i) =>
+    STAGE_FIELDS.map(f => `s${i+1}_${f}`))),
+  nBoost() ? BOOST_FIELDS.map(f => `b_${f}`) : []);
+
+// Stage 1 is the booster, the last is the kick stage that does TLI, and
+// anything between is an upper stage — the same roles the server uses.
+const ROLE = {
+  booster: { label: 'booster',              prop: 42000, dry: 3800, thrust: 950,
+             isp: 305, mix: 'kerolox',    engines: 5 },
+  upper:   { label: 'upper',                prop:  9500, dry:  900, thrust:  95,
+             isp: 345, mix: 'kerolox',    engines: 1 },
+  kick:    { label: 'kick stage (TLI + TCM)', prop: 950, dry:  140, thrust:  15,
+             isp: 315, mix: 'hypergolic', engines: 1 },
+};
+ROLE.strap = { label: 'strap-on set', prop: 12000, dry: 900, thrust: 380,
+               isp: 285, mix: 'kerolox', engines: 2 };
+const roleOf = (k, n) => k === 1 ? ROLE.booster : k === n ? ROLE.kick : ROLE.upper;
+// stage 2 keeps the reference figures; each inserted stage above it starts a
+// quarter the size, so raising the stack height leaves a flyable vehicle
+const roleAt = (k, n) => {
+  const r = roleOf(k, n), f = (r === ROLE.upper) ? Math.pow(0.25, k - 2) : 1;
+  const rnd = v => +(v * f).toPrecision(3);
+  return Object.assign({}, r, { prop: rnd(r.prop), dry: rnd(r.dry),
+                                thrust: rnd(r.thrust) });
+};
+
+let CATALOGUE = { propellants: [], engines: [], solve_metrics: [] };
+async function fillCatalogues() {
+  try { CATALOGUE = await (await fetch('/api/catalogue')).json(); } catch (e) {}
+}
+// rebuild the stage form, keeping whatever the user already typed
+// whichever of propellant mass / tank length is *derived* is greyed out, so
+// it is always clear which one you are driving
+function syncSizeBy() {
+  const pre = Array.from({length: nStages()}, (_, i) => `s${i+1}_`);
+  if (nBoost()) pre.push('b_');
+  for (const p of pre) {
+    const byLen = $(p + 'size_by') && $(p + 'size_by').value === 'length';
+    if (!$(p + 'prop')) continue;
+    $(p + 'prop').disabled = byLen;
+    $(p + 'len').disabled = !byLen;
+    $(p + 'prop').style.opacity = byLen ? 0.45 : 1;
+    $(p + 'len').style.opacity = byLen ? 1 : 0.45;
+  }
+}
+function buildStages() {
+  const n = nStages(), box = $('stagebox');
+  const DIA0 = ($('diameter') || {}).value || 1.8;
+  const keep = {};
+  for (const el of box.querySelectorAll('input,select')) keep[el.id] = el.value;
+  const mixOpts = CATALOGUE.propellants
+    .map(p => `<option value="${p.name}">${p.name} · ${Math.round(p.bulk)} kg/m³</option>`)
+    .join('');
+  const engOpts = '<option value="manual">manual (use the fields above)</option>' +
+    CATALOGUE.engines.map(e =>
+      `<option value="${e.name}">${e.name} · ${Math.round(e.thrust_kn)} kN · ` +
+      `Isp ${Math.round(e.isp_vac)} s · ${e.propellant}</option>`).join('');
+  // one block of markup, used for a serial stage and for a strap-on set
+  // alike — they are configured by the same numbers
+  const block = (title, p, r, dia) => `<div class="stagehdr">${title}
+        <span class="sub" id="${p}derived" style="float:right;font-weight:400"></span></div>
+      <div class="row">
+        <div><label for="${p}size_by">size by</label>
+          <select id="${p}size_by">
+            <option value="prop">propellant mass</option>
+            <option value="length">tank length</option></select></div>
+        <div><label for="${p}diameter">diameter [m]</label><input id="${p}diameter" value="${dia}"></div>
+      </div>
+      <div class="row">
+        <div><label for="${p}prop">propellant [kg]</label><input id="${p}prop" value="${r.prop}"></div>
+        <div><label for="${p}len">tank length [m]</label><input id="${p}len" value="10"></div>
+      </div>
+      <div class="row">
+        <div><label for="${p}dry">dry mass [kg]</label><input id="${p}dry" value="${r.dry}"></div>
+        <div><label for="${p}engines">engines</label><input id="${p}engines" value="${r.engines}"></div>
+      </div>
+      <div class="row">
+        <div><label for="${p}thrust_kn">vac thrust [kN]</label><input id="${p}thrust_kn" value="${r.thrust}"></div>
+        <div><label for="${p}isp">vac Isp [s]</label><input id="${p}isp" value="${r.isp}"></div>
+      </div>
+      <div class="row">
+        <div style="flex:1"><label for="${p}propellant">mixture</label>
+          <select id="${p}propellant">${mixOpts}</select></div>
+      </div>
+      <div class="row">
+        <div style="flex:1"><label for="${p}engine">engine (overrides thrust/Isp)</label>
+          <select id="${p}engine">${engOpts}</select></div>
+      </div>`;
+  let html = '';
+  for (let k = 1; k <= n; k++)
+    html += block(`stage ${k} — ${roleAt(k, n).label}`, `s${k}_`, roleAt(k, n), DIA0);
+  const nb = nBoost();
+  if (nb) {
+    // Each of these numbers describes ONE booster; the set contributes them
+    // `nb` times over. The core throttle is the Falcon-Heavy trick: hold the
+    // first stage down while the sides carry the stack, so it still has
+    // propellant when they go.
+    html += block(`${nb} × strap-on booster`, 'b_', ROLE.strap,
+                  +(DIA0 * 0.85).toFixed(2)) + `
+      <div class="row">
+        <div><label for="b_throttle">core throttle [%]</label><input id="b_throttle" value="100"></div>
+        <div><label for="b_sep_delay">sep delay [s]</label><input id="b_sep_delay" value="0"></div>
+      </div>
+      <div class="row">
+        <div><label for="b_ign_delay">ignition delay [s]</label><input id="b_ign_delay" value="0"></div>
+        <div></div>
+      </div>
+      <div class="sub">the numbers above are per booster · the set burns in
+        parallel with stage 1 and separates together</div>`;
+  }
+  box.innerHTML = html;
+  const init = (p, r, fields) => {
+    $(p + 'propellant').value = r.mix;
+    $(p + 'engine').value = 'manual';
+    for (const f of fields)
+      if (keep[p + f] !== undefined) $(p + f).value = keep[p + f];
+  };
+  for (let k = 1; k <= n; k++) init(`s${k}_`, roleAt(k, n), STAGE_FIELDS);
+  if (nb) init('b_', ROLE.strap, BOOST_FIELDS);
+  // anything that changes the vehicle's physical shape redraws the viewer
+  for (const el of box.querySelectorAll('input,select'))
+    el.addEventListener('change', () => { syncSizeBy(); fetchGeo(); });
+  syncSizeBy();
+  fillSolveParams();
+}
+
+// Sweep and solve offer exactly the numeric fields that exist right now, so
+// adding a fourth stage immediately makes its propellant load solvable.
+const PARAM_LABEL = { pod_mass: 'pod mass', h_park_km: 'parking alt',
+  hp_moon_km: 'perilune', hp_return_km: 'return perigee',
+  incl_deg: 'inclination', diameter: 'diameter', fairing: 'fairing mass' };
+const SFIELD_LABEL = { prop: 'prop', dry: 'dry', isp: 'Isp',
+                       thrust_kn: 'thrust', engines: 'engine count' };
+const METRIC_LABEL = { prop_margin_kg: 'kick-stage prop margin [kg]',
+  perilune_km: 'perilune [km]', vac_perigee_km: 'return perigee [km]',
+  peak_g: 'peak entry g', peak_q_wcm2: 'peak q̇ [W/cm²]',
+  t_days: 'mission days', liftoff_t: 'liftoff mass [t]',
+  park_apogee_km: 'parking apogee [km]', v_splash: 'splashdown speed [m/s]',
+  tli_dv: 'TLI Δv [m/s]', heat_mj: 'heat load [MJ/m²]' };
+function fillSolveParams() {
+  const n = nStages();
+  const opts = Object.keys(PARAM_LABEL).map(k => [k, PARAM_LABEL[k]]);
+  for (let k = 1; k <= n; k++)
+    for (const f in SFIELD_LABEL)
+      opts.push([`s${k}_${f}`, `stage ${k} ${SFIELD_LABEL[f]}`]);
+  const html = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+  for (const el of document.querySelectorAll('select[data-solvable]')) {
+    const was = el.value;
+    el.innerHTML = html;
+    el.value = opts.some(o => o[0] === was) ? was : 'pod_mass';
+  }
+  // a target the reference vehicle can actually hit, so the first solve
+  // demonstrates the feature instead of reporting an unreachable goal
+  if (!$('solve_param').dataset.touched) $('solve_param').value = 'hp_moon_km';
+  const ms = CATALOGUE.solve_metrics || Object.keys(METRIC_LABEL);
+  const sm = $('solve_metric'), wasM = sm.value;
+  sm.innerHTML = ms.map(m =>
+    `<option value="${m}">${METRIC_LABEL[m] || m}</option>`).join('');
+  sm.value = ms.includes(wasM) && wasM ? wasM : 'perilune_km';
+}
+
+async function doSolve() {
+  $('solvebtn').disabled = true;
+  $('solve_out').textContent = 'searching — each step flies a whole mission…';
+  try {
+    const u = params();
+    for (const f of ['solve_param','solve_metric','solve_target','solve_min','solve_max'])
+      u.set(f, $(f).value);
+    const j = await (await fetch('/api/solve',
+      { method: 'POST', body: u })).json();
+    if (!j.ok) throw new Error(j.error || 'solve failed');
+    const pl = PARAM_LABEL[j.param] ||
+      j.param.replace(/^s(\d+)_/, 'stage $1 ').replace('thrust_kn','thrust');
+    const ml = METRIC_LABEL[j.metric] || j.metric;
+    // an end that produced no valid mission was walked inward; saying so
+    // matters, because then the fix is not "widen the range"
+    const shrank = Math.abs(j.hi - j.asked_hi) > 1e-9 ||
+                   Math.abs(j.lo - j.asked_lo) > 1e-9;
+    const note = shrank
+      ? ` Part of the range flies no valid mission, so the search was ` +
+        `confined to ${(+j.lo).toPrecision(4)}–${(+j.hi).toPrecision(4)}.`
+      : '';
+    const msg = j.status === 'converged'
+      ? `${pl} = <b>${(+j.x).toPrecision(5)}</b> gives ${ml} = ` +
+        `${(+j.value).toPrecision(4)} (target ${j.target}) — ${j.iterations} runs.` + note
+      : j.status === 'no_bracket'
+      ? `${ml} never reaches ${j.target} over that range; closest is ` +
+        `${pl} = ${(+j.x).toPrecision(5)} at ${(+j.value).toPrecision(4)}.` +
+        (shrank ? note : ' Try a wider range.')
+      : `no valid mission anywhere in that range — try bounds nearer the ` +
+        `current configuration.`;
+    $('solve_out').innerHTML = msg;
+    drawSolve(j);
+  } catch (e) {
+    $('solve_out').textContent = 'solve: ' + (e.message || e);
+  }
+  $('solvebtn').disabled = false;
+}
+
+// the search path is most of the information when each point costs a second
+function drawSolve(j) {
+  const cv = $('solvechart'), ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const pts = ((j && j.history) || []).filter(p => isFinite(p.value));
+  if (pts.length < 2) return;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.value).concat([j.target]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const px = v => 34 + (w - 44) * (x1 > x0 ? (v - x0)/(x1 - x0) : 0.5);
+  const py = v => h - 20 - (h - 32) * (y1 > y0 ? (v - y0)/(y1 - y0) : 0.5);
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath(); ctx.moveTo(30, py(j.target)); ctx.lineTo(w - 6, py(j.target));
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '10px system-ui';
+  ctx.fillText('target', 32, py(j.target) - 3);
+  // evaluations in the order they were taken: early wide, late clustered
+  pts.forEach((p, i) => {
+    const t = i/(pts.length - 1);
+    ctx.fillStyle = `rgba(242,193,78,${0.35 + 0.65*t})`;
+    ctx.beginPath(); ctx.arc(px(p.x), py(p.value), 3.2, 0, 7); ctx.fill();
+  });
+  if (j.status === 'converged') {
+    ctx.strokeStyle = '#f2c14e'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(px(j.x), 8); ctx.lineTo(px(j.x), h - 18); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText(x0.toPrecision(4), 30, h - 6);
+  ctx.fillText(x1.toPrecision(4), w - 46, h - 6);
+}
 // trajectory phase colors: 4 ascent, 0 parking coast, 1 TLI burn,
 // 2 outbound, 3 return, 5 entry
 const COL = {4:'#8fbef0',0:'#3987e5',1:'#d95926',2:'#199e70',3:'#c98500',5:'#d55181'};
@@ -274,7 +527,11 @@ let rotFrame = false, camYaw = 0.6, camPitch = 1.05, camDist = 1150;
 
 function params() {
   const u = new URLSearchParams();
-  for (const f of FIELDS) u.set(f, $(f).value);
+  for (const f of FIELDS()) {
+    const el = $(f);
+    if (!el) continue;
+    u.set(f, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
+  }
   return u;
 }
 
@@ -752,9 +1009,19 @@ function drawSweep() {
 // The viewer follows the mission clock: stages, fairing, and finally the
 // kick stage drop off as the scrubbed time passes their separation events.
 let geo = null, geoYaw = -0.9, geoPitch = 0.30, geoKey = '';
-const GEO_COL = { stage1: [119,119,111], stage2: [141,141,134],
-                  stage3: [165,165,157], pod: [126,146,168], fairing: [201,199,186] };
-const GEO_SHORT = { stage1: 'S1', stage2: 'S2', stage3: 'S3', pod: 'pod', fairing: 'fairing' };
+// stages get progressively lighter up the stack, whatever the stack height
+const GEO_COL = { pod: [126,146,168], fairing: [201,199,186] };
+const GEO_SHORT = { pod: 'pod', fairing: 'fairing' };
+function geoStyle(name) {
+  const b = /^booster(\d+)$/.exec(name);
+  if (b) return { col: [148, 132, 118], short: 'B' + b[1] };  // warmer than the core
+  const m = /^stage(\d+)$/.exec(name);
+  if (!m) return { col: GEO_COL[name] || GEO_COL.fairing,
+                   short: GEO_SHORT[name] || name };
+  const k = +m[1], f = Math.min(1, (k - 1)/4);
+  const v = 119 + 52*f;
+  return { col: [v, v, v - 8], short: 'S' + k };
+}
 
 async function fetchGeo() {
   try {
@@ -763,10 +1030,48 @@ async function fetchGeo() {
     if (!j.ok) throw new Error(j.error || 'geometry failed');
     geo = j;
     geoKey = '';
+    const ds = (j.stages || []).map(s => +s.diameter_m);
+    const wide = ds.length ? Math.max(...ds) : +j.diameter;
+    const stepped = ds.length && Math.min(...ds) < wide - 1e-6;
     $('geo_info').textContent =
-      `${j.length.toFixed(1)} m long × ${(+j.diameter).toFixed(1)} m — ` +
-      j.sections.filter(s => s.name !== 'pod')
+      `${j.length.toFixed(1)} m long × ${wide.toFixed(2)} m` +
+      (stepped ? ' (stepped)' : '') + ' — ' +
+      j.sections.filter(s => !['pod','cabin','glass'].includes(s.name))
         .map(s => `${s.name} ${(s.x1 - s.x0).toFixed(1)} m`).join(' · ');
+    // Static verdict, so a stack that cannot fly says so before it is flown:
+    // what it weighs, whether it can leave the pad, and what it has to spend.
+    // Ideal delta-v is Tsiolkovsky with no losses — a circumlunar mission
+    // wants roughly 12.5 km/s of it once gravity and drag are paid for.
+    const twr = +j.liftoff_twr, dvt = +j.total_dv_mps;
+    $('geo_perf').innerHTML =
+      `${Math.round(j.liftoff_mass_kg).toLocaleString()} kg on the pad · ` +
+      `T/W <b class="${twr < 1.15 ? 'bad' : twr < 1.25 ? 'warn' : 'good'}">` +
+      `${twr.toFixed(2)}</b>` +
+      (twr < 1.15 ? ' (will not lift off)' : twr < 1.25 ? ' (sluggish)' : '') +
+      ` · Δv <b class="${dvt < 11500 ? 'warn' : 'good'}">` +
+      `${(dvt / 1000).toFixed(2)} km/s</b> ideal` +
+      (dvt < 11500 ? ' (thin for a Moon shot)' : '');
+    // per-stage read-out: whichever of mass/length you did not type, plus
+    // what the stage buys and whether it can move the mass above it
+    for (const [i, s] of (j.stages || []).entries()) {
+      const el = $(`s${i+1}_derived`);
+      if (!el) continue;
+      const t = +s.twr, inter = +s.interstage_m;
+      el.innerHTML =
+        `${Math.round(s.prop_kg).toLocaleString()} kg · ${(+s.length_m).toFixed(1)} m` +
+        ` · ${(+s.volume_m3).toFixed(1)} m³ · Δv ${Math.round(s.dv_mps).toLocaleString()}` +
+        ` · T/W <b class="${i === 0 && t < 1.15 ? 'bad' : ''}">${t.toFixed(2)}</b>` +
+        ` · ${Math.round(s.burn_s)} s` +
+        (inter > 0.01 ? ` · +${inter.toFixed(2)} m adapter` : '');
+    }
+    // the strap-on read-out reports the whole set, since a set is what flies
+    const bel = $('b_derived'), bs = (j.boosters || [])[0];
+    if (bel && bs) bel.textContent =
+      `${bs.count} × ${Math.round(bs.prop_kg).toLocaleString()} kg` +
+      ` · ${(+bs.length_m).toFixed(1)} m × ${(+bs.diameter_m).toFixed(2)} m` +
+      ` · set ${Math.round(bs.set_mass_kg).toLocaleString()} kg` +
+      ` · ${Math.round(bs.burn_s)} s` +
+      (bs.core_throttle < 1 ? ` · core ${Math.round(bs.core_throttle*100)}%` : '');
     drawGeo();
   } catch (e) {
     $('geo_info').textContent = 'geometry: ' + String(e.message || e);
@@ -774,23 +1079,56 @@ async function fetchGeo() {
 }
 
 // which sections are still attached / burning at mission time t [s]
+// Which bodies are still attached, and which is burning, at mission time t.
+// Event names carry the sim's own stage names, so the k-th separation is
+// what drops stage k — nothing here counts stages itself.
 function geoConfigAt(tsec) {
-  const cfg = { gone: {}, burn: null, t: tsec };
+  const cfg = { gone: {}, burn: null, bburn: [], t: tsec };
   if (!run || tsec == null) return cfg;
   const ev = {};
-  let sep1 = null, ign2 = null;
+  const seps = [], igns = [];
+  // Strap-ons separate mid-ascent, so their sep_ events sit in the middle of
+  // the core's. Matching them by the set's own stage name keeps the
+  // positional mapping of core separations to core stages intact — counting
+  // sep_ events alone would drop stage 1 when the boosters went.
+  const bnames = ((geo && geo.boosters) || []).map(b => b.name);
+  const bsep = [], bign = [];
   for (const e of run.events) {
     ev[e.name] = e.t;
-    if (sep1 === null && e.name.startsWith('sep_')) sep1 = e.t;
-    if (ign2 === null && e.name.startsWith('ignition_')) ign2 = e.t;
+    if (e.phase !== 'ascent') continue;
+    if (e.name.startsWith('sep_')) {
+      const bi = bnames.indexOf(e.name.slice(4));
+      bi >= 0 ? (bsep[bi] = e.t) : seps.push(e.t);
+    } else if (e.name.startsWith('ignition_')) {
+      const bi = bnames.indexOf(e.name.slice(9));
+      bi >= 0 ? (bign[bi] = e.t) : igns.push(e.t);
+    }
   }
-  const drop = { stage1: sep1, fairing: ev.fairing_jettison,
-                 stage2: ev.seco, stage3: ev.entry_handoff };
+  seps.sort((a, b) => a - b); igns.sort((a, b) => a - b);
+  const nst = (geo ? geo.sections.filter(s => /^stage\d+$/.test(s.name)).length : 0)
+              || seps.length + 1;
+  const drop = { fairing: ev.fairing_jettison };
+  seps.forEach((t, i) => { if (i < nst) drop['stage' + (i+1)] = t; });
+  bnames.forEach((_, i) => {
+    drop['booster' + (i+1)] = bsep[i];
+    cfg.bburn[i] = bign[i] != null && tsec >= bign[i] &&
+                   tsec < (bsep[i] ?? Infinity);
+  });
+  // whatever is still flying at SECO hands over to the kick stage, which
+  // goes at the entry handoff
+  if (nst >= 2 && drop['stage' + (nst-1)] == null) drop['stage' + (nst-1)] = ev.seco;
+  if (nst >= 1) drop['stage' + nst] = ev.entry_handoff;
   for (const k in drop) if (drop[k] != null && tsec >= drop[k]) cfg.gone[k] = true;
-  if (sep1 != null && tsec < sep1) cfg.burn = 'stage1';
-  else if (ign2 != null && tsec >= ign2 && tsec < (ev.seco ?? Infinity)) cfg.burn = 'stage2';
-  else if (ev.tli_ignition != null && tsec >= ev.tli_ignition && tsec < (ev.tli_cutoff ?? Infinity))
-    cfg.burn = 'stage3';
+
+  if (ev.tli_ignition != null && tsec >= ev.tli_ignition &&
+      tsec < (ev.tli_cutoff ?? Infinity)) cfg.burn = 'stage' + nst;
+  else if (tsec < (seps[0] ?? Infinity)) cfg.burn = 'stage1';
+  else if (tsec < (ev.seco ?? -Infinity)) {
+    // the stage lit by the most recent ignition is the one running
+    let k = 1;
+    for (let i = 0; i < igns.length; i++) if (tsec >= igns[i]) k = i + 2;
+    cfg.burn = 'stage' + Math.min(k, nst);
+  }
   return cfg;
 }
 
@@ -816,7 +1154,10 @@ function drawGeo(cfg) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   if (!geo) return;
-  const secs = geo.sections.filter(s => !cfg.gone[s.name]);
+  // the cabin and window panes are capsule internals — they live inside the
+  // pod's outline and never show in this exterior side view
+  const HIDE = { cabin: 1, glass: 1 };
+  const secs = geo.sections.filter(s => !cfg.gone[s.name] && !HIDE[s.name]);
   if (!secs.length) return;
   // fit the *attached* stack: after staging the view recenters on what's left
   let xlo = Infinity, xhi = -Infinity;
@@ -831,25 +1172,37 @@ function drawGeo(cfg) {
     const y1 = v[1]*cyw - v[2]*syw, z1 = v[1]*syw + v[2]*cyw;
     return [w/2 + y1*f, h/2 - (a*cpt - z1*spt)*f, a*spt + z1*cpt];
   };
-  // engine flame under the lowest attached section while a stage burns
-  if (cfg.burn && !cfg.gone[cfg.burn]) {
-    const d = +geo.diameter, flick = 0.85 + 0.3*Math.random();
-    const a = xf([xlo, 0, 0]), b = xf([xlo - 0.30*span*flick, 0, 0]);
+  // engine flame under the lowest attached section while a stage burns, and
+  // one under each strap-on that is lit — a parallel-burn lift-off shows the
+  // whole cluster, not just the core
+  const plume = (y, z, wid, len) => {
+    const flick = 0.85 + 0.3*Math.random();
+    const a = xf([xlo, y, z]), b = xf([xlo - len*span*flick, y, z]);
     const g = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
     g.addColorStop(0, 'rgba(255,214,140,0.95)');
     g.addColorStop(0.35, 'rgba(245,150,60,0.55)');
     g.addColorStop(1, 'rgba(245,150,60,0)');
     const dx = b[0]-a[0], dy = b[1]-a[1], dl = Math.hypot(dx, dy) || 1;
-    const px_ = -dy/dl * 0.42*d*f, py_ = dx/dl * 0.42*d*f;
+    const px_ = -dy/dl * wid*f, py_ = dx/dl * wid*f;
     ctx.fillStyle = g;
     ctx.beginPath();
     ctx.moveTo(a[0]-px_, a[1]-py_); ctx.lineTo(a[0]+px_, a[1]+py_);
     ctx.lineTo(b[0], b[1]); ctx.closePath(); ctx.fill();
+  };
+  if (cfg.burn && !cfg.gone[cfg.burn]) plume(0, 0, 0.42*(+geo.diameter), 0.30);
+  const bl = (geo.boosters || [])[0];
+  if (bl && cfg.bburn && cfg.bburn[0]) {
+    const rc = (geo.stages[0] ? +geo.stages[0].diameter_m : +geo.diameter) / 2;
+    const rb = +bl.diameter_m / 2, R = rc + rb;
+    for (let j = 0; j < bl.count; j++) {
+      const th = 2*Math.PI*j/bl.count;
+      plume(R*Math.cos(th), R*Math.sin(th), 0.42*rb*2, 0.24);
+    }
   }
   const light = norm3([-0.45, 0.55, -0.9]);
   const tris = [];
   for (const s of secs) {
-    const col0 = GEO_COL[s.name] || GEO_COL.fairing;
+    const col0 = geoStyle(s.name).col;
     for (let k = s.t0 - 1; k < s.t1; k++) {
       const t = geo.tris[k];
       const p1 = xf([t[0], t[1], t[2]]), p2 = xf([t[3], t[4], t[5]]), p3 = xf([t[6], t[7], t[8]]);
@@ -877,25 +1230,30 @@ function drawGeo(cfg) {
   ctx.fillStyle = MUTED; ctx.font = '10px system-ui';
   ctx.fillText('10 m', 14, h-14);
   // configuration readout under the canvas
-  const names = secs.map(s => GEO_SHORT[s.name] || s.name).join('+');
+  const names = secs.map(s => geoStyle(s.name).short).join('+');
   const tl = cfg.t == null ? '' :
     cfg.t < 3600 ? `T+${Math.floor(cfg.t/60)}:${String(Math.floor(cfg.t%60)).padStart(2,'0')} · ` :
     `T+${(cfg.t/86400).toFixed(2)} d · `;
   $('geo_state').textContent = tl + names +
-    (cfg.burn && !cfg.gone[cfg.burn] ? ` · ${GEO_SHORT[cfg.burn]} burning` : '');
+    (cfg.burn && !cfg.gone[cfg.burn] ? ` · ${geoStyle(cfg.burn).short} burning` : '');
 }
 
 // ---------------------------------------------------------------- presets --
 function initPresets() {
   DEFAULTS = {};
-  for (const f of FIELDS) DEFAULTS[f] = $(f).value;
+  for (const f of FIELDS()) DEFAULTS[f] = $(f).value;
   $('presets').innerHTML = Object.keys(PRESETS).map(k =>
     `<span class="chip" data-p="${k}">${k}</span>`).join('');
   for (const el of $('presets').querySelectorAll('.chip'))
     el.onclick = () => {
-      for (const f of FIELDS) $(f).value = DEFAULTS[f];
+      // a preset may change the stack height, so restore the count first
+      if (DEFAULTS.nstages !== undefined) $('nstages').value = DEFAULTS.nstages;
       const o = PRESETS[el.dataset.p];
-      for (const k in o) $(k).value = o[k];
+      if (o.nstages !== undefined) $('nstages').value = o.nstages;
+      buildStages();
+      for (const f of FIELDS())
+        if (DEFAULTS[f] !== undefined && $(f)) $(f).value = DEFAULTS[f];
+      for (const k in o) if ($(k)) $(k).value = o[k];
       fetchGeo();
       doRun();
     };
@@ -939,13 +1297,35 @@ geoCv.addEventListener('pointermove', e => {
   gdrag = [e.clientX, e.clientY];   // drawGeoLive picks the new angles up next frame
 });
 geoCv.addEventListener('pointerup', () => gdrag = null);
-for (const id of ['s1_prop', 's2_prop', 's3_prop', 'diameter'])
-  $(id).addEventListener('change', fetchGeo);
+// the vehicle diameter carries stages that have not been given their own
+let lastDia = $('diameter').value;
+$('diameter').addEventListener('change', () => {
+  for (let k = 1; k <= nStages(); k++) {
+    const el = $(`s${k}_diameter`);
+    if (el && Math.abs(+el.value - +lastDia) < 1e-9) el.value = $('diameter').value;
+  }
+  lastDia = $('diameter').value;
+  fetchGeo();
+});
+$('nstages').addEventListener('change', () => { buildStages(); fetchGeo(); });
+$('nboost').addEventListener('change', () => {
+  // Strap-ons make the reference 8-degree kick badly wrong — the stack lofts
+  // and the free-return design has nothing to work with. Turn the search on
+  // with them (visibly, so it can still be turned off).
+  if (nBoost() > 0) $('opt_kick').checked = true;
+  buildStages(); fetchGeo();
+});
+$('solvebtn').onclick = doSolve;
+$('solve_param').addEventListener('change', e => e.target.dataset.touched = '1');
 
-initPresets();
 requestAnimationFrame(tick);
-fetchGeo();
-doRun();   // populate on load — the server pre-warms the sim at startup
+// catalogues first: the stage form has no options until they arrive
+fillCatalogues().then(() => {
+  buildStages();
+  initPresets();
+  fetchGeo();
+  doRun();
+});
 </script>
 </body>
 </html>

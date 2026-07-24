@@ -59,6 +59,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   tli_mag_err::Float64 = 0.0,
                   tli_point_err::Float64 = 0.0,
                   tcm_delay::Float64 = 86400.0,
+                  optimize_kick::Bool = false,
                   verbose::Bool = false)
     # --- 1. launch to parking orbit ----------------------------------------
     # a supplied launch vehicle wins; its payload IS the pod
@@ -66,7 +67,8 @@ function moonshot(; pod_mass::Float64 = 350.0,
     pod_mass = lv.payload_mass
     az = launch_azimuth(inclination, deg2rad_(28.5))
     guid0 = AscentGuidance(azimuth = az, h_target = h_park)
-    guid, asc = tune_ascent(lv, guid0; verbose = verbose)
+    guid, asc = tune_ascent(lv, guid0; optimize_kick = optimize_kick,
+                            verbose = verbose)
     asc.reached_orbit ||
         error("ascent failed to reach orbit (h_cut=$(asc.h_cut/1e3) km, gamma=$(rad2deg_(asc.gamma_cut))°)")
 
@@ -152,8 +154,10 @@ function print_moonshot_summary(io::IO, ms::MoonshotResult)
     asc, cis, ent = ms.ascent, ms.cislunar, ms.entry
     el = asc.elements
     println(io, "== Moonshot summary ==")
-    @printf(io, "  Liftoff mass    : %.1f t   (%s, %d stages + fairing)\n",
-            liftoff_mass(ms.lv) / 1e3, ms.lv.name, length(ms.lv.stages))
+    straps = sum(b.count for b in ms.lv.boosters; init = 0)
+    @printf(io, "  Liftoff mass    : %.1f t   (%s, %d stages%s + fairing)\n",
+            liftoff_mass(ms.lv) / 1e3, ms.lv.name, length(ms.lv.stages),
+            straps > 0 ? " + $straps strap-ons" : "")
     @printf(io, "  Parking orbit   : %.1f x %.1f km  i=%.2f°  (insertion t=%.1f s, m=%.0f kg)\n",
             (el.rp - RE_MEAN) / 1e3, (el.ra - RE_MEAN) / 1e3, rad2deg_(el.i), asc.t, asc.m)
     @printf(io, "  Kick-stage prop : %.1f kg at insertion\n", asc.prop_left[end])

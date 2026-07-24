@@ -203,35 +203,402 @@ function _bell_mesh(xexit, len, rex, rt, y, z; nseg::Int = 24)
 end
 
 """
-    rocket_mesh(; diameter, prop_masses, densities, fairing_len, nseg)
-        -> (mesh, sections)
+    _cluster(n, rmax, rb_max) -> [(y, z, exit_radius)]
+
+Lay out `n` engine bells inside radius `rmax`, packed so they do not
+overlap: one on the axis, a plain ring, or a ring around a centre engine
+once there are five or more and the count is odd (the octaweb arrangement).
+Bells shrink as the count grows, which is what real clusters do.
+"""
+function _cluster(n::Int, rmax::Float64, rb_max::Float64)
+    n <= 1 && return [(0.0, 0.0, rb_max)]
+    centre = isodd(n) && n >= 5
+    m = centre ? n - 1 : n
+    s = sin(pi / m)
+    rr = rmax / (1 + s)
+    rb = min(rb_max, 0.92 * rr * s)
+    centre && (rb = min(rb, 0.5rr))
+    out = [(rr * cos(2pi * (i - 1) / m + pi / m),
+            rr * sin(2pi * (i - 1) / m + pi / m), rb) for i in 1:m]
+    centre && pushfirst!(out, (0.0, 0.0, rb))
+    out
+end
+
+# ------------------------------------------------------------ capsule kit --
+#
+# The crew pod is the one part of the stack you can be inside, so it is built
+# from primitives that carry a real wall: `_shell_mesh` revolves a contour and
+# offsets it along its own surface normal, cutting watertight apertures for
+# windows and rimming them. Everything below stays a closed solid, so mass
+# properties and the section-volume tests keep working.
+
+"Rotate about +z by `pitch`, then about +x by `roll`, then translate."
+function _place_mesh(m::TriMesh; roll::Float64 = 0.0, pitch::Float64 = 0.0,
+                     shift::V3 = (0.0, 0.0, 0.0))
+    cp, sp = cos(pitch), sin(pitch)
+    cr, sr = cos(roll), sin(roll)
+    function f(v)
+        x, y, z = v
+        x1, y1 = cp * x - sp * y, sp * x + cp * y
+        y2, z2 = cr * y1 - sr * z, sr * y1 + cr * z
+        (x1 + shift[1], y2 + shift[2], z2 + shift[3])
+    end
+    TriMesh([(f(t[1]), f(t[2]), f(t[3])) for t in m.tris])
+end
+
+_negv(v::V3) = (-v[1], -v[2], -v[3])
+
+"Emit a quad as two triangles wound so the face normal follows `outward`."
+function _quad!(tris::Vector{NTuple{3,V3}}, p::V3, q::V3, r::V3, s::V3, outward::V3)
+    if vdot(vcross(vsub(q, p), vsub(r, p)), outward) >= 0
+        push!(tris, (p, q, r)); push!(tris, (p, r, s))
+    else
+        push!(tris, (p, r, q)); push!(tris, (p, s, r))
+    end
+end
+
+"True if angle `a` lies in the arc from `a0` counter-clockwise to `a1`."
+_ang_in(a, a0, a1) = mod(a - a0, 2pi) <= mod(a1 - a0, 2pi)
+
+"Wall half-angle of an interstage transition cone [rad] — shallow, as built."
+const TAPER_HALFANGLE = deg2rad(17.0)
+
+"""
+    _taper_len(r, rj, D) -> Float64
+
+Axial length of the cone that takes a stage of radius `r` to the joint radius
+`rj` of the stage above, holding the wall angle at [`TAPER_HALFANGLE`](@ref)
+in either direction (necking down to a narrower upper stage, or flaring out
+to a wider one). Returns 0 when the two radii are within 2%, so a uniform
+stack keeps its plain barrel-to-barrel joint.
+"""
+function _taper_len(r::Float64, rj::Float64, D::Float64)
+    dr = abs(rj - r)
+    dr < 0.02r && return 0.0
+    clamp(dr / tan(TAPER_HALFANGLE), 0.10D, 6.0D)
+end
+
+"""
+    interstage_length(d_below, d_above) -> Float64
+
+Length [m] of the transition cone that joins a stage of diameter `d_below` to
+the stage of diameter `d_above` above it — zero when the two match, and the
+same for a flare as for a neck of equal size. This is structure the stack
+carries in addition to its tanks; see [`rocket_mesh`](@ref).
+"""
+interstage_length(d_below::Float64, d_above::Float64) =
+    _taper_len(d_below / 2, d_above / 2, d_below)
+
+"""
+    _arc_slab(x0, x1, r0, r1, a0, a1; nseg=10) -> TriMesh
+
+Closed solid spanning `x0..x1` axially, `r0..r1` radially and the angular
+sector `a0..a1` about +x — curved cabin panels, equipment racks, consoles.
+"""
+function _arc_slab(x0, x1, r0, r1, a0, a1; nseg::Int = 10)
+    na = max(2, nseg)
+    th = [a0 + (a1 - a0) * k / na for k in 0:na]
+    P(x, r, k) = (x, r * cos(th[k+1]), r * sin(th[k+1]))
+    rad(k) = (0.0, cos(th[k+1]), sin(th[k+1]))
+    tng(k) = (0.0, -sin(th[k+1]), cos(th[k+1]))
+    tris = NTuple{3,V3}[]
+    for k in 0:na-1
+        _quad!(tris, P(x0,r1,k), P(x1,r1,k), P(x1,r1,k+1), P(x0,r1,k+1), rad(k))
+        _quad!(tris, P(x0,r0,k), P(x1,r0,k), P(x1,r0,k+1), P(x0,r0,k+1), _negv(rad(k)))
+        _quad!(tris, P(x0,r0,k), P(x0,r1,k), P(x0,r1,k+1), P(x0,r0,k+1), (-1.0,0.0,0.0))
+        _quad!(tris, P(x1,r0,k), P(x1,r1,k), P(x1,r1,k+1), P(x1,r0,k+1), (1.0,0.0,0.0))
+    end
+    _quad!(tris, P(x0,r0,0),  P(x1,r0,0),  P(x1,r1,0),  P(x0,r1,0),  _negv(tng(0)))
+    _quad!(tris, P(x0,r0,na), P(x1,r0,na), P(x1,r1,na), P(x0,r1,na), tng(na))
+    ensure_outward(TriMesh(tris))
+end
+
+"""
+    _shell_mesh(prof, thick; nseg=24, holes=()) -> TriMesh
+
+Watertight shell of revolution. `prof` is the outer `(x, radius)` contour;
+the inner surface is offset by `thick` along the local surface normal
+(negative offsets outward, giving a raised collar or panel). `holes` is a
+list of `(cell_lo, cell_hi, a0, a1)` apertures — a profile-cell range and an
+angular sector — cut clean through the wall and rimmed all the way round.
+
+Because the sector test wraps, passing `(1, ncell, a1, a0)` removes
+*everything except* `a0..a1`, which is how a curved panel that follows a
+cone is made: a shell that only exists where you want material.
+"""
+function _shell_mesh(prof::Vector{Tuple{Float64,Float64}}, thick::Float64;
+                     nseg::Int = 24, holes = NTuple{4,Float64}[])
+    n = length(prof)
+    n >= 2 || throw(ArgumentError("shell profile needs at least two points"))
+    m = n - 1                                     # axial cells
+    inw = Vector{Tuple{Float64,Float64}}(undef, n)
+    for i in 1:n
+        i0, i1 = max(1, i - 1), min(n, i + 1)
+        tx = prof[i1][1] - prof[i0][1]
+        tr = prof[i1][2] - prof[i0][2]
+        L = hypot(tx, tr)
+        if L < 1e-12
+            tx, tr, L = 1.0, 0.0, 1.0
+        end
+        inw[i] = (tr / L, -tx / L)                # inward = -(outward normal)
+    end
+    # angular indices wrap exactly: sin(2pi) is not 0 in binary, so the seam
+    # would otherwise be a hairline crack rather than a shared edge
+    th = [2pi * k / nseg for k in 0:nseg-1]
+    ct(k) = 2pi * (k + 0.5) / nseg                # cell-centre angle
+    O(i, k) = (prof[i][1], prof[i][2] * cos(th[mod(k,nseg)+1]),
+                           prof[i][2] * sin(th[mod(k,nseg)+1]))
+    function Q(i, k)
+        x = prof[i][1] + thick * inw[i][1]
+        r = max(prof[i][2] + thick * inw[i][2], 1e-4)
+        (x, r * cos(th[mod(k,nseg)+1]), r * sin(th[mod(k,nseg)+1]))
+    end
+    cut(i, k) = any(h -> i >= h[1] && i <= h[2] && _ang_in(ct(k), h[3], h[4]), holes)
+    solid(i, k) = 1 <= i <= m && !cut(i, mod(k, nseg))
+    # a negative offset raises the wall outward, which swaps which of the two
+    # revolved surfaces faces out of the solid
+    sg = thick >= 0 ? 1.0 : -1.0
+
+    tris = NTuple{3,V3}[]
+    for i in 1:m, k in 0:nseg-1
+        solid(i, k) || continue
+        ca, sa = cos(ct(k)), sin(ct(k))
+        ox = -(inw[i][1] + inw[i+1][1]); orr = -(inw[i][2] + inw[i+1][2])
+        ref = (sg * ox, sg * orr * ca, sg * orr * sa)
+        _quad!(tris, O(i,k), O(i,k+1), O(i+1,k+1), O(i+1,k), ref)
+        _quad!(tris, Q(i,k), Q(i,k+1), Q(i+1,k+1), Q(i+1,k), _negv(ref))
+    end
+    for i in 1:m+1, k in 0:nseg-1                 # rims across profile stations
+        a, b = solid(i - 1, k), solid(i, k)
+        a == b && continue
+        j = clamp(i, 1, n)
+        ca, sa = cos(ct(k)), sin(ct(k))
+        t3 = (-inw[j][2], inw[j][1] * ca, inw[j][1] * sa)
+        _quad!(tris, O(j,k), O(j,k+1), Q(j,k+1), Q(j,k), a ? t3 : _negv(t3))
+    end
+    for i in 1:m, k in 0:nseg-1                   # rims along aperture sides
+        a, b = solid(i, k - 1), solid(i, k)
+        a == b && continue
+        ca, sa = cos(th[mod(k,nseg)+1]), sin(th[mod(k,nseg)+1])
+        tg = (0.0, -sa, ca)
+        _quad!(tris, O(i,k), O(i+1,k), Q(i+1,k), Q(i,k), a ? tg : _negv(tg))
+    end
+    ensure_outward(TriMesh(tris))
+end
+
+"""
+    pod_mesh(; radius=0.75, nseg=24, ncrew=0) -> (hull, glass, cabin, height)
+
+Apollo-proportioned crew capsule: a spherical-section ablative heat shield,
+a 32.5° conical afterbody built as a real pressure shell with three glazed
+window apertures, a side hatch, RCS quads and a forward docking tunnel —
+plus the cabin behind it all: deck, crew couches, main display console and
+equipment racks. Each return is a vector of closed solids. The window panes
+come back separately from the hull so a viewer can drop them and look out
+through the apertures from inside the cabin.
+
+Sits with the heat-shield apex at x = 0 and the tunnel at x = `height`;
+`ncrew` defaults to what the diameter can actually seat.
+"""
+function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
+    rp = radius
+    nc = max(16, nseg)
+    Rs = 2.4rp                                    # heat-shield spherical radius
+    xsh = Rs - sqrt(Rs^2 - rp^2)                  # shoulder station
+    ts = 0.055rp                                  # ablator thickness
+    tw = 0.050rp                                  # pressure-wall thickness
+    ta = tan(deg2rad(32.5))                       # afterbody half-angle
+    rf = 0.26rp                                   # forward radius
+    Lc = (rp - rf) / ta
+    xb0 = xsh + 0.05rp                            # hull base rim
+    xtop = xb0 + Lc
+    hgt = xtop + 0.34rp
+    crew = ncrew > 0 ? ncrew : (rp >= 1.10 ? 3 : rp >= 0.85 ? 2 : 1)
+    ext = TriMesh[]; glass = TriMesh[]; cab = TriMesh[]
+
+    # --- heat shield: spherical cap, ablator thickness, closed at the axis --
+    shield = Tuple{Float64,Float64}[]
+    for f in range(0.0, 1.0; length = 9)
+        u = rp * f
+        push!(shield, (Rs - sqrt(max(Rs^2 - u^2, 0.0)), u))
+    end
+    push!(shield, (xsh + 0.06rp, rp))
+    for f in range(1.0, 0.0; length = 9)
+        u = 0.985rp * f
+        push!(shield, (ts + Rs - sqrt(max(Rs^2 - u^2, 0.0)), u))
+    end
+    push!(ext, lathe_mesh(shield; nseg = nc))
+
+    # --- conical pressure hull with glazed apertures ------------------------
+    NB = 12
+    cone = Tuple{Float64,Float64}[(xb0, rp)]
+    for i in 1:NB
+        f = i / NB
+        push!(cone, (xb0 + f * Lc, rp + (rf - rp) * f))
+    end
+    rcone(x) = rp - ta * (x - xb0)
+    wins = [(0.0, deg2rad(22.0)), (deg2rad(68.0), deg2rad(15.0)),
+            (deg2rad(-68.0), deg2rad(15.0))]     # (centre, half-width)
+    wi0, wi1 = 5, 7                              # window cell band
+    hatch = (pi, deg2rad(42.0))
+    holes = NTuple{4,Float64}[(Float64(wi0), Float64(wi1), w[1] - w[2], w[1] + w[2])
+                              for w in wins]
+    push!(ext, _shell_mesh(cone, tw; nseg = nc, holes = holes))
+
+    # window frames (raised collar around each pane) and the panes themselves
+    for w in wins
+        fr = cone[wi0-1:wi1+2]
+        ncell = length(fr) - 1
+        push!(ext, _shell_mesh(fr, -0.030rp; nseg = nc, holes = NTuple{4,Float64}[
+            (1.0, Float64(ncell), w[1] + w[2] + 0.10, w[1] - w[2] - 0.10),
+            (2.0, Float64(ncell - 1), w[1] - w[2], w[1] + w[2])]))
+        pn = cone[wi0:wi1+1]
+        push!(glass, _shell_mesh(pn, 0.012rp; nseg = nc, holes = NTuple{4,Float64}[
+            (1.0, Float64(length(pn) - 1), w[1] + w[2], w[1] - w[2])]))
+    end
+    # side hatch: raised panel over its own sector, with a small port
+    hh = cone[4:9]
+    nhc = length(hh) - 1
+    push!(ext, _shell_mesh(hh, -0.026rp; nseg = nc, holes = NTuple{4,Float64}[
+        (1.0, Float64(nhc), hatch[1] + hatch[2], hatch[1] - hatch[2])]))
+
+    # RCS quads on the upper cone: a housing with fore- and aft-firing nozzles
+    xq = xb0 + 0.80Lc
+    rq = rcone(xq)
+    for a in (0.25pi):(0.5pi):(1.99pi)
+        push!(ext, _place_mesh(box_mesh((xq - 0.10rp, rq - 0.02rp, -0.07rp),
+                                        (xq + 0.10rp, rq + 0.05rp, 0.07rp));
+                               roll = a))
+        for (sg, pit) in ((-1.0, 0.0), (1.0, Float64(pi)))
+            noz = _place_mesh(_bell_mesh(0.0, 0.055rp, 0.030rp, 0.014rp, 0.0, 0.0;
+                                         nseg = 10);
+                              pitch = pit, shift = (xq + sg * 0.105rp, rq + 0.02rp, 0.0))
+            push!(ext, _place_mesh(noz; roll = a))
+        end
+    end
+    # forward compartment and docking tunnel
+    push!(ext, lathe_mesh(Tuple{Float64,Float64}[
+        (xtop - 0.02rp, 0.0), (xtop - 0.02rp, rf),
+        (xtop + 0.10rp, 0.245rp), (xtop + 0.16rp, 0.225rp),
+        (xtop + 0.16rp, 0.0)]; nseg = nc))
+    push!(ext, lathe_mesh(Tuple{Float64,Float64}[
+        (xtop + 0.14rp, 0.0), (xtop + 0.14rp, 0.215rp),
+        (hgt - 0.05rp, 0.200rp), (hgt - 0.05rp, 0.240rp),
+        (hgt, 0.240rp), (hgt, 0.0)]; nseg = nc))
+
+    # --- cabin --------------------------------------------------------------
+    # every fitting is sized against the pressure wall where it actually sits,
+    # so nothing punches through the cone as the capsule is scaled
+    rin(x) = rcone(x) - tw
+    xfl = xb0 + 0.04rp                            # deck
+    push!(cab, lathe_mesh(Tuple{Float64,Float64}[
+        (xfl, 0.0), (xfl, 0.96rin(xfl + 0.045rp)),
+        (xfl + 0.045rp, 0.96rin(xfl + 0.045rp)), (xfl + 0.045rp, 0.0)]; nseg = nc))
+    xa = xfl + 0.045rp
+    zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] : [-0.44rp, 0.0, 0.44rp]
+    hw = crew >= 3 ? 0.14rp : 0.17rp              # couch half-width
+    ln = 0.60 * rin(xa + 0.07rp)                  # couch half-length
+    for zc in zs
+        push!(cab, box_mesh((xa + 0.02rp, -ln,      zc - hw),
+                            (xa + 0.07rp,  0.36ln,  zc + hw)))         # back pan
+        push!(cab, box_mesh((xa + 0.07rp, 0.19ln, zc - 0.78hw),
+                            (xa + 0.15rp, 0.41ln, zc + 0.78hw)))       # headrest
+        push!(cab, _place_mesh(box_mesh((-0.025rp, -0.20ln, -0.88hw),
+                                        ( 0.025rp,  0.20ln,  0.88hw));
+                               pitch = deg2rad(-50.0),
+                               shift = (xa + 0.10rp, -1.06ln, zc)))    # leg rest
+        for sg in (-1.0, 1.0)                                          # side rails
+            push!(cab, box_mesh((xa + 0.05rp, -0.96ln, zc + sg * hw - 0.022rp),
+                                (xa + 0.13rp,  0.31ln, zc + sg * hw + 0.022rp)))
+        end
+        for (sy, sg) in ((-0.84, -1.0), (-0.84, 1.0), (0.24, -1.0), (0.24, 1.0))
+            push!(cab, box_mesh((xfl + 0.045rp, sy * ln - 0.022rp,
+                                 zc + sg * hw * 0.8 - 0.022rp),
+                                (xa + 0.02rp,   sy * ln + 0.022rp,
+                                 zc + sg * hw * 0.8 + 0.022rp)))       # struts
+        end
+    end
+    # main display console: an annular panel facing the crew, with instruments
+    xcon = xb0 + 0.62Lc
+    rcin = rin(xcon)
+    push!(cab, lathe_mesh(Tuple{Float64,Float64}[
+        (xcon, 0.20rcin), (xcon, 0.92rcin), (xcon + 0.05rp, 0.92rcin),
+        (xcon + 0.05rp, 0.20rcin), (xcon, 0.20rcin)]; nseg = nc))
+    for (k, a) in enumerate(range(-1.05, 1.05; length = 5))
+        cy, cz = 0.58rcin * cos(a), 0.58rcin * sin(a)
+        push!(cab, box_mesh((xcon - 0.035rp, cy - 0.10rcin, cz - 0.13rcin),
+                            (xcon,           cy + 0.10rcin, cz + 0.13rcin)))
+        isodd(k) && push!(cab, _arc_slab(xcon - 0.020rp, xcon, 0.26rcin, 0.35rcin,
+                                         a - 0.16, a + 0.16; nseg = 6))
+    end
+    # equipment racks against the cabin wall, clear of the couches
+    for (a0, a1) in ((deg2rad(100.0), deg2rad(136.0)), (deg2rad(224.0), deg2rad(260.0)))
+        x0r, x1r = xa, xa + 0.26rp
+        push!(cab, _arc_slab(x0r, x1r, 0.72rin(x1r), 0.97rin(x1r), a0, a1; nseg = 8))
+        x2r, x3r = x1r + 0.04rp, x1r + 0.30rp
+        push!(cab, _arc_slab(x2r, x3r, 0.68rin(x3r), 0.96rin(x3r),
+                             a0 + 0.08, a1 - 0.08; nseg = 8))
+    end
+    (ext, glass, cab, hgt)
+end
+
+"""
+    rocket_mesh(; diameter, diameters, prop_masses, densities, n_engines,
+                  fairing_len, nseg) -> (mesh, sections)
 
 Procedural launch-vehicle geometry with real detailing: a first stage with
 an engine skirt and a five-bell cluster, one cylindrical barrel per stage
 sized so its tank volume holds `prop_masses[k]` of propellant at
 `densities[k]` (plus ullage and an engine/interstage bay), recessed
 interstage collars with a nested vacuum bell on every upper stage, cable
-raceways, RCS pods and a payload adapter cone on the kick stage, a blunt
-entry-pod capsule on the adapter, and an ogive fairing enclosing both.
-Body +x is the nose axis; the tail plate sits at x = 0 with the first-stage
-bells extending to x ≈ -0.32·diameter.
+raceways, RCS pods and a payload adapter cone on the kick stage, a crew
+capsule (see [`pod_mesh`](@ref)) on the adapter, and an ogive fairing
+enclosing both. Body +x is the nose axis; the tail plate sits at x = 0 with
+the first-stage bells extending to x ≈ -0.32·diameter.
 
 Each piece is a closed solid, so `sections` carries both the axial extent
 and the triangle range of every component in the merged soup:
-`(name, x0, x1, t0, t1)` bottom-up with `:pod` then `:fairing` last —
-viewers can hide/detach a section by dropping `tris[t0:t1]`.
+`(name, x0, x1, t0, t1)` bottom-up, ending with the capsule's three parts —
+`:pod` (hull), `:glass` (window panes) and `:cabin` (interior) — then
+`:fairing`. Viewers hide or detach a section by dropping `tris[t0:t1]`:
+drop `:glass` and `:cabin` becomes visible through the apertures.
+
+`boosters` adds strap-on sets clustered around the first stage, each entry a
+named tuple `(count, diameter, prop_mass, density, n_engines)`. A set is one
+section named `:booster<i>`, appended after the core stack — so the section
+list is bottom-up for the stack itself, with strap-ons last.
+
+Stages may have their own diameters via `diameters`. A barrel's length
+follows from its own cross-section, so widening a stage makes it shorter for
+the same propellant load, and where two neighbours differ the lower one is
+capped with a transition cone ([`_taper_len`](@ref)) carrying its radius to
+the joint — necking down to a narrower upper stage or flaring out to a wider
+one, at a constant shallow wall angle either way. The cone sits above the
+tank, so it lengthens the stack without eating tank volume, and it belongs to
+the lower stage's section: it departs at separation, as a real interstage
+does. Uniform stacks emit no cone and are unchanged. The fairing and capsule
+are sized by the topmost stage.
 """
 function rocket_mesh(; diameter::Float64 = 1.8,
                      prop_masses::Vector{Float64} = [42000.0, 9500.0, 950.0],
-                     densities::Vector{Float64} = fill(1020.0, length(prop_masses)),
-                     fairing_len::Float64 = 2.2 * diameter,
+                     densities::Vector{Float64} = fill(bulk_density(PROPELLANTS[:kerolox]),
+                                                       length(prop_masses)),
+                     n_engines::Vector{Int} = ones(Int, length(prop_masses)),
+                     diameters::Vector{Float64} = fill(diameter, length(prop_masses)),
+                     boosters::Vector = NamedTuple[],
+                     fairing_len::Float64 = 2.2 * last(diameters),
                      nseg::Int = 48)
     length(prop_masses) == length(densities) ||
         throw(ArgumentError("prop_masses and densities length mismatch"))
-    D = diameter
+    length(n_engines) == length(prop_masses) ||
+        throw(ArgumentError("n_engines and prop_masses length mismatch"))
+    length(diameters) == length(prop_masses) ||
+        throw(ArgumentError("diameters and prop_masses length mismatch"))
+    all(>(0), diameters) || throw(ArgumentError("stage diameters must be positive"))
+    K = length(prop_masses)
+    D = diameters[1]
     r = D / 2
     A = pi * r^2
-    K = length(prop_masses)
     nb = max(16, nseg ÷ 2)
     parts = TriMesh[]
     sections = NamedTuple[]
@@ -243,34 +610,51 @@ function rocket_mesh(; diameter::Float64 = 1.8,
                          t0 = tcount + 1, t1 = tcount + n))
         tcount += n
     end
-    raceway(xa, xb) = box_mesh((xa, 0.955r, -0.030D), (xb, r + 0.048D, 0.030D))
+    raceway(xa, xb, r, D) = box_mesh((xa, 0.955r, -0.030D), (xb, r + 0.048D, 0.030D))
 
     x = 0.28D                                    # engine-skirt cone length
-    for (k, (mp, rho)) in enumerate(zip(prop_masses, densities))
+    rtop_prev = D / 2                            # radius at the top of stage k-1
+    for (k, (mp, rho, ne)) in enumerate(zip(prop_masses, densities, n_engines))
+        D = diameters[k]                         # this stage's own diameter
+        r = D / 2
+        A = pi * r^2
         len = mp / (rho * A) * 1.15 + 0.9D       # tank + ullage + engine bay
+        # Transition to the stage above: the adapter belongs to the lower
+        # stage (it is the top of its structure and departs with it), and is
+        # a cone whenever the two diameters differ — necking down or flaring
+        # out. It is appended above the barrel, so tank volume is untouched.
+        rj = k < K ? diameters[k+1] / 2 : r      # joint radius with the stage above
+        ltap = _taper_len(r, rj, D)
+        xtop = x + len + ltap                    # top of this stage's structure
         ms = TriMesh[]
         if k == 1
-            # skirt + barrel, five-bell cluster half-recessed below the plate
-            push!(ms, lathe_mesh(Tuple{Float64,Float64}[
-                (0.0, 0.0), (0.0, 0.80r), (0.28D, r), (x + len, r), (x + len, 0.0)];
-                nseg = nseg))
-            push!(ms, _bell_mesh(-0.32D, 0.42D, 0.105D, 0.050D, 0.0, 0.0; nseg = nb))
-            for a in (0.25pi):(0.5pi):(1.99pi)
-                push!(ms, _bell_mesh(-0.32D, 0.42D, 0.105D, 0.050D,
-                                     0.52r * cos(a), 0.52r * sin(a); nseg = nb))
+            # skirt + barrel, engine cluster half-recessed below the plate
+            prof1 = Tuple{Float64,Float64}[
+                (0.0, 0.0), (0.0, 0.80r), (0.28D, r), (x + len, r)]
+            ltap > 0 && push!(prof1, (xtop, rj))
+            push!(prof1, (xtop, 0.0))
+            push!(ms, lathe_mesh(prof1; nseg = nseg))
+            for (by, bz, bs) in _cluster(ne, 0.80r, 0.105D)
+                push!(ms, _bell_mesh(-0.32D, 4.0bs, bs, 0.48bs, by, bz; nseg = nb))
             end
-            push!(ms, raceway(0.30D, x + len - 0.02D))
-            finish!(:stage1, -0.32D, x + len, ms)
+            push!(ms, raceway(0.30D, x + len - 0.02D, r, D))
+            finish!(:stage1, -0.32D, xtop, ms)
         else
-            # recessed interstage collar, then the barrel; the vacuum bell
-            # nests down into the stage below (revealed at separation)
-            push!(ms, lathe_mesh(Tuple{Float64,Float64}[
-                (x, 0.0), (x, 0.945r), (x + 0.10D, 0.945r), (x + 0.10D, r),
-                (x + len, r), (x + len, 0.0)]; nseg = nseg))
-            bex, blen = k == K ? (0.085D, 0.22D) : (0.155D, 0.36D)
-            push!(ms, _bell_mesh(x + 0.04D - blen, blen, bex, 0.045D, 0.0, 0.0;
-                                 nseg = nb))
-            k < K && push!(ms, raceway(x + 0.12D, x + len - 0.02D))
+            # Interstage collar: tucked inside whatever the stage below ends
+            # at, then opened out to this stage's own radius.
+            rbase = min(0.945r, 0.98 * rtop_prev)
+            profk = Tuple{Float64,Float64}[
+                (x, 0.0), (x, rbase), (x + 0.10D, rbase), (x + 0.13D, r),
+                (x + len, r)]
+            ltap > 0 && push!(profk, (xtop, rj))
+            push!(profk, (xtop, 0.0))
+            push!(ms, lathe_mesh(profk; nseg = nseg))
+            bex, blen, thr = k == K ? (0.085D, 0.22D, 0.53) : (0.155D, 0.36D, 0.29)
+            for (by, bz, bs) in _cluster(ne, 0.80r, bex)
+                L = blen * bs / bex
+                push!(ms, _bell_mesh(x + 0.04D - L, L, bs, thr * bs, by, bz; nseg = nb))
+            end
+            k < K && push!(ms, raceway(x + 0.12D, x + len - 0.02D, r, D))
             if k == K
                 # kick stage: four RCS pods + the payload adapter cone
                 xm = x + 0.5 * len
@@ -285,19 +669,26 @@ function rocket_mesh(; diameter::Float64 = 1.8,
                     (x + len, 0.0), (x + len, 0.90r),
                     (x + len + 0.13D, 0.44r), (x + len + 0.13D, 0.0)]; nseg = nseg))
             end
-            finish!(Symbol(:stage, k), x, x + len + (k == K ? 0.13D : 0.0), ms)
+            finish!(Symbol(:stage, k), x, xtop + (k == K ? 0.13D : 0.0), ms)
         end
-        x += len
+        x += len + ltap
+        rtop_prev = ltap > 0 ? rj : r
     end
-    # pod: blunt capsule seated on the adapter, inside the fairing (base caps
-    # offset a hair so coincident flat faces don't z-fight in viewers)
+    D = diameters[K]                             # fairing and capsule ride on top
+    r = D / 2
+    # pod: crew capsule seated on the adapter, inside the fairing. The cabin
+    # is its own section so a viewer can cull the hull and look inside; it
+    # shares the pod's axial extent so `sections` stays sorted by x0.
     rp = min(0.75, 0.85r)
-    lp = 2.0rp
-    xb = x + 0.13D + 0.02
-    finish!(:pod, x, xb + lp, TriMesh[lathe_mesh(Tuple{Float64,Float64}[
-        (xb, 0.0), (xb, 0.92rp), (xb + 0.06rp, rp), (xb + 0.14rp, rp),
-        (xb + 0.75lp, 0.40rp), (xb + 0.82lp, 0.34rp), (xb + 0.86lp, 0.34rp),
-        (xb + 0.97lp, 0.24rp), (xb + lp, 0.0)]; nseg = nseg)])
+    xb = x + 0.13D + 0.02                        # a hair off the adapter face
+    phull, pglass, pcab, lp = pod_mesh(; radius = rp, nseg = max(20, nseg ÷ 2))
+    shift = (xb, 0.0, 0.0)
+    place!(nm, ms) = finish!(nm, x, xb + lp,
+                             TriMesh[_place_mesh(m; shift = shift) for m in ms])
+    place!(:pod, phull)
+    place!(:glass, pglass)
+    place!(:cabin, pcab)
+    #= fairing follows =#
     # fairing: closed shell — cylindrical shoulder, power-law ogive, eased tip
     x0f = x
     xsh = x0f + 0.12 * fairing_len
@@ -308,5 +699,56 @@ function rocket_mesh(; diameter::Float64 = 1.8,
     push!(prof, (x0f + 0.985 * fairing_len, 0.055r))
     push!(prof, (x0f + fairing_len, 0.0))
     finish!(:fairing, x0f, x0f + fairing_len, TriMesh[lathe_mesh(prof; nseg = nseg)])
+
+    # --- strap-on boosters ------------------------------------------------
+    # Clustered around the first stage, standing on the same plane, each a
+    # barrel sized by its own propellant load with an ogive nose and its own
+    # bells. A whole set is one section, because a set separates together.
+    r1 = diameters[1] / 2
+    for (bi, b) in enumerate(boosters)
+        db = b.diameter
+        rb = db / 2
+        lb = b.prop_mass / (b.density * pi * rb^2) * 1.15 + 0.9db
+        xn = 0.28db + lb                             # nose starts above the barrel
+        bprof = Tuple{Float64,Float64}[(0.0, 0.0), (0.0, 0.80rb), (0.28db, rb), (xn, rb)]
+        for f in range(0.0, 1.0; length = 8)[2:end-1]
+            push!(bprof, (xn + f * 1.75rb, rb * (1 - f^2)^0.55))
+        end
+        push!(bprof, (xn + 1.75rb, 0.0))
+        one = TriMesh[lathe_mesh(bprof; nseg = max(16, nseg ÷ 2))]
+        for (by, bz, bs) in _cluster(b.n_engines, 0.78rb, 0.105db)
+            push!(one, _bell_mesh(-0.30db, 3.6bs, bs, 0.46bs, by, bz; nseg = nb))
+        end
+        R = r1 + rb                                  # flank of the core, touching
+        set = TriMesh[]
+        for j in 0:(b.count - 1)
+            a = 2pi * j / b.count
+            sh = (0.0, R * cos(a), R * sin(a))
+            append!(set, (_place_mesh(m; roll = a, shift = sh) for m in one))
+        end
+        finish!(Symbol(:booster, bi), -0.30db, xn + 1.75rb, set)
+    end
     (merge_meshes(parts...), sections)
 end
+
+"""
+    rocket_mesh(lv::LaunchVehicle; diameter, kwargs...) -> (mesh, sections)
+
+The geometry a launch vehicle actually implies: every barrel is sized by
+its own propellant's bulk density, and every stage gets its own engine
+count. Swap a stage from kerolox to hydrolox and the same propellant mass
+needs a three-times longer tank — the vehicle visibly grows.
+"""
+rocket_mesh(lv::LaunchVehicle; diameter::Float64 = 2 * sqrt(lv.sref / pi),
+            kwargs...) =
+    rocket_mesh(; diameter = diameter,
+                prop_masses = [s.mprop for s in lv.stages],
+                densities = [bulk_density(s.prop) for s in lv.stages],
+                n_engines = [s.n_engines for s in lv.stages],
+                diameters = [stage_diameter(s, diameter) for s in lv.stages],
+                boosters = [(count = b.count,
+                             diameter = stage_diameter(b.stage, diameter),
+                             prop_mass = b.stage.mprop,
+                             density = bulk_density(b.stage.prop),
+                             n_engines = b.stage.n_engines) for b in lv.boosters],
+                kwargs...)

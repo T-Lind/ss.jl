@@ -54,9 +54,25 @@ pitch law for the upper stages with cutoff at the target orbit energy.
 `tune_ascent` closes (pitch0, pitch rate) on (insertion altitude, γ = 0) by
 damped-Newton shooting — a stand-in for PEG-class guidance. Staging drops
 dry mass, the fairing jettisons at 120 km, and unspent kick-stage propellant
-is the TLI budget. The default `Sable` launcher (S1 kerolox 950 kN, S2
-kerolox 95 kN, S3 storable 15 kN) puts ~1.4 t through TLI from a 57.8 t
-liftoff.
+is the TLI budget. Burnouts are the one boundary a fixed step gets visibly
+wrong, so the final step of a burn is trimmed to land exactly on depletion:
+a stage burns its propellant load and not a kilogram more. The default
+`Sable` launcher (S1 kerolox 950 kN, S2 kerolox 95 kN, S3 storable 15 kN)
+puts ~1.4 t through TLI from a 57.8 t liftoff.
+
+**Strap-on boosters** (`BoosterSet`) burn in parallel with stage 1: thrust
+and mass flow sum, the attached set adds its own frontal area to the drag,
+the core can be held at a reduced throttle while the sides carry the stack,
+and each set lights, burns out and separates on its own schedule. The pitch
+kick is where parallel burn bites — it is not a constraint (the 2×2 above
+already pins the insertion state) but it decides how much of the climb is
+spent fighting gravity, and the right value moves with thrust-to-weight. A
+stack with strap-ons lifts off so hard that the reference 8° kick lofts it,
+and it reaches the target energy having *wasted* the extra impulse: two
+boosters on the reference vehicle deliver **less** mass to orbit than none.
+`tune_ascent(...; optimize_kick = true)` scans the kick, solves the 2×2
+inside each candidate and keeps whichever puts the most mass in orbit —
+turning that 1.2 t into 3.7 t. It costs a few seconds, so it is opt-in.
 
 **Trans-lunar injection & free return** (`src/moon.jl`, `src/translunar.jl`):
 the Moon is a circular ephemeris in the achieved parking-orbit plane (the
@@ -116,10 +132,14 @@ against the 22.8 kg post-TLI kick margin, with 99% of samples reaching the
 entry corridor.
 
 Nominal circumlunar numbers (v0.2): TLI Δv 3151 m/s of a 3330 m/s budget,
-perilune 2000 ± 30 km, return vacuum perigee 32.4 km (γ ≈ −7.4° at 140 km),
-entry peak 18.8 g / 253 W/cm², stagnation heat load 102 MJ/m², splashdown
+perilune 2000 ± 30 km, return vacuum perigee 35.5 km (γ ≈ −7.3° at 140 km),
+entry peak 17.9 g / 247 W/cm², stagnation heat load 104 MJ/m², splashdown
 6.5 days after liftoff at 4.5 m/s under main (3.3 d out, 3.2 d home — the
-symmetric free-return figure-8).
+symmetric free-return figure-8). Trimming the last step of each burn to land
+exactly on depletion moved these slightly from v0.1's figures (peak load
+18.8 g, vacuum perigee 32.4 km): the old fixed step both burned a little
+propellant a stage did not have and threw a little away, and a free return
+is sensitive enough to notice.
 
 Plots: `output/plots/moonshot_*` — 3D ascent, Earth-Moon trajectory,
 rotating-frame figure-8, 3D entry — plus the full analysis suite from
@@ -142,16 +162,65 @@ mission — pod, targets, all stages, dispersions — and
 `run_mission("missions/moonshot.toml")` designs and flies it. New vehicles
 and mission variants are files, not code.
 
+**Propellants, engines and stage sizing** (`engines.jl`): the flight model
+only needs a stage's mass, thrust, Isp and nozzle exit area, and that is all
+`Stage` carries into the integrator. Above it sits a design layer with real
+propellant properties (kerolox, hydrolox, methalox, hypergolic, hydrazine,
+solid — storage densities and flight mixture ratios), a catalogue of
+representative engines (Merlin 1D and its vacuum variant, Rutherford,
+Raptor 2, RS-25, RL10B-2, Vinci, AJ10), and mass-estimating relations. An
+engine's nozzle exit area is *derived* from its sea-level/vacuum Isp split,
+so the pressure correction the sim flies reproduces both quoted figures
+exactly — a tested invariant, not a coincidence.
+
+This is what makes propellant choice physical rather than cosmetic. Bulk
+density spans more than a factor of three across the catalogue (hydrolox
+343 kg/m³ against kerolox 1023), and tanks are sized from the real fuel and
+oxidiser volumes — so swapping the reference upper stage from its kerolox
+engine to an RL10B-2 grows that barrel from 5.8 m to 14.1 m and the whole
+vehicle from 32.4 m to 40.8 m, in the panel viewer, the launch view, and the
+exported STL alike. Stages carry their own **diameter** too, and where two
+neighbours differ the lower one is capped with a **transition cone** — a
+real interstage adapter, held at a constant shallow wall angle (17°) so its
+length follows the size of the step, necking down to a narrower upper stage
+or flaring out to a wider one. It sits above the tank rather than inside it,
+so it lengthens the stack without eating capacity, and it belongs to the
+lower stage's section: it departs at separation, as the real article does.
+Stepping the reference vehicle 2.6/1.8/1.2 m buys a 1.31 m cone and a 0.98 m
+cone; a uniform stack emits none and is untouched. The capsule and fairing
+follow whichever stage they ride on. Because a barrel's length comes from
+its own cross-section, widening the reference booster to 2.6 m packs the
+same 42 t into 11.2 m instead of 20.2 m. Run it the other way — hold the
+length and widen — and the capacity is what moves: 21.2 m at 2.6 m across
+holds 89 t of kerolox rather than 42 t. Clustering is equally concrete: `engines = 9` multiplies
+thrust and exit area by nine and hangs nine bells under the stage, packed to
+fit. `sized_stage` estimates dry mass from tank volume, engine mass, thrust
+structure and cryogenic insulation, plus one lumped `systems` term that
+scales as `mprop^0.78` because mass fraction improves with size; it lands
+within a few percent of a Falcon-9-class first stage and the reference
+upper stage, and about 15% light on small dense boosters. Pass a measured
+`dry_kg` and the estimate is skipped entirely.
+
 **Aerodynamics from geometry** (`mesh.jl`, `panelaero.jl`, `geometry/`):
 load an STL (or build one procedurally — `lathe_mesh`, `box_mesh`, and
 `rocket_mesh`, which sizes a stacked launcher so each stage's barrel holds
 its propellant and details it with a five-bell first-stage engine cluster,
 recessed interstage collars hiding nested vacuum bells, cable raceways,
-RCS pods and a payload adapter on the kick stage, and a pod capsule under
-the fairing — reporting each section's axial extent *and* triangle range
-so viewers can detach pieces individually), get exact
-polyhedral mass properties (volume, CG, inertia — Eberly's method,
-validated to machine precision on primitives), and generate hypersonic aero
+RCS pods and a payload adapter on the kick stage, a crew capsule under
+the fairing, and any strap-on booster sets clustered around the first stage
+— reporting each section's axial extent *and* triangle range so viewers can
+detach pieces individually). The capsule comes from
+`pod_mesh`: Apollo proportions (spherical-section ablator, 32.5° afterbody,
+docking tunnel), built as a genuine pressure *shell* by `_shell_mesh`,
+which revolves a contour, offsets it along its own surface normal and cuts
+watertight, rimmed apertures — so the three glazed windows and the side
+hatch are real holes through a real wall, and the cabin behind them (deck,
+crew couches, display console, equipment racks, all scaled to what the
+diameter can actually seat) is modelled and returned separately from the
+hull and the panes. Every piece is a closed, consistently wound solid, so
+you can compute exact polyhedral mass properties (volume, CG, inertia —
+Eberly's method, validated to machine precision on primitives), and
+generate hypersonic aero
 tables with a modified-Newtonian panel method: CA/CN/Cm over (α, Mach) plus the pitch
 damping derivative Cm_q from a rotating-panel sweep. The sphere reproduces
 the analytic Newtonian drag to 0.2%; the committed capsule mesh flies the
@@ -232,10 +301,13 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (169 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (291 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
-# meshes/panel aero, maneuvers, and end-to-end reentry)
+# propellant/engine consistency and stage sizing, scalar targeting including
+# infeasible-design retreat, parallel-burn strap-on boosters, meshes/panel
+# aero including interstage transition cones, capsule watertightness and
+# cabin clearances, maneuvers, and end-to-end reentry)
 julia --project -e 'push!(LOAD_PATH, "src"); using SatelliteSim; include("test/runtests.jl")'
 
 # targeted nominal trajectory -> output/*.csv
@@ -286,9 +358,58 @@ color), a textured globe spinning about the real pole with **launch-site
 and splashdown markers riding the rotating surface**, correct
 depth-occlusion of trajectory lines behind the Earth, mission-time
 playback, an inertial/rotating frame toggle, and Earth/full zoom shortcuts.
-A **vehicle geometry** card renders the launcher your stage masses imply
-(procedural mesh from `rocket_mesh`, sized so each barrel actually holds
-its propellant) and updates as you edit the configuration — and it
+The **stage count** is a field (2–5) and the whole launcher form is generated
+from it — nothing in the page or the server counts stages itself, so the
+geometry viewer, the sweep list and the solver all pick up a new stage the
+moment you add one. Each stage has a **mixture**, an **engine count**, and an
+optional **engine** from the catalogue; pick an engine and its thrust, Isp,
+exit area and propellant take over, with dry mass estimated if you leave it
+to. Each stage also has its own **diameter** and a choice of what drives its
+size: give it a propellant mass and the tank length follows, or give it a
+tank length and the propellant load follows from the volume — which is how
+widening a stage turns into extra propellant rather than a shorter barrel.
+Whichever you are not driving is greyed out and reported back to you. The dropdowns are filled from the server's own catalogue, so the page can
+never offer something the simulator doesn't have. Bear in mind the reference
+vehicle carries about 23 kg of propellant margin, so inserting a stage adds
+enough mass to break the mission — which is what the solver is for.
+
+Every stage reports its own **verdict** as you type — propellant, tank
+length, volume, ideal Δv, thrust-to-weight at its own ignition, burn time,
+and the adapter cone it needs to meet the stage above — with a summary line
+for the whole stack: mass on the pad, lift-off T/W (flagged red below 1.15,
+because that vehicle does not leave the ground), and the total ideal Δv it
+has to spend. That is all arithmetic on numbers the geometry endpoint
+already returns, and it turns "run it and see" into "look at it and see".
+
+**Strap-on boosters** are a field too. Pick 2, 3, 4 or 6 and a set appears,
+configured exactly like a stage — propellant, engine, mixture, diameter,
+size-by-mass-or-length — plus the three things that only make sense in
+parallel: the **core throttle** held while they burn (the Falcon-Heavy trick
+of running the first stage down so it still has propellant when the sides
+go), an **ignition delay** for an air-lit set, and a **separation delay**
+that carries them as dead weight after burnout. The numbers describe one
+booster; the set contributes them `count` times over. They fly as a real
+parallel burn — summed thrust and mass flow, their own frontal area in the
+drag while attached, their own separation events — and they show up in the
+geometry, the panel viewer and the launch view as bodies beside the core
+with their own nose cones, bells and exhaust plumes, dropping away at their
+separation event while the core keeps burning.
+
+A **solve** card locks every field but one and searches it until a mission
+metric hits a target: *vary perilune target until perilune = 3000 km*, or
+*vary pod mass until the kick stage's propellant margin = 0*. Each step flies
+the whole chain, so this is a bracketing search (Illinois-modified regula
+falsi, `solve.jl`) on a hard iteration budget rather than a scan — typically
+five or six missions. Every evaluation is plotted, because with second-long
+evaluations the path is most of what you learn. A configuration that fails
+outright counts as past the feasible edge: the search retreats from it and
+reports the interval it could actually use, so "a 500 kg pod flies no valid
+mission" reads differently from "your range is too narrow". Running it is
+instructive about this vehicle — most targets turn out to be unreachable,
+and the reason is always the same thin margin. A **vehicle geometry** card
+renders the launcher those choices imply — built from the very same
+`LaunchVehicle` the mission flies, so the drawing and the trajectory cannot
+disagree — and updates as you edit the configuration; it
 **follows the mission clock**: scrub the timeline and stage 1, the fairing,
 stage 2, and finally the spent kick stage drop away at their actual event
 times, with an engine flame while a stage burns and the view recentering
@@ -299,10 +420,18 @@ on whatever is still flying (down to the bare pod on the return leg).
 The **🚀 launch view** chip (or `http://localhost:8137/launch`) opens a
 cinematic WebGL rendering of the whole mission, pad to splashdown, flown
 directly from the simulator's logs for the currently configured vehicle —
-same `/api/run` data, nothing canned. The timeline is phase-aware with
-automatic time warp (real-time through the burns and entry, thousands× on
-the quiet cruise, a warp ladder and a phase-segmented seek bar to jump
-around):
+same `/api/run` data, nothing canned.
+
+The timeline is **built from the run, not hardcoded**. Phases are emitted
+only if the trajectory contains them (no TLI in the log ⇒ no TLI phase, no
+translunar coast, no flyby), coasts are paced to compress to a roughly
+fixed wall-clock length whichever trajectory you configured, and every
+event the sim reported becomes a callout and a seek-bar marker — including
+ones whose names are derived from your own stage and parachute names, so a
+four-stage vehicle gets four separations. Burns and entry run in real
+time; a warp ladder (×1 · ×2 · ×4 · ×10 … ×10k, or auto) and a
+phase-segmented seek bar let you jump around. Seven cameras (keys `1`-`7`)
+cover exterior, onboard and in-cabin views:
 
 * **Ascent** — from T−15 the umbilical arms swing back and the pad lights
   under the real ignition ramp; the camera director cuts through pad,
@@ -315,10 +444,41 @@ around):
   for the TLI burn against the limb, and cruise out with the Moon growing
   from a disc (sim ephemeris) to a cratered sphere filling the frame at
   the 2 000 km far-side flyby.
-* **Entry** — the pod hits the interface at ~10.6 km/s trailing an
-  incandescent plasma wake driven by the logged heating rate, then drogue,
-  gored orange-and-white main, and splashdown in the Pacific, with the
-  final stat card.
+* **Entry** — the pod hits the interface at ~10.6 km/s with a shock layer
+  standing on the heat shield and an incandescent wake streaming behind
+  it, driven by the logged heating rate; then drogue, gored
+  orange-and-white main, and splashdown in the Pacific, with the final
+  stat card. Exhaust and wake are seeded in the *vehicle's* frame: what you
+  see is the relative recession, a few hundred m/s, not the 8-11 km/s the
+  vehicle is doing. Left in the world frame a trail falls kilometres behind
+  between frames and never becomes visible — and if the velocity it is
+  measured against is even slightly overstated, the plume overtakes the
+  rocket, which is why the cruise state uses a 1 s velocity baseline rather
+  than a 40 s one that would average across the TLI burn's acceleration.
+  The plume also runs on its own near-real-time clock, so it keeps burning
+  when you wind the time warp up instead of blinking out.
+* **Inside the capsule** — `cabin` (key `5`) puts the eye on the couch;
+  `window` (key `6`) puts it up against a viewport looking out. Because the
+  hull is a real shell with real apertures, the renderer simply drops the
+  window panes and you see straight out through the openings: display
+  console overhead, equipment racks along the wall, the ocean or the stars
+  through the glass. In space the view picks whichever of the three
+  windows currently faces the Moon or Earth, and dragging turns your head
+  rather than orbiting the capsule. Riding inside, the camera moves *with*
+  the hull — only a few millimetres of vibration remain, because a crew
+  member is shaken along with the vehicle rather than watching it shake.
+  The director cuts inside when the fairing splits and daylight first
+  reaches the cabin, and again through peak heating.
+
+The vehicle wears a **livery**: a decal sheet painted procedurally in
+(station, roll) space and wrapped cylindrically over the skin — roll-pattern
+quadrants on the booster, an interstage trim band, stage numerals, an
+insignia roundel and ensign, split-line markings down the fairing, and the
+vehicle name. Baked vertex colours could never carry lettering at this
+triangle count, so the markings live in a generated texture and the mesh
+itself stays clean. The insignia is an original mark rather than any real
+agency's; it is all drawn in one function (`buildLiveryTex`) if you want a
+different scheme.
 
 Earth and Moon are **exact ray-traced spheres** rendered in a single
 fullscreen pass with camera-relative centers — the limb, horizon dip, and
@@ -443,3 +603,13 @@ geometry/           demo STL meshes (capsule, simplified Starship)
 * Splashdown of the lunar return lands wherever the geometry says; targeting
   a specific site couples TLI epoch to Earth rotation and is a
   straightforward outer loop that is not yet closed.
+* Ascent steering is a *command*: the thrust direction follows the guidance
+  law with no rate limit and no attitude lag, so the gravity turn holds
+  α ≈ 0 by construction and max-q structural loads are trivially zero. Rate-
+  limiting the command and logging q·α is the honest upgrade.
+* Stages burn at fixed throttle. `Engine` already carries a `throttle_min`
+  that nothing reads yet; a thrust-vs-time curve is what solid strap-ons
+  want, so `BoosterSet` currently models solids only as constant-thrust.
+* Booster drag sums each strap-on's full frontal area onto the core's, with
+  no shielding between neighbours and no change to the CD table shape — it
+  errs high, and only while they are attached.

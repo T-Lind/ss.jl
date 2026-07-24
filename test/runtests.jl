@@ -158,6 +158,93 @@ end
     @test :fairing_jettison in names
     # max-q in a sane band for a small launcher
     @test 20e3 < maximum(asc.log.qbar) < 90e3
+
+    # A stage burns exactly its propellant load. The final step of a burn is
+    # trimmed to land on depletion, so the mass at separation is the lift-off
+    # mass less all of stage 1's propellant and its dry structure — no
+    # phantom propellant burned past empty, none thrown away short of it.
+    sep1 = asc.events[findfirst(e -> e.name === :sep_sable1, asc.events)]
+    @test isapprox(sep1.m,
+                   liftoff_mass(lv) - lv.stages[1].mprop - lv.stages[1].mdry;
+                   atol = 0.5)
+    @test isapprox(sep1.t, stage_burn_time(lv.stages[1]); atol = 0.05)
+end
+
+@testset "strap-on boosters" begin
+    base = default_moon_rocket()
+    strap = Stage(:strap, 900.0, 12000.0, 380.0e3, 285.0, 0.32,
+                  PROPELLANTS[:kerolox], 2)
+    mk(nb; thr = 1.0, delay = 0.0, sep = 0.0) = LaunchVehicle(
+        name = "Sable-H", stages = base.stages, fairing_mass = base.fairing_mass,
+        payload_mass = base.payload_mass, sref = base.sref, cd = base.cd,
+        boosters = nb == 0 ? BoosterSet[] :
+            [BoosterSet(stage = strap, count = nb, core_throttle = thr,
+                        ignition_delay = delay, sep_delay = sep)])
+
+    # a vehicle with no boosters is the vehicle it always was
+    @test liftoff_mass(mk(0)) == liftoff_mass(base)
+    @test frontal_area(mk(0), Bool[]) == base.sref
+
+    lv2 = mk(2)
+    @test liftoff_mass(lv2) ≈ liftoff_mass(base) + 2 * (900.0 + 12000.0)
+    @test pad_thrust(lv2) ≈ pad_thrust(base) + 2 * stage_thrust(strap, 101325.0)
+    # attached boosters put their own frontal area into the flow, then stop
+    @test frontal_area(lv2, [true]) > base.sref
+    @test frontal_area(lv2, [false]) == base.sref
+
+    guid, asc = tune_ascent(lv2, AscentGuidance())
+    @test asc.reached_orbit
+    names = [e.name for e in asc.events]
+    @test :ignition_strap in names && :burnout_strap in names && :sep_strap in names
+    # the set lights on the pad, runs its own burn time, and goes at once
+    tign = asc.events[findfirst(e -> e.name === :ignition_strap, asc.events)].t
+    tout = asc.events[findfirst(e -> e.name === :burnout_strap, asc.events)].t
+    tsep = asc.events[findfirst(e -> e.name === :sep_strap, asc.events)].t
+    @test tign == 0.0
+    @test isapprox(tout - tign, stage_burn_time(strap); atol = 0.2)
+    @test tsep == tout                                # sep_delay = 0
+    # and they are gone before the core stages
+    @test tsep < asc.events[findfirst(e -> e.name === :sep_sable1, asc.events)].t
+    # mass drops by the whole set's dry mass at separation, not one booster's
+    im = findfirst(t -> t > tsep, asc.log.t)
+    @test asc.log.m[im] < asc.log.m[findlast(t -> t <= tsep, asc.log.t)] - 1500.0
+
+    # holding the core down leaves it burning after the sides are away
+    hot  = tune_ascent(mk(2), AscentGuidance())[2]
+    cool = tune_ascent(mk(2; thr = 0.6), AscentGuidance())[2]
+    sep1(r) = r.events[findfirst(e -> e.name === :sep_sable1, r.events)].t
+    @test sep1(cool) > sep1(hot) + 20.0
+
+    # a delayed set waits on the pad, and a separation delay carries the
+    # dead weight for exactly that long
+    late = simulate_ascent(mk(2; delay = 20.0), guid)
+    @test late.events[findfirst(e -> e.name === :ignition_strap, late.events)].t ≥ 20.0
+    hang = simulate_ascent(mk(2; sep = 12.0), guid)
+    hb = hang.events[findfirst(e -> e.name === :burnout_strap, hang.events)].t
+    hs = hang.events[findfirst(e -> e.name === :sep_strap, hang.events)].t
+    @test isapprox(hs - hb, 12.0; atol = 0.2)
+
+    # the kick scan turns strap-ons from a liability into a gain: at the
+    # reference kick the extra impulse is spent lofting the stack
+    _, flat = tune_ascent(lv2, AscentGuidance())
+    _, opt  = tune_ascent(lv2, AscentGuidance(); optimize_kick = true)
+    @test opt.reached_orbit && opt.m > flat.m
+    @test opt.m > tune_ascent(base, AscentGuidance())[2].m   # actually helps
+    @test abs(opt.h_cut - 200e3) < 2e3
+
+    # geometry: a set is one section of `count` bodies beside the core
+    m1, s1 = rocket_mesh(base; nseg = 20)
+    m2, s2 = rocket_mesh(lv2; nseg = 20)
+    b = only(filter(s -> s.name === :booster1, s2))
+    @test isempty(filter(s -> s.name === :booster1, s1))
+    @test mesh_volume(TriMesh(m2.tris[b.t0:b.t1])) > 0
+    @test length(m2.tris) > length(m1.tris)
+    # four boosters are twice the triangles of two, and stand off the axis
+    m4, s4 = rocket_mesh(mk(4); nseg = 20)
+    b4 = only(filter(s -> s.name === :booster1, s4))
+    @test (b4.t1 - b4.t0 + 1) == 2 * (b.t1 - b.t0 + 1)
+    off = [hypot(p[2], p[3]) for t in m2.tris[b.t0:b.t1] for p in t]
+    @test minimum(off) > 0.1                          # none of it on the core axis
 end
 
 @testset "circumlunar free return" begin
@@ -293,9 +380,67 @@ end
     lv0 = default_moon_rocket()
     @test liftoff_mass(spec.lv) ≈ liftoff_mass(lv0)
     @test spec.lv.stages[3].isp_vac == lv0.stages[3].isp_vac
+    @test isempty(spec.lv.boosters)
     ms = run_mission(spec)
     @test ms.cislunar.outcome == :entry_interface
     @test isapprox(ms.cislunar.perilune_alt, 2000e3; atol = 30e3)
+
+    # a [[vehicle.booster]] set round-trips through the spec, and a spec that
+    # has one flies with the pitch kick re-found for it
+    heavy = mktemp() do path, io
+        write(io, """
+        [mission]
+        name = "heavy"
+        pod_mass_kg = 350.0
+        [vehicle]
+        name = "Sable-H"
+        diameter_m = 1.8
+        [[vehicle.stage]]
+        name = "sable1"
+        prop_kg = 42000.0
+        dry_kg = 3800.0
+        thrust_vac_kn = 950.0
+        isp_vac_s = 305.0
+        exit_area_m2 = 0.80
+        engines = 5
+        [[vehicle.stage]]
+        name = "sable2"
+        prop_kg = 9500.0
+        dry_kg = 900.0
+        thrust_vac_kn = 95.0
+        isp_vac_s = 345.0
+        [[vehicle.stage]]
+        name = "sablek"
+        prop_kg = 950.0
+        dry_kg = 140.0
+        thrust_vac_kn = 15.0
+        isp_vac_s = 315.0
+        propellant = "hypergolic"
+        [[vehicle.booster]]
+        name = "strap"
+        count = 2
+        diameter_m = 1.53
+        prop_kg = 12000.0
+        dry_kg = 900.0
+        thrust_vac_kn = 380.0
+        isp_vac_s = 285.0
+        exit_area_m2 = 0.32
+        core_throttle = 0.75
+        sep_delay_s = 2.0
+        """)
+        close(io)
+        load_mission(path)
+    end
+    b = only(heavy.lv.boosters)
+    @test b.count == 2
+    @test b.core_throttle == 0.75
+    @test b.sep_delay == 2.0
+    @test b.stage.diameter == 1.53
+    @test liftoff_mass(heavy.lv) ≈ liftoff_mass(spec.lv) + 2 * (900.0 + 12000.0)
+    msh = run_mission(heavy)
+    @test msh.cislunar.outcome == :entry_interface
+    # the strap-ons pay for themselves: more mass reaches the parking orbit
+    @test msh.ascent.m > ms.ascent.m
 end
 
 @testset "mesh + mass properties" begin
@@ -318,21 +463,240 @@ end
     sph2 = read_stl(path)
     @test length(sph2) == length(sph)
     @test isapprox(mesh_volume(sph2), mesh_volume(sph); rtol = 1e-6)
-    # procedural launcher: closed, positive volume, one section per stage
-    # plus the pod capsule and the fairing shell that encloses it
+    # procedural launcher: closed, positive volume, one section per stage plus
+    # the pod capsule, its cabin interior, and the fairing shell over both
     rk, secs = rocket_mesh(diameter = 2.0, prop_masses = [10_000.0, 2_000.0])
     @test mesh_volume(rk) > 0
-    @test length(secs) == 4
-    @test secs[end-1].name == :pod
-    @test secs[end].name == :fairing
+    @test length(secs) == 6
+    @test [s.name for s in secs[end-3:end]] == [:pod, :glass, :cabin, :fairing]
     @test issorted([s.x0 for s in secs])
     # triangle ranges tile the merged soup exactly, in order
     @test secs[1].t0 == 1 && secs[end].t1 == length(rk)
     @test all(secs[i+1].t0 == secs[i].t1 + 1 for i in 1:length(secs)-1)
     # each section is itself a closed solid (viewers detach them individually)
     @test all(mesh_volume(TriMesh(rk.tris[s.t0:s.t1])) > 0 for s in secs)
+    # glass and cabin live inside the pod's shell, so all three share an extent
+    pod, cab = secs[end-3], secs[end-1]
+    @test all(s -> s.x0 == pod.x0 && s.x1 == pod.x1, secs[end-3:end-1])
+    @test mesh_volume(TriMesh(rk.tris[cab.t0:cab.t1])) <
+          mesh_volume(TriMesh(rk.tris[pod.t0:pod.t1]))
     # barrel volume actually swallows the propellant it was sized for
     @test mesh_volume(rk) > (10_000.0 + 2_000.0) / 1020.0
+end
+
+@testset "scalar targeting" begin
+    # a plain root, and one where the target is not zero
+    r = find_root(x -> x^2 - 2, 0.0, 3.0)
+    @test converged(r) && isapprox(r.x, sqrt(2); atol = 1e-3)
+    r2 = find_root(x -> x^3, -1.0, 4.0; target = 8.0)
+    @test converged(r2) && isapprox(r2.x, 2.0; atol = 1e-3)
+    # every evaluation is recorded — with second-long missions the path is
+    # most of what you learn from a solve
+    @test length(r.history) == r.iterations >= 3
+    @test all(h -> 0.0 <= h[1] <= 3.0, r.history)
+
+    # a hit exactly on a bound short-circuits
+    @test converged(find_root(x -> x - 1.0, 1.0, 5.0; ftol = 1e-9))
+    # no sign change: report the closest end rather than a wrong answer
+    nb = find_root(x -> x^2 + 1, 0.0, 3.0)
+    @test nb.status === :no_bracket && nb.x == 0.0
+
+    # a failing design is "past the feasible edge", not a crash: the search
+    # retreats from an infeasible bound and still finds the boundary
+    hard(x) = x > 2.5 ? error("ascent failed to reach orbit") : 1.0 - x
+    rf = find_root(hard, 0.0, 10.0)
+    @test converged(rf) && isapprox(rf.x, 1.0; atol = 1e-2)
+    # the clipped interval is reported, so a caller can say *why* it clipped
+    @test rf.hi < 10.0 && rf.lo == 0.0
+    # a clean solve reports the bounds it was given, not the final bracket
+    @test r.lo == 0.0 && r.hi == 3.0
+    @test find_root(x -> NaN, 0.0, 1.0).status === :infeasible
+    # NaN behaves the same as a throw
+    @test converged(find_root(x -> x > 2.5 ? NaN : 1.0 - x, 0.0, 10.0))
+
+    # Illinois beats bisection's iteration count on a nasty one-sided root
+    steep(x) = exp(x) - 5.0
+    rs = find_root(steep, 0.0, 40.0; xtol = 1e-6)
+    @test converged(rs) && isapprox(rs.x, log(5); atol = 1e-4)
+    @test rs.iterations < 30
+    # the budget is honoured even when it cannot converge in time
+    @test find_root(steep, 0.0, 40.0; xtol = 1e-14, max_iter = 6).iterations <= 6
+
+    # decreasing functions and reversed bounds work the same
+    @test isapprox(find_root(x -> 5.0 - x, 10.0, 0.0).x, 5.0; atol = 1e-3)
+end
+
+@testset "propellants & engines" begin
+    # bulk density of a mixture: mass of both fluids over the volume of both
+    kero = PROPELLANTS[:kerolox]
+    vf, vox = propellant_volumes(kero, 1000.0)
+    @test isapprox(1000.0 / (vf + vox), bulk_density(kero); rtol = 1e-12)
+    @test isapprox(vox / vf * kero.rho_ox / kero.rho_fuel, kero.mr; rtol = 1e-12)
+    # the spread across propellants is the whole point: hydrolox tanks are
+    # three times the volume of kerolox ones for the same propellant mass
+    @test 1000 < bulk_density(kero) < 1050
+    @test 330 < bulk_density(PROPELLANTS[:hydrolox]) < 360
+    @test bulk_density(kero) / bulk_density(PROPELLANTS[:hydrolox]) > 2.8
+    # monopropellant: no oxidiser volume at all
+    @test propellant_volumes(PROPELLANTS[:hydrazine], 100.0)[2] == 0.0
+    @test_throws ArgumentError propellant(:unobtainium)
+    @test_throws ArgumentError lookup_engine(:nonesuch)
+
+    # a catalogue engine's derived exit area must reproduce its quoted
+    # sea-level Isp through the same pressure correction the sim flies
+    for e in values(ENGINES)
+        e.isp_sl > 0 || continue
+        st = Stage(:t, 0.0, 0.0, e.thrust_vac, e.isp_vac, e.ae)
+        @test isapprox(e.isp_vac * stage_thrust(st, SatelliteSim.P0_SEA) / e.thrust_vac,
+                       e.isp_sl; rtol = 1e-9)
+        @test stage_thrust(st, 0.0) == e.thrust_vac          # vacuum unchanged
+    end
+
+    # clustering multiplies thrust and exit area, never Isp
+    m1 = ENGINES[:merlin_1d]
+    s9 = sized_stage(:booster; engine = :merlin_1d, n_engines = 9,
+                     prop_mass = 411_000.0, diameter = 3.66)
+    @test s9.thrust_vac ≈ 9 * m1.thrust_vac
+    @test s9.ae ≈ 9 * m1.ae
+    @test s9.isp_vac == m1.isp_vac
+    @test s9.n_engines == 9
+    # ...and lands near a real first stage of that size (~25.6 t dry)
+    @test 22_000 < s9.mdry < 29_000
+
+    # dry-mass fraction has to improve with size, or the curve is wrong
+    small = stage_mass(m1, 1, 10_000.0, 1.8)
+    big   = stage_mass(m1, 9, 400_000.0, 3.7)
+    @test big.dry_fraction < small.dry_fraction
+    @test small.tanks > 0 && big.engines ≈ 9 * m1.mass
+    # cryogenic stages carry insulation, storables do not
+    @test stage_mass(m1, 1, 10_000.0, 1.8).insulation > 0
+    @test stage_mass(ENGINES[:aj10], 1, 1_000.0, 1.8).insulation == 0
+    # an explicit dry mass overrides the estimate entirely
+    @test sized_stage(:s; engine = :aj10, prop_mass = 950.0,
+                      dry_mass = 140.0).mdry == 140.0
+
+    # a legacy 6-argument Stage still works and is assumed dense and single-engine
+    old = Stage(:legacy, 100.0, 1000.0, 20e3, 300.0, 0.0)
+    @test old.n_engines == 1 && old.prop.name === :kerolox
+    # propellant choice drives physical size through the mesh
+    lens = map((:kerolox, :hydrolox)) do pk
+        st = Stage(:s, 100.0, 9500.0, 20e3, 300.0, 0.0, PROPELLANTS[pk], 1)
+        lv = LaunchVehicle(name = "t", stages = [st], fairing_mass = 50.0,
+                           payload_mass = 100.0, sref = pi * 0.9^2,
+                           cd = SatelliteSim.LV_CD_TABLE)
+        last(rocket_mesh(lv; nseg = 16)[2]).x1
+    end
+    @test lens[2] > lens[1] + 5.0            # hydrolox stack is metres longer
+    # engine count shows up as bells: more engines, more triangles
+    ntri(n) = length(rocket_mesh(; prop_masses = [42000.0], n_engines = [n],
+                                 nseg = 16)[1].tris)
+    @test ntri(9) > ntri(5) > ntri(1)
+    @test_throws ArgumentError rocket_mesh(prop_masses = [1.0, 2.0],
+                                           n_engines = [1])
+    @test_throws ArgumentError rocket_mesh(prop_masses = [1.0], diameters = [0.0])
+
+    # per-stage diameter: the same propellant in a wider barrel is shorter,
+    # and the interstage becomes a transition cone rather than breaking
+    barrel(d) = (m, s) = rocket_mesh(; prop_masses = [42000.0, 9500.0],
+                                     diameters = [d, 1.8], nseg = 20)[2][1]
+    @test (barrel(2.6).x1 - barrel(2.6).x0) < (barrel(1.8).x1 - barrel(1.8).x0)
+    stepped, ssec = rocket_mesh(; prop_masses = [42000.0, 9500.0, 950.0],
+                                diameters = [2.6, 1.8, 1.2], nseg = 20)
+    @test all(mesh_volume(TriMesh(stepped.tris[s.t0:s.t1])) > 0 for s in ssec)
+    @test issorted([s.x0 for s in ssec])
+    # the capsule and fairing ride on the topmost stage, so they follow it
+    narrow = rocket_mesh(; prop_masses = [42000.0, 950.0],
+                         diameters = [2.6, 1.0], nseg = 20)[2]
+    wide   = rocket_mesh(; prop_masses = [42000.0, 950.0],
+                         diameters = [2.6, 2.6], nseg = 20)[2]
+    fw(secs) = only(filter(s -> s.name === :fairing, secs))
+    @test (fw(narrow).x1 - fw(narrow).x0) < (fw(wide).x1 - fw(wide).x0)
+    # --- interstage transition cone ------------------------------------
+    # A neighbour of a different diameter is joined by a cone at the lower
+    # stage's top, at a fixed shallow wall angle in either direction. It is
+    # the lower stage that grows: the cone is its structure, not the tank's.
+    tl = SatelliteSim._taper_len
+    @test tl(0.9, 0.9, 1.8) == 0.0                      # uniform: no cone
+    @test tl(1.3, 0.9, 2.6) ≈ 0.4 / tan(SatelliteSim.TAPER_HALFANGLE)
+    @test tl(0.6, 0.9, 1.2) ≈ 0.3 / tan(SatelliteSim.TAPER_HALFANGLE)
+    @test tl(0.9, 1.3, 1.8) > 0                          # flares out too
+    s1len(dias) = (s = rocket_mesh(; prop_masses = [42000.0, 9500.0],
+                                   diameters = dias, nseg = 20)[2][1];
+                   s.x1 - s.x0)
+    @test s1len([1.8, 1.2]) > s1len([1.8, 1.8])          # necking down adds a cone
+    @test s1len([1.8, 2.6]) > s1len([1.8, 1.8])          # flaring out adds one too
+    # the cone lands exactly on the upper stage's radius: no ledge, no gap
+    for dias in ([2.6, 1.8], [1.2, 1.8], [1.8, 1.8])
+        m, s = rocket_mesh(; prop_masses = [42000.0, 9500.0],
+                           diameters = dias, nseg = 20)
+        xj = s[1].x1
+        rim = [hypot(p[2], p[3]) for t in m.tris[s[1].t0:s[1].t1] for p in t
+               if abs(p[1] - xj) < 1e-9]
+        @test !isempty(rim)
+        @test maximum(rim) ≈ dias[2] / 2 rtol = 0.02      # meets the stage above
+    end
+    # both directions stay watertight and positively oriented
+    for dias in ([2.6, 1.8, 1.2], [1.2, 1.8, 2.6], [1.0, 2.6, 1.4])
+        m, s = rocket_mesh(; prop_masses = [42000.0, 9500.0, 950.0],
+                           diameters = dias, nseg = 20)
+        @test all(mesh_volume(TriMesh(m.tris[c.t0:c.t1])) > 0 for c in s)
+        @test issorted([c.x0 for c in s])
+    end
+
+    # a stage carries its own diameter, or inherits the vehicle's
+    @test stage_diameter(Stage(:a, 1.0, 1.0, 1.0, 300.0, 0.0), 1.8) == 1.8
+    @test stage_diameter(sized_stage(:b; engine = :aj10, prop_mass = 100.0,
+                                     diameter = 3.0), 1.8) == 3.0
+end
+
+@testset "crew capsule" begin
+    # Every directed edge appears once and its reverse once: the mesh is
+    # closed AND consistently wound. Window apertures and raised collars are
+    # easy to get subtly wrong (a hairline seam crack, or a panel whose
+    # surfaces face into its own rims), and both leaks are invisible on screen.
+    function manifold(m)
+        d = Dict{Tuple{NTuple{3,Float64},NTuple{3,Float64}},Int}()
+        for t in m.tris, e in ((t[1],t[2]), (t[2],t[3]), (t[3],t[1]))
+            d[e] = get(d, e, 0) + 1
+        end
+        all(n -> n == 1, values(d)) &&
+            all(e -> get(d, (e[2], e[1]), 0) == 1, keys(d))
+    end
+
+    for rp in (0.55, 0.75, 1.20)
+        ext, glass, cab, hgt = pod_mesh(; radius = rp, nseg = 24)
+        @test length(glass) == 3                     # three glazed apertures
+        @test all(manifold, ext) && all(manifold, glass) && all(manifold, cab)
+        @test all(m -> mesh_volume(m) > 0, ext)
+        @test all(m -> mesh_volume(m) > 0, glass)
+        @test all(m -> mesh_volume(m) > 0, cab)
+        # Apollo-ish proportions: a touch under 0.9 diameters tall
+        @test 0.85 < hgt / (2rp) < 0.92
+        # nothing in the cabin punches through the tapering pressure wall
+        ta = tan(deg2rad_(32.5))
+        xb0 = 2.4rp - sqrt((2.4rp)^2 - rp^2) + 0.05rp
+        rwall(x) = rp - ta * (x - xb0) - 0.050rp
+        @test all(hypot(v[2], v[3]) <= rwall(v[1]) for m in cab for t in m.tris for v in t)
+    end
+    # the hull really is pierced: the pressure shell has no triangle sitting
+    # inside the main window's aperture (centred on +y, the crew's viewport)
+    rp = 0.75
+    ext, glass, _, _ = pod_mesh(; radius = rp, nseg = 24)
+    ta = tan(deg2rad_(32.5))
+    xb0 = 2.4rp - sqrt((2.4rp)^2 - rp^2) + 0.05rp
+    Lc = (rp - 0.26rp) / ta
+    xlo, xhi = xb0 + 4.3Lc / 12, xb0 + 6.7Lc / 12
+    cen(t) = ntuple(j -> (t[1][j] + t[2][j] + t[3][j]) / 3, 3)
+    function inwin(t)
+        c = cen(t)
+        xlo < c[1] < xhi && c[2] > 0 && abs(atan(c[3], c[2])) < deg2rad_(10.0)
+    end
+    @test !any(inwin, ext[2].tris)                       # shell: hole is open
+    @test any(inwin, glass[1].tris)                      # pane: glass fills it
+    # crew count follows what the cabin can actually seat
+    @test length(pod_mesh(; radius = 0.55)[3]) < length(pod_mesh(; radius = 1.20)[3])
+    @test length(pod_mesh(; radius = 0.55, ncrew = 3)[3]) ==
+          length(pod_mesh(; radius = 1.20, ncrew = 3)[3])
 end
 
 @testset "Newtonian panel aero" begin
