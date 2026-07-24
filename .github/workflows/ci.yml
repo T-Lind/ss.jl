@@ -49,6 +49,11 @@ jobs:
         run: julia --project=. scripts/run_mission.jl missions/moonshot.toml
       - name: regenerate geometry
         run: julia --project=. scripts/make_meshes.jl
+      # the rendezvous demo asserts its own result (the CW design has to land
+      # within 500 m under nonlinear propagation), so running it is a test —
+      # and it is the one script the unit suite does not reach
+      - name: two-impulse rendezvous
+        run: julia --project=. scripts/run_rendezvous.jl
       # committed artifacts must match what the code now produces, or the
       # numbers quoted in the README are stale
       - name: committed outputs are current
