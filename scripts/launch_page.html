@@ -6,7 +6,10 @@
      configured mission.
 
      Everything is procedural and self-contained: vehicle mesh from
-     rocket_mesh via the API, lattice tower/pad built from boxes, a
+     rocket_mesh via the API, a full launch complex — hardstand, flame
+     trench and deflector, launch table, service tower, swing arms,
+     propellant farm, water tower and support buildings — built from
+     primitives and dimensioned off the configured vehicle, a
      ray-traced spherical Earth + Moon (with the panel's land-mask texture),
      plume/plasma particles, parachutes, and audio all generated in-page.
      No external assets, no libraries.
@@ -411,14 +414,16 @@ void main(){
 // ------------------------------------------------------- procedural build --
 // mesh vertex: position, normal, baked color, livery uv, paint weight
 const VST = 12;
-// segBox with per-vertex color; boxAt rescales the cross-section
-function segBox(out, p0, p1, w, col) {
+// beam: a rectangular member from p0 to p1, `w` across and `t` deep — for a
+// horizontal run that is width and thickness, so decks, plates and railings
+// all come off the same primitive. segBox is the square-section case.
+function beam(out, p0, p1, w, t, col) {
   const ax = V.norm(V.sub(p1, p0));
   let up = Math.abs(ax[1]) > 0.9 ? [1,0,0] : [0,1,0];
   const s = V.norm(V.cross(ax, up)), u = V.cross(s, ax);
-  const h = w/2, L = V.len(V.sub(p1, p0));
-  const corner = (t, a, b) =>
-    V.add(V.add(V.add(p0, V.scale(ax, t*L)), V.scale(s, a*h)), V.scale(u, b*h));
+  const hw = w/2, hu = t/2, L = V.len(V.sub(p1, p0));
+  const corner = (q, a, b) =>
+    V.add(V.add(V.add(p0, V.scale(ax, q*L)), V.scale(s, a*hw)), V.scale(u, b*hu));
   const v = [corner(0,-1,-1), corner(0,1,-1), corner(0,1,1), corner(0,-1,1),
              corner(1,-1,-1), corner(1,1,-1), corner(1,1,1), corner(1,-1,1)];
   const quad = (a,b,c,d,n) => {
@@ -432,12 +437,77 @@ function segBox(out, p0, p1, w, col) {
   quad(0,1,5,4, neg(u));  quad(3,7,6,2, u);
   quad(0,4,7,3, neg(s));  quad(1,2,6,5, s);
 }
+const segBox = (out, p0, p1, w, col) => beam(out, p0, p1, w, w, col);
 function boxAt(out, c, s, col) {
   segBox(out, [c[0], c[1]-s[1]/2, c[2]], [c[0], c[1]+s[1]/2, c[2]], 1, col);
   const n = out.length;
   for (let i = n - 36*VST; i < n; i += VST) {
     out[i]   = c[0] + (out[i]   - c[0]) * s[0];
     out[i+2] = c[2] + (out[i+2] - c[2]) * s[2];
+  }
+}
+// capped cylinder along an arbitrary axis: tanks, pipes, columns, masts.
+// `r1` tapers the far end (lightning masts, vent stacks).
+function tube(out, p0, p1, r0, col, nseg = 12, r1 = r0) {
+  const ax = V.norm(V.sub(p1, p0));
+  const up = Math.abs(ax[1]) > 0.9 ? [1,0,0] : [0,1,0];
+  const s = V.norm(V.cross(ax, up)), u = V.cross(s, ax);
+  const ring = (p, r, k) => {
+    const a = k/nseg*2*Math.PI;
+    return V.add(p, V.add(V.scale(s, r*Math.cos(a)), V.scale(u, r*Math.sin(a))));
+  };
+  const emit = (p, n) => out.push(p[0],p[1],p[2], n[0],n[1],n[2],
+                                  col[0],col[1],col[2], 0,0,0);
+  const tri = (a,b,c,n) => { emit(a,n); emit(b,n); emit(c,n); };
+  for (let k = 0; k < nseg; k++) {
+    const q00 = ring(p0,r0,k), q01 = ring(p0,r0,k+1);
+    const q10 = ring(p1,r1,k), q11 = ring(p1,r1,k+1);
+    // per-quad normal averaged from the two rim normals: smooth enough that a
+    // 12-sided pipe does not read as a bundle of flat planks
+    const n = V.norm(V.add(V.norm(V.sub(q00, p0)), V.norm(V.sub(q01, p0))));
+    tri(q00, q01, q10, n); tri(q10, q01, q11, n);
+    if (r0 > 1e-6) tri(p0, q01, q00, V.scale(ax, -1));
+    if (r1 > 1e-6) tri(p1, q10, q11, ax);
+  }
+}
+// sphere of revolution (the cryogenic storage vessels)
+function sphereAt(out, c, r, col, nseg = 16) {
+  const nring = nseg >> 1;
+  const p = (i, k) => {
+    const th = Math.PI*i/nring, a = 2*Math.PI*k/nseg;
+    return [c[0] + r*Math.sin(th)*Math.cos(a), c[1] + r*Math.cos(th),
+            c[2] + r*Math.sin(th)*Math.sin(a)];
+  };
+  const emit = q => { const n = V.norm(V.sub(q, c));
+    out.push(q[0],q[1],q[2], n[0],n[1],n[2], col[0],col[1],col[2], 0,0,0); };
+  for (let i = 0; i < nring; i++) for (let k = 0; k < nseg; k++) {
+    const a = p(i,k), b = p(i,k+1), d = p(i+1,k), e = p(i+1,k+1);
+    if (i) { emit(a); emit(b); emit(d); }
+    if (i < nring-1) { emit(d); emit(b); emit(e); }
+  }
+}
+// handrail along a polyline: two rails and posts, the way every walkway,
+// platform edge and trench lip on a real pad is fenced
+function railing(out, pts, h, col) {
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const a = pts[i], b = pts[i+1];
+    for (const f of [0.55, 1.0])
+      beam(out, [a[0], a[1]+h*f, a[2]], [b[0], b[1]+h*f, b[2]], 0.07, 0.07, col);
+    const n = Math.max(1, Math.round(V.len(V.sub(b, a))/2.6));
+    for (let k = 0; k <= n; k++) {
+      const q = V.lerp(a, b, k/n);
+      beam(out, q, [q[0], q[1]+h, q[2]], 0.10, 0.10, col);
+    }
+  }
+}
+// sagging cable: the lightning catenary and every hoist and guy on the pad
+function cable(out, a, b, sag, r, col, n = 10) {
+  let prev = a;
+  for (let k = 1; k <= n; k++) {
+    const f = k/n, q = V.lerp(a, b, f);
+    q[1] -= sag*4*f*(1-f);
+    tube(out, prev, q, r, col, 5);
+    prev = q;
   }
 }
 // small surface-of-revolution helper (parachute canopies); axis +x, striped
@@ -687,7 +757,8 @@ function state(t) {
   }
   let thr = samp(A.t, A.thrust, tc);
   if (t < 0) thr = t > -3 ? samp(A.t, A.thrust, 0.5)*(t+3)/3 : 0;
-  const sm = sphereMap(dr, h + 2.0);
+  // the stack stands on the launch table, not on the concrete
+  const sm = sphereMap(dr, h + PADH);
   const dir = V.add(V.scale(sm.tg, Math.cos(gam)), V.scale(sm.up, Math.sin(gam)));
   return { h, v, dr, gam, thr, m: samp(A.t, A.m, tc), mach: samp(A.t, A.mach, tc),
            q: samp(A.t, A.qbar, tc), pos: sm.pos, dir, up: sm.up };
@@ -732,7 +803,7 @@ function entState(t) {
 const SUN = V.norm([0.50, 0.58, 0.42]);
 let SUNE = V.norm([0.5, 0.5, 0.5]);
 let rocketBuf, secDraw = [], halfDraw = [], LEN = 30, DIA = 1.8;
-let towerBuf, towerN, armBuf, armN, padBuf, padN, cloudBuf;
+let towerBuf, towerN, armBuf, armDraw = [], padBuf, padN, cloudBuf;
 let drogueBuf, drogueN, mainBuf, mainN, landTex;
 
 function podRange() { return secDraw.find(s => s.name === 'pod'); }
@@ -1006,48 +1077,502 @@ function buildRocket() {
   rocketBuf = buffer(new Float32Array(verts));
 }
 
-function buildStatics() {
-  const th = Math.max(40, LEN*1.25), TZ = -14, HF = 3.2;
-  const TC = [0.35,0.20,0.16], GC = [0.42,0.42,0.43];
-  const tow = [];
-  for (const sx of [-1,1]) for (const sz of [-1,1])
-    segBox(tow, [sx*HF, 0, TZ+sz*HF], [sx*HF, th, TZ+sz*HF], 0.55, TC);
-  for (let y = 5.5; y < th; y += 5.5) {
-    for (const sz of [-1,1])
-      segBox(tow, [-HF, y, TZ+sz*HF], [HF, y, TZ+sz*HF], 0.3, TC);
-    for (const sx of [-1,1])
-      segBox(tow, [sx*HF, y, TZ-HF], [sx*HF, y, TZ+HF], 0.3, TC);
-    for (const sz of [-1,1]) {
-      segBox(tow, [-HF, y-5.5, TZ+sz*HF], [HF, y, TZ+sz*HF], 0.2, TC);
-      segBox(tow, [HF, y-5.5, TZ+sz*HF], [-HF, y, TZ+sz*HF], 0.2, TC);
+// ---------------------------------------------------------- launch complex --
+// Pad-world metres: origin on the vehicle centreline, +y up, +x downrange,
+// the service tower at -z. Everything below is one launch complex, built to
+// the same rule as the rest of the page — procedural, from primitives, no
+// assets — and dimensioned off the vehicle the panel actually configured.
+//
+// The whole works stands on a concrete hardstand DECK above grade. That is
+// what makes the flame trench possible: the ground here is the ray-traced
+// planet and cannot be dug into, so the trench is a channel cut *through*
+// the hardstand, the deflector ramp sits in it, and the exhaust leaves at
+// grade to +z. The vehicle therefore starts PADH up, on the launch table
+// that straddles the channel — `state` adds exactly that offset.
+const PADH = 11.0;                 // launch-table deck: the vehicle's zero [m]
+const DECK = 6.0;                  // hardstand surface [m]
+const TR_Z0 = -13, TR_Z1 = 34;     // trench: closed (deflector) end, open end
+const TWZ = -17, TWHF = 5.0;       // service tower centre, half footprint
+const HINGE_Z = TWZ + TWHF;        // swing arms pivot on the tower's near face
+// A pad is built for a vehicle: the plume aperture, the table it is cut into
+// and the channel below all follow the core diameter, which is only known
+// once the API has answered, so they are functions rather than constants.
+const apR = () => Math.max(4.2, DIA*1.15);      // engine aperture radius [m]
+const trHW = () => Math.max(7.5, apR() + 3.0);  // trench half width, in x [m]
+const mntR = () => apR()*1.55 + 5.0;            // launch table outer radius [m]
+
+const MAT = {
+  conc:  [0.60,0.59,0.56], conc2:  [0.52,0.51,0.48], kerb:  [0.70,0.69,0.65],
+  steel: [0.49,0.50,0.53], dark:   [0.21,0.21,0.23], grate: [0.33,0.34,0.36],
+  tower: [0.36,0.21,0.17], rust:   [0.46,0.28,0.20], white: [0.86,0.86,0.83],
+  tank:  [0.85,0.87,0.88], pipe:   [0.60,0.62,0.65], yellow:[0.76,0.62,0.15],
+  road:  [0.23,0.23,0.24], scorch: [0.16,0.15,0.15], lamp:  [0.97,0.94,0.78],
+  berm:  [0.34,0.33,0.24], glass:  [0.13,0.19,0.24],
+};
+
+// --- hardstand, flame trench, deflector, deluge -----------------------------
+function buildHardstand(out) {
+  const M = MAT, X0 = -46, X1 = 40, Z0 = -38, TR_HW = trHW(), MNT_R = mntR();
+  // deck poured around the channel: two side slabs and the closed end
+  const slabs = [[X0, -TR_HW, Z0, TR_Z1], [TR_HW, X1, Z0, TR_Z1],
+                 [-TR_HW, TR_HW, Z0, TR_Z0]];
+  for (const [x0, x1, z0, z1] of slabs) {
+    const c = [(x0+x1)/2, 0, (z0+z1)/2], w = x1-x0, d = z1-z0;
+    boxAt(out, [c[0], DECK/2, c[2]], [w, DECK, d], M.conc);
+    boxAt(out, [c[0], DECK-0.12, c[2]], [w+0.5, 0.3, d+0.5], M.conc2);  // cap
+    boxAt(out, [c[0], 0.5, c[2]], [w+3.0, 1.0, d+3.0], M.conc2);        // batter
+    for (const y of [2.0, 4.0])                                         // lift lines
+      boxAt(out, [c[0], y, c[2]], [w+0.16, 0.16, d+0.16], M.conc2);
+  }
+  // scuppers draining the deck over the face
+  for (let x = X0 + 8; x < X1; x += 12) {
+    boxAt(out, [x, DECK-0.5, TR_Z1+0.1], [1.0, 0.5, 0.5], M.dark);
+    boxAt(out, [x, DECK-0.5, Z0-0.1], [1.0, 0.5, 0.5], M.dark);
+  }
+  // trench floor and steel-lined walls, scoured black from the last launch
+  boxAt(out, [0, 0.3, (TR_Z0+TR_Z1)/2], [2*TR_HW, 0.6, TR_Z1-TR_Z0], M.scorch);
+  for (const sx of [-1, 1]) {
+    boxAt(out, [sx*(TR_HW-0.15), DECK/2, (TR_Z0+TR_Z1)/2],
+          [0.3, DECK-0.3, TR_Z1-TR_Z0], M.steel);
+    for (let z = TR_Z0 + 2; z < TR_Z1; z += 4)                  // wall ribs
+      beam(out, [sx*(TR_HW-0.35), 0.6, z], [sx*(TR_HW-0.35), DECK-0.4, z],
+           0.35, 0.5, M.dark);
+    // lip beam and the handrail that keeps people out of the channel
+    beam(out, [sx*TR_HW, DECK+0.1, TR_Z0], [sx*TR_HW, DECK+0.1, TR_Z1],
+         1.2, 0.4, M.kerb);
+    railing(out, [[sx*(TR_HW+1.0), DECK+0.2, TR_Z0], [sx*(TR_HW+1.0), DECK+0.2, TR_Z1]],
+            1.1, M.yellow);
+  }
+  // deflector: a stepped ramp climbing to the closed end, so the plume that
+  // arrives straight down leaves horizontally toward +z
+  const N = 16, ZA = TR_Z0 + 0.4, ZB = 11.0;
+  for (let k = 0; k < N; k++) {
+    const z0 = ZA + (ZB-ZA)*k/N, z1 = ZA + (ZB-ZA)*(k+1)/N;
+    const y = 0.6 + (DECK-1.2)*Math.pow(1 - k/(N-1), 1.6);
+    boxAt(out, [0, 0.3 + y/2, (z0+z1)/2], [2*TR_HW-0.6, y, z1-z0],
+          k % 2 ? M.steel : M.dark);
+  }
+  // deluge: headers down both lips, nozzles inboard, risers up from the main
+  for (const sx of [-1, 1]) {
+    tube(out, [sx*(TR_HW+1.9), DECK+0.55, TR_Z0], [sx*(TR_HW+1.9), DECK+0.55, TR_Z1],
+         0.34, M.pipe, 10);
+    for (let z = TR_Z0 + 3; z < TR_Z1 - 2; z += 3.2)
+      tube(out, [sx*(TR_HW+1.9), DECK+0.55, z], [sx*(TR_HW-0.4), DECK+1.5, z],
+           0.11, M.pipe, 6);
+    tube(out, [sx*(TR_HW+1.9), 0.4, TR_Z0-6], [sx*(TR_HW+1.9), DECK+0.55, TR_Z0-6],
+         0.34, M.pipe, 10);
+  }
+  // apron beyond the trench mouth, scoured where the plume lands and fading
+  // back into the concrete at its edges
+  boxAt(out, [0, 0.10, TR_Z1 + 16], [44, 0.2, 32], M.conc2);
+  boxAt(out, [0, 0.14, TR_Z1 + 12], [2*TR_HW + 12, 0.2, 24], [0.34,0.33,0.31]);
+  boxAt(out, [0, 0.18, TR_Z1 + 7], [2*TR_HW + 3, 0.2, 14], M.scorch);
+  // deck markings: keep-clear box round the table, and the pour joints that
+  // stop the hardstand reading as one flat sheet of grey
+  for (const s of [-1, 1]) {
+    boxAt(out, [s*(MNT_R+4), DECK+0.06, 0], [0.5, 0.1, 2*MNT_R+8], M.yellow);
+    boxAt(out, [0, DECK+0.06, s*(MNT_R+4)], [2*MNT_R+8, 0.1, 0.5], M.yellow);
+  }
+  for (let x = X0 + 10; x < X1; x += 10) {
+    if (Math.abs(x) < TR_HW) continue;                     // no deck to joint
+    boxAt(out, [x, DECK+0.03, (Z0+TR_Z1)/2], [0.22, 0.1, TR_Z1-Z0], M.conc2);
+  }
+  for (let z = Z0 + 10; z < TR_Z1; z += 10) {
+    if (z < TR_Z0) { boxAt(out, [(X0+X1)/2, DECK+0.03, z], [X1-X0, 0.1, 0.22], M.conc2); }
+    else for (const [a, b] of [[X0, -TR_HW], [TR_HW, X1]])
+      boxAt(out, [(a+b)/2, DECK+0.03, z], [b-a, 0.1, 0.22], M.conc2);
+  }
+  // cable trays and propellant runs coming in from the farm, up onto the deck
+  for (let i = 0; i < 3; i++) {
+    const z = -26 + i*2.4;
+    boxAt(out, [-27, DECK+0.4, z], [36, 0.35, 1.4], M.steel);
+    for (let x = -44; x < -9; x += 9)
+      beam(out, [x, DECK, z], [x, DECK+0.4, z], 0.25, 0.25, M.steel);
+  }
+  for (const [i, r] of [[0, 0.55], [1, 0.42], [2, 0.30]]) {
+    const y = DECK + 1.9 + i*0.9;
+    tube(out, [-46, y, -32], [-11, y, -32], r, M.pipe, 10);
+    tube(out, [-11, y, -32], [-11, y, -6], r, M.pipe, 10);
+    tube(out, [-11, y, -6], [-11, PADH - 1.5, -6], r, M.pipe, 10);
+  }
+  for (let x = -44; x < -10; x += 7)                      // pipe-rack bents
+    beam(out, [x, DECK, -32], [x, DECK+4.2, -32], 0.4, 0.4, M.steel);
+  // stairs down to grade on both flanks, and the transporter ramp at -x
+  for (const [sx, z] of [[-1, 20], [1, -24]]) {
+    const x = sx > 0 ? 40 : -46;
+    beam(out, [x + sx*0.5, 0, z], [x - sx*7, DECK, z], 2.4, 0.4, M.grate);
+    for (let k = 1; k < 12; k++) {
+      const f = k/12;
+      boxAt(out, [x + sx*0.5 - sx*7.5*f, DECK*f + 0.2, z], [0.6, 0.12, 2.4], M.steel);
+    }
+    railing(out, [[x + sx*0.5, 0.9, z+1.2], [x - sx*7, DECK+0.9, z+1.2]], 1.1, M.steel);
+    railing(out, [[x + sx*0.5, 0.9, z-1.2], [x - sx*7, DECK+0.9, z-1.2]], 1.1, M.steel);
+  }
+  // transporter ramp: one sloped slab up the -x face, kerbed both sides
+  beam(out, [-64, 0.35, -6], [-45.5, DECK+0.05, -6], 22, 1.0, M.conc2);
+  for (const s of [-1, 1])
+    beam(out, [-64, 0.9, -6 + s*11.4], [-45.5, DECK+0.6, -6 + s*11.4], 0.9, 1.2, M.kerb);
+  // ground support hardware parked on the deck
+  for (const [x, z, w] of [[26, -20, 3.2], [26, -14, 3.2], [-34, 14, 5.0],
+                           [30, 12, 4.0]]) {
+    boxAt(out, [x, DECK+1.4, z], [w, 2.8, w*1.8], M.white);
+    boxAt(out, [x, DECK+2.9, z], [w*0.9, 0.3, w*1.7], M.steel);
+  }
+}
+
+// --- launch table: legs across the trench, deck, hold-downs, tail masts -----
+function buildMount(out) {
+  const M = MAT, ap = apR(), MNT_R = mntR();
+  const oct = k => [MNT_R*Math.cos(k*Math.PI/4 + Math.PI/8), 0,
+                    MNT_R*Math.sin(k*Math.PI/4 + Math.PI/8)];
+  // deck: an octagonal ring of plate girders with a hole for the plume
+  for (let k = 0; k < 8; k++) {
+    const a = oct(k), b = oct(k+1);
+    beam(out, [a[0], PADH-0.45, a[2]], [b[0], PADH-0.45, b[2]],
+         MNT_R - ap - 0.6, 0.9, M.steel);
+    beam(out, [a[0], PADH+0.05, a[2]], [b[0], PADH+0.05, b[2]],
+         MNT_R - ap - 0.6, 0.12, M.grate);
+    railing(out, [[a[0]*1.03, PADH+0.1, a[2]*1.03], [b[0]*1.03, PADH+0.1, b[2]*1.03]],
+            1.1, M.yellow);
+  }
+  tube(out, [0, PADH-0.5, 0], [0, PADH+0.1, 0], ap + 0.5, M.dark, 24, ap + 0.5);
+  tube(out, [0, PADH-0.45, 0], [0, PADH+0.15, 0], ap, M.scorch, 24, ap);
+  // legs on the trench shoulders, cross-braced, with heat shielding beneath
+  const LG = Math.min(trHW() + 2.2, MNT_R - 1.5);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const x = sx*LG, z = sz*LG;
+    tube(out, [x, DECK, z], [x, PADH-0.4, z], 0.85, M.steel, 10);
+    boxAt(out, [x, DECK+0.25, z], [3.0, 0.5, 3.0], M.conc2);
+    beam(out, [x, DECK+0.6, z], [x, PADH-1.0, -z], 0.4, 0.4, M.steel);
+    beam(out, [x, DECK+0.6, z], [-x, PADH-1.0, z], 0.4, 0.4, M.steel);
+  }
+  for (let k = 0; k < 8; k++) {                       // radial under-girders
+    const a = oct(k);
+    beam(out, [0, PADH-1.1, 0], [a[0]*0.98, PADH-0.9, a[2]*0.98], 0.5, 0.7, M.dark);
+  }
+  // hold-down arms gripping the base of the stack, and the launch ring itself
+  const hr = DIA/2 + 0.35;
+  tube(out, [0, PADH+0.1, 0], [0, PADH+0.45, 0], hr + 0.45, M.steel, 20, hr + 0.45);
+  tube(out, [0, PADH+0.12, 0], [0, PADH+0.5, 0], hr - 0.1, M.dark, 20, hr - 0.1);
+  for (let k = 0; k < 6; k++) {
+    const a = k*Math.PI/3, c = Math.cos(a), s = Math.sin(a);
+    beam(out, [c*(hr+1.9), PADH+0.15, s*(hr+1.9)], [c*(hr+0.5), PADH+1.9, s*(hr+0.5)],
+         0.45, 0.55, M.steel);
+    boxAt(out, [c*(hr+0.3), PADH+2.0, s*(hr+0.3)], [0.8, 0.7, 0.8], M.yellow);
+  }
+  // tail service masts: propellant and power to the base until first motion
+  for (const sx of [-1, 1]) {
+    const x = sx*(hr + 3.4), z = -3.0, h = PADH + 7.5;
+    beam(out, [x, PADH+0.1, z], [x, h, z], 1.5, 1.5, M.white);
+    boxAt(out, [x, h+0.35, z], [1.9, 0.7, 1.9], M.steel);
+    railing(out, [[x, h - 2.2, z-0.9], [x, h - 2.2, z+0.9]], 1.0, M.steel);
+    for (const [dy, r] of [[-1.2, 0.13], [-2.4, 0.11], [-3.6, 0.09]])
+      cable(out, [x - sx*0.75, h + dy, z], [sx*(hr + 0.05), PADH + 2.4 + dy*0.3, 0.3],
+            0.5, r, M.dark, 6);
+  }
+  // stairs up from the hardstand deck to the table
+  beam(out, [-MNT_R-6.5, DECK, 0], [-MNT_R+1.5, PADH, 0], 2.4, 0.4, M.grate);
+  for (let k = 1; k < 10; k++) {
+    const f = k/10;
+    boxAt(out, [-MNT_R-6.5 + 8*f, DECK + (PADH-DECK)*f + 0.2, 0],
+          [0.6, 0.12, 2.4], M.steel);
+  }
+  for (const s of [-1, 1])
+    railing(out, [[-MNT_R-6.5, DECK+0.9, s*1.2], [-MNT_R+1.5, PADH+0.9, s*1.2]],
+            1.1, M.steel);
+}
+
+// --- fixed service structure: lattice, elevator, stairs, crane, mast --------
+function buildTower(out, th) {
+  const M = MAT, HF = TWHF, BAY = 6.0, y0 = DECK;
+  const col = (sx, sz) => [sx*HF, 0, TWZ + sz*HF];
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const c = col(sx, sz);
+    beam(out, [c[0], y0, c[2]], [c[0], th, c[2]], 0.8, 0.8, M.tower);
+    boxAt(out, [c[0], y0+0.4, c[2]], [2.6, 0.8, 2.6], M.conc2);      // footing
+  }
+  for (let y = y0; y < th - 1; y += BAY) {
+    const y1 = Math.min(y + BAY, th);
+    for (const sz of [-1, 1])                                        // ties
+      beam(out, [-HF, y1, TWZ+sz*HF], [HF, y1, TWZ+sz*HF], 0.4, 0.4, M.tower);
+    for (const sx of [-1, 1])
+      beam(out, [sx*HF, y1, TWZ-HF], [sx*HF, y1, TWZ+HF], 0.4, 0.4, M.tower);
+    // X bracing on three faces; the face toward the vehicle stays open so the
+    // swing arms have somewhere to go
+    for (const sx of [-1, 1]) {
+      segBox(out, [sx*HF, y, TWZ-HF], [sx*HF, y1, TWZ+HF], 0.26, M.tower);
+      segBox(out, [sx*HF, y, TWZ+HF], [sx*HF, y1, TWZ-HF], 0.26, M.tower);
+    }
+    segBox(out, [-HF, y, TWZ-HF], [HF, y1, TWZ-HF], 0.26, M.tower);
+    segBox(out, [HF, y, TWZ-HF], [-HF, y1, TWZ-HF], 0.26, M.tower);
+  }
+  // work platforms with railings, and a floodlight cluster on every third one
+  let lv = 0;
+  for (let y = y0 + BAY*2; y < th - BAY; y += BAY*2, lv++) {
+    boxAt(out, [0, y+0.1, TWZ], [2*HF+2.4, 0.22, 2*HF+2.4], M.grate);
+    const R = HF + 1.2, e = [[-R,-R],[R,-R],[R,R],[-R,R],[-R,-R]];
+    railing(out, e.map(p => [p[0], y+0.2, TWZ+p[1]]), 1.1, M.yellow);
+    if (lv % 2 === 0) for (const sx of [-1, 1]) {
+      beam(out, [sx*(HF-1), y+2.2, TWZ+HF], [sx*(HF-1), y+2.2, TWZ+HF+1.6],
+           0.25, 0.25, M.steel);
+      boxAt(out, [sx*(HF-1), y+2.2, TWZ+HF+1.9], [1.4, 0.7, 0.5], M.lamp);
     }
   }
-  for (const y of [th*0.3, th*0.6, th*0.9])
-    boxAt(tow, [0, y, TZ], [8.5, 0.35, 8.5], [0.30,0.30,0.31]);
-  segBox(tow, [0, th, TZ], [0, th+10, TZ], 0.5, [0.55,0.55,0.57]);
-  segBox(tow, [0, th+10, TZ], [0, th+13, TZ], 0.14, [0.55,0.55,0.57]);
-  towerBuf = buffer(new Float32Array(tow)); towerN = tow.length/9;
+  // elevator shaft up the back face: framed, ribbed and louvred rather than a
+  // blank slab, with the cab parked at the crew level and its machine room up top
+  const ez0 = TWZ - HF - 3.4, ez1 = TWZ - HF, eh = th - 5;
+  for (const sx of [-1, 1]) for (const z of [ez0, ez1])
+    beam(out, [sx*2.0, y0, z], [sx*2.0, eh, z], 0.34, 0.34, M.tower);
+  boxAt(out, [0, (y0+eh)/2, ez0-0.05], [4.0, eh-y0, 0.16], M.steel);
+  for (const sx of [-1, 1])
+    boxAt(out, [sx*2.05, (y0+eh)/2, (ez0+ez1)/2], [0.16, eh-y0, 3.4], M.steel);
+  for (let y = y0 + 2.4; y < eh; y += 2.4) {                        // rib lines
+    boxAt(out, [0, y, ez0-0.18], [4.2, 0.18, 0.2], M.tower);
+    for (const sx of [-1, 1]) boxAt(out, [sx*2.18, y, (ez0+ez1)/2], [0.2, 0.18, 3.5], M.tower);
+  }
+  for (const y of [y0+1.4, y0+(eh-y0)*0.5, eh-4])                   // shaft doors
+    boxAt(out, [0, y+1.1, ez0-0.22], [2.0, 2.2, 0.16], M.dark);
+  boxAt(out, [0, y0 + (th-y0)*0.62, (ez0+ez1)/2], [3.6, 2.8, 2.8], M.white);
+  boxAt(out, [0, eh+1.2, (ez0+ez1)/2], [4.6, 2.4, 4.0], M.steel);   // machine room
+  boxAt(out, [0, eh+2.5, (ez0+ez1)/2], [5.0, 0.3, 4.4], M.dark);
+  // switchback stairs up the +x face
+  for (let y = y0, k = 0; y < th - BAY; y += BAY, k++) {
+    const s = k % 2 ? 1 : -1;
+    beam(out, [HF+1.9, y, TWZ + s*HF], [HF+1.9, y+BAY, TWZ - s*HF], 1.6, 0.3, M.grate);
+    boxAt(out, [HF+1.9, y+BAY+0.1, TWZ - s*HF], [1.8, 0.2, 2.4], M.grate);
+    railing(out, [[HF+2.7, y+0.2, TWZ + s*HF], [HF+2.7, y+BAY+0.2, TWZ - s*HF]],
+            1.0, M.steel);
+  }
+  // service risers: propellant, gas and cable runs clamped to the -x face
+  for (const [i, r] of [[0, 0.34], [1, 0.26], [2, 0.20], [3, 0.20]]) {
+    const z = TWZ - 2.4 + i*1.6;
+    tube(out, [-HF-0.9, y0, z], [-HF-0.9, th-6, z], r, M.pipe, 8);
+  }
+  for (let y = y0 + 3; y < th - 6; y += BAY)
+    beam(out, [-HF-0.5, y, TWZ-3.2], [-HF-0.5, y, TWZ+3.2], 0.3, 0.3, M.steel);
+  // hammerhead crane on the roof: slew ring, jib, counterweight, hook block
+  boxAt(out, [0, th+0.4, TWZ], [2*HF+1.6, 0.8, 2*HF+1.6], M.steel);
+  tube(out, [0, th+0.8, TWZ], [0, th+2.6, TWZ], 1.8, M.rust, 12);
+  // slewed away from the pad for launch, as it would be on the day
+  const jib = [0, th+3.4, TWZ - 21], cj = [0, th+3.4, TWZ + 9];
+  beam(out, cj, jib, 1.2, 1.6, M.rust);
+  segBox(out, [0, th+7.5, TWZ], jib, 0.3, M.rust);
+  segBox(out, [0, th+7.5, TWZ], cj, 0.3, M.rust);
+  beam(out, [0, th+2.8, TWZ], [0, th+7.8, TWZ], 1.0, 1.0, M.rust);
+  boxAt(out, [0, th+3.4, TWZ+9.6], [3.0, 2.4, 2.2], M.dark);          // counterweight
+  boxAt(out, [0, th+2.6, TWZ-14], [1.6, 1.0, 2.0], M.steel);          // trolley
+  cable(out, [0, th+2.6, TWZ-14], [0, th-6, TWZ-14], 0.4, 0.08, M.steel, 3);
+  boxAt(out, [0, th-6.6, TWZ-14], [1.2, 1.2, 1.2], M.dark);           // hook block
+  // lightning mast and the wire that carries a strike away over the vehicle
+  tube(out, [0, th+7.8, TWZ], [0, th+30, TWZ], 0.55, M.steel, 10, 0.14);
+  tube(out, [0, th+30, TWZ], [0, th+33, TWZ], 0.14, M.steel, 6, 0.03);
+}
+
+// --- swing arms: each hinges on the tower and clears before its own deadline -
+// A retraction is driven straight off the mission clock rather than a global
+// counter, so scrubbing the seek bar backwards puts every arm back where it
+// belongs instead of leaving them stuck open.
+function buildArms(out) {
+  const M = MAT, tip = -(DIA/2 + 0.55);
+  // boom: two chords, diagonals, a grating walkway and rails
+  const boom = (y, w, len) => {
+    const z1 = HINGE_Z - len;
+    for (const sx of [-1, 1]) {
+      beam(out, [sx*w, y, HINGE_Z], [sx*w, y, z1], 0.3, 0.4, M.steel);
+      beam(out, [sx*w, y-1.5, HINGE_Z], [sx*w, y-1.5, z1], 0.3, 0.4, M.steel);
+      for (let z = HINGE_Z, k = 0; z > z1 + 0.1; z -= 2.2, k++) {
+        const za = Math.max(z - 2.2, z1);
+        segBox(out, [sx*w, y-1.5, z], [sx*w, y, za], 0.16, M.steel);
+        beam(out, [sx*w, y-1.5, za], [sx*w, y, za], 0.16, 0.16, M.steel);
+      }
+    }
+    for (let z = HINGE_Z; z > z1; z -= 2.2)
+      beam(out, [-w, y-1.5, z], [w, y-1.5, z], 0.16, 0.16, M.steel);
+    beam(out, [0, y+0.06, HINGE_Z], [0, y+0.06, z1], 2*w, 0.12, M.grate);
+    for (const sx of [-1, 1])
+      railing(out, [[sx*w, y+0.1, HINGE_Z], [sx*w, y+0.1, z1]], 1.05, M.yellow);
+    // hinge pintle back at the tower
+    tube(out, [0, y-2.0, HINGE_Z], [0, y+1.3, HINGE_Z], 0.55, M.rust, 10);
+    return z1;
+  };
+  const arms = [];
+  const push = (v0, hinge, sweep, t0, dur) =>
+    arms.push({ first: v0, count: out.length/VST - v0, hinge, sweep, t0, dur });
+
+  // 1. gaseous-oxygen vent hood over the nose ("beanie cap")
+  let v0 = out.length/VST;
+  const yh = PADH + LEN + 2.6;
+  boom(yh, 1.1, HINGE_Z - tip - 1.0);
+  tube(out, [0, yh-2.2, tip-1.2], [0, yh+0.4, tip-1.2], DIA*0.55, M.white, 14,
+       DIA*0.62);
+  tube(out, [0, yh-1.0, tip-1.2], [0, yh-1.0, HINGE_Z], 0.28, M.pipe, 8);
+  push(v0, [0, 0, HINGE_Z], -1.85, -14.0, 5.0);
+
+  // 2. crew access arm with the white room at its tip
+  v0 = out.length/VST;
+  const yc = PADH + LEN*0.86;
+  boom(yc, 1.4, HINGE_Z - tip);
+  boxAt(out, [0, yc+1.5, tip-1.9], [4.0, 3.2, 3.4], M.white);
+  boxAt(out, [0, yc+1.5, tip-0.3], [2.4, 2.4, 0.3], M.dark);          // hatch face
+  boxAt(out, [0, yc+3.3, tip-1.9], [4.4, 0.3, 3.8], M.steel);         // roof
+  boxAt(out, [0, yc+2.2, tip-3.7], [1.2, 1.0, 0.3], M.glass);
+  push(v0, [0, 0, HINGE_Z], 1.75, -11.0, 6.0);
+
+  // 3./4. upper and lower umbilical arms — propellant, gas, power
+  for (const [k, fy, sweep, t0, dur] of
+       [[0, 0.56, 1.9, -7.0, 4.5], [1, 0.22, 1.9, -3.4, 3.0]]) {
+    v0 = out.length/VST;
+    const y = PADH + LEN*fy;
+    boom(y, 1.25, HINGE_Z - tip);
+    boxAt(out, [0, y+1.1, tip-1.3], [2.6, 2.2, 2.4], M.steel);        // carrier plate
+    for (const [dx, r] of [[-0.55, 0.14], [0, 0.11], [0.55, 0.09]])
+      cable(out, [dx, y+0.9, tip-2.4], [dx, y-0.3, HINGE_Z-1.5], 1.2 + k*0.8, r,
+            M.dark, 8);
+    push(v0, [0, 0, HINGE_Z], sweep, t0, dur);
+  }
+  return arms;
+}
+
+// --- everything outside the fence line: farm, water, buildings, masts -------
+function buildGround(out) {
+  const M = MAT;
+  // lightning masts on a triangle about the pad, wired together over the top:
+  // a strike lands on the catenary and goes to ground away from the vehicle
+  const mast = (x, z, h) => {
+    boxAt(out, [x, 1.1, z], [7, 2.2, 7], M.conc2);
+    tube(out, [x, 2.2, z], [x, h*0.55, z], 1.1, M.steel, 10, 0.7);
+    tube(out, [x, h*0.55, z], [x, h, z], 0.7, M.steel, 10, 0.28);
+    tube(out, [x, h, z], [x, h+7, z], 0.28, M.steel, 6, 0.06);
+    for (let y = 6; y < h; y += 9)                      // climb rungs and rests
+      boxAt(out, [x, y, z + 1.0], [1.6, 0.14, 0.5], M.steel);
+    return [x, h+7, z];
+  };
+  const tips = [mast(-52, -46, 88), mast(60, -30, 88), mast(6, 64, 88)];
+  for (let i = 0; i < 3; i++)
+    cable(out, tips[i], tips[(i+1) % 3], 16, 0.09, M.steel, 12);
+  // water tower for the deluge, and the main running back to the pad
+  const wx = -58, wz = -52;
+  for (let k = 0; k < 6; k++) {
+    const a = k*Math.PI/3;
+    tube(out, [wx + 6*Math.cos(a), 0, wz + 6*Math.sin(a)],
+         [wx + 3.4*Math.cos(a), 27, wz + 3.4*Math.sin(a)], 0.42, M.steel, 8);
+  }
+  for (const y of [9, 18])
+    for (let k = 0; k < 6; k++) {
+      const a = k*Math.PI/3, b = (k+1)*Math.PI/3, f = 1 - y/27*0.43;
+      beam(out, [wx + 6*f*Math.cos(a), y, wz + 6*f*Math.sin(a)],
+           [wx + 6*f*Math.cos(b), y, wz + 6*f*Math.sin(b)], 0.3, 0.3, M.steel);
+    }
+  tube(out, [wx, 27, wz], [wx, 40, wz], 6.4, M.tank, 18);
+  tube(out, [wx, 40, wz], [wx, 43, wz], 6.4, M.tank, 18, 0.6);
+  tube(out, [wx, 24, wz], [wx, 27, wz], 6.4, M.tank, 18, 0.6);
+  railing(out, [[wx-6.6, 40.2, wz], [wx, 40.2, wz-6.6], [wx+6.6, 40.2, wz],
+                [wx, 40.2, wz+6.6], [wx-6.6, 40.2, wz]], 1.0, M.steel);
+  tube(out, [wx+2, 27, wz], [wx+2, 1.2, wz], 0.6, M.pipe, 10);        // downcomer
+  tube(out, [wx+2, 1.2, wz], [wx+2, 1.2, TR_Z0-6], 0.6, M.pipe, 10);
+  tube(out, [wx+2, 1.2, TR_Z0-6], [-trHW()-1.9, 1.2, TR_Z0-6], 0.6, M.pipe, 10);
+  boxAt(out, [wx+2, 1.6, TR_Z0-6], [3.0, 3.2, 3.0], M.steel);         // valve house
+  // cryogenic farm: a LOX sphere and fuel tanks, each inside its own berm
+  const bermRing = (x, z, r, h) => {
+    for (let k = 0; k < 16; k++) {
+      const a = k*Math.PI/8, b = (k+1)*Math.PI/8;
+      beam(out, [x + r*Math.cos(a), h/2, z + r*Math.sin(a)],
+           [x + r*Math.cos(b), h/2, z + r*Math.sin(b)], 2.6, h, M.berm);
+    }
+  };
+  const lx = -74, lz = -26;
+  bermRing(lx, lz, 21, 3.2);
+  sphereAt(out, [lx, 13.5, lz], 9.0, M.tank, 20);
+  for (let k = 0; k < 8; k++) {
+    const a = k*Math.PI/4;
+    tube(out, [lx + 7*Math.cos(a), 0, lz + 7*Math.sin(a)],
+         [lx + 7*Math.cos(a), 9, lz + 7*Math.sin(a)], 0.45, M.steel, 8);
+  }
+  for (let i = 0; i < 5; i++)                            // ambient vaporisers
+    for (let k = 0; k < 4; k++)
+      tube(out, [lx + 15 + i*2.2, 0, lz + 14 + k*1.6],
+           [lx + 15 + i*2.2, 7, lz + 14 + k*1.6], 0.35, M.white, 6);
+  const fx = -74, fz = 22;
+  bermRing(fx, fz, 18, 3.0);
+  for (let i = 0; i < 3; i++) {
+    const z = fz - 8 + i*8;
+    tube(out, [fx-9, 5.2, z], [fx+9, 5.2, z], 3.4, M.tank, 14);
+    for (const sx of [-1, 1]) boxAt(out, [fx + sx*6, 1.0, z], [3.0, 2.0, 7.2], M.conc2);
+  }
+  // the run from the farm to the pad: out of the berm, along a pipe rack on
+  // trestles, then up onto the hardstand
+  for (const [i, r] of [[0, 0.55], [1, 0.42], [2, 0.30]]) {
+    const y = 3.4 + i*0.9;
+    tube(out, [lx + 22, y, lz], [-50, y, lz], r, M.pipe, 8);
+    tube(out, [-50, y, lz], [-50, y, -32], r, M.pipe, 8);
+    tube(out, [-50, y, -32], [-46, DECK + 1.9 + i*0.9, -32], r, M.pipe, 8);
+    tube(out, [lx + 9, y, lz], [lx + 22, y, lz], r, M.pipe, 8);
+  }
+  for (let x = lx + 24; x < -50; x += 8)
+    beam(out, [x, 0, lz], [x, 3.2, lz], 0.45, 0.45, M.steel);
+  for (let z = lz + 6; z < -32; z += 8)
+    beam(out, [-50, 0, z], [-50, 3.2, z], 0.45, 0.45, M.steel);
+  // blockhouse: bermed concrete, periscope hood, dish on the roof
+  const bx = -104, bz = -4;
+  boxAt(out, [bx, 3.0, bz], [22, 6.0, 15], M.conc);
+  boxAt(out, [bx, 6.4, bz], [23.5, 0.9, 16.5], M.conc2);
+  boxAt(out, [bx+11.4, 1.6, bz], [1.0, 3.2, 4.0], M.dark);            // blast door
+  for (const s of [-1, 1]) boxAt(out, [bx - 2, 1.6, bz + s*9.6], [26, 3.2, 5.0], M.berm);
+  tube(out, [bx-4, 6.9, bz+4], [bx-4, 11.0, bz+4], 0.3, M.steel, 8);
+  tube(out, [bx-4, 11.0, bz+4], [bx-2.2, 12.4, bz+4], 2.6, M.white, 12, 0.3);
+  tube(out, [bx+6, 6.9, bz-4], [bx+6, 16.0, bz-4], 0.25, M.steel, 6, 0.08);
+  // integration hangar: where the stack is assembled and rolled out from
+  const hx = -134, hz = 30;
+  boxAt(out, [hx, 9.5, hz], [46, 19.0, 26], M.conc2);
+  for (let i = 0; i < 5; i++) {                          // stepped gable roof
+    const f = i/5;
+    boxAt(out, [hx, 19.2 + i*0.9, hz], [46 - f*4, 1.0, 26 - f*9], M.steel);
+  }
+  for (let i = -2; i <= 2; i++)
+    boxAt(out, [hx + i*10, 9.5, hz + 13.2], [0.8, 19.0, 0.8], M.steel);   // pilasters
+  boxAt(out, [hx, 15.5, hz + 13.3], [40, 1.6, 0.4], M.glass);         // clerestory
+  boxAt(out, [hx + 23.3, 8.5, hz], [0.8, 17.0, 19.0], M.steel);       // roll-up door
+  for (let i = -3; i <= 3; i++)
+    boxAt(out, [hx + 23.6, 8.5 + i*2.5, hz], [0.5, 0.3, 19.4], M.dark);
+  boxAt(out, [hx + 23.7, 17.6, hz], [1.4, 1.2, 21.0], M.dark);        // door rail
+  for (const s of [-1, 1]) boxAt(out, [hx - 26, 4.0, hz + s*8], [8, 8.0, 6], M.conc2);
+  boxAt(out, [-97, 0.06, 18], [76, 0.2, 13], M.road);
+  boxAt(out, [-60, 0.06, 6], [14, 0.2, 36], M.road);
+  for (let x = -128; x < -64; x += 9)                                 // road markings
+    boxAt(out, [x, 0.14, 18], [4.5, 0.06, 0.4], M.kerb);
+  // floodlight masts ringing the pad, and the perimeter fence
+  for (let k = 0; k < 6; k++) {
+    const a = k*Math.PI/3 + 0.35, x = 78*Math.cos(a), z = 78*Math.sin(a);
+    tube(out, [x, 0, z], [x, 24, z], 0.45, M.steel, 8, 0.3);
+    boxAt(out, [x, 24.8, z], [3.2, 0.5, 1.2], M.steel);
+    for (let i = -1; i <= 1; i++)
+      boxAt(out, [x + i*1.1*Math.sin(a), 25.4, z - i*1.1*Math.cos(a)],
+            [0.9, 0.7, 0.9], M.lamp);
+  }
+  for (let k = 0; k < 72; k++) {
+    const a = k*2*Math.PI/72, b = (k+1)*2*Math.PI/72, R = 112;
+    const p = [R*Math.cos(a), 0, R*Math.sin(a)], q = [R*Math.cos(b), 0, R*Math.sin(b)];
+    beam(out, p, [p[0], 2.6, p[2]], 0.14, 0.14, M.steel);
+    for (const y of [1.0, 2.0, 2.55])
+      beam(out, [p[0], y, p[2]], [q[0], y, q[2]], 0.05, 0.05, M.steel);
+  }
+}
+
+function buildStatics() {
+  const th = Math.max(30, LEN*1.28 + PADH);        // tower clears the stack
+  const tow = [];
+  buildTower(tow, th);
+  towerBuf = buffer(new Float32Array(tow)); towerN = tow.length/VST;
 
   const arm = [];
-  for (const y of [LEN*0.52, LEN*0.86]) {
-    segBox(arm, [0, y, TZ+HF], [0, y, -DIA*0.68], 0.55, [0.5,0.5,0.52]);
-    segBox(arm, [0, y+0.5, -DIA*0.9], [0, y-0.5, -DIA*0.9], 0.5, [0.5,0.5,0.52]);
-  }
-  armBuf = buffer(new Float32Array(arm)); armN = arm.length/9;
+  armDraw = buildArms(arm);
+  armBuf = buffer(new Float32Array(arm));
 
   const pad = [];
-  boxAt(pad, [0, -0.35, 0], [76, 1.1, 56], GC);
-  // open launch table: four posts + top ring, engine bells hang through
-  for (const sx of [-1,1]) for (const sz of [-1,1])
-    segBox(pad, [sx*1.7, 0, sz*1.7], [sx*1.7, 1.9, sz*1.7], 0.55, [0.30,0.30,0.31]);
-  for (const s of [-1,1]) {
-    segBox(pad, [-2.0, 1.9, s*1.7], [2.0, 1.9, s*1.7], 0.45, [0.30,0.30,0.31]);
-    segBox(pad, [s*1.7, 1.9, -2.0], [s*1.7, 1.9, 2.0], 0.45, [0.30,0.30,0.31]);
-  }
-  segBox(pad, [0, 0.3, 4], [0, 2.6, 10], 5.0, [0.33,0.33,0.34]);
-  for (const sx of [-1,1]) for (const sz of [-1,1])
-    segBox(pad, [sx*32, 0, sz*24], [sx*32, 27, sz*24], 0.5, [0.55,0.55,0.57]);
-  padBuf = buffer(new Float32Array(pad)); padN = pad.length/9;
+  buildHardstand(pad);
+  buildMount(pad);
+  buildGround(pad);
+  padBuf = buffer(new Float32Array(pad)); padN = pad.length/VST;
 
   const c = [], EX = 60000;
   c.push(-EX,-EX, EX,-EX, EX,EX, -EX,-EX, EX,EX, -EX,EX);
@@ -1067,9 +1592,9 @@ function buildStatics() {
     return out;
   };
   const dg = mkChute(1.15, [[0.80,0.79,0.75],[0.45,0.44,0.42]], 3.2);
-  drogueBuf = buffer(new Float32Array(dg)); drogueN = dg.length/9;
+  drogueBuf = buffer(new Float32Array(dg)); drogueN = dg.length/VST;
   const mn = mkChute(4.6, [[0.92,0.44,0.14],[0.94,0.93,0.90]], 8.5);
-  mainBuf = buffer(new Float32Array(mn)); mainN = mn.length/9;
+  mainBuf = buffer(new Float32Array(mn)); mainN = mn.length/VST;
 }
 
 const quadBuf = () => buffer(new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]));
@@ -1559,13 +2084,20 @@ function drawRange(model, proj, first, count) {
   gl.drawArrays(gl.TRIANGLES, first, count);
 }
 function drawWhole(buf, n, model, proj) { bindMeshBuf(buf); drawRange(model, proj, 0, n); }
+// where a swing arm is at time t: eased from stowed to clear over its own
+// retraction window, and a pure function of the clock so seeking works
+function armMat(a, t) {
+  const f = Math.max(0, Math.min(1, (t - a.t0)/a.dur));
+  const ang = a.sweep * f*f*(3 - 2*f);
+  return mMul(mTrans(a.hinge), mMul(mRotY(ang), mTrans(V.scale(a.hinge, -1))));
+}
 
 // ------------------------------------------------------------- main state --
 let simT = -15, running = false, started = false, ended = false;
 let manualWarp = 0, warpCur = 1, warpEff = 1;
 // above this the vehicle moves so far per frame that a trail cannot connect
 const PARTWARP = 300;
-let lastNow = 0, armAng = 0, scorch = 0, splashed = false;
+let lastNow = 0, scorch = 0, splashed = false;
 const toasts = [];
 function buildToasts() {
   toasts.length = 0;
@@ -1618,8 +2150,6 @@ function frame(now) {
   }
   secGone = gone;
   if (tPrev < tSplash && simT >= tSplash) splashed = true;
-
-  armAng = simT > -4.6 ? Math.min(1.75, armAng + dtReal*0.8) : 0;
 
   const scene = buildScene(ph);
   // Plume and wake run on their own near-real-time clock. Stepping them with
@@ -1737,10 +2267,17 @@ function spawnAscent(dt, st, rocketVel, noz, bnoz) {
           DIA*2.0*E, 0);
   }
   if (st.h < 300 && st.thr > 1e5) {
-    for (let i = 0; i < Math.min(6, 60*dt*4); i++) {
-      const sgn = Math.random() < 0.5 ? 1 : -1;
-      spawn([rnd(3,-3), rnd(2.5,0.5), sgn*rnd(8,4)],
-            [rnd(8,-8), rnd(7,2), sgn*(20+rnd(14))], rnd(17,8), rnd(9,5), 3.2, 1);
+    // The trench decides where the smoke goes: the deflector turns the plume
+    // and it leaves the mouth at grade, carrying the deluge steam with it.
+    // Only what spills around the table rises beside the vehicle.
+    for (let i = 0; i < Math.min(7, 60*dt*5); i++)
+      spawn([rnd(trHW()*0.8, -trHW()*0.8), rnd(6, 0.8), TR_Z1 + rnd(7, -3)],
+            [rnd(7,-7), rnd(10,2), 26 + rnd(32)], rnd(18,9), rnd(9,5), 3.4, 1);
+    for (let i = 0; i < Math.min(3, 60*dt*2); i++) {
+      const a = rnd(2*Math.PI), r = mntR()*rnd(1.6, 0.85);
+      spawn([r*Math.cos(a), PADH + rnd(3,-4), r*Math.sin(a)],
+            [3*Math.cos(a) + rnd(6,-6), rnd(7,1), 3*Math.sin(a) + rnd(6,-6)],
+            rnd(13,6), rnd(7,4), 2.6, 1);
     }
   } else if (st.h < 45000 && Math.random() < 60*dt*0.5) {
     spawn(V.add(noz, jit(0.5)), V.add(rocketVel, V.scale(st.dir, -60)),
@@ -1874,9 +2411,8 @@ function drawScene(sc) {
   if (sc.world === 'pad') {
     drawWhole(padBuf, padN, mIdent(), proj);
     drawWhole(towerBuf, towerN, mIdent(), proj);
-    const hinge = [0, 0, -10.8];
-    const armM = mMul(mTrans(hinge), mMul(mRotY(armAng), mTrans(V.scale(hinge, -1))));
-    drawWhole(armBuf, armN, armM, proj);
+    bindMeshBuf(armBuf);
+    for (const a of armDraw) drawRange(armMat(a, simT), proj, a.first, a.count);
     const rocketM = sc.craftM;
     bindMeshBuf(rocketBuf);
     for (const s of secDraw) {
@@ -2046,7 +2582,6 @@ function seekTo(t) {
   for (const q of toasts) q.done = simT >= q.t;
   parts.length = 0; debris.length = 0;
   splashed = simT >= tSplash;
-  armAng = simT > -4.6 ? 1.75 : 0;
   warpCur = 1;
   ended = false; running = true;
   $('overlay').classList.add('hidden');
