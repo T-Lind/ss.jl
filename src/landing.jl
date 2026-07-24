@@ -23,14 +23,22 @@
 # that falls freely with the Moon. That is not a convenience: the residual
 # Earth term in that frame is the *tidal* difference, 2*mu_E*r/d^3, which at
 # a 100 km lunar orbit is 2.5e-5 m/s^2 — 1.5e-5 of lunar gravity, four orders
-# below the modelling error in a point-mass Moon. Lunar gravity is spherical
-# here; the real Moon's mascons perturb a low orbit by kilometres per
-# revolution, which is why real descents navigate rather than propagate.
+# below anything else here, and the reason the Earth can simply be dropped.
 #
-# What is *not* modelled: terrain (the surface is a sphere of radius R_MOON),
-# landing-radar updates, redesignation, hazard avoidance, and abort. The
-# guidance flies open-loop in the braking phase and closed-loop on velocity
-# in the terminal phase, which is enough to price a descent honestly.
+# How much world to fly through is the caller's choice, and it is made with a
+# `DescentConfig`. Left empty — which is the default — the Moon is a point
+# mass, the surface is a sphere of radius `R_MOON`, and the guidance reads the
+# integrator's own state, which is enough to price a descent and not enough to
+# test one. Filled in, the descent is flown over procedural terrain
+# (`terrain.jl`), through an oblate and mascon-lumped gravity field
+# (`moon.jl`), on a navigation state that starts wrong and is corrected by
+# landing radar (`landingnav.jl`), to a landing point the vehicle picks for
+# itself at high gate. Each of those turns on a way to fail that the sphere
+# hid.
+#
+# Still not modelled: abort, staging during descent, plume-surface interaction,
+# and any attitude dynamics at all — thrust points where guidance asks, with no
+# rate limit and no RCS budget to pay for it.
 
 """
     Lander(name, mdry, mprop, thrust, isp, throttle_min, diameter)
@@ -74,17 +82,82 @@ default_lander(; payload::Float64 = 0.0) =
 "Ideal vacuum delta-v the lander carries [m/s]."
 lander_dv(l::Lander) = G0 * l.isp * log(lander_mass(l) / l.mdry)
 
+"""
+    AscentStage(; name, mdry, mprop, thrust, isp)
+
+The part of the lander that comes back. Its wet mass is carried *inside* the
+lander's dry mass — the descent stage is a launch pad that gets left behind —
+so a `Lander` with `mdry = 3500` carrying a 2800 kg ascent stage really has
+700 kg of descent structure under it.
+
+The defaults are Apollo-LM-proportioned and about half the size: 1.3 t dry on
+1.5 t of hypergolic propellant through a 15.6 kN fixed-thrust engine, which is
+2340 m/s of ideal velocity against the roughly 1850 m/s it costs to reach
+lunar orbit. The margin is the rendezvous. See `lunarreturn.jl` for what it
+does with it.
+"""
+Base.@kwdef struct AscentStage
+    name::Symbol = :ascent
+    mdry::Float64 = 1300.0
+    mprop::Float64 = 1500.0
+    thrust::Float64 = 15.6e3
+    isp::Float64 = 311.0
+end
+
+"Wet mass of an ascent stage [kg]."
+ascent_mass(a::AscentStage) = a.mdry + a.mprop
+
+"Ideal vacuum delta-v it carries [m/s]."
+ascent_dv(a::AscentStage) = G0 * a.isp * log(ascent_mass(a) / a.mdry)
+
+"Full-throttle mass flow [kg/s]."
+@inline _ascent_mdot(a::AscentStage) = a.thrust / (G0 * a.isp)
+
+"""
+    Orbiter(; name, mdry, mprop, thrust, isp)
+
+What waits in lunar orbit: the vehicle that never lands, does its own orbit
+insertion, holds station while the lander is away, and burns for home once the
+ascent stage has caught up with it. Apollo called it the command and service
+module; the arithmetic calls it "the place to leave the trans-Earth
+propellant", and leaving it there rather than landing it is the whole argument
+for lunar-orbit rendezvous.
+
+The default carries about 2000 m/s of ideal velocity, which has to cover
+insertion (about 925 m/s) and trans-Earth injection (about 900 m/s) with the
+rest for trim. It is deliberately tight — that is what the real one was.
+"""
+Base.@kwdef struct Orbiter
+    name::Symbol = :orbiter
+    mdry::Float64 = 5200.0
+    mprop::Float64 = 4800.0
+    thrust::Float64 = 45.0e3
+    isp::Float64 = 314.0
+end
+
+"Wet mass of the orbiter [kg]."
+orbiter_mass(o::Orbiter) = o.mdry + o.mprop
+
+"Ideal vacuum delta-v it carries [m/s]."
+orbiter_dv(o::Orbiter) = G0 * o.isp * log(orbiter_mass(o) / o.mdry)
+
 # ---------------------------------------------------------------- logging --
 
 """
-Powered-descent log. `downrange` is arc length over the sphere from the point
+Powered-descent log. `downrange` is arc length over the surface from the point
 under the vehicle at ignition, so it is directly comparable with the maps
 Apollo's crews used; `throttle` is the commanded fraction, which is the
 number that says whether the engine could actually fly the trajectory.
+
+`h` is height above the *ground*, not above the mean sphere — over terrain the
+two differ by the `elev` column, and the gap between them is what a lander
+flying on a sphere would have got wrong. `nav_dh` and `nav_dr` are how wrong
+the vehicle believed itself to be at each sample; both are zero when nothing
+is modelling navigation, which is to say when the vehicle is assumed to know.
 """
 struct DescentLog
     t::Vector{Float64}          # seconds from powered-descent ignition
-    h::Vector{Float64}          # altitude above the mean sphere [m]
+    h::Vector{Float64}          # altitude above the ground below [m]
     downrange::Vector{Float64}  # surface arc from ignition [m]
     v::Vector{Float64}          # speed in the Moon frame [m/s]
     vh::Vector{Float64}         # horizontal (along-track) component [m/s]
@@ -93,8 +166,12 @@ struct DescentLog
     throttle::Vector{Float64}   # commanded fraction of full thrust
     pitch::Vector{Float64}      # thrust elevation above local horizontal [rad]
     x::Vector{Float64}; y::Vector{Float64}; z::Vector{Float64}  # Moon-centred [m]
+    elev::Vector{Float64}       # ground elevation above the mean sphere [m]
+    nav_dh::Vector{Float64}     # navigation altitude error [m] (est - truth)
+    nav_dr::Vector{Float64}     # navigation position error magnitude [m]
+    cross::Vector{Float64}      # crossrange offset to the designated site [m]
 end
-DescentLog() = DescentLog((Float64[] for _ in 1:12)...)
+DescentLog() = DescentLog((Float64[] for _ in 1:16)...)
 
 """
 Coast log in the lunar parking / descent orbit, Moon-centred inertial.
@@ -114,7 +191,7 @@ that decide whether the vehicle survived it.
 """
 struct DescentResult
     log::DescentLog
-    outcome::Symbol             # :touchdown | :crash | :propellant | :diverged
+    outcome::Symbol             # :touchdown | :crash | :tipped | :propellant | :diverged
     t_touchdown::Float64        # seconds from PDI
     t_gate::Float64             # seconds from PDI to high gate (end of braking)
     v_vertical::Float64         # touchdown sink rate [m/s] (positive = down)
@@ -129,6 +206,14 @@ struct DescentResult
     pitch0::Float64             # braking-phase initial pitch [rad]
     pitch_rate::Float64         # braking-phase pitch rate [rad/s]
     r::V3; v::V3; m::Float64    # touchdown state, Moon-centred
+    slope::Float64              # ground slope where it came to rest [rad]
+    elev::Float64               # ground elevation there, above the mean sphere [m]
+    site_score::Float64         # hazard score of the chosen site [rad], NaN if none
+    site_score_nominal::Float64 # hazard score of the site it would have taken
+    redesignated::Float64       # how far the aim point moved [m]
+    nav_err::Float64            # final navigation position error [m]
+    nav_dh::Float64             # final navigation altitude error [m]
+    radar_locked::Bool          # did the landing radar ever acquire
 end
 
 """
@@ -156,22 +241,36 @@ struct LandingResult
     lat_land::Float64           # selenographic latitude [rad]
     lon_land::Float64           # longitude from the sub-Earth meridian [rad]
     prop_margin::Float64        # lander propellant left at touchdown [kg]
+    # what was left in lunar orbit, if anything: the vehicle the ascent stage
+    # has to come back to. `nothing` is a one-way mission.
+    orbiter::Union{Nothing,Orbiter}
+    m_orbiter::Float64          # orbiter mass after its own insertion burn [kg]
+    r_orbiter::V3               # orbiter state at insertion, Moon-centred
+    v_orbiter::V3
 end
 
 # ------------------------------------------------------- Moon-frame basics --
 
-"Lunar point-mass acceleration in the Moon-centred frame."
+"""
+Lunar gravity in the Moon-centred frame. With no field it is the point mass
+the whole trans-lunar chain uses; with one it is oblate and lumpy, and the
+lumps are fixed to the Moon rather than to inertial space, which is why the
+time and the ephemeris have to come along.
+"""
 @inline _moon_accel(r::V3) = vscale(r, -MU_MOON / vnorm(r)^3)
+@inline _moon_accel(r::V3, t::Float64, field, eph) = lunar_gravity(r, field, t, eph)
 
 "RK4 step of a ballistic Moon-centred coast."
-function _moon_step(r::V3, v::V3, dt::Float64)
-    k1v = _moon_accel(r);                       k1r = v
+function _moon_step(r::V3, v::V3, dt::Float64; t::Float64 = 0.0,
+                    field = nothing, eph = nothing)
+    acc(rr, tt) = _moon_accel(rr, tt, field, eph)
+    k1v = acc(r, t);                            k1r = v
     r2 = vadd(r, vscale(k1r, dt/2)); v2 = vadd(v, vscale(k1v, dt/2))
-    k2v = _moon_accel(r2);                      k2r = v2
+    k2v = acc(r2, t + dt/2);                    k2r = v2
     r3 = vadd(r, vscale(k2r, dt/2)); v3 = vadd(v, vscale(k2v, dt/2))
-    k3v = _moon_accel(r3);                      k3r = v3
+    k3v = acc(r3, t + dt/2);                    k3r = v3
     r4 = vadd(r, vscale(k3r, dt));   v4 = vadd(v, vscale(k3v, dt))
-    k4v = _moon_accel(r4);                      k4r = v4
+    k4v = acc(r4, t + dt);                      k4r = v4
     (vadd(r, vscale(vadd(vadd(k1r, vscale(vadd(k2r, k3r), 2.0)), k4r), dt/6)),
      vadd(v, vscale(vadd(vadd(k1v, vscale(vadd(k2v, k3v), 2.0)), k4v), dt/6)))
 end
@@ -193,10 +292,7 @@ near side or far side, is exactly right, because synchronous rotation ties
 the Moon-fixed frame to the Earth-Moon line by construction.
 """
 function selenographic(r_m::V3, t::Float64, eph::CircularMoonEphemeris)
-    s = moon_position(eph, t)
-    xhat = vunit(vscale(s, -1.0))               # Moon -> Earth
-    zhat = vunit(vcross(s, moon_velocity(eph, t)))
-    yhat = vcross(zhat, xhat)
+    xhat, yhat, zhat = moonfixed_basis(eph, t)
     u = vunit(r_m)
     lat = asin(clamp(vdot(u, zhat), -1.0, 1.0))
     lon = atan(vdot(u, yhat), vdot(u, xhat))
@@ -330,7 +426,7 @@ Ballistic Moon-centred coast of `dt_total` seconds, logging as it goes.
 """
 function coast_moon!(L::LunarOrbitLog, r::V3, v::V3, t::Float64,
                      dt_total::Float64; phase::Int = 0, dt::Float64 = 5.0,
-                     log_every::Int = 4)
+                     log_every::Int = 4, field = nothing, eph = nothing)
     n = max(1, ceil(Int, dt_total / dt))
     step = dt_total / n
     for k in 1:n
@@ -338,7 +434,7 @@ function coast_moon!(L::LunarOrbitLog, r::V3, v::V3, t::Float64,
             push!(L.t, t); push!(L.x, r[1]); push!(L.y, r[2]); push!(L.z, r[3])
             push!(L.h, vnorm(r) - R_MOON); push!(L.phase, phase)
         end
-        r, v = _moon_step(r, v, step)
+        r, v = _moon_step(r, v, step; t = t, field = field, eph = eph)
         t += step
     end
     push!(L.t, t); push!(L.x, r[1]); push!(L.y, r[2]); push!(L.z, r[3])
@@ -349,6 +445,78 @@ end
 # ------------------------------------------------------- powered descent ---
 
 """
+    DescentConfig(; surface, field, nav, hazard, eph, t0)
+
+Everything the descent knows about the world it is descending into. Every
+field is optional, and with all of them left out the descent is flown exactly
+as it was before any of this existed: a point-mass Moon, a spherical surface,
+and a guidance system that reads the integrator's own state vector.
+
+  * `surface` — a [`SurfaceModel`](@ref), so altitude means height above the
+    ground rather than above a sphere.
+  * `field` — a [`LunarGravity`](@ref), so the Moon is oblate and lumpy.
+  * `nav` — a [`DescentNav`](@ref), so the guidance flies on an estimate that
+    starts wrong and has to be corrected by radar rather than on the truth.
+  * `hazard` — a [`HazardScan`](@ref), so the vehicle picks its own landing
+    point at high gate instead of arriving wherever the braking phase aimed.
+  * `eph`, `t0` — the ephemeris and the mission time at ignition, which are
+    what tie the Moon-fixed frame (where the terrain and the mascons live) to
+    the inertial frame the descent is integrated in.
+
+Turning any of these on turns on a failure mode that was previously invisible.
+That is the point of them: a descent that always succeeds has not been tested.
+"""
+Base.@kwdef struct DescentConfig
+    surface::Union{Nothing,SurfaceModel} = nothing
+    field::Union{Nothing,LunarGravity} = nothing
+    nav::Union{Nothing,DescentNav} = nothing
+    hazard::Union{Nothing,HazardScan} = nothing
+    eph::Union{Nothing,CircularMoonEphemeris} = nothing
+    t0::Float64 = 0.0
+end
+
+"""
+    nominal(cfg) -> DescentConfig
+
+The world as the *designer* sees it: sphere, point mass, perfect knowledge.
+The braking pitch program is shot against this and then flown against the
+real one, which is how a pre-computed open-loop program is actually produced
+— nobody shoots a trajectory through terrain they have not flown over yet.
+Everything the two worlds disagree about is left for the closed-loop terminal
+phase to absorb, and how much of it there is to absorb is the interesting
+number.
+"""
+nominal(cfg::DescentConfig) = DescentConfig(eph = cfg.eph, t0 = cfg.t0)
+
+"Ground radius under a Moon-centred position, at descent time `t`."
+@inline _ground(cfg::DescentConfig, r::V3, t::Float64) =
+    surface_radius(cfg.surface, r, cfg.t0 + t)
+
+"Height above the ground directly below [m]."
+@inline _alt(cfg::DescentConfig, r::V3, t::Float64) = vnorm(r) - _ground(cfg, r, t)
+
+"""
+Velocity of the ground itself at a Moon-centred position, in the inertial
+frame. The Moon turns once a month, which is 4.6 m/s at the equator — small
+against a 1.7 km/s orbit and enormous against a lander's 1.2 m/s lateral
+touchdown limit. A guidance law that nulls *inertial* velocity therefore
+arrives sliding sideways at four times the speed that tips the vehicle over,
+and a vehicle that hovers over a chosen site for a minute and a half while
+holding inertial velocity to zero drifts four hundred metres off it. Both of
+those are landings ruined by a rotation rate you can barely see on a plot.
+"""
+@inline function _surface_vel(cfg::DescentConfig, r::V3, t::Float64)
+    cfg.eph === nothing && return (0.0, 0.0, 0.0)
+    _, _, zh = moonfixed_basis(cfg.eph, cfg.t0 + t)
+    vcross(vscale(zh, N_MOON), r)
+end
+
+"Gravity at a Moon-centred position, at descent time `t`."
+@inline _grav(cfg::DescentConfig, r::V3, t::Float64) =
+    cfg.field === nothing || cfg.eph === nothing ? _moon_accel(r) :
+    lunar_gravity(r, cfg.field, cfg.t0 + t, cfg.eph)
+
+"""
 In-plane frame at a Moon-centred position: radial-out and along-track, the
 latter fixed by the orbit normal `hhat` captured at ignition rather than by
 the instantaneous velocity. That distinction is the whole difference between
@@ -356,8 +524,12 @@ a descent and a divergence: a frame built on the velocity flips end-for-end
 the moment the vehicle stops flying forward, so "retrograde" reverses under
 the guidance in the last thirty seconds of braking and the thrust that was
 slowing the vehicle starts accelerating it back up. The normal is constant —
-nothing here thrusts out of plane — so the along-track direction stays the
-direction the vehicle was originally going, all the way to the surface.
+the braking phase does not thrust out of plane — so the along-track direction
+stays the direction the vehicle was originally going, all the way down.
+
+`hhat` itself is the third axis: crossrange, which is unused until the
+vehicle is allowed to redesignate its landing point and then becomes the axis
+it translates along to miss a crater.
 """
 @inline function _descent_frame(r::V3, hhat::V3)
     ur = vunit(r)
@@ -368,14 +540,14 @@ end
 @inline _descent_normal(r::V3, v::V3) = vunit(vcross(r, v))
 
 """
-    _descent_leg(lander, r0, v0, m0, pitch0, pitch_rate; vh_gate, dt, t_max)
+    _descent_leg(lander, r0, v0, m0, pitch0, pitch_rate; vh_gate, cfg, nav, ...)
 
 Braking phase: full thrust, thrust elevation above the local horizontal
 following `theta(t) = pitch0 + pitch_rate * t`, integrated until the
-along-track speed falls through `vh_gate` — high gate — which is bisected
-onto exactly. It also stops early if the tank runs dry, the vehicle reaches
-the surface, it climbs away, or the clock runs out; the shooter needs those
-apart to tell a miss from a divergence.
+along-track speed falls through `vh_gate` — high gate. It also stops early if
+the tank runs dry, the vehicle reaches the surface, it climbs away, or the
+clock runs out; the shooter needs those apart to tell a miss from a
+divergence.
 
 High gate is a *velocity* condition, not an altitude one, and that is what
 makes the phase shootable. Braking is nearly all horizontal, so where the
@@ -387,36 +559,50 @@ whatever fell out.
 Full thrust is not an approximation for effect: a braking phase wants every
 newton it has, and Apollo held maximum thrust for all but the first and last
 minutes of its descent. Throttling is what the terminal phase is for.
+
+When a `nav` state is supplied, the gate is called on what the vehicle
+*believes* its along-track speed is, because that is the only number it has.
+The nav state is propagated and radar-corrected alongside the truth, so the
+braking phase is also where the radar acquires — which is exactly where it
+acquired on Apollo, and for the same reason: it is the last chance to fix the
+altitude before altitude starts mattering.
 """
 function _descent_leg(l::Lander, r0::V3, v0::V3, m0::Float64,
                       pitch0::Float64, pitch_rate::Float64;
                       vh_gate::Float64 = 150.0, dt::Float64 = 0.5,
                       t_max::Float64 = 1200.0, log::Union{Nothing,DescentLog} = nothing,
-                      r_ref::V3 = r0, log_every::Int = 4)
+                      r_ref::V3 = r0, log_every::Int = 4,
+                      cfg::DescentConfig = DescentConfig(),
+                      nav::Union{Nothing,NavState} = nothing)
     r, v, m, t = r0, v0, m0, 0.0
     mdot = lander_mdot(l)
     m_dry = m0 - l.mprop
-    h0 = vnorm(r0) - R_MOON
+    h0 = _alt(cfg, r0, 0.0)
     hhat = _descent_normal(r0, v0)
     outcome = :gate
     kount = 0
+    radar = nav === nothing || cfg.nav === nothing ? nothing : cfg.nav.radar
 
-    thrust_dir(rr, vv, tt) = begin
+    thrust_dir(rr, tt) = begin
         ur, ut = _descent_frame(rr, hhat)
         th = clamp(pitch0 + pitch_rate * tt, -deg2rad_(60.0), deg2rad_(89.0))
         (vadd(vscale(ur, sin(th)), vscale(ut, -cos(th))), th)
     end
 
-    vhof(rr, vv) = (ur = vunit(rr); vdot(vv, vcross(hhat, ur)))
+    vhof(rr, vv, tt) = (ur = vunit(rr);
+                        vdot(vsub(vv, _surface_vel(cfg, rr, tt)), vcross(hhat, ur)))
+    # the number the *vehicle* has: its own estimate when it is navigating,
+    # the truth when nothing is modelling how it found out
+    guide_vh() = nav === nothing ? vhof(r, v, t) : vhof(nav.r, nav.v, t)
 
     while t < t_max
-        h = vnorm(r) - R_MOON
+        h = _alt(cfg, r, t)
         if log !== nothing && kount % log_every == 0
-            _, th = thrust_dir(r, v, t)
-            _log_descent!(log, t, r, v, m, 1.0, th, r_ref, hhat)
+            _, th = thrust_dir(r, t)
+            _log_descent!(log, t, r, v, m, 1.0, th, r_ref, hhat, cfg, nav)
         end
         kount += 1
-        if vhof(r, v) <= vh_gate
+        if guide_vh() <= vh_gate
             outcome = :gate
             break
         end
@@ -434,28 +620,30 @@ function _descent_leg(l::Lander, r0::V3, v0::V3, m0::Float64,
         end
         step = min(dt, (m - m_dry) / mdot)
         # RK4 on (r, v) with mass drawn linearly across the step
-        acc(rr, vv, mm, tt) = begin
-            d, _ = thrust_dir(rr, vv, tt)
-            vadd(_moon_accel(rr), vscale(d, l.thrust / mm))
+        acc(rr, mm, tt) = begin
+            d, _ = thrust_dir(rr, tt)
+            vadd(_grav(cfg, rr, tt), vscale(d, l.thrust / mm))
         end
-        k1r = v;                            k1v = acc(r, v, m, t)
+        k1r = v;                            k1v = acc(r, m, t)
         r2 = vadd(r, vscale(k1r, step/2)); v2 = vadd(v, vscale(k1v, step/2)); m2 = m - mdot*step/2
-        k2r = v2;                           k2v = acc(r2, v2, m2, t + step/2)
+        k2r = v2;                           k2v = acc(r2, m2, t + step/2)
         r3 = vadd(r, vscale(k2r, step/2)); v3 = vadd(v, vscale(k2v, step/2))
-        k3r = v3;                           k3v = acc(r3, v3, m2, t + step/2)
+        k3r = v3;                           k3v = acc(r3, m2, t + step/2)
         r4 = vadd(r, vscale(k3r, step));   v4 = vadd(v, vscale(k3v, step));   m4 = m - mdot*step
-        k4r = v4;                           k4v = acc(r4, v4, m4, t + step)
+        k4r = v4;                           k4v = acc(r4, m4, t + step)
         rn = vadd(r, vscale(vadd(vadd(k1r, vscale(vadd(k2r, k3r), 2.0)), k4r), step/6))
         vn = vadd(v, vscale(vadd(vadd(k1v, vscale(vadd(k2v, k3v), 2.0)), k4v), step/6))
         # land exactly on the gate rather than stepping past it: over half a
-        # second the state is linear to well under a metre
-        if vhof(rn, vn) < vh_gate
+        # second the state is linear to well under a metre. Only worth doing
+        # when the gate is called on truth — a vehicle calling it on its own
+        # estimate at 4 Hz cannot split a control cycle either.
+        if nav === nothing && vhof(rn, vn, t + step) < vh_gate
             lo, hi = 0.0, 1.0
             for _ in 1:40
                 f = 0.5 * (lo + hi)
                 rm = vadd(r, vscale(vsub(rn, r), f))
                 vm = vadd(v, vscale(vsub(vn, v), f))
-                if vhof(rm, vm) > vh_gate; lo = f; else; hi = f; end
+                if vhof(rm, vm, t + step * f) > vh_gate; lo = f; else; hi = f; end
             end
             f = 0.5 * (lo + hi)
             r = vadd(r, vscale(vsub(rn, r), f))
@@ -465,22 +653,46 @@ function _descent_leg(l::Lander, r0::V3, v0::V3, m0::Float64,
             outcome = :gate
             break
         end
+        if nav !== nothing
+            d, _ = thrust_dir(r, t)
+            nav_propagate!(nav, vscale(d, l.thrust / m), step)
+            radar === nothing ||
+                radar_update!(nav, radar, rn, vn, t + step, cfg.surface,
+                              cfg.t0 + t + step, hhat)
+        end
         r, v, m, t = rn, vn, m - mdot*step, t + step
     end
     ur, ut = _descent_frame(r, hhat)
+    vr = vsub(v, _surface_vel(cfg, r, t))
     (r = r, v = v, m = m, t = t, outcome = outcome,
-     h = vnorm(r) - R_MOON, vv = vdot(v, ur), vh = vdot(v, ut))
+     h = _alt(cfg, r, t), vv = vdot(vr, ur), vh = vdot(vr, ut))
 end
 
 "Push one sample onto a descent log."
 function _log_descent!(L::DescentLog, t, r::V3, v::V3, m, throttle, pitch,
-                       r_ref::V3, hhat::V3)
+                       r_ref::V3, hhat::V3, cfg::DescentConfig = DescentConfig(),
+                       nav::Union{Nothing,NavState} = nothing,
+                       target::Union{Nothing,V3} = nothing)
     ur, ut = _descent_frame(r, hhat)
-    push!(L.t, t); push!(L.h, vnorm(r) - R_MOON)
+    # velocities are logged relative to the ground, which is what a landing is
+    # measured against — the 4.6 m/s the surface itself carries is invisible on
+    # a plot of a 1.7 km/s orbit and decisive on a plot of a touchdown
+    vr = vsub(v, _surface_vel(cfg, r, t))
+    push!(L.t, t); push!(L.h, _alt(cfg, r, t))
     push!(L.downrange, R_MOON * acos(clamp(vdot(vunit(r), vunit(r_ref)), -1.0, 1.0)))
-    push!(L.v, vnorm(v)); push!(L.vh, vdot(v, ut)); push!(L.vv, vdot(v, ur))
+    push!(L.v, vnorm(vr)); push!(L.vh, vdot(vr, ut)); push!(L.vv, vdot(vr, ur))
     push!(L.m, m); push!(L.throttle, throttle); push!(L.pitch, pitch)
     push!(L.x, r[1]); push!(L.y, r[2]); push!(L.z, r[3])
+    push!(L.elev, ground_elevation(cfg.surface, r, cfg.t0 + t))
+    if nav === nothing
+        push!(L.nav_dh, 0.0); push!(L.nav_dr, 0.0)
+    else
+        dr, _, dh = nav_error(nav, r, v, cfg.surface, cfg.t0 + t)
+        push!(L.nav_dh, dh); push!(L.nav_dr, dr)
+    end
+    push!(L.cross, target === nothing || cfg.eph === nothing ? 0.0 :
+          vdot(vscale(vsub(moonfixed_inv(target, cfg.t0 + t, cfg.eph), vunit(r)),
+                      R_MOON), hhat))
     nothing
 end
 
@@ -504,13 +716,21 @@ surface still moving at hundreds of metres per second), and a Newton started
 on the wrong side of it walks off rather than converging. Failed legs return
 a signed penalty that pushes the search back toward the feasible region
 instead of stalling on a flat NaN.
+
+The shoot is always flown against the nominal world — sphere, point mass,
+perfect state — whatever world the descent will actually be flown in. That is
+not a shortcut: an open-loop pitch program *is* a pre-computed object, and
+pre-computing it against terrain the vehicle has not reached yet would be
+assuming away the very error the closed-loop phase exists to absorb.
 """
 function tune_braking(l::Lander, r0::V3, v0::V3, m0::Float64;
                       h_gate::Float64 = 2300.0, vv_gate::Float64 = -45.0,
                       vh_gate::Float64 = 150.0, max_iter::Int = 25,
+                      cfg::DescentConfig = DescentConfig(),
                       verbose::Bool = false)
+    ncfg = nominal(cfg)
     function resid(p0, pr)
-        leg = _descent_leg(l, r0, v0, m0, p0, pr; vh_gate = vh_gate)
+        leg = _descent_leg(l, r0, v0, m0, p0, pr; vh_gate = vh_gate, cfg = ncfg)
         if leg.outcome === :gate
             return ((leg.h - h_gate) / 1000.0, (leg.vv - vv_gate) / 100.0, leg)
         elseif leg.outcome === :climbing
@@ -596,12 +816,18 @@ end
 Closed-loop descent from high gate to the surface. The guidance holds a
 commanded sink rate that tapers with altitude —
 `v_cmd = -(v_touch + k*sqrt(h))`, the standard square-root profile, capped so
-the vehicle does not dive — and nulls the horizontal component on a fixed
-time constant. The commanded acceleration becomes a thrust vector, the
-magnitude is clamped to the engine's throttle band, and what the engine
-cannot deliver simply is not delivered: if the deepest throttle still
-exceeds lunar gravity at the current mass, the vehicle climbs, and the log
-shows it.
+the vehicle does not dive — and flies the horizontal channels to null, or to
+a designated landing point if it has one. The commanded acceleration becomes
+a thrust vector, the magnitude is clamped to the engine's throttle band, and
+what the engine cannot deliver simply is not delivered: if the deepest
+throttle still exceeds lunar gravity at the current mass, the vehicle climbs,
+and the log shows it.
+
+The command is computed once per cycle and held across it, because that is
+what a digital autopilot does. It is also computed from whatever the vehicle
+knows — its own navigation estimate when it is navigating — while the vehicle
+itself is integrated over the real ground. Everything interesting about a
+landing lives in the gap between those two.
 """
 function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
                           m_dry::Float64, v_touch::Float64 = 0.8,
@@ -609,19 +835,53 @@ function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
                           tau_h::Float64 = 18.0, tau_v::Float64 = 5.0,
                           dt::Float64 = 0.1, t_max::Float64 = 900.0,
                           log::Union{Nothing,DescentLog} = nothing,
-                          t0::Float64 = 0.0, r_ref::V3 = r0, log_every::Int = 10)
+                          t0::Float64 = 0.0, r_ref::V3 = r0, log_every::Int = 10,
+                          cfg::DescentConfig = DescentConfig(),
+                          nav::Union{Nothing,NavState} = nothing,
+                          target::Union{Nothing,V3} = nothing,
+                          arrival::Float64 = 30.0, vh_cap::Float64 = 180.0)
     r, v, m, t = r0, v0, m0, 0.0
     mdot_full = lander_mdot(l)
     hhat = _descent_normal(r0, v0)
     min_thr = 1.0
     outcome = :touchdown
     kount = 0
+    radar = nav === nothing || cfg.nav === nothing ? nothing : cfg.nav.radar
 
-    command(rr, vv, mm) = begin
+    # position error to the designated site, in the along-track / crossrange
+    # pair, from whatever position the vehicle believes it holds. Times here
+    # are seconds from powered-descent ignition — `t0` is the handover from
+    # the braking phase — because the terrain and the mascons are fixed to a
+    # Moon that is turning, and a phase that restarts its own clock looks
+    # them up half a kilometre away from where it is.
+    offsets(rr, ta) = begin
+        target === nothing && return (0.0, 0.0)
+        ui = moonfixed_inv(target, cfg.t0 + ta, cfg.eph)
+        w = vscale(vsub(ui, vunit(rr)), R_MOON)
         ur, ut = _descent_frame(rr, hhat)
-        h = vnorm(rr) - R_MOON
-        vv_now = vdot(vv, ur); vh_now = vdot(vv, ut)
-        v_cmd = -min(v_cap, v_touch + k_profile * sqrt(max(h, 0.0)))
+        (vdot(w, ut), vdot(w, hhat))
+    end
+
+    command(rr, vv, mm, hh, ta) = begin
+        ur, ut = _descent_frame(rr, hhat)
+        # horizontal channels fly relative to the ground, which is moving
+        vr = vsub(vv, _surface_vel(cfg, rr, ta))
+        vv_now = vdot(vv, ur); vh_now = vdot(vr, ut); vc_now = vdot(vr, hhat)
+        d_rem, c_rem = offsets(rr, ta)
+        # Do not descend faster than the approach can converge. The two
+        # channels are otherwise independent, and independent is wrong: the
+        # sink-rate profile runs out of altitude on its own schedule, and if
+        # the vehicle is still eight hundred metres from its landing site when
+        # that happens it lands eight hundred metres from its landing site —
+        # which, on ground chosen precisely because everywhere else was worse,
+        # is the same as not having chosen. So the offset sets a floor on how
+        # long the descent has to take, and the profile is clipped to it. A
+        # pilot flying the last minute by hand does exactly this, and calls it
+        # hovering until the site is underneath.
+        off = hypot(d_rem, c_rem)
+        t_go = off > 25.0 ? arrival * Base.log(off / 25.0) : 0.0
+        v_allow = t_go > 0.1 ? hh / t_go : Inf
+        v_cmd = -min(v_cap, v_touch + k_profile * sqrt(max(hh, 0.0)), v_allow)
         # Feed-forward on the profile itself. The commanded sink rate is a
         # function of altitude, so it moves as the vehicle descends, and a
         # pure proportional law lags it by tau_v * dv_cmd/dt — metres per
@@ -629,38 +889,52 @@ function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
         # steepens as 1/sqrt(h) near the ground. Differentiating the profile
         # along the trajectory and commanding that outright leaves the
         # proportional term with nothing but the error to correct.
-        dv_dh = v_cmd <= -v_cap ? 0.0 : -0.5 * k_profile / sqrt(max(h, 1.0))
+        dv_dh = v_cmd <= -v_cap ? 0.0 : -0.5 * k_profile / sqrt(max(hh, 1.0))
         a_r = (v_cmd - vv_now) / tau_v + dv_dh * vv_now
-        a_t = (0.0 - vh_now) / tau_h            # null the along-track drift
+        vh_des = clamp(d_rem / arrival, -vh_cap, vh_cap)
+        vc_des = clamp(c_rem / arrival, -0.2 * vh_cap, 0.2 * vh_cap)
+        a_t = (vh_des - vh_now) / tau_h
+        a_c = (vc_des - vc_now) / tau_h
         # cancel gravity and the centrifugal relief of whatever speed remains
         g_eff = MU_MOON / vnorm(rr)^2 - vh_now^2 / vnorm(rr)
         ar_tot = a_r + g_eff
-        # Thrust is finite, and the two channels are not equally important:
+        # Thrust is finite, and the channels are not equally important:
         # arriving with a few m/s of drift is a bad landing, arriving with an
         # unchecked sink rate is a crater. So the vertical demand is served
-        # first and the along-track command gets whatever is left over.
+        # first and the two horizontal commands share whatever is left over.
         a_max = l.thrust / mm
         if abs(ar_tot) > a_max
-            a_t = 0.0
+            a_t = 0.0; a_c = 0.0
         else
             lim = sqrt(max(a_max^2 - ar_tot^2, 0.0))
-            a_t = clamp(a_t, -lim, lim)
+            ah = hypot(a_t, a_c)
+            if ah > lim && ah > 0.0
+                a_t *= lim / ah; a_c *= lim / ah
+            end
         end
-        a_des = vadd(vscale(ur, ar_tot), vscale(ut, a_t))
+        a_des = vadd(vadd(vscale(ur, ar_tot), vscale(ut, a_t)), vscale(hhat, a_c))
         an = vnorm(a_des)
         thr = clamp(mm * an / l.thrust, l.throttle_min, 1.0)
         dir = an > 1e-9 ? vscale(a_des, 1 / an) : ur
         (dir, thr)
     end
 
+    # what the vehicle flies on: its own estimate, or the truth if nothing is
+    # modelling how it found out
+    guide(ta) = nav === nothing ? (r, v, _alt(cfg, r, ta)) :
+                                  (nav.r, nav.v, nav_altitude(nav))
+
     while t < t_max
-        h = vnorm(r) - R_MOON
-        dir, thr = command(r, v, m)
+        ta = t0 + t
+        h = _alt(cfg, r, ta)
+        rg, vg, hg = guide(ta)
+        dir, thr = command(rg, vg, m, hg, ta)
         min_thr = min(min_thr, thr)
         if log !== nothing && kount % log_every == 0
             ur, _ = _descent_frame(r, hhat)
-            _log_descent!(log, t0 + t, r, v, m, thr,
-                          asin(clamp(vdot(dir, ur), -1.0, 1.0)), r_ref, hhat)
+            _log_descent!(log, ta, r, v, m, thr,
+                          asin(clamp(vdot(dir, ur), -1.0, 1.0)), r_ref, hhat,
+                          cfg, nav, target)
         end
         kount += 1
         if h <= 0.0
@@ -672,20 +946,21 @@ function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
             break
         end
         step = min(dt, (m - m_dry) / (thr * mdot_full))
-        acc(rr, vv, mm) = begin
-            d, th = command(rr, vv, mm)
-            vadd(_moon_accel(rr), vscale(d, th * l.thrust / mm))
-        end
-        k1r = v;                         k1v = acc(r, v, m)
+        # zero-order hold on the command across the control cycle: the thrust
+        # direction and throttle a real vehicle flies are constants between
+        # guidance updates, not functions re-evaluated inside the integrator
+        a_th = vscale(dir, thr * l.thrust)
+        acc(rr, mm, tt) = vadd(_grav(cfg, rr, tt), vscale(a_th, 1 / mm))
+        k1r = v;                         k1v = acc(r, m, ta)
         r2 = vadd(r, vscale(k1r, step/2)); v2 = vadd(v, vscale(k1v, step/2))
-        k2r = v2;                        k2v = acc(r2, v2, m - thr*mdot_full*step/2)
+        k2r = v2;                        k2v = acc(r2, m - thr*mdot_full*step/2, ta + step/2)
         r3 = vadd(r, vscale(k2r, step/2)); v3 = vadd(v, vscale(k2v, step/2))
-        k3r = v3;                        k3v = acc(r3, v3, m - thr*mdot_full*step/2)
+        k3r = v3;                        k3v = acc(r3, m - thr*mdot_full*step/2, ta + step/2)
         r4 = vadd(r, vscale(k3r, step)); v4 = vadd(v, vscale(k3v, step))
-        k4r = v4;                        k4v = acc(r4, v4, m - thr*mdot_full*step)
+        k4r = v4;                        k4v = acc(r4, m - thr*mdot_full*step, ta + step)
         rn = vadd(r, vscale(vadd(vadd(k1r, vscale(vadd(k2r, k3r), 2.0)), k4r), step/6))
         vn = vadd(v, vscale(vadd(vadd(k1v, vscale(vadd(k2v, k3v), 2.0)), k4v), step/6))
-        hn = vnorm(rn) - R_MOON
+        hn = _alt(cfg, rn, ta + step)
         if hn <= 0.0 && h > 0.0
             f = h / max(h - hn, 1e-9)           # linear touchdown interpolation
             rn = vadd(r, vscale(vsub(rn, r), f))
@@ -696,29 +971,55 @@ function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
             outcome = :touchdown
             break
         end
+        if nav !== nothing
+            nav_propagate!(nav, vscale(a_th, 1 / m), step)
+            radar === nothing ||
+                radar_update!(nav, radar, rn, vn, ta + step, cfg.surface,
+                              cfg.t0 + ta + step, hhat)
+        end
         r, v, m, t = rn, vn, m - thr*mdot_full*step, t + step
     end
     ur, ut = _descent_frame(r, hhat)
+    vrel = vsub(v, _surface_vel(cfg, r, t0 + t))
     (r = r, v = v, m = m, t = t, outcome = outcome, min_throttle = min_thr,
-     v_vertical = -vdot(v, ur), v_horizontal = vdot(v, ut))
+     v_vertical = -vdot(v, ur),
+     v_horizontal = hypot(vdot(vrel, ut), vdot(vrel, hhat)))
 end
 
 """
-    powered_descent(lander, r0, v0, m0; h_gate, vh_gate, vv_gate, verbose)
+    powered_descent(lander, r0, v0, m0; h_gate, vh_gate, vv_gate, cfg, verbose)
         -> DescentResult
 
-Braking phase (shot open-loop) followed by the closed-loop terminal phase,
-logged as one continuous descent.
+Braking phase (shot open-loop against the nominal world, flown against the
+real one) followed by the closed-loop terminal phase, logged as one continuous
+descent. If `cfg` carries a hazard scan, the landing point is chosen at high
+gate, between the two.
 """
 function powered_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
                          h_gate::Float64 = 2300.0, vh_gate::Float64 = 150.0,
-                         vv_gate::Float64 = -45.0, verbose::Bool = false)
+                         vv_gate::Float64 = -45.0, h_ref::Float64 = 0.0,
+                         cfg::DescentConfig = DescentConfig(),
+                         verbose::Bool = false)
     m_dry = m0 - l.mprop
-    p0, pr, _ = tune_braking(l, r0, v0, m0; h_gate = h_gate, vh_gate = vh_gate,
-                             vv_gate = vv_gate, verbose = verbose)
+    # The pitch program is shot on the sphere, so a gate 2 km over ground that
+    # stands 1.5 km high has to be aimed at 3.5 km over the sphere. Getting
+    # this one number wrong is the whole difference between arriving at high
+    # gate with two kilometres to fly the approach in and arriving with five
+    # hundred metres — which is not enough to stop, whatever the guidance
+    # does afterwards. Apollo carried a landing-site radius in its targeting
+    # for exactly this reason, and this is that number.
+    p0, pr, _ = tune_braking(l, r0, v0, m0; h_gate = h_gate + h_ref,
+                             vh_gate = vh_gate,
+                             vv_gate = vv_gate, cfg = cfg, verbose = verbose)
+    hhat = _descent_normal(r0, v0)
+    nav = cfg.nav === nothing ? nothing : init_nav(cfg.nav, r0, v0, hhat)
     L = DescentLog()
-    leg = _descent_leg(l, r0, v0, m0, p0, pr; vh_gate = vh_gate, log = L, r_ref = r0)
+    leg = _descent_leg(l, r0, v0, m0, p0, pr; vh_gate = vh_gate, log = L,
+                       r_ref = r0, cfg = cfg, nav = nav)
     dv_brake = G0 * l.isp * log(m0 / leg.m)
+    nav_dr0, _, nav_dh0 =
+        nav === nothing ? (0.0, 0.0, 0.0) :
+        nav_error(nav, leg.r, leg.v, cfg.surface, cfg.t0 + leg.t)
     # A braking phase that reached high gate is worth flying out even if the
     # shooter finished loose: the terminal phase is closed-loop on velocity,
     # so it either saves the landing or it does not, and the touchdown state
@@ -728,34 +1029,101 @@ function powered_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
                              leg.t, leg.t, -leg.vv, leg.vh,
                              isempty(L.downrange) ? 0.0 : L.downrange[end],
                              dv_brake, 0.0, m0 - leg.m, leg.m - m_dry, 0.0, 1.0,
-                             p0, pr, leg.r, leg.v, leg.m)
+                             p0, pr, leg.r, leg.v, leg.m,
+                             0.0, ground_elevation(cfg.surface, leg.r, cfg.t0 + leg.t),
+                             NaN, NaN, 0.0, nav_dr0, nav_dh0,
+                             nav !== nothing && nav.locked_h)
+    end
+
+    # --- landing-point designation ----------------------------------------
+    _, ut_gate = _descent_frame(leg.r, hhat)
+    target = nothing
+    score = NaN; score0 = NaN; moved = 0.0
+    if cfg.hazard !== nothing && cfg.surface !== nothing && cfg.eph !== nothing
+        # where the vehicle would arrive if it simply flew its forward speed
+        # out on the approach time constant: the aim point it is redesignating
+        # away from
+        rg = nav === nothing ? leg.r : nav.r
+        vg = nav === nothing ? leg.v : nav.v
+        ur, ut = _descent_frame(rg, hhat)
+        lead = vdot(vg, ut) * cfg.hazard.arrival
+        # The scan looks at the ground from where the vehicle actually is —
+        # a sensor sees real terrain, not the terrain under where the
+        # navigation filter thinks it is. But the site it picks then has to be
+        # flown to using that same filter, so the answer is expressed as an
+        # offset from the *estimated* position rather than as a place on the
+        # Moon. Register it any other way and the vehicle flies its own
+        # navigation error straight into the crater it just avoided: the site
+        # would be chosen on truth and approached on an estimate, and the two
+        # differ by the several hundred metres nothing on board can measure.
+        target, score, score0, moved =
+            redesignate(cfg.hazard, cfg.surface, leg.r, leg.v, cfg.t0 + leg.t,
+                        hhat, lead)
+        if nav !== nothing
+            eph = cfg.surface.eph
+            u_true = vunit(moonfixed(leg.r, cfg.t0 + leg.t, eph))
+            u_nav = vunit(moonfixed(nav.r, cfg.t0 + leg.t, eph))
+            target = vunit(vadd(target, vsub(u_nav, u_true)))
+        end
+        verbose && @info "redesignation" lead score_deg = rad2deg_(score) nominal_deg = rad2deg_(score0) moved
     end
 
     term = terminal_descent(l, leg.r, leg.v, leg.m; m_dry = m_dry, log = L,
-                            t0 = leg.t, r_ref = r0)
+                            t0 = leg.t, r_ref = r0, cfg = cfg, nav = nav,
+                            target = target,
+                            arrival = cfg.hazard === nothing ? 30.0 : cfg.hazard.arrival,
+                            # chasing a designated point is a position loop, and
+                            # it needs a tighter inner constant than the pure
+                            # drift-nulling one does or it never settles
+                            tau_h = target === nothing || cfg.hazard === nothing ?
+                                    18.0 : cfg.hazard.tau,
+                            vh_cap = max(60.0, 1.2 * abs(vdot(leg.v, ut_gate))))
     dv_term = G0 * l.isp * log(leg.m / term.m)
     _log_descent!(L, leg.t + term.t, term.r, term.v, term.m, term.min_throttle,
-                  0.0, r0, _descent_normal(r0, v0))
+                  0.0, r0, hhat, cfg, nav, target)
     prop_left = term.m - m_dry
     # what the residual is actually worth: seconds of hover at touchdown mass
     hover = prop_left / (term.m * MU_MOON / vnorm(term.r)^2 / (G0 * l.isp))
+
+    # the ground it actually arrived on
+    t_td = cfg.t0 + leg.t + term.t
+    slope = 0.0
+    if cfg.surface !== nothing
+        u_td = vunit(moonfixed(term.r, t_td, cfg.surface.eph))
+        slope = terrain_slope(cfg.surface.terrain, u_td)
+    end
+    elev = ground_elevation(cfg.surface, term.r, t_td)
+    nav_dr, _, nav_dh = nav === nothing ? (0.0, 0.0, 0.0) :
+                        nav_error(nav, term.r, term.v, cfg.surface, t_td)
+
     # Touchdown limits are the lander's, not the trajectory's: Apollo's LM was
     # designed for 3 m/s of sink and about 1.2 m/s of lateral drift before a
-    # leg digs in and the vehicle tips. Anything outside that is a crash, and
-    # calling it one is the whole point of flying the last kilometre.
-    outcome = term.outcome === :touchdown ?
-              (term.v_vertical > 3.0 || abs(term.v_horizontal) > 1.5 ?
-               :crash : :touchdown) : term.outcome
+    # leg digs in and the vehicle tips, and for standing on ground no steeper
+    # than about 12°. Anything outside that is a crash, and calling it one is
+    # the whole point of flying the last kilometre.
+    outcome = if term.outcome !== :touchdown
+        term.outcome
+    elseif term.v_vertical > 3.0 || abs(term.v_horizontal) > 1.5
+        :crash
+    elseif slope > deg2rad_(12.0)
+        :tipped
+    else
+        :touchdown
+    end
     DescentResult(L, outcome, leg.t + term.t, leg.t, term.v_vertical, term.v_horizontal,
                   L.downrange[end], dv_brake, dv_term, m0 - term.m, prop_left,
-                  hover, term.min_throttle, p0, pr, term.r, term.v, term.m)
+                  hover, term.min_throttle, p0, pr, term.r, term.v, term.m,
+                  slope, elev, score, score0, moved, nav_dr, nav_dh,
+                  nav !== nothing && nav.locked_h)
 end
+
 
 # ------------------------------------------------------- mission assembly --
 
 """
     moonlanding(; lander, h_park, h_moon_park, h_pdi, n_rev, inclination,
-                lv, hp_return, optimize_kick, verbose) -> LandingResult
+                lv, hp_return, terrain, field, nav, hazard, survey_error,
+                optimize_kick, verbose) -> LandingResult
 
 Design and fly the whole landing mission: pad to lunar surface.
 
@@ -769,6 +1137,22 @@ from `h_pdi`.
 The payload of `lv` must be the lander's wet mass; `moonlanding` builds a
 matching vehicle if none is given, and complains if the two disagree, since
 a launcher that is not carrying this lander is not flying this mission.
+
+`terrain`, `field`, `nav` and `hazard` decide how much of the real Moon the
+descent has to cope with; all four default to off, and with them off this is
+the descent onto a smooth sphere that the rest of the repo was built against.
+Switch on `terrain` and the ground moves by kilometres; switch on `field` and
+the parking orbit stops being the ellipse the burn put it in; switch on `nav`
+and the vehicle stops knowing where it is. [`apollo_landing`](@ref) turns on
+all four at once.
+
+`survey_error` [m] is how well the landing site's elevation was measured from
+orbit before the descent. The predicted site is found by flying the descent
+once over a smooth sphere, the true ground elevation there is read off with
+this much error added, and *that* is what the navigation filter is told. It is
+the difference between a lander that knows roughly how high its site sits and
+one that assumes the mean sphere, which is the difference between a landing
+and a crater. Pass `NaN` to survey nothing.
 """
 function moonlanding(; lander::Lander = default_lander(),
                      h_park::Float64 = 200.0e3,
@@ -779,6 +1163,12 @@ function moonlanding(; lander::Lander = default_lander(),
                      lv::Union{Nothing,LaunchVehicle} = nothing,
                      hp_return::Float64 = 50.0e3,
                      h_gate::Float64 = 2000.0,
+                     terrain::Union{Nothing,LunarTerrain} = nothing,
+                     field::Union{Nothing,LunarGravity} = nothing,
+                     nav::Union{Nothing,DescentNav} = nothing,
+                     hazard::Union{Nothing,HazardScan} = nothing,
+                     survey_error::Float64 = 60.0,
+                     orbiter::Union{Nothing,Orbiter} = nothing,
                      kick_angle::Float64 = deg2rad_(8.0),
                      optimize_kick::Bool = false,
                      cis_eta::Float64 = SatelliteSim.CIS_ETA,
@@ -788,16 +1178,21 @@ function moonlanding(; lander::Lander = default_lander(),
                      # the 250 m the flyby mission needs.
                      perigee_tol::Float64 = 5.0e3,
                      verbose::Bool = false)
-    lv === nothing && (lv = default_moon_rocket(payload = lander_mass(lander)))
-    abs(lv.payload_mass - lander_mass(lander)) < 1.0 ||
+    m_payload = lander_mass(lander) +
+                (orbiter === nothing ? 0.0 : orbiter_mass(orbiter))
+    lv === nothing && (lv = default_moon_rocket(payload = m_payload))
+    abs(lv.payload_mass - m_payload) < 1.0 ||
         error("launch vehicle payload ($(round(lv.payload_mass)) kg) is not the " *
-              "lander's wet mass ($(round(lander_mass(lander))) kg)")
+              "mass being sent to the Moon ($(round(m_payload)) kg: a " *
+              "$(round(lander_mass(lander))) kg lander" *
+              (orbiter === nothing ? "" :
+               " and a $(round(orbiter_mass(orbiter))) kg orbiter") * ")")
 
     des = translunar_design(lv; h_park = h_park, hp_moon = h_moon_park,
                             hp_return = hp_return, inclination = inclination,
                             kick_angle = kick_angle, optimize_kick = optimize_kick,
                             cis_eta = cis_eta, perigee_tol = perigee_tol,
-                            tol_perigee_km = 25.0, verbose = verbose)
+                            tol_perigee_km = 30.0, verbose = verbose)
     asc, eph = des.ascent, des.eph
 
     cis = fly_to_perilune(asc.r, asc.v, asc.t, eph; t_ign = des.t_ign,
@@ -814,35 +1209,90 @@ function moonlanding(; lander::Lander = default_lander(),
     m <= lander.mdry &&
         error("lunar-orbit insertion alone empties the lander " *
               "($(round(dv_loi)) m/s needed, $(round(lander_dv(lander))) m/s carried)")
+    # the orbiter arrives on the same trajectory and pays the same delta-v out
+    # of its own tanks, then stays where the burn put it
+    m_orb = 0.0
+    if orbiter !== nothing
+        m_orb = orbiter_mass(orbiter) * exp(-dv_loi / (G0 * orbiter.isp))
+        m_orb <= orbiter.mdry &&
+            error("lunar-orbit insertion alone empties the orbiter " *
+                  "($(round(dv_loi)) m/s needed, $(round(orbiter_dv(orbiter))) m/s carried)")
+    end
 
     # --- parking orbit, DOI, coast to the descent periapsis ----------------
     OL = LunarOrbitLog()
     r_park, v_park = r_m, v_after
     T_park = 2pi * sqrt(vnorm(r_park)^3 / MU_MOON)
     r_park, v_park = coast_moon!(OL, r_park, v_park, t_loi, n_rev * T_park;
-                                 phase = 0, dt = 5.0, log_every = 8)
+                                 phase = 0, dt = 5.0, log_every = 8,
+                                 field = field, eph = eph)
     t_doi = t_loi + n_rev * T_park
     dv_doi, v_doi = doi_burn(r_park, v_park, h_pdi)
     m = _burn_mass(lander, m, dv_doi)
     a_desc = 0.5 * (vnorm(r_park) + R_MOON + h_pdi)
     t_transfer = pi * sqrt(a_desc^3 / MU_MOON)
     r_pdi, v_pdi = coast_moon!(OL, r_park, v_doi, t_doi, t_transfer;
-                               phase = 1, dt = 2.0, log_every = 8)
+                               phase = 1, dt = 2.0, log_every = 8,
+                               field = field, eph = eph)
     t_pdi = t_doi + t_transfer
 
     # --- powered descent ---------------------------------------------------
     # the lander's remaining propellant is what it flies the descent on
     flying = Lander(lander.name, lander.mdry, m - lander.mdry, lander.thrust,
                     lander.isp, lander.throttle_min, lander.diameter)
+    surf = terrain === nothing ? nothing : SurfaceModel(terrain, eph)
+
+    # Survey the site the way a real mission does: fly the descent once over a
+    # smooth sphere to find out where it is going to end up, then look up what
+    # the ground there actually does. That one elevation is then the reference
+    # for everything — the altitude the braking phase is aimed at, and the
+    # radius the navigation filter measures its altitude against. A mission
+    # that skips this step designs its descent to the mean sphere, and the
+    # mean sphere is nowhere in particular.
+    h_ref = 0.0
+    if surf !== nothing && !isnan(survey_error)
+        dry = powered_descent(flying, r_pdi, v_pdi, m; h_gate = h_gate,
+                              cfg = DescentConfig(eph = eph, t0 = t_pdi))
+        u_aim = vunit(moonfixed(dry.r, t_pdi + dry.t_touchdown, eph))
+        seed = nav === nothing ? 0x00537EE1 : nav.seed ⊻ 0x00537EE1
+        h_ref = terrain_height(terrain, u_aim) + survey_error * _ngauss(seed, 11)
+        verbose && @info "site survey" elevation = h_ref
+        if nav !== nothing && isnan(nav.site_elev)
+            nav = DescentNav(nav.dr_down, nav.dr_radial, nav.dr_cross,
+                             nav.dv_down, nav.dv_radial, nav.dv_cross,
+                             h_ref, nav.radar, nav.seed)
+        end
+    end
+
+    cfg = DescentConfig(surface = surf, field = field, nav = nav,
+                        hazard = hazard, eph = eph, t0 = t_pdi)
     desc = powered_descent(flying, r_pdi, v_pdi, m; h_gate = h_gate,
-                           verbose = verbose)
+                           h_ref = h_ref, cfg = cfg, verbose = verbose)
     t_td = t_pdi + desc.t_touchdown
     lat, lon = selenographic(desc.r, t_td, eph)
 
     LandingResult(lv, lander, des.guid, asc, eph, cis, OL, desc,
                   dv_loi, dv_doi, t_loi, t_doi, t_pdi, t_td, h_moon_park, h_pdi,
-                  n_rev, lat, lon, desc.prop_left)
+                  n_rev, lat, lon, desc.prop_left,
+                  orbiter, m_orb, r_m, v_after)
 end
+
+"""
+    apollo_landing(; terrain, kwargs...) -> LandingResult
+
+The landing mission with everything switched on: procedural terrain under the
+vehicle, an oblate and mascon-lumped Moon around it, orbit-determination error
+and landing radar in place of perfect knowledge, and hazard avoidance choosing
+the touchdown point at high gate. Any keyword `moonlanding` takes still
+applies.
+
+This is the configuration worth quoting. The one with everything off lands
+every time, which tells you about the guidance law and nothing about the
+Moon.
+"""
+apollo_landing(; terrain::LunarTerrain = LunarTerrain(), kwargs...) =
+    moonlanding(; terrain = terrain, field = LunarGravity(), nav = DescentNav(),
+                hazard = HazardScan(), kwargs...)
 
 function print_landing_summary(io::IO, ls::LandingResult)
     asc, cis, d = ls.ascent, ls.cislunar, ls.descent
@@ -864,12 +1314,27 @@ function print_landing_summary(io::IO, ls::LandingResult)
             d.t_touchdown, d.dv_braking, d.dv_terminal, d.downrange / 1e3)
     @printf(io, "  Braking program : pitch %.1f° + %.4f °/s, min throttle %.0f%%\n",
             rad2deg_(d.pitch0), rad2deg_(d.pitch_rate), 100 * d.min_throttle)
+    if d.elev != 0.0 || d.slope != 0.0
+        @printf(io, "  Ground          : %+.0f m off the mean sphere, %.1f° slope, %s\n",
+                d.elev, rad2deg_(d.slope),
+                isnan(d.site_score) ? "site not redesignated" :
+                @sprintf("site %.1f° (was %.1f°), moved %.0f m",
+                         rad2deg_(d.site_score), rad2deg_(d.site_score_nominal),
+                         d.redesignated))
+    end
+    if d.nav_err != 0.0
+        @printf(io, "  Navigation      : %.0f m position error at touchdown, %+.0f m in altitude, radar %s\n",
+                d.nav_err, d.nav_dh, d.radar_locked ? "acquired" : "NEVER ACQUIRED")
+    end
     if d.outcome === :touchdown
         @printf(io, "  TOUCHDOWN       : %.2f m/s down, %.2f m/s lateral at %.2f°%s, %.2f°%s (%s side)\n",
                 d.v_vertical, d.v_horizontal, abs(rad2deg_(ls.lat_land)),
                 ls.lat_land >= 0 ? "N" : "S", abs(rad2deg_(ls.lon_land)),
                 ls.lon_land >= 0 ? "E" : "W",
                 abs(ls.lon_land) < pi/2 ? "near" : "far")
+    elseif d.outcome === :tipped
+        @printf(io, "  TIPPED OVER     : came to rest on %.1f° ground (limit 12°)\n",
+                rad2deg_(d.slope))
     else
         println(io, "  DID NOT LAND SAFELY (", d.outcome, ")")
         @printf(io, "    arrived %.2f m/s down, %.2f m/s lateral\n",

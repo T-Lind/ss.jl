@@ -36,7 +36,7 @@ ballistic_coefficient(v::Vehicle, M::Float64 = 25.0) =
     v.mass / (cd_coeff(v.aero, M, v.aero isa CapsuleAero ? v.aero.alpha_trim : 0.0) * v.sref)
 
 """
-    default_reentry_pod(; mass = 350.0, cl_trim_hyp = 0.45)
+    default_reentry_pod(; mass = 350.0, cl_trim_hyp = 0.45, diameter = 1.5)
 
 A small crewed reentry pod: 1.5 m diameter blunt capsule, drogue + main
 parachute sequence sized for ~5.5 m/s splashdown. Ballistic coefficient
@@ -67,9 +67,10 @@ that is what sizes the ablator.
 """
 function default_reentry_pod(; mass::Float64 = 350.0,
                              cl_trim_hyp::Float64 = 0.45,
+                             diameter::Float64 = 1.5,
                              alpha_trim::Float64 = cl_trim_hyp > 0 ?
                                                    deg2rad_(25.0) : 0.0)
-    d = 1.5
+    d = diameter
     Vehicle(
         name = "reentry-pod",
         mass = mass,
@@ -80,8 +81,28 @@ function default_reentry_pod(; mass::Float64 = 350.0,
         aero = default_capsule_aero(cl_trim_hyp = cl_trim_hyp,
                                     alpha_trim = alpha_trim),
         chutes = [
-            Parachute(:drogue, 12.0, 1.5, 9000.0, 2.0),
-            Parachute(:main, 260.0, 0.5, 3000.0, 6.0),
+            Parachute(:drogue, 12.0 * (d / 1.5)^2, 1.5, 9000.0, 2.0),
+            Parachute(:main, 260.0 * (mass / 350.0), 0.5, 3000.0, 6.0),
         ],
     )
 end
+
+"""
+    apollo_capsule(; mass = 5560.0)
+
+A crew-return capsule at the scale that actually comes back from the Moon:
+3.9 m across and five and a half tonnes, which is a ballistic coefficient of
+about 340 kg/m² against the small pod's 130.
+
+That difference is the whole reason it needs its own constructor. A capsule
+three times as heavy per unit area penetrates three times deeper before it
+starts decelerating, which on a lunar-return entry means it does its
+decelerating in denser air: same corridor, same lift-to-drag, noticeably
+higher peak load and a much higher heat rate. Scaling the small pod's mass up
+and leaving its 1.5 m heatshield in place would model a cannonball.
+
+The parachutes scale with the mass so the descent still lands at a survivable
+speed, and the drogue with the frontal area.
+"""
+apollo_capsule(; mass::Float64 = 5560.0, cl_trim_hyp::Float64 = 0.45) =
+    default_reentry_pod(mass = mass, cl_trim_hyp = cl_trim_hyp, diameter = 3.9)
