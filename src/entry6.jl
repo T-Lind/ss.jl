@@ -113,6 +113,38 @@ function _entry6_deriv!(dx, x, scn::Scenario, ctx::FlightContext,
                     Cm = cm_coeff(veh.aero, Mn, alpha_t, 0.0)
                     M_b = vadd(M_b, vscale(e, qbar * veh.sref * veh.lref * Cm / en))
                 end
+                # --- roll control: hold the commanded bank angle ----------
+                # Lift points along the off-wind body-axis component, so its
+                # angle about the wind IS the bank angle. That axis has no
+                # aerodynamic restoring moment on an axisymmetric capsule —
+                # pitch and yaw self-trim, roll does not — which makes it the
+                # one attitude freedom worth spending propellant on, and the
+                # reason a real capsule carries roll jets.
+                if rcs !== nothing && rcs_mode === :bank_hold &&
+                   un > 1e-9 && x[15] < rcs.prop
+                    rhat_ = vunit(r)
+                    sg = clamp(vdot(rhat_, vhat), -1.0, 1.0)
+                    uh = vsub(rhat_, vscale(vhat, sg))
+                    if vnorm(uh) > 1e-9
+                        uh = vunit(uh)
+                        sh = vcross(vhat, uh)              # right-handed with v, up
+                        lh = vscale(uax, 1 / un)           # where lift actually points
+                        phi = atan(vdot(lh, sh), vdot(lh, uh))
+                        gl = sqrt(D * D + L * L) / (veh.mass * G0)
+                        phi_c = bank_command(scn.bank, t, h, Vr, gl)
+                        e_phi = rem(phi_c - phi, 2pi, RoundNearest)
+                        # roll rate about the WIND, not the body axis: that is
+                        # the rate that actually moves the lift vector
+                        vb_ = qrotate_inv(q, vhat)
+                        p_wind = vdot(w, vb_)
+                        auth1 = torque_authority(rcs)[1]
+                        wcmd = clamp(0.6 * e_phi, -deg2rad_(20.0), deg2rad_(20.0))
+                        u = clamp(3.0 * (wcmd - p_wind) * inertia[1] / max(auth1, 1e-9),
+                                  -1.0, 1.0)
+                        M_b = vadd(M_b, vscale(vb_, auth1 * u))
+                        dmrcs += rcs_mdot(rcs, 2) * abs(u)
+                    end
+                end
                 cmq = _cmq_of(veh.aero, Mn)
                 kd = qbar * veh.sref * veh.lref * veh.lref / (2 * Vr)
                 M_b = vadd(M_b, (0.05 * cmq * kd * w[1],   # weak roll damping

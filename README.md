@@ -132,14 +132,20 @@ against the 22.8 kg post-TLI kick margin, with 99% of samples reaching the
 entry corridor.
 
 Nominal circumlunar numbers (v0.2): TLI Δv 3151 m/s of a 3330 m/s budget,
-perilune 2000 ± 30 km, return vacuum perigee 35.5 km (γ ≈ −7.3° at 140 km),
-entry peak 17.9 g / 247 W/cm², stagnation heat load 104 MJ/m², splashdown
-6.5 days after liftoff at 4.5 m/s under main (3.3 d out, 3.2 d home — the
-symmetric free-return figure-8). Trimming the last step of each burn to land
-exactly on depletion moved these slightly from v0.1's figures (peak load
-18.8 g, vacuum perigee 32.4 km): the old fixed step both burned a little
-propellant a stage did not have and threw a little away, and a free return
-is sensitive enough to notice.
+perilune 2000 ± 0.1 km, return vacuum perigee 50.2 km (γ_EI ≈ −6.3°), entry
+peak **6.4 g** / 191 W/cm², stagnation heat load 187 MJ/m², splashdown
+6.6 days after liftoff at 4.5 m/s under main (3.3 d out, 3.2 d home — the
+symmetric free-return figure-8).
+
+These are reproducible, which they previously were not. The free-return
+corrector used to accept any design landing within **3 km** of the perigee
+target — wide enough that two distinct solutions both qualified, so the
+search settled on either depending on numerical noise. Changing nothing but
+the coast step size moved the reported perigee by 2 km and peak entry load by
+0.6 g. The band is now 250 m (`PERIGEE_TOL`), and over an 8× range of step
+sizes the flown result varies by 0.27 km of perigee and 0.08 g — the
+remaining spread is just where inside the band the search stops. Perilune was
+always solid: 40 m across the same range.
 
 Plots: `output/plots/moonshot_*` — 3D ascent, Earth-Moon trajectory,
 rotating-frame figure-8, 3D entry — plus the full analysis suite from
@@ -301,13 +307,14 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (291 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (329 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
 # propellant/engine consistency and stage sizing, scalar targeting including
-# infeasible-design retreat, parallel-burn strap-on boosters, meshes/panel
-# aero including interstage transition cones, capsule watertightness and
-# cabin clearances, maneuvers, and end-to-end reentry)
+# infeasible-design retreat, parallel-burn strap-on boosters, RK4 order and
+# the Jacobi constant of the cislunar coast, step-size independence of the
+# flown mission, meshes/panel aero including interstage transition cones,
+# capsule watertightness and cabin clearances, maneuvers, end-to-end reentry)
 julia --project -e 'push!(LOAD_PATH, "src"); using SatelliteSim; include("test/runtests.jl")'
 
 # targeted nominal trajectory -> output/*.csv
@@ -577,6 +584,123 @@ geometry/           demo STL meshes (capsule, simplified Starship)
 | 6-DOF | the pitch channel is isolated in `dynamics.jl`; adding roll/yaw states extends the same pattern |
 | Higher-order integration | swap `rk4_step!` behind the same signature |
 | Mission Monte Carlo | disperse `Stage` performance, TLI execution errors, and ephemeris phase through `moonshot` the same way `run_montecarlo` disperses entry |
+
+### The entry corridor, and why the pod is lifting
+
+An early version of this flew a **ballistic** capsule down a 35 km-perigee
+return and peaked at **18 g**, holding above 15 g for 26 seconds. That is not
+a simulation artefact — it is the correct answer for that flight mode, and
+close to what Zond 5 actually pulled on the first ballistic circumlunar
+return. It is also why nobody flies crew that way.
+
+Two levers fix it, and the sim shows both:
+
+| return perigee | L/D | γ_EI | peak g | > 6 g | heat load |
+|---|---|---|---|---|---|
+| 35 km | 0 (ballistic) | −6.87° | 18.0 | 68 s | 104 MJ/m² |
+| 35 km | 0.3 | −6.87° | 9.4 | 30 s | 161 MJ/m² |
+| **50 km** | **0.3** | **−6.25°** | **6.4** | **12.5 s** | **187 MJ/m²** |
+| 65 km | 0.3 | −5.56° | 4.5 | 0 s | 247 MJ/m² |
+| 80 km | 0.3 | −4.77° | — | — | *skips out, never returns* |
+
+The default is the third row: `hp_return = 50 km` with `cl_trim_hyp = 0.45`
+(L/D ≈ 0.3, the Apollo figure) flown lift-up. That lands at 6.4 g and
+γ_EI = −6.3°, essentially the Apollo entry point.
+
+The corridor is genuinely narrow, and both walls are real: steepen it and the
+loads climb fast, shallow it past ~65 km and the vehicle skips back out and
+never comes home (the 80 km case terminates on timeout, not splashdown).
+The trade for the low g is **integrated heating, which nearly doubles** —
+a lifting entry soaks for longer even though its peak heat *rate* is lower,
+and it is the integral that sizes the ablator.
+
+**Bank modulation** (`gload_bank`) is available and is *not* a way to reduce
+peak load — inside the corridor, full lift-up is already the minimum-g
+solution and modulating costs 1–2 g. What a roll law buys is the shallow
+wall:
+
+| return perigee | fixed lift-up | modulated (g=6) |
+|---|---|---|
+| 50 km | 6.4 g | 8.4 g |
+| 65 km | 4.5 g | 5.5 g |
+| **80 km** | **skips out — lost** | **4.5 g, home** |
+
+It converts a mission loss into a survivable entry, widening the usable
+corridor by roughly 15 km. That is why the default stays fixed lift-up (the
+nominal perigee is held to 250 m) and the law is there for when the corridor
+is uncertain — a dispersed TLI, a missed correction, an off-nominal return.
+
+**Roll control is simulated, not assumed.** The 4-DOF model holds the
+commanded bank by construction; a real capsule only does that with RCS. The
+6-DOF model flying `rcs_mode = :bank_hold` now reproduces the 4-DOF result to
+0.01 g and prices it at **0.26 kg** of propellant. Without roll control the
+same vehicle lets its lift vector tumble and pulls 13 g instead of 6.4 — so
+the low number is genuinely a *guided* entry number, and now the guidance is
+in the loop rather than in the assumptions.
+
+Getting there exposed a modelling inconsistency worth recording. Trim lift
+and trim angle of attack are the same physical fact — an offset centre of
+gravity produces both — but the aero database let you set one without the
+other. With `cl_trim_hyp = 0.45` and `alpha_trim = 0`, the 4-DOF looked fine
+(it constructs the lift direction from `bank`), while the 6-DOF flew at
+**0.0° AoA**: the pitching moment restored toward zero, the off-wind body
+component that carries the lift collapsed, and its direction became numerical
+noise. Roll control burned 2.7 kg chasing a vector that was not there. The
+two are now tied in `default_reentry_pod`, and the models agree.
+
+Reaction wheels are the wrong device for this and the numbers are not close.
+At peak dynamic pressure the aero restoring torque at 5° off trim is
+**182 N·m**; a large reaction wheel (0.5 N·m, 20 N·m·s) has 0.3% of that
+authority and saturates in **0.11 s**. RCS at 26 N·m is also under the aero
+torque — and does not need to match it, because the capsule is
+aerodynamically stable in pitch and yaw and self-trims. Roll is the only axis
+with no restoring moment, so roll is the only axis worth spending propellant
+on. For the cruise, RCS spends 1.04 kg over 6.5 days against an 11 kg margin,
+so wheels would save about a kilogram while costing more than that in mass,
+plus RCS for desaturation anyway.
+
+### Verification
+
+The integrator and the invariants are checked, not assumed:
+
+* **RK4 is 4th order in practice.** A closed two-body orbit must return to
+  where it started; the closure error falls 2.0 m → 26 µm across five step
+  halvings, observed order 4.15 → 4.03.
+* **The Jacobi constant holds on the real trajectory.** Because the Moon is a
+  circular coplanar ephemeris, the cislunar coast *is* the circular restricted
+  three-body problem, so C_J is a true invariant and any drift is integration
+  error on the production dynamics — not a toy problem. Over the full 6.5-day
+  flight including the flyby it drifts **3.5×10⁻⁵ relative**.
+* **The answer does not depend on the step size.** Halving the coast step
+  moves perilune by under 200 m and peak entry load by under 0.15 g.
+
+All three are regression tests, so they run in CI rather than living in a
+notebook somewhere. The numerical knobs that make such a study possible —
+`cis_eta` (coast step as a fraction of the local orbital period) and
+`perigee_tol` — are parameters of `moonshot`, `fly_cislunar` and
+`design_free_return`, because a simulator you cannot run a convergence study
+on is a simulator you cannot check.
+
+### Performance
+
+The whole design-and-fly chain is about **0.45 s**, split roughly evenly
+between the ascent shooting solve and the free-return design. Every inner
+loop is allocation-free after warmup — `_cis_accel`, `_cis_step`,
+`dynamics!`, `_ascent_deriv!`, `atmosphere_state` and `gravity_accel` all
+measure 0 bytes per call — so the cost is arithmetic, not garbage.
+
+What is expensive is the search layers on top, and those parallelise: the
+optional pitch-kick scan runs its candidates across threads (2.94 s → 1.12 s
+on 16 threads), and the panel's parameter sweep already did. Run with
+`-t auto`.
+
+The launch view holds **~1 ms per frame** at 1280×800 with 690 live
+particles, so it is nowhere near the 16.7 ms budget. Two things were still
+worth fixing: attribute locations were being re-queried from the driver every
+frame in four draw paths (they are fixed at link time, and are now resolved
+alongside the uniforms), and the particle packer allocated a transformed
+position per particle plus two partition arrays per frame — ~600 objects a
+frame of pure GC churn, now packed straight into the GL staging buffer.
 
 ### Fidelity notes & current limits
 

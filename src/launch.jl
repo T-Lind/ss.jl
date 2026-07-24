@@ -480,27 +480,37 @@ mass.
 """
 function _tune_with_kick(lv::LaunchVehicle, guid::AscentGuidance;
                          tol_h, tol_gamma, max_iter, verbose, kwargs...)
-    best_g, best_r, best_m = guid, nothing, -Inf
-    try_kick(ka) = begin
-        ka <= 0 && return
-        g, r = tune_ascent(lv, _with_kick(guid, ka); tol_h = tol_h,
-                           tol_gamma = tol_gamma, max_iter = max_iter,
-                           optimize_kick = false, kwargs...)
-        ok = r.reached_orbit && abs(r.h_cut - g.h_target) < tol_h &&
-             abs(r.gamma_cut) < tol_gamma
-        verbose && @info "kick scan" kick_deg = rad2deg_(ka) ok m = r.m
-        if ok && r.m > best_m
-            best_g, best_r, best_m = g, r, r.m
+    # Each candidate is an independent shooting solve reading only immutable
+    # inputs — `simulate_ascent` allocates its own state, work buffers and log
+    # — so a ladder runs across threads with no sharing. Results are collected
+    # positionally and reduced afterwards rather than racing on a running best.
+    function scan(angles)
+        out = Vector{Any}(undef, length(angles))
+        Threads.@threads for i in eachindex(angles)
+            ka = angles[i]
+            if ka <= 0
+                out[i] = nothing
+                continue
+            end
+            g, r = tune_ascent(lv, _with_kick(guid, ka); tol_h = tol_h,
+                               tol_gamma = tol_gamma, max_iter = max_iter,
+                               optimize_kick = false, kwargs...)
+            ok = r.reached_orbit && abs(r.h_cut - g.h_target) < tol_h &&
+                 abs(r.gamma_cut) < tol_gamma
+            out[i] = ok ? (g, r) : nothing
         end
-        ka
+        filter(!isnothing, out)
     end
+    pick(cands) = isempty(cands) ? nothing : cands[argmax([c[2].m for c in cands])]
+
     step = deg2rad_(3.0)
-    ladder = [deg2rad_(4.0) + i * step for i in 0:5]        # 4..19 degrees
-    foreach(try_kick, ladder)
-    if best_r !== nothing                                    # refine around the peak
-        foreach(try_kick, (best_g.kick_angle - step / 2, best_g.kick_angle + step / 2))
+    best = pick(scan([deg2rad_(4.0) + i * step for i in 0:5]))    # 4..19 degrees
+    if best !== nothing                                    # refine around the peak
+        ka = best[1].kick_angle
+        best = pick(vcat([best], scan([ka - step / 2, ka + step / 2])))
+        verbose && @info "kick scan" kick_deg = rad2deg_(best[1].kick_angle) m = best[2].m
     end
-    best_r === nothing ? tune_ascent(lv, guid; tol_h = tol_h, tol_gamma = tol_gamma,
-                                     max_iter = max_iter, optimize_kick = false,
-                                     kwargs...) : (best_g, best_r)
+    best === nothing ? tune_ascent(lv, guid; tol_h = tol_h, tol_gamma = tol_gamma,
+                                   max_iter = max_iter, optimize_kick = false,
+                                   kwargs...) : best
 end

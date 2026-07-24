@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# a superseded run of the same branch has nothing left to tell us
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: julia ${{ matrix.julia }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.9 is the declared floor in Project.toml, so it is tested as well
+        # as the current release; the suite is pure stdlib, so the matrix
+        # covers OS differences rather than dependency resolution
+        julia: ['1.9', '1']
+        os: [ubuntu-latest]
+        include:
+          - julia: '1'
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-runtest@v1
+
+  scripts:
+    name: reference mission runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      # the TOML path is how most people will drive this, and it exercises
+      # config parsing, the full design chain and the summary writer at once
+      - name: fly missions/moonshot.toml
+        run: julia --project=. scripts/run_mission.jl missions/moonshot.toml
+      - name: regenerate geometry
+        run: julia --project=. scripts/make_meshes.jl
+      # committed artifacts must match what the code now produces, or the
+      # numbers quoted in the README are stale
+      - name: committed outputs are current
+        run: |
+          julia --project=. scripts/run_moonshot.jl
+          git diff --exit-code --stat -- output/ geometry/ || {
+            echo "::error::committed outputs differ from a fresh run — rerun scripts/run_moonshot.jl and scripts/make_meshes.jl, then commit"
+            exit 1
+          }

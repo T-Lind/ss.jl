@@ -252,7 +252,7 @@ end
     cis = ms.cislunar
     @test cis.outcome == :entry_interface
     @test isapprox(cis.perilune_alt, 2000e3; atol = 30e3)
-    @test isapprox(cis.vac_perigee_alt, 35e3; atol = 5e3)
+    @test isapprox(cis.vac_perigee_alt, 50e3; atol = 5e3)
     @test 2.5e3 < cis.dv_tli < 3.4e3
     # direct free return: entry on the FIRST post-flyby perigee pass, no
     # phasing loop back out past the Moon (regression: the design once
@@ -277,6 +277,75 @@ end
     @test ms2.lv === lv
     @test ms2.entry_scn.vehicle.mass == 300.0
     @test isapprox(ms2.cislunar.perilune_alt, 1500e3; atol = 75e3)
+end
+
+@testset "numerics: order, invariants, step independence" begin
+    # --- RK4 is actually 4th order --------------------------------------
+    # A closed two-body orbit must return to where it started; the closure
+    # error is pure truncation, so halving the step must cut it ~16x.
+    g = PointMassGravity()
+    a = RE_MEAN + 400e3
+    r0 = (a, 0.0, 0.0); v0 = (0.0, sqrt(MU_EARTH / a), 0.0)
+    T = 2pi * sqrt(a^3 / MU_EARTH)
+    V = SatelliteSim
+    function closure(dt)
+        r, v, t = r0, v0, 0.0
+        n = round(Int, T / dt); h = T / n
+        for _ in 1:n
+            k1v = gravity_accel(g, r, t);                                   k1r = v
+            k2v = gravity_accel(g, V.vadd(r, V.vscale(k1r, h/2)), t+h/2);   k2r = V.vadd(v, V.vscale(k1v, h/2))
+            k3v = gravity_accel(g, V.vadd(r, V.vscale(k2r, h/2)), t+h/2);   k3r = V.vadd(v, V.vscale(k2v, h/2))
+            k4v = gravity_accel(g, V.vadd(r, V.vscale(k3r, h)),   t+h);     k4r = V.vadd(v, V.vscale(k3v, h))
+            r = V.vadd(r, V.vscale(V.vadd(V.vadd(k1r, V.vscale(V.vadd(k2r,k3r),2.0)), k4r), h/6))
+            v = V.vadd(v, V.vscale(V.vadd(V.vadd(k1v, V.vscale(V.vadd(k2v,k3v),2.0)), k4v), h/6))
+            t += h
+        end
+        V.vnorm(V.vsub(r, r0))
+    end
+    e1, e2 = closure(16.0), closure(8.0)
+    @test 3.7 < log2(e1 / e2) < 4.4        # observed order ~4
+    @test e2 < 0.05                        # and small in absolute terms
+
+    # --- Jacobi constant on the real cislunar coast ----------------------
+    # The Moon is a circular coplanar ephemeris, so the coast IS the circular
+    # restricted three-body problem and C_J is a true invariant: any drift is
+    # integration error on the production dynamics, not a modelling choice.
+    ms = moonshot()
+    L = ms.cislunar.log
+    n = N_MOON
+    f = MU_MOON / (MU_EARTH + MU_MOON)
+    i2 = max(2, length(L.t) ÷ 4)
+    zh = V.vunit(V.vcross((L.mx[1],L.my[1],L.mz[1]), (L.mx[i2],L.my[i2],L.mz[i2])))
+    om = V.vscale(zh, n)
+    function jacobi(i)
+        r = (L.rx[i], L.ry[i], L.rz[i]); v = (L.vx[i], L.vy[i], L.vz[i])
+        m = (L.mx[i], L.my[i], L.mz[i])
+        rho  = V.vsub(r, V.vscale(m, f))
+        rhod = V.vsub(v, V.vscale(V.vcross(om, m), f))
+        vrot = V.vsub(rhod, V.vcross(om, rho))
+        perp2 = V.vdot(rho, rho) - V.vdot(rho, zh)^2
+        U = 0.5 * n^2 * perp2 + MU_EARTH / V.vnorm(r) +
+            MU_MOON / max(V.vnorm(V.vsub(m, r)), 1.0)
+        2U - V.vdot(vrot, vrot)
+    end
+    cj = [jacobi(i) for i in eachindex(L.t) if L.phase[i] >= 2]
+    @test length(cj) > 100
+    @test (maximum(cj) - minimum(cj)) / abs(sum(cj)/length(cj)) < 2.0e-4
+
+    # --- the answer must not depend on the step size ---------------------
+    # Regression: the free-return corrector used to accept anything within
+    # 3 km of the perigee target, so two distinct designs both qualified and
+    # the search landed on either depending on numerical noise — 2 km of
+    # perigee and 0.6 g of peak load with no code change. Halving the coast
+    # step must now move the flown result by less than the tolerance allows.
+    fine = moonshot(cis_eta = SatelliteSim.CIS_ETA / 2)
+    @test abs(fine.cislunar.perilune_alt - ms.cislunar.perilune_alt) < 200.0
+    @test abs(fine.cislunar.vac_perigee_alt - ms.cislunar.vac_perigee_alt) < 600.0
+    @test abs(fine.entry.peak_gload - ms.entry.peak_gload) < 0.15
+    # and both must actually sit on the requested target
+    for r in (ms, fine)
+        @test abs(r.cislunar.vac_perigee_alt - 50e3) < 2 * SatelliteSim.PERIGEE_TOL
+    end
 end
 
 @testset "rigid body" begin
@@ -333,7 +402,12 @@ end
 end
 
 @testset "6-DOF entry vs 4-DOF" begin
-    veh = default_reentry_pod()
+    # Compared ballistically on purpose. The 4-DOF model holds the trim lift
+    # vector at the commanded bank angle by construction; the 6-DOF model
+    # lets the capsule roll. With lift those are different physical problems
+    # — see the lifting-entry testset below — so the question "do the two
+    # integrators agree on the same dynamics" is only well posed at zero lift.
+    veh = default_reentry_pod(cl_trim_hyp = 0.0)
     scn = scenario_from_elements(DeorbitElements(), veh)
     r4 = simulate(scn)
     r6 = simulate_entry6(scn; rcs = default_pod_rcs())   # wind-hold coast
@@ -699,6 +773,78 @@ end
           length(pod_mesh(; radius = 1.20, ncrew = 3)[3])
 end
 
+@testset "lifting entry (lunar return corridor)" begin
+    # A ballistic capsule cannot fly a lunar return with people aboard: the
+    # same trajectory that peaks near 6 g with L/D 0.3 peaks at 18 g without
+    # it, and stays above 15 g for tens of seconds. This is the Zond-5 result,
+    # and it is why the default pod is lifting.
+    ms = moonshot()
+    @test ms.entry.peak_gload < 8.0                 # crew-survivable
+    @test 45e3 < ms.cislunar.vac_perigee_alt < 55e3
+
+    mkpod(cl) = default_reentry_pod(cl_trim_hyp = cl)
+    fly(cl; bank = 0.0) = simulate(Scenario(
+        vehicle = mkpod(cl), r0 = ms.cislunar.r, v0 = ms.cislunar.v,
+        t0 = ms.cislunar.t, t_max = ms.cislunar.t + 4.0e4,
+        alpha0 = deg2rad_(5.0), bank = bank))
+
+    ball, lift = fly(0.0), fly(0.45)
+    @test ball.peak_gload > 2.0 * lift.peak_gload    # lift roughly thirds it
+    @test ball.peak_gload > 12.0
+    @test lift.peak_gload < 8.0
+    @test lift.terminated == :splashdown
+    # the trade is integrated heating: a lifting entry soaks longer at a lower
+    # peak rate, and that is what sizes the ablator
+    @test lift.heat_load > ball.heat_load
+    @test lift.peak_qdot < ball.peak_qdot
+    # lift-down is the wrong way to point it: steeper, harder
+    @test fly(0.45; bank = Float64(pi)).peak_gload > lift.peak_gload
+
+    # the corridor really is bounded: too shallow and it never comes home
+    shallow = moonshot(hp_return = 80e3)
+    fly_sh(bk) = simulate(Scenario(vehicle = mkpod(0.45), r0 = shallow.cislunar.r,
+                                   v0 = shallow.cislunar.v, t0 = shallow.cislunar.t,
+                                   t_max = shallow.cislunar.t + 6.0e4,
+                                   alpha0 = deg2rad_(5.0), bank = bk))
+    @test fly_sh(0.0).terminated == :timeout            # fixed lift-up skips out
+
+    # --- bank modulation ------------------------------------------------
+    # A roll law is NOT a way to reduce peak load: inside the corridor, full
+    # lift-up is already the minimum-g solution and modulating costs 1-2 g.
+    # What it buys is the shallow wall — it converts a skip-out (mission loss)
+    # into a survivable entry, widening the usable corridor by ~15 km.
+    saved = fly_sh(gload_bank(6.0))
+    @test saved.terminated == :splashdown
+    @test saved.peak_gload < 8.0
+    @test fly(0.45; bank = gload_bank(6.0)).peak_gload > lift.peak_gload
+
+    # --- roll control, simulated rather than assumed --------------------
+    # The 4-DOF holds the commanded bank by construction. With a coherent
+    # trim (nonzero AoA from the same CG offset that makes the lift), the
+    # 6-DOF flying RCS roll control reproduces it — and prices it.
+    scn6 = Scenario(vehicle = mkpod(0.45), r0 = ms.cislunar.r, v0 = ms.cislunar.v,
+                    t0 = ms.cislunar.t, t_max = ms.cislunar.t + 6.0e4,
+                    alpha0 = deg2rad_(25.0), bank = 0.0)
+    held = simulate_entry6(scn6; rcs = default_pod_rcs(), rcs_mode = :bank_hold)
+    @test held.terminated == :splashdown
+    @test isapprox(held.peak_gload, lift.peak_gload; rtol = 0.02)
+    @test 0.05 < held.rcs_used < 1.0        # roll control costs a few hundred grams
+    # the capsule really does sit at its trim angle, which is what gives the
+    # lift vector a defined direction to be rolled
+    ip = argmax(held.log.gload)
+    @test isapprox(rad2deg_(held.log.alpha_t[ip]), 25.0; atol = 3.0)
+    # without roll control the same vehicle tumbles its lift vector and the
+    # entry is a different, harsher trajectory
+    free = simulate_entry6(scn6)
+    @test free.peak_gload > 1.3 * held.peak_gload
+
+    # the law is a plain callable, evaluated on the current load factor
+    law = gload_bank(6.0)
+    @test law(0.0, 120e3, 11e3, 0.0) > deg2rad_(140.0)   # unloaded -> lift down
+    @test law(0.0, 40e3, 5e3, 12.0) == 0.0               # over target -> lift up
+    @test bank_command(0.3, 0.0, 0.0, 0.0, 0.0) == 0.3   # a number is held
+end
+
 @testset "Newtonian panel aero" begin
     @test isapprox(cp_max_newtonian(1e6), 1.8394; atol = 1e-3)  # M -> inf limit
     # sphere: CD = Cp_max/2 exactly in Newtonian theory
@@ -718,8 +864,12 @@ end
     @test abs(trim_alpha(pac)) < deg2rad_(1.0)
     @test 1.4 < cd_coeff(pac, 20.0, 0.0) < 2.0
 
-    # geometry-to-trajectory: fly the pod on mesh-derived aero
-    veh0 = default_reentry_pod()
+    # geometry-to-trajectory: fly the pod on mesh-derived aero. The panel
+    # method sees an axisymmetric capsule and so produces no trim lift, which
+    # is correct — trim lift comes from an offset CG, not from the outer mould
+    # line. The hand-tabulated reference is therefore taken ballistic too, or
+    # the comparison would be measuring lift rather than the aero model.
+    veh0 = default_reentry_pod(cl_trim_hyp = 0.0)
     veh = Vehicle(name = "mesh-pod", mass = 350.0, sref = pi * 0.75^2,
                   lref = 1.5, rn = 1.8, iyy = mp.inertia[2], aero = pac,
                   chutes = veh0.chutes)

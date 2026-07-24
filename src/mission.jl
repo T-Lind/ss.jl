@@ -46,20 +46,29 @@ end
              inclination=deg2rad_(28.5), verbose=false) -> MoonshotResult
 
 Design and fly the whole mission. `hp_moon` is the perilune altitude of the
-flyby; `hp_return` the vacuum perigee of the return leg (sets the entry
-flight-path angle: ~35 km gives gamma_EI near -5.9 deg, mid-corridor for a
-ballistic lunar return).
+flyby; `hp_return` the vacuum perigee of the return leg, which sets the entry
+flight-path angle and so the whole character of the entry.
+
+The corridor is narrow. Below ~35 km the descent is steep enough that a
+ballistic capsule pulls 18 g; above ~65 km it skips back out and never comes
+home. The default 50 km gives gamma_EI ~ -6.25 deg, which with the pod's
+L/D ~ 0.3 flown lift-up peaks near 6 g — the Apollo entry point.
 """
 function moonshot(; pod_mass::Float64 = 350.0,
                   h_park::Float64 = 200.0e3,
                   hp_moon::Float64 = 2000.0e3,
-                  hp_return::Float64 = 35.0e3,
+                  hp_return::Float64 = 50.0e3,
                   inclination::Float64 = deg2rad_(28.5),
                   lv::Union{Nothing,LaunchVehicle} = nothing,
                   tli_mag_err::Float64 = 0.0,
                   tli_point_err::Float64 = 0.0,
                   tcm_delay::Float64 = 86400.0,
                   optimize_kick::Bool = false,
+                  # numerical knobs, exposed so a convergence study needs no
+                  # source edit: coast step as a fraction of the local orbital
+                  # period, and the free return's perigee acceptance band [m]
+                  cis_eta::Float64 = SatelliteSim.CIS_ETA,
+                  perigee_tol::Float64 = SatelliteSim.PERIGEE_TOL,
                   verbose::Bool = false)
     # --- 1. launch to parking orbit ----------------------------------------
     # a supplied launch vehicle wins; its payload IS the pod
@@ -96,6 +105,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
     # --- 3. free-return design ---------------------------------------------
     kick = lv.stages[end]
     t_ign, dv, cis = design_free_return(asc.r, asc.v, asc.t, eph;
+                                        eta = cis_eta, perigee_tol = perigee_tol,
                                         stage = kick, m_stack = m_stack,
                                         prop_avail = asc.prop_left[end],
                                         hp_moon_target = hp_moon,
@@ -111,15 +121,18 @@ function moonshot(; pod_mass::Float64 = 350.0,
         # value) so the TCM reproduces the same physical return, and grab the
         # nominal perilune-epoch position as the return-to-reference target
         nomfly = fly_cislunar(asc.r, asc.v, asc.t, eph;
+                              eta = cis_eta,
                               t_ign = t_ign, dv = dv, stage = kick,
                               m_stack = m_stack, prop_avail = asc.prop_left[end],
                               stop_after_flyby = true, t_max = 10.0 * 86400.0)
         proxy = nomfly.vac_perigee_alt
         refleg = fly_cislunar(asc.r, asc.v, asc.t, eph;
+                              eta = cis_eta,
                               t_ign = t_ign, dv = dv, stage = kick,
                               m_stack = m_stack, prop_avail = asc.prop_left[end],
                               t_max = nomfly.t_perilune - asc.t)
         cis_d, tcm_dv = fly_cislunar_tcm(asc.r, asc.v, asc.t, eph;
+                                         eta = cis_eta,
                                          t_ign = t_ign, dv = dv, stage = kick,
                                          m_stack = m_stack,
                                          prop_avail = asc.prop_left[end],

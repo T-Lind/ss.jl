@@ -167,7 +167,15 @@ function program(vs, fs) {
     const inf = gl.getActiveUniform(p, i);
     u[inf.name.replace('[0]','')] = gl.getUniformLocation(p, inf.name);
   }
-  return { p, u };
+  // Attribute locations are fixed once the program links, but the draw paths
+  // were re-querying them every frame — a synchronous GL call per attribute
+  // per frame. Resolve them here alongside the uniforms.
+  const a = {}, na = gl.getProgramParameter(p, gl.ACTIVE_ATTRIBUTES);
+  for (let i = 0; i < na; i++) {
+    const inf = gl.getActiveAttrib(p, i);
+    a[inf.name] = gl.getAttribLocation(p, inf.name);
+  }
+  return { p, u, a };
 }
 function buffer(data) {
   const b = gl.createBuffer();
@@ -1701,29 +1709,38 @@ function stepParticles(dt) {
 }
 function drawParticles(view, proj, fov, smoke) {
   if (!parts.length) return;
-  const smokeL = [], glow = [];
-  // kind 3 is wake smoke: same look as kind 1, different physics
-  for (const q of parts) (q.kind === 1 || q.kind === 3 ? smokeL : glow).push(q);
-  const pack = (list, off) => {
-    let k = off;
-    for (const q of list) {
+  // The two blend modes need their particles contiguous, so this walks the
+  // list twice — smoke (kinds 1 and 3) then glow — writing straight into the
+  // GL staging buffer. Partitioning into two JS arrays and calling mApply per
+  // particle allocated a few hundred objects every frame for nothing; the
+  // view transform is inlined, and z is computed first so culled particles
+  // never pay for x and y.
+  let k = 0;
+  const pack = wantSmoke => {
+    const from = k;
+    for (const q of parts) {
       if (k >= PMAX) break;
-      const vp = mApply(view, q.p);
-      if (vp[2] > -0.3) continue;
-      const f = 1 - q.age/q.life;
-      partArr[k*6] = vp[0]; partArr[k*6+1] = vp[1]; partArr[k*6+2] = vp[2];
-      partArr[k*6+3] = q.size; partArr[k*6+4] = f;
-      partArr[k*6+5] = q.kind === 3 ? 1 : q.kind;
+      if (((q.kind === 1 || q.kind === 3)) !== wantSmoke) continue;
+      const px = q.p[0], py = q.p[1], pz = q.p[2];
+      const vz = view[2]*px + view[6]*py + view[10]*pz + view[14];
+      if (vz > -0.3) continue;
+      const o = k*6;
+      partArr[o]   = view[0]*px + view[4]*py + view[8]*pz  + view[12];
+      partArr[o+1] = view[1]*px + view[5]*py + view[9]*pz  + view[13];
+      partArr[o+2] = vz;
+      partArr[o+3] = q.size;
+      partArr[o+4] = 1 - q.age/q.life;
+      partArr[o+5] = q.kind === 3 ? 1 : q.kind;
       k++;
     }
-    return k - off;
+    return k - from;
   };
-  const nA = pack(smokeL, 0), nB = pack(glow, nA);
+  const nA = pack(true), nB = pack(false);
   if (!(nA+nB)) return;
   gl.useProgram(PART.p);
   gl.bindBuffer(gl.ARRAY_BUFFER, partDyn);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, partArr.subarray(0, (nA+nB)*6));
-  const aVP = gl.getAttribLocation(PART.p, 'aVP'), aM = gl.getAttribLocation(PART.p, 'aM');
+  const aVP = PART.a.aVP, aM = PART.a.aM;
   gl.enableVertexAttribArray(aVP); gl.enableVertexAttribArray(aM);
   gl.vertexAttribPointer(aVP, 3, gl.FLOAT, false, 24, 0);
   gl.vertexAttribPointer(aM, 3, gl.FLOAT, false, 24, 12);
@@ -2095,11 +2112,8 @@ function beginMeshes(view, sunV, fogDen, fogCol, amb, engI, engV, engC) {
 }
 function bindMeshBuf(buf) {
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  const aP = gl.getAttribLocation(MESH.p, 'aP'),
-        aN = gl.getAttribLocation(MESH.p, 'aN'),
-        aC = gl.getAttribLocation(MESH.p, 'aC'),
-        aUV = gl.getAttribLocation(MESH.p, 'aUV'),
-        aPw = gl.getAttribLocation(MESH.p, 'aPw');
+  const aP = MESH.a.aP, aN = MESH.a.aN, aC = MESH.a.aC,
+        aUV = MESH.a.aUV, aPw = MESH.a.aPw;
   for (const a of [aP, aN, aC, aUV, aPw]) if (a >= 0) gl.enableVertexAttribArray(a);
   const S = VST*4;
   gl.vertexAttribPointer(aP,  3, gl.FLOAT, false, S, 0);
@@ -2428,7 +2442,7 @@ function drawScene(sc) {
   gl.bindTexture(gl.TEXTURE_2D, landTex);
   gl.uniform1i(SPACE.u.uLand, 0);
   gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
-  const aQ = gl.getAttribLocation(SPACE.p, 'aP');
+  const aQ = SPACE.a.aP;
   gl.enableVertexAttribArray(aQ);
   gl.vertexAttribPointer(aQ, 2, gl.FLOAT, false, 0, 0);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -2522,7 +2536,7 @@ function drawClouds(view, proj, fogCol, fogDen, camY) {
   gl.uniform3fv(CLOUD.u.uFogCol, fogCol);
   gl.uniform1f(CLOUD.u.uFogDen, fogDen);
   gl.bindBuffer(gl.ARRAY_BUFFER, cloudBuf);
-  const aC = gl.getAttribLocation(CLOUD.p, 'aP');
+  const aC = CLOUD.a.aP;
   gl.enableVertexAttribArray(aC);
   gl.vertexAttribPointer(aC, 2, gl.FLOAT, false, 0, 0);
   gl.enable(gl.BLEND);

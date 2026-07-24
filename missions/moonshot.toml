@@ -10,7 +10,7 @@ pod_mass_kg = 350.0
 parking_altitude_km = 200.0
 inclination_deg = 28.5
 perilune_km = 2000.0
-return_perigee_km = 35.0
+return_perigee_km = 50.0
 
 [mission.dispersions]
 # nonzero values fly a dispersed cruise with an automatic mid-course
