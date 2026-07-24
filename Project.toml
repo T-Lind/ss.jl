@@ -12,3 +12,12 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [compat]
 julia = "1.9"
+
+# `Pkg.test()` resolves the test environment from these, not from whatever the
+# REPL happens to have loaded: without them `using Test` in test/runtests.jl
+# fails with "Package Test not found in current path" on every Julia version.
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

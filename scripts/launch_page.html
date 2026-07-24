@@ -204,6 +204,138 @@ float vnoise3(vec3 p){
   float d = mix(h3(i+vec3(0,1,1)), h3(i+vec3(1,1,1)), f.x);
   return mix(mix(a,b,f.y), mix(c,d,f.y), f.z);
 }`;
+
+// --------------------------------------------------------------- starfield --
+// Stars live at hashed positions inside a cube-face cell grid, and are drawn
+// as smooth points whose angular radius is tied to the PIXEL solid angle
+// (uPxA). That is the whole trick: a star is then ~1.5 px across whatever the
+// zoom, it antialiases instead of stair-stepping, and it stops swimming
+// between cells when the camera turns — which is what the previous
+// step(0.9986, hash(floor(d*230))) field did, since there a "star" was a
+// whole direction cell and its apparent size grew with every zoom-in.
+//
+// Brightness follows a steep power law so a handful are genuinely bright and
+// the rest are faint (the naked-eye magnitude distribution, near enough),
+// color comes off a blackbody-ish ramp, and the galactic plane both glows and
+// carries extra stars. Everything is a pure function of direction, so the sky
+// is stable in inertial space and identical on every machine.
+const STARS_GLSL = `
+uniform float uPxA;                        // angular size of one pixel [rad]
+uniform float uT;                          // seconds, for scintillation
+vec3 h33(vec3 p){
+  p = vec3(dot(p, vec3(127.1, 311.7,  74.7)),
+           dot(p, vec3(269.5, 183.3, 246.1)),
+           dot(p, vec3(113.5, 271.9, 124.6)));
+  return fract(sin(p)*43758.5453123);
+}
+// Spectral tint. Most stars read very close to white and only the tails run
+// amber (K/M) or blue (B/A) — a flat amber-to-blue ramp over t makes the whole
+// sky look sodium-lit, which is what the first cut of this did.
+vec3 starTint(float t){
+  float u = t*2.0 - 1.0;
+  u = sign(u)*pow(abs(u), 1.9);
+  return u < 0.0 ? mix(vec3(1.0), vec3(1.00, 0.76, 0.52), -u)
+                 : mix(vec3(1.0), vec3(0.72, 0.81, 1.00),  u);
+}
+// direction -> (cube face id, face uv in -1..1); face uv is what we grid on
+void cubeFace(vec3 d, out float face, out vec2 uv, out vec3 ax0, out vec3 ax1, out vec3 axn){
+  vec3 a = abs(d);
+  float m = max(a.x, max(a.y, a.z));
+  if (a.x == m) {
+    face = d.x > 0.0 ? 0.0 : 1.0; axn = vec3(sign(d.x), 0.0, 0.0);
+    ax0 = vec3(0.0, 1.0, 0.0); ax1 = vec3(0.0, 0.0, 1.0);
+  } else if (a.y == m) {
+    face = d.y > 0.0 ? 2.0 : 3.0; axn = vec3(0.0, sign(d.y), 0.0);
+    ax0 = vec3(0.0, 0.0, 1.0); ax1 = vec3(1.0, 0.0, 0.0);
+  } else {
+    face = d.z > 0.0 ? 4.0 : 5.0; axn = vec3(0.0, 0.0, sign(d.z));
+    ax0 = vec3(1.0, 0.0, 0.0); ax1 = vec3(0.0, 1.0, 0.0);
+  }
+  vec3 dn = d/m;
+  uv = vec2(dot(dn, ax0), dot(dn, ax1));
+}
+// galactic plane: an arbitrary but FIXED pole, so the band sits still in ECI
+const vec3 GPOLE = vec3(0.3714, 0.8571, 0.3571);
+float milkyway(vec3 d){
+  float b = abs(dot(d, normalize(GPOLE)));            // sin(galactic latitude)
+  float band = exp(-b*b/0.0125);                      // ~6 deg 1/e half-width
+  // Clumping and dust lanes, so it is not a painted stripe. The octaves are
+  // swizzled as well as scaled: stacked on the same axes, value noise leaves
+  // its cubic lattice visible as faint diamonds across the band.
+  float n = vnoise3(d*6.0 + 11.3)*0.55
+          + vnoise3(d.yzx*15.0 - 4.7)*0.30
+          + vnoise3(d.zxy*37.0 + 21.9)*0.15;
+  float dust = smoothstep(0.28, 0.64, n);
+  return band*(0.30 + 0.95*dust);
+}
+// scintillation: only real inside the air, and worst near the horizon
+float twinkle(vec3 d, float seed, float air){
+  if (air < 0.002) return 1.0;
+  float f = sin(uT*(5.7 + 6.0*seed) + seed*97.0)*0.5
+          + sin(uT*(11.3 + 4.0*seed) + seed*211.0)*0.5;
+  return 1.0 + f*air*0.55;
+}
+// air = atmospheric extinction weight (0 in vacuum), mw = milky-way glow
+vec3 starField(vec3 d, float air, out float mw){
+  mw = milkyway(d);
+  float face; vec2 uv; vec3 ax0, ax1, axn;
+  cubeFace(d, face, uv, ax0, ax1, axn);
+  const float G = 150.0;                   // cells per half-face
+  const float CELL = 1.0/G;                // cell angular size [rad], near enough
+  vec2 g = uv*G;
+  vec2 gi = floor(g);
+  vec3 sum = vec3(0.0);
+  // the galactic plane roughly doubles the local star count
+  float keep = 0.11 + 0.09*mw;
+  // Limiting magnitude follows the zoom. The catalogue is fixed, but a narrow
+  // field would otherwise show almost nothing — the tracker camera is 8 deg,
+  // 1/100 the solid angle of the wide pad view — so the faint end fades in as
+  // the pixels get smaller, the way a longer lens reaches deeper. Brightness
+  // is then measured FROM that limit, so the visible population always spans
+  // the full range instead of collapsing to a handful of equally bright dots.
+  float lim = 0.90*smoothstep(0.00016, 0.0013, uPxA);
+  for (int i = -1; i <= 1; i++) {
+    for (int j = -1; j <= 1; j++) {
+      vec2 c = gi + vec2(float(i), float(j));
+      vec3 h = h33(vec3(c, face*17.0 + 3.0));
+      if (h.z > keep) continue;            // most cells hold no star
+      float r1 = fract(h.z*97.13);
+      float q = (r1 - lim)/max(1.0 - lim, 1e-3);
+      if (q <= 0.0) continue;              // below the limiting magnitude
+      // star direction, rebuilt from its sub-cell position on the cube face
+      vec2 suv = (c + vec2(h.x, h.y))/G;
+      if (abs(suv.x) > 1.0 || abs(suv.y) > 1.0) continue;
+      vec3 sd = normalize(axn + ax0*suv.x + ax1*suv.y);
+      float ang = length(sd - d);           // chord ~ angle at these scales
+      // steep magnitude law: a few bright, a great many faint
+      float mag = pow(q, 3.5)*smoothstep(0.0, 0.05, q);
+      // tint mixes all three hash components: pulling it off h.z alone (which
+      // also drives the magnitude) ties color to brightness on a lattice
+      float tint = fract(h.x*31.7 + h.y*17.3 + h.z*11.9);
+      // A star is ~1 px across whatever the zoom — but never so wide that it
+      // reaches past the 3x3 cells this loop visits, because a disc truncated
+      // at the search boundary is what turns a halo into a square block. Past
+      // that cap the disc holds still and brightness carries the extra flux,
+      // which is what an unresolved point source does anyway.
+      float want = uPxA*(0.80 + 0.70*mag);
+      float rad = min(want, CELL*0.22);
+      float bright = (0.05 + 1.90*mag)*min(4.0, (want*want)/(rad*rad));
+      float core = exp(-(ang*ang)/(rad*rad));
+      // a soft bloom on the bright ones; gaussian so it dies well inside the
+      // search radius rather than stepping at the cell edge
+      float hr = rad*2.2;
+      float halo = mag > 0.20 ? exp(-(ang*ang)/(hr*hr))*mag*0.34 : 0.0;
+      float lum = (core + halo)*bright*twinkle(d, r1, air);
+      // horizon extinction is stronger for the blue end, as it is in the sky
+      vec3 col = starTint(tint);
+      if (air > 0.002) col = mix(col, vec3(1.0, 0.72, 0.50), min(air*0.7, 0.6));
+      sum += col*lum;
+    }
+  }
+  // diffuse unresolved band light on top of the resolved stars
+  sum += vec3(0.62, 0.66, 0.80)*mw*0.055;
+  return sum;
+}`;
 const SPACE = program(`
 attribute vec2 aP; varying vec2 vP;
 void main(){ vP = aP; gl_Position = vec4(aP, 0.9999, 1.0); }`, `
@@ -218,6 +350,7 @@ uniform sampler2D uLand;
 uniform float uNear, uScorch;             // 1 = pad-world near-field detail
 uniform vec3 uCamW;
 ${NOISE_GLSL}
+${STARS_GLSL}
 float raySphere(vec3 c, float R, vec3 d){
   float b = dot(c, d);
   float disc = b*b - dot(c,c) + R*R;
@@ -318,10 +451,18 @@ void main(){
     float s = max(dot(d, uSun), 0.0);
     col += vec3(1.0,0.97,0.9) * pow(s, 1500.0) * 5.0;
     col += vec3(1.0,0.9,0.72) * pow(s, 9.0) * 0.34 * max(dens, 0.10);
-    if (dens < 0.55) {
-      float h = h3(floor(d*230.0));
-      float st = step(0.9986, h) * (0.25 + 0.75*fract(h*93.0));
-      col += vec3(st) * (0.55 - dens) * 1.9;
+    // stars: fade in as the sky goes out (~8 km up), full dark above ~35 km,
+    // and never survive being looked at through the sun's glare
+    float night = smoothstep(0.42, 0.02, dens);
+    if (night > 0.002) {
+      float mw;
+      // extinction rises toward the horizon while there is still air to look
+      // through: airmass ~ 1/cos(zenith), clamped for the grazing case
+      float zc = max(dot(d, up), 0.0);
+      float air = dens*min(1.0/(zc + 0.10), 6.0)*0.55;
+      vec3 st = starField(d, air, mw);
+      st *= exp(-air*0.9);                       // dimmed by the air column
+      col += st * night * (1.0 - pow(s, 6.0)*0.85);
     }
   }
   gl_FragColor = vec4(pow(col, vec3(0.9)), 1.0);
@@ -2428,6 +2569,11 @@ function drawScene(sc) {
   gl.uniform3fv(SPACE.u.uF, camF); gl.uniform3fv(SPACE.u.uSun, sun);
   gl.uniform1f(SPACE.u.uTan, Math.tan(cam.fov/2));
   gl.uniform1f(SPACE.u.uAsp, asp);
+  // one pixel's angular size: the starfield sizes itself off this, so stars
+  // stay a fixed number of pixels across at any zoom or display density
+  gl.uniform1f(SPACE.u.uPxA, 2*Math.tan(cam.fov/2)/h);
+  // scintillation runs on the wall clock, not the (warpable) mission clock
+  gl.uniform1f(SPACE.u.uT, performance.now()/1000);
   gl.uniform3fv(SPACE.u.uEc, V.sub(sc.earthC, cam.eye));
   gl.uniform1f(SPACE.u.uER, RE);
   gl.uniform3fv(SPACE.u.uMc, sc.moonC ? V.sub(sc.moonC, cam.eye) : [0,0,0]);
