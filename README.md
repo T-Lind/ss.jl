@@ -132,14 +132,20 @@ against the 22.8 kg post-TLI kick margin, with 99% of samples reaching the
 entry corridor.
 
 Nominal circumlunar numbers (v0.2): TLI Δv 3151 m/s of a 3330 m/s budget,
-perilune 2000 ± 30 km, return vacuum perigee 35.5 km (γ ≈ −7.3° at 140 km),
-entry peak 17.9 g / 247 W/cm², stagnation heat load 104 MJ/m², splashdown
+perilune 2000 ± 0.1 km, return vacuum perigee 35.2 km (γ ≈ −7.3° at 140 km),
+entry peak 18.0 g / 247 W/cm², stagnation heat load 104 MJ/m², splashdown
 6.5 days after liftoff at 4.5 m/s under main (3.3 d out, 3.2 d home — the
-symmetric free-return figure-8). Trimming the last step of each burn to land
-exactly on depletion moved these slightly from v0.1's figures (peak load
-18.8 g, vacuum perigee 32.4 km): the old fixed step both burned a little
-propellant a stage did not have and threw a little away, and a free return
-is sensitive enough to notice.
+symmetric free-return figure-8).
+
+These are reproducible, which they previously were not. The free-return
+corrector used to accept any design landing within **3 km** of the perigee
+target — wide enough that two distinct solutions both qualified, so the
+search settled on either depending on numerical noise. Changing nothing but
+the coast step size moved the reported perigee by 2 km and peak entry load by
+0.6 g. The band is now 250 m (`PERIGEE_TOL`), and over an 8× range of step
+sizes the flown result varies by 0.27 km of perigee and 0.08 g — the
+remaining spread is just where inside the band the search stops. Perilune was
+always solid: 40 m across the same range.
 
 Plots: `output/plots/moonshot_*` — 3D ascent, Earth-Moon trajectory,
 rotating-frame figure-8, 3D entry — plus the full analysis suite from
@@ -301,13 +307,14 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (291 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (308 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
 # propellant/engine consistency and stage sizing, scalar targeting including
-# infeasible-design retreat, parallel-burn strap-on boosters, meshes/panel
-# aero including interstage transition cones, capsule watertightness and
-# cabin clearances, maneuvers, and end-to-end reentry)
+# infeasible-design retreat, parallel-burn strap-on boosters, RK4 order and
+# the Jacobi constant of the cislunar coast, step-size independence of the
+# flown mission, meshes/panel aero including interstage transition cones,
+# capsule watertightness and cabin clearances, maneuvers, end-to-end reentry)
 julia --project -e 'push!(LOAD_PATH, "src"); using SatelliteSim; include("test/runtests.jl")'
 
 # targeted nominal trajectory -> output/*.csv
@@ -577,6 +584,49 @@ geometry/           demo STL meshes (capsule, simplified Starship)
 | 6-DOF | the pitch channel is isolated in `dynamics.jl`; adding roll/yaw states extends the same pattern |
 | Higher-order integration | swap `rk4_step!` behind the same signature |
 | Mission Monte Carlo | disperse `Stage` performance, TLI execution errors, and ephemeris phase through `moonshot` the same way `run_montecarlo` disperses entry |
+
+### Verification
+
+The integrator and the invariants are checked, not assumed:
+
+* **RK4 is 4th order in practice.** A closed two-body orbit must return to
+  where it started; the closure error falls 2.0 m → 26 µm across five step
+  halvings, observed order 4.15 → 4.03.
+* **The Jacobi constant holds on the real trajectory.** Because the Moon is a
+  circular coplanar ephemeris, the cislunar coast *is* the circular restricted
+  three-body problem, so C_J is a true invariant and any drift is integration
+  error on the production dynamics — not a toy problem. Over the full 6.5-day
+  flight including the flyby it drifts **3.5×10⁻⁵ relative**.
+* **The answer does not depend on the step size.** Halving the coast step
+  moves perilune by under 200 m and peak entry load by under 0.15 g.
+
+All three are regression tests, so they run in CI rather than living in a
+notebook somewhere. The numerical knobs that make such a study possible —
+`cis_eta` (coast step as a fraction of the local orbital period) and
+`perigee_tol` — are parameters of `moonshot`, `fly_cislunar` and
+`design_free_return`, because a simulator you cannot run a convergence study
+on is a simulator you cannot check.
+
+### Performance
+
+The whole design-and-fly chain is about **0.45 s**, split roughly evenly
+between the ascent shooting solve and the free-return design. Every inner
+loop is allocation-free after warmup — `_cis_accel`, `_cis_step`,
+`dynamics!`, `_ascent_deriv!`, `atmosphere_state` and `gravity_accel` all
+measure 0 bytes per call — so the cost is arithmetic, not garbage.
+
+What is expensive is the search layers on top, and those parallelise: the
+optional pitch-kick scan runs its candidates across threads (2.94 s → 1.12 s
+on 16 threads), and the panel's parameter sweep already did. Run with
+`-t auto`.
+
+The launch view holds **~1 ms per frame** at 1280×800 with 690 live
+particles, so it is nowhere near the 16.7 ms budget. Two things were still
+worth fixing: attribute locations were being re-queried from the driver every
+frame in four draw paths (they are fixed at link time, and are now resolved
+alongside the uniforms), and the particle packer allocated a transformed
+position per particle plus two partition arrays per frame — ~600 objects a
+frame of pure GC churn, now packed straight into the GL staging buffer.
 
 ### Fidelity notes & current limits
 

@@ -60,6 +60,11 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   tli_point_err::Float64 = 0.0,
                   tcm_delay::Float64 = 86400.0,
                   optimize_kick::Bool = false,
+                  # numerical knobs, exposed so a convergence study needs no
+                  # source edit: coast step as a fraction of the local orbital
+                  # period, and the free return's perigee acceptance band [m]
+                  cis_eta::Float64 = SatelliteSim.CIS_ETA,
+                  perigee_tol::Float64 = SatelliteSim.PERIGEE_TOL,
                   verbose::Bool = false)
     # --- 1. launch to parking orbit ----------------------------------------
     # a supplied launch vehicle wins; its payload IS the pod
@@ -96,6 +101,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
     # --- 3. free-return design ---------------------------------------------
     kick = lv.stages[end]
     t_ign, dv, cis = design_free_return(asc.r, asc.v, asc.t, eph;
+                                        eta = cis_eta, perigee_tol = perigee_tol,
                                         stage = kick, m_stack = m_stack,
                                         prop_avail = asc.prop_left[end],
                                         hp_moon_target = hp_moon,
@@ -111,15 +117,18 @@ function moonshot(; pod_mass::Float64 = 350.0,
         # value) so the TCM reproduces the same physical return, and grab the
         # nominal perilune-epoch position as the return-to-reference target
         nomfly = fly_cislunar(asc.r, asc.v, asc.t, eph;
+                              eta = cis_eta,
                               t_ign = t_ign, dv = dv, stage = kick,
                               m_stack = m_stack, prop_avail = asc.prop_left[end],
                               stop_after_flyby = true, t_max = 10.0 * 86400.0)
         proxy = nomfly.vac_perigee_alt
         refleg = fly_cislunar(asc.r, asc.v, asc.t, eph;
+                              eta = cis_eta,
                               t_ign = t_ign, dv = dv, stage = kick,
                               m_stack = m_stack, prop_avail = asc.prop_left[end],
                               t_max = nomfly.t_perilune - asc.t)
         cis_d, tcm_dv = fly_cislunar_tcm(asc.r, asc.v, asc.t, eph;
+                                         eta = cis_eta,
                                          t_ign = t_ign, dv = dv, stage = kick,
                                          m_stack = m_stack,
                                          prop_avail = asc.prop_left[end],

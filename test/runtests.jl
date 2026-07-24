@@ -279,6 +279,75 @@ end
     @test isapprox(ms2.cislunar.perilune_alt, 1500e3; atol = 75e3)
 end
 
+@testset "numerics: order, invariants, step independence" begin
+    # --- RK4 is actually 4th order --------------------------------------
+    # A closed two-body orbit must return to where it started; the closure
+    # error is pure truncation, so halving the step must cut it ~16x.
+    g = PointMassGravity()
+    a = RE_MEAN + 400e3
+    r0 = (a, 0.0, 0.0); v0 = (0.0, sqrt(MU_EARTH / a), 0.0)
+    T = 2pi * sqrt(a^3 / MU_EARTH)
+    V = SatelliteSim
+    function closure(dt)
+        r, v, t = r0, v0, 0.0
+        n = round(Int, T / dt); h = T / n
+        for _ in 1:n
+            k1v = gravity_accel(g, r, t);                                   k1r = v
+            k2v = gravity_accel(g, V.vadd(r, V.vscale(k1r, h/2)), t+h/2);   k2r = V.vadd(v, V.vscale(k1v, h/2))
+            k3v = gravity_accel(g, V.vadd(r, V.vscale(k2r, h/2)), t+h/2);   k3r = V.vadd(v, V.vscale(k2v, h/2))
+            k4v = gravity_accel(g, V.vadd(r, V.vscale(k3r, h)),   t+h);     k4r = V.vadd(v, V.vscale(k3v, h))
+            r = V.vadd(r, V.vscale(V.vadd(V.vadd(k1r, V.vscale(V.vadd(k2r,k3r),2.0)), k4r), h/6))
+            v = V.vadd(v, V.vscale(V.vadd(V.vadd(k1v, V.vscale(V.vadd(k2v,k3v),2.0)), k4v), h/6))
+            t += h
+        end
+        V.vnorm(V.vsub(r, r0))
+    end
+    e1, e2 = closure(16.0), closure(8.0)
+    @test 3.7 < log2(e1 / e2) < 4.4        # observed order ~4
+    @test e2 < 0.05                        # and small in absolute terms
+
+    # --- Jacobi constant on the real cislunar coast ----------------------
+    # The Moon is a circular coplanar ephemeris, so the coast IS the circular
+    # restricted three-body problem and C_J is a true invariant: any drift is
+    # integration error on the production dynamics, not a modelling choice.
+    ms = moonshot()
+    L = ms.cislunar.log
+    n = N_MOON
+    f = MU_MOON / (MU_EARTH + MU_MOON)
+    i2 = max(2, length(L.t) ÷ 4)
+    zh = V.vunit(V.vcross((L.mx[1],L.my[1],L.mz[1]), (L.mx[i2],L.my[i2],L.mz[i2])))
+    om = V.vscale(zh, n)
+    function jacobi(i)
+        r = (L.rx[i], L.ry[i], L.rz[i]); v = (L.vx[i], L.vy[i], L.vz[i])
+        m = (L.mx[i], L.my[i], L.mz[i])
+        rho  = V.vsub(r, V.vscale(m, f))
+        rhod = V.vsub(v, V.vscale(V.vcross(om, m), f))
+        vrot = V.vsub(rhod, V.vcross(om, rho))
+        perp2 = V.vdot(rho, rho) - V.vdot(rho, zh)^2
+        U = 0.5 * n^2 * perp2 + MU_EARTH / V.vnorm(r) +
+            MU_MOON / max(V.vnorm(V.vsub(m, r)), 1.0)
+        2U - V.vdot(vrot, vrot)
+    end
+    cj = [jacobi(i) for i in eachindex(L.t) if L.phase[i] >= 2]
+    @test length(cj) > 100
+    @test (maximum(cj) - minimum(cj)) / abs(sum(cj)/length(cj)) < 2.0e-4
+
+    # --- the answer must not depend on the step size ---------------------
+    # Regression: the free-return corrector used to accept anything within
+    # 3 km of the perigee target, so two distinct designs both qualified and
+    # the search landed on either depending on numerical noise — 2 km of
+    # perigee and 0.6 g of peak load with no code change. Halving the coast
+    # step must now move the flown result by less than the tolerance allows.
+    fine = moonshot(cis_eta = SatelliteSim.CIS_ETA / 2)
+    @test abs(fine.cislunar.perilune_alt - ms.cislunar.perilune_alt) < 200.0
+    @test abs(fine.cislunar.vac_perigee_alt - ms.cislunar.vac_perigee_alt) < 600.0
+    @test abs(fine.entry.peak_gload - ms.entry.peak_gload) < 0.15
+    # and both must actually sit on the requested target
+    for r in (ms, fine)
+        @test abs(r.cislunar.vac_perigee_alt - 35e3) < 2 * SatelliteSim.PERIGEE_TOL
+    end
+end
+
 @testset "rigid body" begin
     # rotation basics
     q = quat_axis_angle((0.0, 0.0, 1.0), pi/2)

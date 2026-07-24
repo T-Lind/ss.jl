@@ -66,9 +66,27 @@ end
     vadd(a, vsub(vscale(d, MU_MOON / dn^3), vscale(s, MU_MOON / sn^3)))
 end
 
+"""
+Fraction of the local orbital period taken as one coast step. The default
+resolves a free return to well under a kilometre of return perigee; halving
+it changes the flown trajectory by less than the design tolerance. Exposed
+through `fly_cislunar`/`design_free_return`/`moonshot` so a convergence study
+needs no source edit.
+"""
+const CIS_ETA = 0.002
+
+"""
+Acceptance band on the free return's descent perigee [m]. This was 3 km,
+wide enough that two distinct designs both satisfied it — the search landed
+on either depending on numerical noise, moving the reported perigee by ~2 km
+and peak entry load by ~0.6 g with no code change at all. The band has to be
+small against the sensitivity of what it feeds.
+"""
+const PERIGEE_TOL = 250.0
+
 "Local-timescale step size [s]."
 @inline function _cis_dt(r::V3, t::Float64, eph::CircularMoonEphemeris;
-                         eta::Float64 = 0.004, dt_max::Float64 = 240.0)
+                         eta::Float64 = CIS_ETA, dt_max::Float64 = 240.0)
     re = vnorm(r)
     dm = moon_distance(eph, r, t)
     te = 2pi * sqrt(re^3 / MU_EARTH)
@@ -156,6 +174,7 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
                       t_max::Float64 = 30.0 * 86400.0,
                       stop_after_flyby::Bool = false,
                       dv_scale::Float64 = 1.0, point_err::Float64 = 0.0,
+                      eta::Float64 = CIS_ETA,
                       log_every::Int = 4)
     L = CislunarLog()
     r, v, t = r0, v0, t0
@@ -163,7 +182,7 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
     # --- parking coast ------------------------------------------------------
     kount = 0
     while t < t_ign
-        dtp = min(_cis_dt(r, t, eph; dt_max = 30.0), t_ign - t)
+        dtp = min(_cis_dt(r, t, eph; eta = eta, dt_max = 30.0), t_ign - t)
         (kount % log_every == 0) && _cis_push!(L, t, r, v, eph, theta_g0, 0)
         r, v = _cis_step(r, v, t, dtp, eph)
         t += dtp
@@ -179,7 +198,7 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
     end
 
     # --- translunar / return coast -----------------------------------------
-    leg = _coast_leg!(L, r, v, t, eph;
+    leg = _coast_leg!(L, r, v, t, eph; eta = eta,
                       theta_g0 = theta_g0, h_stop = h_stop,
                       t_end = t0 + t_max, stop_after_flyby = stop_after_flyby,
                       log_every = log_every)
@@ -190,7 +209,7 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
 end
 
 """
-    _coast_leg!(L, r, v, t, eph; theta_g0, h_stop, t_end, stop_after_flyby,
+    _coast_leg!(L, r, v, t, eph; eta = eta, theta_g0, h_stop, t_end, stop_after_flyby,
                 log_every, t_stop=Inf, outbound=true, peri_alt=Inf,
                 t_peri=NaN, vac_perigee=NaN)
 
@@ -207,14 +226,15 @@ function _coast_leg!(L::CislunarLog, r::V3, v::V3, t::Float64,
                      outbound::Bool = true,
                      peri_alt::Float64 = Inf, t_peri::Float64 = NaN,
                      vac_perigee::Float64 = NaN,
-                     miss_passes::Int = 0, first_perigee_alt::Float64 = NaN)
+                     miss_passes::Int = 0, first_perigee_alt::Float64 = NaN,
+                     eta::Float64 = CIS_ETA)
     outcome = :timeout
     d_prev = moon_distance(eph, r, t)
     kount = 0
     gamma_end = NaN
     rdot_prev = vdot(r, v)
     while t < t_end
-        dtc = min(_cis_dt(r, t, eph), max(t_stop - t, 1.0e-3))
+        dtc = min(_cis_dt(r, t, eph; eta = eta), max(t_stop - t, 1.0e-3))
         (kount % log_every == 0) && _cis_push!(L, t, r, v, eph, theta_g0, outbound ? 2 : 3)
         kount += 1
         rn_, vn_ = _cis_step(r, v, t, dtc, eph)
@@ -372,13 +392,17 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
                             theta_g0::Float64 = 0.0,
                             hp_moon_target::Float64 = 2000.0e3,
                             hp_return_target::Float64 = 35.0e3,
+                            perigee_tol::Float64 = PERIGEE_TOL,
+                            outer_iter::Int = 12,
+                            eta::Float64 = CIS_ETA,
                             max_iter::Int = 15, verbose::Bool = false)
     # design evaluations stop right after the first flyby: fast, and immune
     # to later-revolution re-encounters contaminating the perilune metric
     fly(tig, dvv) = fly_cislunar(r0, v0, t0, eph; t_ign = tig, dv = dvv,
                                  stage = stage, m_stack = m_stack,
                                  prop_avail = prop_avail, theta_g0 = theta_g0,
-                                 stop_after_flyby = true, t_max = 10.0 * 86400.0)
+                                 stop_after_flyby = true, eta = eta,
+                                 t_max = 10.0 * 86400.0)
 
     # residuals scaled to km; a missing return perigee is a large penalty.
     # The perigee residual is measured against a PROXY target: the osculating
@@ -459,10 +483,12 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
     # full-horizon verification flight of a converged design
     verify(tig_, dvv_) = fly_cislunar(r0, v0, t0, eph; t_ign = tig_, dv = dvv_,
                                       stage = stage, m_stack = m_stack,
-                                      prop_avail = prop_avail, theta_g0 = theta_g0)
+                                      prop_avail = prop_avail, theta_g0 = theta_g0,
+                                      eta = eta)
     local full
     stalls = 0
-    for outer in 1:8
+    best = (Inf, tig, dvv, nothing)          # tightest residual seen so far
+    for outer in 1:outer_iter
         converged = newton!()
         if !converged && stalls == 0
             stalls += 1
@@ -478,12 +504,22 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
             err = full.miss_passes > 0 ? full.first_perigee_alt - hp_return_target :
                                          full.vac_perigee_alt - hp_return_target
             verbose && @info "free-return corrector" outer true_perigee_km = full.vac_perigee_alt/1e3 err_km = err/1e3 miss_passes = full.miss_passes
-            abs(err) < 3.0e3 && full.miss_passes == 0 && return (tig, dvv, full)
+            if full.miss_passes == 0 && abs(err) < best[1]
+                best = (abs(err), tig, dvv, full)
+            end
+            abs(err) < perigee_tol && full.miss_passes == 0 && return (tig, dvv, full)
             proxy_target[] -= err
         else
             @warn "free-return design stalled" converged outcome = full.outcome
             break
         end
+    end
+    if best[4] !== nothing
+        # ran out of passes but did produce valid designs: hand back the
+        # tightest one seen, not whichever the last pass landed on, and say
+        # how far off target it actually is
+        @warn "free-return perigee outside tolerance" achieved_m = round(best[1], digits=1) tol_m = perigee_tol
+        return (best[2], best[3], best[4])
     end
     f1, f2, res = resid(tig, dvv)
     @warn "free-return targeting did not fully converge" f_perilune_km = f1 f_perigee_km = f2 outcome = full.outcome
@@ -598,13 +634,14 @@ function fly_cislunar_tcm(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeri
                           theta_g0::Float64 = 0.0,
                           h_stop::Float64 = 140.0e3,
                           t_max::Float64 = 30.0 * 86400.0,
+                          eta::Float64 = CIS_ETA,
                           verbose::Bool = false)
     L = CislunarLog()
     r, v, t = r0, v0, t0
 
     kount = 0
     while t < t_ign
-        dtp = min(_cis_dt(r, t, eph; dt_max = 30.0), t_ign - t)
+        dtp = min(_cis_dt(r, t, eph; eta = eta, dt_max = 30.0), t_ign - t)
         (kount % 4 == 0) && _cis_push!(L, t, r, v, eph, theta_g0, 0)
         r, v = _cis_step(r, v, t, dtp, eph)
         t += dtp
