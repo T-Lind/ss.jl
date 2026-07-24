@@ -1,5 +1,6 @@
 using Test
 using SatelliteSim
+using Statistics
 
 @testset "SatelliteSim" begin
 
@@ -277,6 +278,345 @@ end
     @test ms2.lv === lv
     @test ms2.entry_scn.vehicle.mass == 300.0
     @test isapprox(ms2.cislunar.perilune_alt, 1500e3; atol = 75e3)
+end
+
+@testset "lunar landing" begin
+    S = SatelliteSim
+    # --- the burns, against closed-form two-body values -------------------
+    # circularising at periapsis of a 100 x 15 km ellipse is exactly the
+    # speed difference, and the DOI is the same statement run backwards
+    rp = R_MOON + 100e3
+    v_circ = sqrt(MU_MOON / rp)
+    r0 = (rp, 0.0, 0.0)
+    dv, vafter = loi_burn(r0, (0.0, 1.15 * v_circ, 0.0))
+    @test isapprox(dv, 0.15 * v_circ; rtol = 1e-12)
+    @test isapprox(SatelliteSim.vnorm(vafter), v_circ; rtol = 1e-12)
+
+    dv2, v2 = doi_burn(r0, (0.0, v_circ, 0.0), 15e3)
+    a_t = 0.5 * (rp + R_MOON + 15e3)
+    @test isapprox(dv2, v_circ - sqrt(MU_MOON * (2 / rp - 1 / a_t)); rtol = 1e-12)
+    @test 15.0 < dv2 < 30.0                       # a couple of dozen m/s, as flown
+    @test_throws ArgumentError doi_burn(r0, (0.0, v_circ, 0.0), 150e3)
+
+    # --- powered descent from a descent-orbit periapsis --------------------
+    rpdi = R_MOON + 15e3
+    a_d = 0.5 * (rpdi + R_MOON + 100e3)
+    vpdi = sqrt(MU_MOON * (2 / rpdi - 1 / a_d))
+    lander = Lander(mdry = 3500.0, mprop = 5700.0, thrust = 45e3, isp = 311.0,
+                    throttle_min = 0.10)
+    d = powered_descent(lander, (rpdi, 0.0, 0.0), (0.0, vpdi, 0.0), 9200.0)
+    @test d.outcome == :touchdown
+    @test d.v_vertical < 3.0                       # survivable sink rate
+    @test d.v_horizontal < 2.0
+    @test isapprox(SatelliteSim.vnorm(d.r), R_MOON; atol = 5.0)  # actually on the surface
+    # the descent has to cost about what the orbital speed was, plus the
+    # gravity losses of holding altitude while shedding it
+    @test vpdi < d.dv_braking + d.dv_terminal < 1.35 * vpdi
+    @test d.prop_left > 0.0
+    @test d.min_throttle >= lander.throttle_min - 1e-9
+    # propellant bookkeeping closes against the rocket equation
+    @test isapprox(d.prop_used + d.prop_left, lander.mprop; atol = 1.0)
+
+    # a lander that cannot throttle cannot fly the last kilometre: at
+    # touchdown mass a fixed-thrust engine is pushing 5 g upward
+    stiff = Lander(mdry = 3500.0, mprop = 5700.0, thrust = 45e3, isp = 311.0,
+                   throttle_min = 1.0)
+    d2 = powered_descent(stiff, (rpdi, 0.0, 0.0), (0.0, vpdi, 0.0), 9200.0)
+    @test d2.outcome != :touchdown
+
+    # --- the whole mission -------------------------------------------------
+    lnd = default_lander()
+    lv = starship_expendable(payload = lander_mass(lnd))
+    ls = moonlanding(lander = lnd, lv = lv, kick_angle = deg2rad_(5.0))
+    @test ls.cislunar.outcome == :perilune
+    @test isapprox(ls.cislunar.perilune_alt, 100e3; atol = 25e3)
+    @test 750.0 < ls.dv_loi < 1100.0               # LOI from a free return
+    @test 10.0 < ls.dv_doi < 40.0
+    @test ls.descent.outcome == :touchdown
+    @test ls.prop_margin > 0.0
+    @test ls.descent.hover_s > 30.0                # a real, not notional, margin
+    # the free return is still a free return: arriving without burning would
+    # have brought the stack home
+    @test ls.t_touchdown / 86400 < 6.0
+    # touchdown is on the sphere and the site is reported consistently
+    lat, lon = selenographic(ls.descent.r, ls.t_touchdown, ls.eph)
+    @test isapprox(lat, ls.lat_land; atol = 1e-9)
+    @test isapprox(lon, ls.lon_land; atol = 1e-9)
+    @test -pi <= ls.lon_land <= pi
+
+    # a launcher carrying something other than this lander is not flying this
+    # mission, and says so rather than quietly flying the wrong mass
+    @test_throws ErrorException moonlanding(lander = lnd,
+                                            lv = starship_expendable(payload = 9000.0))
+end
+
+@testset "lunar terrain" begin
+    S = SatelliteSim
+    tr = LunarTerrain()
+
+    # --- determinism and purity -------------------------------------------
+    u = S.vunit((0.31, 0.88, 0.12))
+    @test terrain_height(tr, u) == terrain_height(tr, u)
+    @test terrain_height(tr, u) != terrain_height(LunarTerrain(seed = 0x1234), u)
+    @test terrain_radius(tr, u) == R_MOON + terrain_height(tr, u)
+
+    # --- the surface is continuous: no cliffs between adjacent samples ----
+    # (a lattice bug — a missing neighbour cell, a seam at a cube-sphere face
+    # edge — shows up here as a step of tens of metres over a few metres of
+    # ground, which nothing physical does)
+    e1, e2 = S._tangents(u)
+    worst = 0.0
+    for k in 0:200
+        a = 2pi * k / 201
+        p1 = surface_offset(u, e1, e2, 400.0 * cos(a), 400.0 * sin(a))
+        p2 = surface_offset(u, e1, e2, 402.0 * cos(a), 402.0 * sin(a))
+        worst = max(worst, abs(terrain_height(tr, p1) - terrain_height(tr, p2)))
+    end
+    @test worst < 15.0                     # 2 m of ground, so < ~80% slope
+
+    # --- statistics look like a Moon rather than a fractal ----------------
+    hs = Float64[]; sl = Float64[]
+    for k in 1:400
+        # a low-discrepancy sweep of the whole sphere, poles included
+        z = 2 * (k - 0.5) / 400 - 1
+        a = 2pi * k * 0.6180339887
+        v = (sqrt(1 - z^2) * cos(a), sqrt(1 - z^2) * sin(a), z)
+        push!(hs, terrain_height(tr, v))
+        push!(sl, terrain_slope(tr, v))
+    end
+    @test 200.0 < Statistics.std(hs) < 2500.0        # relief in kilometres
+    @test maximum(abs, hs) < 12.0e3                  # not deeper than the real Moon
+    @test Statistics.median(rad2deg_.(sl)) < 12.0    # most ground is not a cliff
+    @test maximum(rad2deg_.(sl)) > 20.0              # but some of it is
+
+    # a mare is smoother than a highland, which is the whole point of having
+    # both of them
+    ms = [terrain_slope(mare_terrain(), (sqrt(1 - z^2), 0.0, z))
+          for z in range(-0.9, 0.9, length = 120)]
+    hl = [terrain_slope(highland_terrain(), (sqrt(1 - z^2), 0.0, z))
+          for z in range(-0.9, 0.9, length = 120)]
+    @test Statistics.median(ms) < Statistics.median(hl)
+
+    # --- normals and slope agree ------------------------------------------
+    n = terrain_normal(tr, u)
+    @test isapprox(S.vnorm(n), 1.0; atol = 1e-12)
+    @test isapprox(acos(clamp(S.vdot(n, u), -1, 1)), terrain_slope(tr, u); atol = 1e-9)
+    # a flat surface has a radial normal
+    flat = LunarTerrain(relief = 0.0, density = 0.0, rough = 0.0)
+    @test isapprox(terrain_slope(flat, u), 0.0; atol = 1e-9)
+    @test isapprox(terrain_height(flat, u), 0.0; atol = 1e-9)
+
+    # --- hazard scoring and site selection --------------------------------
+    sc, worst_slope, spread = site_hazard(tr, u)
+    @test sc >= worst_slope >= 0.0
+    @test spread >= 0.0
+    ed, ec = S._tangents(u)
+    best_u, dd, dc, best = safe_site(tr, u, ed, ec; reach = 600.0, step = 150.0,
+                                     cross_reach = 300.0)
+    @test best <= sc + 1e-12                   # never worse than staying put
+    @test hypot(dd, dc) <= hypot(600.0, 300.0) + 1e-6
+    @test isapprox(S.vnorm(best_u), 1.0; atol = 1e-12)
+
+    # --- Moon-fixed frame round-trips --------------------------------------
+    eph = coplanar_moon((7.0e6, 0.0, 0.0), (0.0, 7.5e3, 0.0))
+    rr = (1.0e6, -2.0e5, 3.0e5)
+    for t in (0.0, 3600.0, 5.0 * 86400.0)
+        back = moonfixed_inv(moonfixed(rr, t, eph), t, eph)
+        @test isapprox(S.vnorm(S.vsub(back, rr)), 0.0; atol = 1e-6)
+    end
+    # longitude zero faces the Earth, by construction
+    xh, _, _ = moonfixed_basis(eph, 1234.0)
+    to_earth = S.vunit(S.vscale(moon_position(eph, 1234.0), -1.0))
+    @test isapprox(S.vdot(xh, to_earth), 1.0; atol = 1e-12)
+
+    # --- SurfaceModel wraps it for the descent -----------------------------
+    sm = SurfaceModel(tr, eph)
+    rp = S.vscale(S.vunit((1.0, 0.3, 0.1)), R_MOON + 2000.0)
+    @test isapprox(surface_altitude(sm, rp, 0.0),
+                   2000.0 - ground_elevation(sm, rp, 0.0); atol = 1e-6)
+    @test surface_radius(nothing, rp, 0.0) == R_MOON      # no model, no terrain
+    @test ground_elevation(nothing, rp, 0.0) == 0.0
+end
+
+@testset "lunar gravity field" begin
+    S = SatelliteSim
+    eph = coplanar_moon((7.0e6, 0.0, 0.0), (0.0, 7.5e3, 0.0))
+    fld = LunarGravity()
+
+    # --- the anomalies are anomalies: no net mass is added -----------------
+    # far from the Moon the mascon pairs cancel to the monopole, so a distant
+    # point feels exactly MU_MOON and nothing else
+    far = (5.0e8, 1.0e8, 0.0)
+    a_pt = lunar_gravity(far, nothing, 0.0, eph)
+    a_fl = lunar_gravity(far, fld, 0.0, eph)
+    @test isapprox(S.vnorm(S.vsub(a_fl, a_pt)) / S.vnorm(a_pt), 0.0; atol = 1e-6)
+
+    # --- and they are the right size where a spacecraft actually flies -----
+    for m in fld.mascons
+        surf = gravity_anomaly(fld, m.lat, m.lon, 0.0, eph, 0.0) * 1e5
+        orb = gravity_anomaly(fld, m.lat, m.lon, 100e3, eph, 0.0) * 1e5
+        @test 80.0 < surf < 400.0             # a few hundred mGal, as observed
+        @test 30.0 < orb < surf               # weaker higher up, and still felt
+    end
+    # the far side is quiet: no mascons there, only the oblateness everyone
+    # gets, so the anomaly is a fraction of what a mare shows
+    far_side = abs(gravity_anomaly(fld, 0.0, Float64(pi), 100e3, eph, 0.0))
+    near_side = gravity_anomaly(fld, fld.mascons[1].lat, fld.mascons[1].lon,
+                                100e3, eph, 0.0)
+    @test far_side < 0.6 * near_side
+
+    # --- J2 alone is symmetric about the pole ------------------------------
+    j2only = LunarGravity(mascons = Mascon[])
+    _, _, zh = moonfixed_basis(eph, 0.0)
+    rr = S.vscale(S.vunit(S.vcross(zh, (1.0, 0.0, 0.0))), R_MOON + 100e3)
+    @test isapprox(gravity_anomaly(j2only, 0.0, 0.0, 100e3, eph, 0.0),
+                   gravity_anomaly(j2only, 0.0, 2.0, 100e3, eph, 0.0); atol = 1e-12)
+    # and it is not zero
+    @test abs(gravity_anomaly(j2only, 0.0, 0.0, 100e3, eph, 0.0)) > 1e-6
+
+    # --- a low orbit really does wander ------------------------------------
+    r0 = S.vscale(S.vunit((1.0, 0.0, 0.0)), R_MOON + 100e3)
+    v0 = S.vscale(S.vunit(S.vcross(zh, r0)), sqrt(MU_MOON / S.vnorm(r0)))
+    L1 = LunarOrbitLog(); L2 = LunarOrbitLog()
+    T = 2pi * sqrt(S.vnorm(r0)^3 / MU_MOON)
+    S.coast_moon!(L1, r0, v0, 0.0, 2T; dt = 5.0, log_every = 4)
+    S.coast_moon!(L2, r0, v0, 0.0, 2T; dt = 5.0, log_every = 4,
+                  field = fld, eph = eph)
+    @test maximum(L1.h) - minimum(L1.h) < 50.0            # a circle stays a circle
+    @test 200.0 < maximum(L2.h) - minimum(L2.h) < 20.0e3  # lumpy: hundreds of metres up
+end
+
+@testset "descent navigation and hazard avoidance" begin
+    S = SatelliteSim
+    eph = coplanar_moon((7.0e6, 0.0, 0.0), (0.0, 7.5e3, 0.0))
+    tr = LunarTerrain()
+    sm = SurfaceModel(tr, eph)
+
+    # --- initial navigation error is drawn where it is asked for ----------
+    r0 = S.vscale(S.vunit((1.0, 0.0, 0.0)), R_MOON + 15e3)
+    v0 = (0.0, 1.7e3, 0.0)
+    hhat = S._descent_normal(r0, v0)
+    n = init_nav(DescentNav(), r0, v0, hhat)
+    @test 0.0 < S.vnorm(S.vsub(n.r, r0)) < 5000.0
+    @test 0.0 < S.vnorm(S.vsub(n.v, v0)) < 5.0
+    @test init_nav(perfect_nav(), r0, v0, hhat).r == r0     # perfect is perfect
+    # same seed, same error — a dispersion study that is not reproducible is
+    # not a study
+    @test init_nav(DescentNav(), r0, v0, hhat).r == n.r
+
+    # --- radar drives the altitude estimate onto the truth ----------------
+    rad = LandingRadar()
+    n2 = init_nav(DescentNav(), r0, v0, hhat)
+    rlow = S.vscale(S.vunit((1.0, 0.0, 0.0)), R_MOON + 3000.0)
+    before = abs(nav_error(n2, rlow, v0, sm, 0.0)[3])
+    for k in 1:200
+        radar_update!(n2, rad, rlow, v0, k * rad.dt_update, sm, 0.0, hhat)
+    end
+    after = abs(nav_error(n2, rlow, v0, sm, 0.0)[3])
+    @test after < 0.1 * before             # converged, by a lot
+    @test n2.locked_h && n2.locked_v
+    # above the acquisition altitude it sees nothing at all
+    n3 = init_nav(DescentNav(), r0, v0, hhat)
+    rhigh = S.vscale(S.vunit((1.0, 0.0, 0.0)), R_MOON + 40e3)
+    @test !radar_update!(n3, rad, rhigh, v0, 1.0, sm, 0.0, hhat)
+    @test !n3.locked_h
+
+    # --- redesignation moves to better ground, or does not move -----------
+    scan = HazardScan()
+    u, sc, sc0, moved = redesignate(scan, sm, r0, v0, 0.0, hhat, 3000.0)
+    @test sc <= sc0 + 1e-12                       # never a worse site
+    @test moved <= hypot(scan.reach, scan.cross_reach) + 1e-6
+    @test isapprox(S.vnorm(u), 1.0; atol = 1e-12)
+end
+
+@testset "landing over real ground" begin
+    S = SatelliteSim
+    # The interesting claim is not that a descent works — it is that each
+    # layer of realism introduces a specific failure, and the countermeasure
+    # for that failure fixes it and nothing else. Fly the same mission with
+    # the layers switched on one at a time and check the story holds.
+    lnd = default_lander()
+    lv = starship_expendable(payload = lander_mass(lnd))
+    base = (lander = lnd, lv = lv, kick_angle = deg2rad_(5.0))
+    tr = LunarTerrain()
+
+    # over a sphere, with perfect knowledge, it lands — the old model
+    plain = moonlanding(; base...)
+    @test plain.descent.outcome === :touchdown
+    @test plain.descent.elev == 0.0
+
+    # navigating on a mean sphere over ground that is nowhere near it, with
+    # no survey and no radar, the vehicle flies its profile into the ground
+    blind = moonlanding(; base..., terrain = tr, field = LunarGravity(),
+                        nav = DescentNav(radar = nothing), survey_error = NaN)
+    @test blind.descent.outcome !== :touchdown
+    @test abs(blind.descent.nav_dh) > 300.0        # it thought it was high up
+    @test !blind.descent.radar_locked
+    @test blind.descent.v_vertical > 3.0           # and arrived like it
+
+    # radar plus a surveyed site elevation fixes the altitude channel
+    seeing = moonlanding(; base..., terrain = tr, field = LunarGravity(),
+                         nav = DescentNav())
+    @test seeing.descent.radar_locked
+    @test abs(seeing.descent.nav_dh) < 25.0        # knows its height to metres
+    @test seeing.descent.v_vertical < 3.0          # and lands softly
+    @test abs(seeing.descent.elev) > 100.0         # on ground well off the sphere
+
+    # ...but softly onto whatever it happens to be over, which is why hazard
+    # avoidance exists
+    full = apollo_landing(; base..., terrain = tr)
+    @test full.descent.outcome === :touchdown
+    @test full.descent.site_score <= full.descent.site_score_nominal + 1e-12
+    @test full.descent.slope < deg2rad_(12.0)      # standing up
+    @test full.descent.v_vertical < 3.0
+    @test full.descent.v_horizontal < 1.5
+    @test full.descent.prop_left > 0.0
+    # it really is on the ground the terrain model says is there
+    u_td = S.vunit(moonfixed(full.descent.r, full.t_touchdown, full.eph))
+    @test isapprox(S.vnorm(full.descent.r), terrain_radius(tr, u_td); atol = 5.0)
+end
+
+@testset "return from the surface" begin
+    S = SatelliteSim
+    lnd = default_lander(); orb = Orbiter()
+    @test ascent_mass(AscentStage()) <= lnd.mdry      # it has to fit inside
+    @test 2000.0 < ascent_dv(AscentStage()) < 2800.0  # orbit plus a rendezvous
+    @test 1700.0 < orbiter_dv(orb) < 2400.0           # insertion plus TEI
+
+    lv = starship_expendable(payload = lander_mass(lnd) + orbiter_mass(orb))
+    ls = apollo_landing(lander = lnd, lv = lv, orbiter = orb,
+                        kick_angle = deg2rad_(5.0))
+    @test ls.descent.outcome === :touchdown
+    @test ls.orbiter === orb
+    @test ls.m_orbiter < orbiter_mass(orb)            # it paid for insertion too
+    @test isapprox(S.vnorm(ls.r_orbiter) - R_MOON, 100e3; atol = 25e3)
+
+    rr = moonreturn(ls)
+    a = rr.ascent
+    @test a.outcome === :insertion
+    @test isapprox(a.hp, 15e3; atol = 2.0e3)          # inserted where asked
+    @test isapprox(a.ha, 85e3; atol = 6.0e3)
+    @test abs(rad2deg_(a.gamma_cut)) < 0.5            # and level
+    @test 1600.0 < a.dv_ideal < 2100.0                # the price of lunar orbit
+    @test a.prop_left > 0.0
+    @test rr.dv_rendezvous < 200.0                    # a phased ascent is cheap
+    @test rr.prop_ascent_left > 0.0
+    @test 700.0 < rr.dv_tei < 1200.0                  # leaving costs about a km/s
+    @test rr.prop_orbiter_left > 0.0
+    @test rr.cis.outcome === :entry_interface
+    @test isapprox(rr.cis.vac_perigee_alt, 50e3; atol = 5.0e3)
+    @test rr.entry !== nothing && rr.entry.terminated === :splashdown
+    @test 3.0 < rr.entry.peak_gload < 12.0            # a crewed lunar return
+    @test rr.t_liftoff > ls.t_touchdown               # causality, at least
+    @test rr.t_dock > rr.t_liftoff
+    @test rr.t_tei > rr.t_dock
+    @test rr.entry.t_splash / 86400 < 14.0
+
+    # a landing that left nothing in orbit has nothing to come back to
+    solo = moonlanding(lander = lnd,
+                       lv = starship_expendable(payload = lander_mass(lnd)),
+                       kick_angle = deg2rad_(5.0))
+    @test_throws ErrorException moonreturn(solo)
 end
 
 @testset "numerics: order, invariants, step independence" begin

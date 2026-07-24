@@ -9,20 +9,38 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: #0d0d0d; color: #c3c2b7;
          font: 13.5px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .app { display: grid; grid-template-columns: 330px 1fr; gap: 16px;
-         max-width: 1400px; margin: 0 auto; padding: 16px; }
+  .app { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px;
+         max-width: 1560px; margin: 0 auto; padding: 16px; }
   @media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
   h1 { color: #fff; font-size: 17px; margin: 0 0 2px; }
-  h2 { color: #fff; font-size: 13px; margin: 0 0 8px; letter-spacing: .04em;
+  h2 { color: #fff; font-size: 13px; margin: 0; letter-spacing: .04em;
        text-transform: uppercase; font-weight: 600; }
+  h2 + * { margin-top: 8px; }
   .sub { color: #898781; font-size: 12px; margin-bottom: 10px; }
   .card { background: #1a1a19; border: 1px solid rgba(255,255,255,.1);
           border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
-  label { display: block; color: #898781; font-size: 11px; margin: 7px 0 2px; }
+  /* a card header that collapses its body: the launcher form is long, and a
+     panel you have to scroll past to reach Run is a panel you fight */
+  .card > h2.fold { cursor: pointer; user-select: none; display: flex;
+                    align-items: center; gap: 6px; }
+  .card > h2.fold::before { content: '▾'; font-size: 10px; color: #898781;
+                            transition: transform .12s; }
+  .card.closed > h2.fold::before { transform: rotate(-90deg); }
+  .card.closed > *:not(h2) { display: none; }
+  .card > h2.fold .count { margin-left: auto; color: #898781; font-weight: 400;
+                           font-size: 10.5px; letter-spacing: 0; }
+  label { display: block; color: #898781; font-size: 11px; margin: 7px 0 2px;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .stagehdr { color: #c3c2b7; font-size: 11.5px; font-weight: 600;
-              letter-spacing: .03em; margin: 10px 0 0;
+              letter-spacing: .03em; margin: 12px 0 0;
               border-top: 1px solid #2c2c2a; padding-top: 8px; }
   .stagehdr:first-of-type { border-top: 0; margin-top: 2px; padding-top: 0; }
+  /* the per-stage verdict gets its own line. Floated right it collided with
+     the row below at this column width, which is exactly the width the
+     sidebar always has. */
+  .derived { display: block; color: #898781; font-size: 10.5px;
+             font-weight: 400; letter-spacing: 0; margin: 2px 0 0;
+             font-variant-numeric: tabular-nums; }
   input, select { width: 100%; background: #0d0d0d; color: #fff;
     border: 1px solid rgba(255,255,255,.15); border-radius: 6px;
     padding: 5px 8px; font: inherit; font-variant-numeric: tabular-nums; }
@@ -63,28 +81,59 @@
           border-radius: 6px; padding: 4px 9px; margin: 0 6px 6px 0; font-size: 11.5px;
           cursor: pointer; font-variant-numeric: tabular-nums; }
   .chip:hover { background: #383835; }
-  .chip.sel { border-color: #3987e5; color: #fff; }
+  .chip.sel, .chip.on { border-color: #3987e5; color: #fff; }
+  /* mission-mode switch: two missions share every launch field, so they are
+     one page with a switch rather than two pages */
+  .seg { display: flex; gap: 0; margin: 8px 0 0; border-radius: 8px;
+         overflow: hidden; border: 1px solid rgba(255,255,255,.15); }
+  .seg button { border-radius: 0; background: #17171690; color: #898781;
+                font-weight: 500; padding: 7px 0; }
+  .seg button.on { background: #3987e5; color: #fff; font-weight: 600; }
+  .runbar { position: sticky; top: 8px; z-index: 5; }
+  .kbd { background: #0d0d0d; border: 1px solid rgba(255,255,255,.18);
+         border-bottom-width: 2px; border-radius: 4px; padding: 0 4px;
+         font: 11px ui-monospace, Consolas, monospace; color: #c3c2b7; }
+  .helprow { display: grid; grid-template-columns: 66px 1fr; gap: 4px 8px;
+             font-size: 11.5px; color: #898781; }
+  .analysis { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+              align-items: start; }
+  @media (max-width: 1150px) { .analysis { grid-template-columns: 1fr; } }
+  .analysis .card { margin-bottom: 0; }
   table { width: 100%; border-collapse: collapse; font-size: 12px;
           font-variant-numeric: tabular-nums; }
   td, th { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid #2c2c2a; }
   th { color: #898781; font-weight: 500; font-size: 11px; }
   .ro { font-variant-numeric: tabular-nums; font-size: 12px; color: #c3c2b7; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 <div class="app">
   <div>
     <h1>ss.jl mission control</h1>
-    <div class="sub">circumlunar free return — configure, run, explore</div>
+    <div class="sub" id="tagline">circumlunar free return — configure, run, explore</div>
 
     <div class="card">
-      <h2>Presets</h2>
-      <div id="presets"></div>
-      <div class="sub" style="margin:2px 0 0">one click configures + runs a
-        reference case — then tweak any knob below</div>
+      <h2>Mission</h2>
+      <div class="seg" id="modeswitch">
+        <button data-mode="flyby" class="on">free-return flyby</button>
+        <button data-mode="landing">lunar landing</button>
+      </div>
+      <div class="sub" id="modenote" style="margin:6px 0 0">a pod around the
+        Moon and home — nothing is left behind and nothing has to stop</div>
     </div>
 
     <div class="card">
+      <h2>Presets</h2>
+      <div class="sub" style="margin:8px 0 3px">mission</div>
+      <div id="presets"></div>
+      <div class="sub" style="margin:8px 0 3px">vehicle</div>
+      <div id="vpresets"></div>
+      <div class="sub" style="margin:4px 0 0">one click configures + runs —
+        then tweak any knob below</div>
+    </div>
+
+    <div class="card" id="card_flyby">
       <h2>Mission targets</h2>
       <div class="row">
         <div><label for="pod_mass">pod mass [kg]</label><input id="pod_mass" value="350"></div>
@@ -93,7 +142,7 @@
       <div class="row3">
         <div><label for="incl_deg">inclination [°]</label><input id="incl_deg" value="28.5"></div>
         <div><label for="hp_moon_km">perilune [km]</label><input id="hp_moon_km" value="2000"></div>
-        <div><label for="hp_return_km">return perigee [km]</label><input id="hp_return_km" value="35"></div>
+        <div><label for="hp_return_km" title="return perigee [km]">return perigee [km]</label><input id="hp_return_km" value="50"></div>
       </div>
       <div class="row" style="margin-top:6px">
         <div><label for="tli_mag_err_pct">TLI Δv error [%]</label><input id="tli_mag_err_pct" value="0"></div>
@@ -103,8 +152,43 @@
         cruise with an automatic mid-course correction at T+24 h</div>
     </div>
 
-    <div class="card">
-      <h2>Launcher</h2>
+    <div class="card hidden" id="card_landing">
+      <h2>Lander &amp; descent</h2>
+      <div class="row">
+        <div><label for="l_dry">lander dry [kg]</label><input id="l_dry" value="3500"></div>
+        <div><label for="l_prop">lander propellant [kg]</label><input id="l_prop" value="9000"></div>
+      </div>
+      <div class="row3">
+        <div><label for="l_thrust_kn">thrust [kN]</label><input id="l_thrust_kn" value="45"></div>
+        <div><label for="l_isp">Isp [s]</label><input id="l_isp" value="311"></div>
+        <div><label for="l_throttle_min" title="deepest throttle [%]">min throttle [%]</label><input id="l_throttle_min" value="10"></div>
+      </div>
+      <div class="sub" id="l_derived" style="margin:6px 0 0">—</div>
+      <div class="row3" style="margin-top:6px">
+        <div><label for="h_moon_park_km">lunar orbit [km]</label><input id="h_moon_park_km" value="100"></div>
+        <div><label for="h_pdi_km">descent orbit [km]</label><input id="h_pdi_km" value="15"></div>
+        <div><label for="n_rev">revs before DOI</label><input id="n_rev" value="1"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label for="plain_moon" style="display:flex;gap:7px;align-items:flex-start;
+               flex-wrap:wrap;cursor:pointer" title="fly the descent onto a smooth
+               sphere with perfect navigation, as everything here did before
+               terrain existed">
+          <input type="checkbox" id="plain_moon" style="width:auto;margin:2px 0 0">
+          <span>smooth sphere, perfect navigation</span></label>
+      </div>
+      <div class="sub" style="margin:6px 0 0">the lander flies insertion,
+        descent-orbit initiation and the descent on its own propellant; the
+        launcher only has to throw its wet mass through TLI. Arrival is on a
+        free return, so a failed insertion still comes home.
+        <b>By default it lands on the real thing</b>: procedural terrain,
+        mascons, orbit-determination error corrected by landing radar, and
+        hazard avoidance choosing the touchdown point at high gate. Tick the
+        box to take all of that away and watch what each of them was for.</div>
+    </div>
+
+    <div class="card" id="card_launcher">
+      <h2 class="fold">Launcher <span class="count" id="lv_count"></span></h2>
       <div class="row">
         <div><label for="nstages">stages</label>
           <select id="nstages">
@@ -118,23 +202,25 @@
       </div>
       <!-- stage blocks are generated from the stage count -->
       <div id="stagebox"></div>
-      <div class="row" style="margin-top:8px">
+      <div class="row3" style="margin-top:8px">
         <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
         <div><label for="diameter">diameter [m]</label><input id="diameter" value="1.8"></div>
+        <div><label for="kick_deg" title="pitch-over kick [deg]">kick [°]</label><input id="kick_deg" value="8"></div>
       </div>
       <div class="row" style="margin-top:6px">
         <div style="flex:1"><label style="display:flex;gap:6px;align-items:center">
           <input type="checkbox" id="opt_kick" style="width:auto;margin:0">
           search for the best pitch-over kick</label></div>
       </div>
-      <div class="sub" style="margin:2px 0 0">off, the ascent flies the
-        reference 8° kick. A high thrust-to-weight stack — anything with
-        strap-ons — lofts on that and wastes the extra impulse; the search
-        costs a few seconds and can multiply the mass delivered to orbit.</div>
+      <div class="sub" style="margin:2px 0 0">the kick is the one guidance
+        number that does not scale: 8° suits the reference vehicle, a
+        Starship-class stack wants about 5°, and anything with strap-ons lofts
+        on either. The search tries a ladder of angles and keeps whichever
+        puts the most mass in orbit — a few seconds, often several tonnes.</div>
     </div>
 
-    <div class="card">
-      <button id="run">Run mission</button>
+    <div class="card runbar">
+      <button id="run">Run mission <span class="kbd" style="margin-left:6px">R</span></button>
       <div class="status" id="status">idle</div>
     </div>
 
@@ -147,51 +233,18 @@
     </div>
 
     <div class="card">
-      <h2>Parameter sweep</h2>
-      <div class="row3">
-        <div><label for="sweep_param">parameter</label>
-          <select id="sweep_param" data-solvable></select></div>
-        <div><label for="sweep_min">min</label><input id="sweep_min" value="250"></div>
-        <div><label for="sweep_max">max</label><input id="sweep_max" value="450"></div>
+      <h2 class="fold">Keys &amp; help</h2>
+      <div class="helprow" style="margin-top:8px">
+        <span><span class="kbd">R</span></span><span>run the mission</span>
+        <span><span class="kbd">space</span></span><span>play / pause the timeline</span>
+        <span><span class="kbd">←</span> <span class="kbd">→</span></span><span>step the timeline</span>
+        <span><span class="kbd">F</span></span><span>inertial ⇄ rotating frame</span>
+        <span><span class="kbd">E</span> <span class="kbd">Z</span></span><span>zoom to Earth / fit the whole trajectory</span>
+        <span><span class="kbd">L</span></span><span>open the cinematic launch view</span>
       </div>
-      <div class="row" style="margin-top:6px">
-        <div><label for="sweep_n">steps</label><input id="sweep_n" value="9"></div>
-        <div><label for="sweep_metric">metric</label>
-          <select id="sweep_metric">
-            <option value="peak_g">peak entry g</option>
-            <option value="tli_dv">TLI Δv [m/s]</option>
-            <option value="prop_margin_kg">prop margin [kg]</option>
-            <option value="perilune_km">perilune [km]</option>
-            <option value="vac_perigee_km">return perigee [km]</option>
-            <option value="heat_mj">heat load [MJ/m²]</option>
-            <option value="peak_q_wcm2">peak q̇ [W/cm²]</option>
-            <option value="t_days">mission days</option>
-          </select></div>
-      </div>
-      <div style="margin-top:8px"><button id="sweepbtn" class="ghost">Run sweep</button></div>
-      <canvas id="sweepchart" style="width:100%;height:170px;margin-top:8px"></canvas>
-    </div>
-
-    <div class="card">
-      <h2>Solve for a target</h2>
-      <div class="sub" style="margin:0 0 6px">
-        Lock everything else and search one field until a mission metric
-        reaches a value. Each step flies the whole mission.
-      </div>
-      <div class="row">
-        <div><label for="solve_param">vary</label>
-          <select id="solve_param" data-solvable></select></div>
-        <div><label for="solve_metric">until</label>
-          <select id="solve_metric"></select></div>
-      </div>
-      <div class="row3" style="margin-top:6px">
-        <div><label for="solve_target">equals</label><input id="solve_target" value="3000"></div>
-        <div><label for="solve_min">search from</label><input id="solve_min" value="1000"></div>
-        <div><label for="solve_max">to</label><input id="solve_max" value="4000"></div>
-      </div>
-      <div style="margin-top:8px"><button id="solvebtn" class="ghost">Solve</button></div>
-      <div class="sub" id="solve_out" style="margin-top:6px">—</div>
-      <canvas id="solvechart" style="width:100%;height:150px;margin-top:6px"></canvas>
+      <div class="sub" style="margin:8px 0 0">drag the 3D views to orbit the
+        camera, scroll to zoom. Everything on this page is a live run of the
+        simulator — no canned data anywhere.</div>
     </div>
   </div>
 
@@ -199,29 +252,35 @@
     <div class="tiles" id="tiles"></div>
 
     <div class="card">
-      <div class="legend">
-        <span><i style="background:#8fbef0"></i>ascent</span>
-        <span><i style="background:#3987e5"></i>parking orbit</span>
-        <span><i style="background:#d95926"></i>TLI burn</span>
-        <span><i style="background:#199e70"></i>outbound</span>
-        <span><i style="background:#c98500"></i>return</span>
-        <span><i style="background:#d55181"></i>entry</span>
-        <span><i style="background:#6b6b66;height:8px;width:8px;border-radius:50%"></i>Moon</span>
-        <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>launch site</span>
-        <span><i style="background:#f2c14e;height:8px;width:8px;border-radius:50%"></i>splashdown</span>
-      </div>
+      <div class="legend" id="legend"></div>
       <canvas id="scene"></canvas>
       <div class="bar">
         <button id="play" class="ghost">&#9654; play</button>
         <input id="scrub" type="range" min="0" max="1000" value="1000">
         <button id="frame" class="ghost">rotating frame</button>
-        <span class="chip" data-zoom="30">Earth</span>
-        <span class="chip" data-zoom="1150">full</span>
+        <span class="chip" data-zoom="30" title="key E">Earth</span>
+        <span class="chip" data-zoom="fit" title="key Z — frame the whole trajectory">fit</span>
+        <span class="chip hidden" id="moonview" title="the lunar phase, Moon-centred">&#127765; Moon</span>
         <span class="chip" id="launchbtn" title="cinematic pad-cam liftoff, flown from this run's parameters">&#128640; launch view</span>
         <span class="ro" id="readout"></span>
       </div>
       <div class="sub" style="margin:6px 0 0">drag to orbit the camera · scroll to
         zoom · dots ride the rotating surface (zoom in on Earth to see them)</div>
+    </div>
+
+    <div class="card hidden" id="card_descent">
+      <h2>Powered descent</h2>
+      <div class="legend">
+        <span><i style="background:#c98500"></i>braking (full thrust)</span>
+        <span><i style="background:#d55181"></i>terminal (throttled)</span>
+        <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>high gate</span>
+      </div>
+      <canvas id="c_desc_prof" style="width:100%;height:210px;display:block"></canvas>
+      <div class="charts" style="margin-top:10px">
+        <canvas id="c_desc_v"></canvas>
+        <canvas id="c_desc_thr"></canvas>
+      </div>
+      <div class="sub" id="desc_note" style="margin:8px 0 0">—</div>
     </div>
 
     <div class="card">
@@ -241,7 +300,48 @@
       <div id="history"><span class="sub">runs appear here — click to restore</span></div>
     </div>
 
-    <div class="card">
+    <div class="analysis">
+      <div class="card">
+        <h2>Parameter sweep</h2>
+        <div class="row3" style="margin-top:8px">
+          <div><label for="sweep_param">parameter</label>
+            <select id="sweep_param" data-solvable></select></div>
+          <div><label for="sweep_min">min</label><input id="sweep_min" value="250"></div>
+          <div><label for="sweep_max">max</label><input id="sweep_max" value="450"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label for="sweep_n">steps</label><input id="sweep_n" value="9"></div>
+          <div><label for="sweep_metric">metric</label>
+            <select id="sweep_metric"></select></div>
+        </div>
+        <div style="margin-top:8px"><button id="sweepbtn" class="ghost">Run sweep</button></div>
+        <canvas id="sweepchart" style="width:100%;height:180px;margin-top:8px"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Solve for a target</h2>
+        <div class="sub" style="margin:8px 0 6px">
+          Lock everything else and search one field until a mission metric
+          reaches a value. Each step flies the whole mission.
+        </div>
+        <div class="row">
+          <div><label for="solve_param">vary</label>
+            <select id="solve_param" data-solvable></select></div>
+          <div><label for="solve_metric">until</label>
+            <select id="solve_metric"></select></div>
+        </div>
+        <div class="row3" style="margin-top:6px">
+          <div><label for="solve_target">equals</label><input id="solve_target" value="3000"></div>
+          <div><label for="solve_min">search from</label><input id="solve_min" value="1000"></div>
+          <div><label for="solve_max">to</label><input id="solve_max" value="4000"></div>
+        </div>
+        <div style="margin-top:8px"><button id="solvebtn" class="ghost">Solve</button></div>
+        <div class="sub" id="solve_out" style="margin-top:6px">—</div>
+        <canvas id="solvechart" style="width:100%;height:150px;margin-top:6px"></canvas>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
       <h2>Events</h2>
       <div style="overflow-x:auto"><table id="events"></table></div>
     </div>
@@ -252,10 +352,17 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const BASE_FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
-  'fairing','diameter','nstages','nboost','opt_kick',
+  'fairing','diameter','nstages','nboost','opt_kick','kick_deg',
   'tli_mag_err_pct','tli_point_err_deg'];
+// the landing mission adds a lander and a descent plan; everything else — the
+// launcher, the ascent, the trans-lunar leg — is the same mission underneath
+const LANDING_FIELDS = ['l_dry','l_prop','l_thrust_kn','l_isp','l_throttle_min',
+  'h_moon_park_km','h_pdi_km','n_rev','plain_moon'];
+let MODE = 'flyby';
+let VNAME = 'Sable';
+const landing = () => MODE === 'landing';
 const STAGE_FIELDS = ['prop','dry','thrust_kn','isp','propellant','engines','engine',
-                      'diameter','size_by','len'];
+                      'diameter','size_by','len','dry_auto'];
 // A booster set is configured exactly like a stage, plus how it behaves in
 // parallel with the core.
 const BOOST_FIELDS = STAGE_FIELDS.concat(['throttle','ign_delay','sep_delay']);
@@ -266,7 +373,8 @@ const nBoost = () => +($('nboost') || {}).value || 0;
 const FIELDS = () => BASE_FIELDS.concat(
   [].concat(...Array.from({length: nStages()}, (_, i) =>
     STAGE_FIELDS.map(f => `s${i+1}_${f}`))),
-  nBoost() ? BOOST_FIELDS.map(f => `b_${f}`) : []);
+  nBoost() ? BOOST_FIELDS.map(f => `b_${f}`) : [],
+  LANDING_FIELDS);
 
 // Stage 1 is the booster, the last is the kick stage that does TLI, and
 // anything between is an upper stage — the same roles the server uses.
@@ -307,13 +415,24 @@ function syncSizeBy() {
     $(p + 'len').disabled = !byLen;
     $(p + 'prop').style.opacity = byLen ? 0.45 : 1;
     $(p + 'len').style.opacity = byLen ? 1 : 0.45;
+    // an engine-less stage has no design to estimate a dry mass from, and a
+    // stage whose dry mass is estimated should not look like you typed it
+    const eng = $(p + 'engine') && $(p + 'engine').value !== 'manual';
+    const auto = $(p + 'dry_auto');
+    if (auto) {
+      auto.disabled = !eng;
+      auto.parentElement.style.opacity = eng ? 1 : 0.45;
+      $(p + 'dry').disabled = eng && auto.checked;
+      $(p + 'dry').style.opacity = eng && auto.checked ? 0.45 : 1;
+    }
   }
 }
 function buildStages() {
   const n = nStages(), box = $('stagebox');
   const DIA0 = ($('diameter') || {}).value || 1.8;
   const keep = {};
-  for (const el of box.querySelectorAll('input,select')) keep[el.id] = el.value;
+  for (const el of box.querySelectorAll('input,select'))
+    keep[el.id] = el.type === 'checkbox' ? el.checked : el.value;
   const mixOpts = CATALOGUE.propellants
     .map(p => `<option value="${p.name}">${p.name} · ${Math.round(p.bulk)} kg/m³</option>`)
     .join('');
@@ -324,7 +443,7 @@ function buildStages() {
   // one block of markup, used for a serial stage and for a strap-on set
   // alike — they are configured by the same numbers
   const block = (title, p, r, dia) => `<div class="stagehdr">${title}
-        <span class="sub" id="${p}derived" style="float:right;font-weight:400"></span></div>
+        <span class="derived" id="${p}derived"></span></div>
       <div class="row">
         <div><label for="${p}size_by">size by</label>
           <select id="${p}size_by">
@@ -340,6 +459,9 @@ function buildStages() {
         <div><label for="${p}dry">dry mass [kg]</label><input id="${p}dry" value="${r.dry}"></div>
         <div><label for="${p}engines">engines</label><input id="${p}engines" value="${r.engines}"></div>
       </div>
+      <label style="display:flex;gap:6px;align-items:center;margin:6px 0 0">
+        <input type="checkbox" id="${p}dry_auto" style="width:auto;margin:0">
+        estimate dry mass from the design</label>
       <div class="row">
         <div><label for="${p}thrust_kn">vac thrust [kN]</label><input id="${p}thrust_kn" value="${r.thrust}"></div>
         <div><label for="${p}isp">vac Isp [s]</label><input id="${p}isp" value="${r.isp}"></div>
@@ -379,7 +501,7 @@ function buildStages() {
     $(p + 'propellant').value = r.mix;
     $(p + 'engine').value = 'manual';
     for (const f of fields)
-      if (keep[p + f] !== undefined) $(p + f).value = keep[p + f];
+      if (keep[p + f] !== undefined) setField(p + f, keep[p + f]);
   };
   for (let k = 1; k <= n; k++) init(`s${k}_`, roleAt(k, n), STAGE_FIELDS);
   if (nb) init('b_', ROLE.strap, BOOST_FIELDS);
@@ -397,15 +519,26 @@ const PARAM_LABEL = { pod_mass: 'pod mass', h_park_km: 'parking alt',
   incl_deg: 'inclination', diameter: 'diameter', fairing: 'fairing mass' };
 const SFIELD_LABEL = { prop: 'prop', dry: 'dry', isp: 'Isp',
                        thrust_kn: 'thrust', engines: 'engine count' };
-const METRIC_LABEL = { prop_margin_kg: 'kick-stage prop margin [kg]',
+const METRIC_LABEL = { prop_margin_kg: 'launcher prop margin [kg]',
   perilune_km: 'perilune [km]', vac_perigee_km: 'return perigee [km]',
   peak_g: 'peak entry g', peak_q_wcm2: 'peak q̇ [W/cm²]',
   t_days: 'mission days', liftoff_t: 'liftoff mass [t]',
   park_apogee_km: 'parking apogee [km]', v_splash: 'splashdown speed [m/s]',
-  tli_dv: 'TLI Δv [m/s]', heat_mj: 'heat load [MJ/m²]' };
+  tli_dv: 'TLI Δv [m/s]', heat_mj: 'heat load [MJ/m²]',
+  prop_left_kg: 'lander propellant left [kg]', hover_s: 'hover margin [s]',
+  descent_dv: 'descent Δv [m/s]', loi_dv: 'insertion Δv [m/s]',
+  touchdown_v: 'touchdown sink [m/s]', downrange_km: 'descent downrange [km]',
+  min_throttle_pct: 'deepest throttle [%]' };
+const LPARAM_LABEL = { l_dry: 'lander dry mass', l_prop: 'lander propellant',
+  l_thrust_kn: 'lander thrust', l_isp: 'lander Isp',
+  l_throttle_min: 'lander min throttle', h_moon_park_km: 'lunar orbit altitude',
+  h_pdi_km: 'descent-orbit altitude', n_rev: 'revs before DOI',
+  plain_moon: 'smooth sphere, perfect navigation' };
 function fillSolveParams() {
   const n = nStages();
   const opts = Object.keys(PARAM_LABEL).map(k => [k, PARAM_LABEL[k]]);
+  if (landing())
+    for (const k in LPARAM_LABEL) opts.push([k, LPARAM_LABEL[k]]);
   for (let k = 1; k <= n; k++)
     for (const f in SFIELD_LABEL)
       opts.push([`s${k}_${f}`, `stage ${k} ${SFIELD_LABEL[f]}`]);
@@ -413,16 +546,27 @@ function fillSolveParams() {
   for (const el of document.querySelectorAll('select[data-solvable]')) {
     const was = el.value;
     el.innerHTML = html;
-    el.value = opts.some(o => o[0] === was) ? was : 'pod_mass';
+    el.value = opts.some(o => o[0] === was) ? was :
+               (landing() ? 'l_prop' : 'pod_mass');
   }
-  // a target the reference vehicle can actually hit, so the first solve
-  // demonstrates the feature instead of reporting an unreachable goal
-  if (!$('solve_param').dataset.touched) $('solve_param').value = 'hp_moon_km';
-  const ms = CATALOGUE.solve_metrics || Object.keys(METRIC_LABEL);
-  const sm = $('solve_metric'), wasM = sm.value;
-  sm.innerHTML = ms.map(m =>
-    `<option value="${m}">${METRIC_LABEL[m] || m}</option>`).join('');
-  sm.value = ms.includes(wasM) && wasM ? wasM : 'perilune_km';
+  if (landing() && !$('sweep_param').dataset.touched) {
+    $('sweep_param').value = 'l_prop';
+    $('sweep_min').value = 6000; $('sweep_max').value = 12000;
+  }
+  // a target this vehicle can actually hit, so the first solve demonstrates
+  // the feature instead of reporting an unreachable goal
+  if (!$('solve_param').dataset.touched)
+    $('solve_param').value = landing() ? 'l_prop' : 'hp_moon_km';
+  const ms = (landing() ? CATALOGUE.landing_metrics : CATALOGUE.solve_metrics)
+             || Object.keys(METRIC_LABEL);
+  for (const id of ['solve_metric', 'sweep_metric']) {
+    const sel = $(id), was = sel.value;
+    sel.innerHTML = ms.map(m =>
+      `<option value="${m}">${METRIC_LABEL[m] || m}</option>`).join('');
+    sel.value = ms.includes(was) && was ? was :
+                (landing() ? (id === 'sweep_metric' ? 'hover_s' : 'prop_left_kg')
+                           : (id === 'sweep_metric' ? 'peak_g' : 'perilune_km'));
+  }
 }
 
 async function doSolve() {
@@ -511,10 +655,68 @@ const PRESETS = {
   'low flyby':      {hp_moon_km: 500},
   'high flyby':     {hp_moon_km: 6000},
   'steep entry':    {hp_return_km: 15},
-  'shallow entry':  {hp_return_km: 55},
+  'shallow entry':  {hp_return_km: 65},
   'high parking':   {h_park_km: 350},
   'inclined 50°':   {incl_deg: 50},
   'dispersed TLI':  {tli_mag_err_pct: 0.3, tli_point_err_deg: 0.25},
+};
+// Landing presets move the things a landing mission actually trades: where
+// you park, how long you loiter before starting down, and how much lander
+// there is to put down.
+const LANDING_PRESETS = {
+  'nominal':        {},
+  'low orbit':      {h_moon_park_km: 60},
+  'high orbit':     {h_moon_park_km: 200},
+  'long loiter':    {n_rev: 4},
+  'direct descent': {n_rev: 0},
+  'heavy lander':   {l_dry: 6000, l_prop: 16000, l_thrust_kn: 75},
+  'light lander':   {l_dry: 1200, l_prop: 3400, l_thrust_kn: 16},
+  'thin margins':   {l_prop: 7200},
+};
+
+// Vehicle presets. Each is the whole launcher: stack height, engines,
+// propellant loads, diameters, and the pitch-over kick the stack needs —
+// which is the field that most often decides whether a configuration flies
+// at all. Engines come from the server's catalogue, so `dry_auto` lets the
+// mass-estimating relations size the stage rather than a typed-in number.
+const VEHICLES = {
+  'Sable (reference)': {
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
+    s1_engine: 'manual', s1_prop: 42000, s1_dry: 3800, s1_thrust_kn: 950, s1_isp: 305,
+      s1_engines: 5, s1_propellant: 'kerolox', s1_diameter: 1.8,
+    s2_engine: 'manual', s2_prop: 9500, s2_dry: 900, s2_thrust_kn: 95, s2_isp: 345,
+      s2_engines: 1, s2_propellant: 'kerolox', s2_diameter: 1.8,
+    s3_engine: 'manual', s3_prop: 950, s3_dry: 140, s3_thrust_kn: 15, s3_isp: 315,
+      s3_engines: 1, s3_propellant: 'hypergolic', s3_diameter: 1.8,
+  },
+  'Sable + 4 strap-ons': {
+    nstages: 3, nboost: 4, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    b_engine: 'manual', b_prop: 12000, b_dry: 900, b_thrust_kn: 380, b_isp: 285,
+      b_engines: 2, b_propellant: 'kerolox', b_diameter: 1.53, b_throttle: 60,
+  },
+  // 6°, not 8°: this stack lofts on the reference kick and arrives at orbital
+  // energy with its perigee underground. The kick search finds the same thing
+  // in a few seconds if you would rather not take the number on faith.
+  'Falcon-class (Merlin)': {
+    nstages: 3, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: false,
+    s1_engine: 'merlin_1d', s1_engines: 9, s1_prop: 411000, s1_dry_auto: true,
+      s1_diameter: 3.7,
+    s2_engine: 'merlin_1d_vac', s2_engines: 1, s2_prop: 108000, s2_dry_auto: true,
+      s2_diameter: 3.7,
+    s3_engine: 'aj10', s3_engines: 1, s3_prop: 2200, s3_dry_auto: true,
+      s3_diameter: 2.4,
+  },
+  'Starship (expendable)': {
+    nstages: 2, nboost: 0, diameter: 9.0, fairing: 0, kick_deg: 5, opt_kick: false,
+    s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
+      s1_diameter: 9.0,
+    s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
+      s2_diameter: 9.0,
+  },
+  'hydrolox upper': {
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
+    s2_engine: 'rl10b2', s2_engines: 1, s2_prop: 9500, s2_dry_auto: true,
+  },
 };
 let DEFAULTS = null;         // captured from the page's initial values
 
@@ -522,11 +724,17 @@ let run = null;              // current run payload
 let history = [];
 let ti = 0, playing = false, lastTs = 0;
 let rotFrame = false, camYaw = 0.6, camPitch = 1.05, camDist = 1150;
+// The scene frames whatever the run turned out to be rather than a fixed
+// number: a 2000 km flyby and a 60 km lunar orbit are five orders of
+// magnitude apart, and a default zoom can only be right for one of them.
+let autoFit = true, moonView = null, moonDist = 12000;
 { const z = new URLSearchParams(location.search).get('zoom');
-  if (z) camDist = Math.min(2400, Math.max(30, +z)); }
+  if (z) { camDist = Math.min(2400, Math.max(30, +z)); autoFit = false; } }
 
 function params() {
   const u = new URLSearchParams();
+  u.set('mode', MODE);
+  u.set('vname', VNAME);
   for (const f of FIELDS()) {
     const el = $(f);
     if (!el) continue;
@@ -551,6 +759,10 @@ async function doRun() {
     renderAll();
     if (j.metrics.on_target) {
       $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
+    } else if (j.mode === 'landing') {
+      $('status').className = 'status err';
+      $('status').textContent = `flown, but the descent ended in "${j.metrics.outcome}" ` +
+        `— see the descent card for what ran out`;
     } else {
       $('status').className = 'status err';
       $('status').textContent = 'flown, but OFF TARGET — targeting could not reach ' +
@@ -568,7 +780,31 @@ function fmt(v, d=1) { return (v==null||!isFinite(v)) ? '—' : (+v).toFixed(d);
 function renderAll() {
   if (!run) return;
   const m = run.metrics;
-  const tiles = [
+  const tiles = run.mode === 'landing' ? [
+    [fmt(m.liftoff_t,1)+' t','liftoff mass'],
+    [fmt(m.lander_wet_t,1)+' t','lander wet mass'],
+    [fmt(m.tli_dv,0)+' m/s','TLI Δv'],
+    [fmt(m.prop_margin_kg,0)+' kg','launcher margin'],
+    [fmt(m.perilune_km,0)+' km','lunar orbit'],
+    [fmt(m.loi_dv,0)+' m/s','insertion Δv'],
+    [fmt(m.doi_dv,1)+' m/s','descent-orbit Δv'],
+    [fmt(m.descent_dv,0)+' m/s','descent Δv'],
+    [fmt(m.descent_s,0)+' s','descent time'],
+    [fmt(m.downrange_km,0)+' km','descent downrange'],
+    [fmt(m.touchdown_v,2)+' m/s','touchdown sink'],
+    [fmt(m.touchdown_vh,2)+' m/s','touchdown lateral'],
+    [fmt(m.prop_left_kg,0)+' kg','propellant left'],
+    [fmt(m.hover_s,0)+' s','hover margin'],
+    [fmt(m.min_throttle_pct,0)+' %','deepest throttle'],
+    [fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°','landing site'],
+    [(m.ground_elev_m>=0?'+':'')+fmt(m.ground_elev_m,0)+' m','ground off the sphere'],
+    [fmt(m.ground_slope_deg,1)+'°','slope at touchdown'],
+    [m.redesignate_m>0 ? fmt(m.site_score_deg,1)+'° ← '+fmt(m.site_was_deg,1)+'°' : '—',
+     'site chosen (was)'],
+    [m.redesignate_m>0 ? fmt(m.redesignate_m,0)+' m' : '—','aim point moved'],
+    [fmt(m.nav_alt_err_m,0)+' m','nav altitude error'],
+    [fmt(m.t_days,2)+' d','pad to surface'],
+  ] : [
     [fmt(m.liftoff_t,1)+' t','liftoff mass'],
     [fmt(m.park_perigee_km,0)+'×'+fmt(m.park_apogee_km,0)+' km','parking orbit'],
     [fmt(m.tli_dv,0)+' m/s','TLI Δv'],
@@ -592,7 +828,16 @@ function renderAll() {
 
   precompute();
   ti = S.n - 1;
+  geoFollow = false;                 // back to the full stack for a new run
+  if (run.moon) {                    // frame the lunar orbit, not empty space
+    let r = 0;
+    for (let i = 0; i < run.moon.orbit.x.length; i++)
+      r = Math.max(r, Math.hypot(run.moon.orbit.x[i], run.moon.orbit.y[i],
+                                 run.moon.orbit.z[i]));
+    moonDist = 2.7 * r;
+  }
   $('scrub').value = 1000;
+  if (autoFit) fitCamera();
   drawCharts();
   renderEvents();
   renderHistory();
@@ -610,8 +855,12 @@ function renderHistory() {
   $('history').innerHTML = history.map((h, i) => {
     const p = h._params, m = h.metrics;
     const sel = h === run ? ' sel' : '';
-    return `<span class="chip${sel}" data-i="${i}">#${history.length-i} · pod ${p.pod_mass} kg · ` +
-      `peri ${p.hp_moon_km} km · ${fmt(m.peak_g,1)} g · ${fmt(m.t_days,1)} d</span>`;
+    const body = h.mode === 'landing'
+      ? `lander ${fmt(m.lander_wet_t,1)} t · ${fmt(m.descent_dv,0)} m/s · ` +
+        `${fmt(m.touchdown_v,1)} m/s down · ${fmt(m.prop_left_kg,0)} kg left`
+      : `pod ${p.pod_mass} kg · peri ${p.hp_moon_km} km · ` +
+        `${fmt(m.peak_g,1)} g · ${fmt(m.t_days,1)} d`;
+    return `<span class="chip${sel}" data-i="${i}">#${history.length-i} · ${body}</span>`;
   }).join('');
   for (const el of $('history').querySelectorAll('.chip'))
     el.onclick = () => { run = history[+el.dataset.i]; renderAll(); };
@@ -758,6 +1007,86 @@ function fmtKm(mm) {   // Mm (1000 km) -> readable km
   return km >= 99500 ? (km/1000).toFixed(0) + 'k km' : km.toFixed(0) + ' km';
 }
 
+// Zoom so the whole flown trajectory fits, with the Earth still legible.
+function fitCamera() {
+  if (!S) return;
+  let r = 0;
+  for (let i = 0; i < S.n; i++) {
+    const p = P(i);
+    r = Math.max(r, Math.hypot(p[0], p[1], p[2]));
+  }
+  camDist = Math.max(30, Math.min(2400, 2.3 * r));
+}
+
+// ------------------------------------------------------- Moon-centred view --
+// A 15 km descent is invisible next to a 384,000 km transfer, so the lunar
+// phase gets its own frame: Moon at the origin, everything in km.
+function drawMoonScene(cv, ctx, w, h) {
+  const M = run.moon;
+  const O = M.orbit, D = M.descent;
+  const RM = M.r_km;
+  const f = Math.min(w, h) * 0.9 / moonDist;
+  const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+  const sp = Math.sin(camPitch), cp = Math.cos(camPitch);
+  const pj = (x, y, z) => {
+    const X = x*cy - y*sy, Yh = x*sy + y*cy;
+    return [w/2 + X*f, h*0.52 - (Yh*sp + z*cp)*f, Yh*cp - z*sp];
+  };
+  // the Moon itself, shaded, with the Earth-facing side marked
+  const pm = pj(0, 0, 0), rM = RM*f;
+  const g = ctx.createRadialGradient(pm[0]-rM*.35, pm[1]-rM*.35, rM*.15, pm[0], pm[1], rM);
+  g.addColorStop(0, '#9a9990'); g.addColorStop(1, '#3f3f3a');
+  circle(ctx, pm[0], pm[1], rM, g);
+  const seg = (xs, ys, zs, i0, i1, col, wid) => {
+    ctx.strokeStyle = col; ctx.lineWidth = wid; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    let started = false;
+    for (let i = i0; i < i1; i++) {
+      const q = pj(xs[i], ys[i], zs[i]);
+      // hide what is behind the Moon
+      if (q[2] > 0 && Math.hypot(q[0]-pm[0], q[1]-pm[1]) < rM) { started = false; continue; }
+      started ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
+      started = true;
+    }
+    ctx.stroke();
+  };
+  // parking orbit then the descent ellipse, in the colours the legend uses
+  let iSplit = O.ph.findIndex(p => p === 1);
+  if (iSplit < 0) iSplit = O.x.length;
+  seg(O.x, O.y, O.z, 0, iSplit + 1, '#c98500', 1.6);
+  seg(O.x, O.y, O.z, Math.max(0, iSplit - 1), O.x.length, '#e0a94e', 1.6);
+  seg(D.x, D.y, D.z, 0, D.x.length, '#d55181', 2.4);
+  // which way Earth lies — the Moon keeps the same face to it, so this is
+  // also the zero of the longitude the summary reports
+  const mp = [S.mx[S.n-1], S.my[S.n-1], S.mz[S.n-1]];
+  const eDir = norm3([-mp[0], -mp[1], -mp[2]]);
+  const e0 = pj(eDir[0]*RM*1.15, eDir[1]*RM*1.15, eDir[2]*RM*1.15);
+  const e1 = pj(eDir[0]*RM*1.75, eDir[1]*RM*1.75, eDir[2]*RM*1.75);
+  ctx.strokeStyle = '#8fbef0'; ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.moveTo(e0[0], e0[1]); ctx.lineTo(e1[0], e1[1]); ctx.stroke();
+  ctx.fillStyle = '#8fbef0'; ctx.font = '11px system-ui';
+  ctx.fillText('to Earth', e1[0] + 5, e1[1] + 3);
+
+  // touchdown
+  const n = D.x.length - 1;
+  if (n > 0) {
+    const q = pj(D.x[n], D.y[n], D.z[n]);
+    circle(ctx, q[0], q[1], 3.4, '#fff');
+    ctx.fillStyle = INK2; ctx.font = '11px system-ui';
+    ctx.fillText('touchdown', q[0] + 8, q[1] + 3);
+  }
+  // scale bar, because at this zoom nothing else says how big the frame is
+  const km = 500;
+  ctx.strokeStyle = MUTED; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(14, h-14); ctx.lineTo(14 + km*f, h-14); ctx.stroke();
+  ctx.fillStyle = MUTED; ctx.font = '10px system-ui';
+  ctx.fillText(km + ' km', 16, h-18);
+  const m = run.metrics;
+  $('readout').textContent =
+    `Moon frame · ${fmt(m.perilune_km,0)} km orbit → ${fmt(m.downrange_km,0)} km ` +
+    `descent · touchdown ${fmt(m.land_lat,1)}°, ${fmt(m.land_lon,1)}°`;
+}
+
 function drawScene() {
   const cv = $('scene'), ctx = cv.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
@@ -766,6 +1095,7 @@ function drawScene() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   if (!run || !S) return;
+  if (moonView && run.moon) { drawMoonScene(cv, ctx, w, h); return; }
   const N = S.n, i0 = Math.min(ti, N-1);
   const tNow = S.t[i0];
 
@@ -851,6 +1181,31 @@ function drawScene() {
 
   drawSegs(false);                            // near side, over the globe
 
+  // Landing missions carry a lunar phase that lives in a Moon-centred frame.
+  // Put it back where it belongs: each sample is offset by the Moon's own
+  // position at that moment, so zooming in on the Moon shows the parking
+  // orbit and the descent arc in the same scene as the transfer.
+  if (run.moon && rM > 6) {
+    const M = run.moon;
+    const mm = t => {                    // Moon position at mission time t
+      let j = S.n - 1;
+      while (j > 0 && S.t[j] > t) j--;
+      return rotAxis([S.mx[j], S.my[j], S.mz[j]], S.nrm, N_MOON*(t - S.t[j]));
+    };
+    const lun = (X, Y, Z, ts, col, wid) => {
+      ctx.strokeStyle = col; ctx.lineWidth = wid;
+      ctx.beginPath();
+      for (let i = 0; i < X.length; i++) {
+        const c = mm(ts ? ts[i] : S.t[S.n-1]);
+        const q = project(cv, [c[0] + X[i]/1000, c[1] + Y[i]/1000, c[2] + Z[i]/1000]);
+        i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
+      }
+      ctx.stroke();
+    };
+    lun(M.orbit.x, M.orbit.y, M.orbit.z, M.orbit.t, '#c98500', 1.4);
+    lun(M.descent.x, M.descent.y, M.descent.z, null, '#d55181', 2.0);
+  }
+
   // pod (hollow + dim when behind the globe)
   const pd = project(cv, P(i0));
   if (pd[3] > 0 && Math.hypot(pd[0]-pe[0], pd[1]-pe[1]) < rE) {
@@ -859,6 +1214,25 @@ function drawScene() {
     ctx.globalAlpha = 1;
   } else {
     circle(ctx, pd[0], pd[1], 3.2, '#fff');
+  }
+
+  // Moon label, so the grey disc is identified rather than inferred
+  if (rM > 3) {
+    ctx.fillStyle = MUTED; ctx.font = '11px system-ui';
+    ctx.fillText('Moon', pm[0] + rM + 5, pm[1] + 3);
+  }
+  // scale bar: the frame spans five orders of magnitude across a mission,
+  // so a bar that adapts is the only honest way to show it
+  const target = camDist * 0.25;
+  const p10 = Math.pow(10, Math.floor(Math.log10(target)));
+  const barMm = [1, 2, 5, 10].map(k => k*p10).reduce((a, b) =>
+    Math.abs(b - target) < Math.abs(a - target) ? b : a);
+  const barPx = barMm * pe[2];
+  if (barPx > 24 && barPx < w - 40) {
+    ctx.strokeStyle = MUTED; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(14, h-12); ctx.lineTo(14 + barPx, h-12); ctx.stroke();
+    ctx.fillStyle = MUTED; ctx.font = '10px system-ui';
+    ctx.fillText(fmtKm(barMm), 16, h-16);
   }
 
   const dm = Math.hypot(S.x[i0]-S.mx[i0], S.y[i0]-S.my[i0], S.z[i0]-S.mz[i0]);
@@ -904,15 +1278,46 @@ function drawLine(cvId, series, title, opts) {
     for (const v of s.ys) { if (v < y0) y0 = v; if (v > y1) y1 = v; }
   }
   if (y1 - y0 < 1e-9) y1 = y0 + 1;
-  if (opts.y0 !== undefined) y0 = opts.y0;
-  const L = 8, R = 8, T = 20, B = 16;
+  if (opts.y0 !== undefined) y0 = Math.min(opts.y0, y0);
+  // round the value axis out to nice ticks so the gridlines mean something
+  const nice = (span, n) => {
+    const raw = span/n, p = Math.pow(10, Math.floor(Math.log10(raw)));
+    const f = raw/p;
+    return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+  };
+  const dy = nice(y1 - y0, 3);
+  y0 = Math.floor(y0/dy)*dy; y1 = Math.ceil(y1/dy)*dy;
+  const fmtTick = v => Math.abs(v) >= 1000 ? (v/1000).toFixed(v % 1000 ? 1 : 0) + 'k'
+                     : Math.abs(v) >= 10 ? v.toFixed(0)
+                     : Math.abs(v) >= 1 ? v.toFixed(1)
+                     : Math.abs(v) < 1e-9 ? '0' : v.toPrecision(2);
+  const L = 40, R = 10, T = 20, B = 26;
   const px = x => L + (x-x0)/(x1-x0)*(w-L-R);
   const py = y => h-B - (y-y0)/(y1-y0)*(h-T-B);
+  ctx.font = '10px system-ui';
   ctx.strokeStyle = GRID; ctx.lineWidth = 1;
-  for (let i = 0; i <= 3; i++) {
-    const y = h-B - i/3*(h-T-B);
+  for (let v = y0; v <= y1 + 1e-9; v += dy) {
+    const y = py(v);
     ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w-R, y); ctx.stroke();
+    ctx.fillStyle = MUTED;
+    const s = fmtTick(v);
+    ctx.fillText(s, L - 5 - ctx.measureText(s).width, y + 3);
   }
+  // three x ticks: start, middle, end of the range actually plotted
+  const dx = nice(x1 - x0, 2);
+  ctx.fillStyle = MUTED;
+  for (let v = Math.ceil(x0/dx)*dx; v <= x1 + 1e-9; v += dx) {
+    const x = px(v);
+    ctx.strokeStyle = 'rgba(255,255,255,.05)';
+    ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, h-B); ctx.stroke();
+    const s = fmtTick(v);
+    ctx.fillText(s, Math.min(x - ctx.measureText(s).width/2, w - 20), h - 14);
+  }
+  if (opts.xu) {
+    const s = '[' + opts.xu + ']';
+    ctx.fillText(s, w - R - ctx.measureText(s).width, h - 3);
+  }
+  if (opts.yu) ctx.fillText('[' + opts.yu + ']', 2, 12);
   for (const s of series) {
     ctx.strokeStyle = s.color; ctx.lineWidth = 1.8; ctx.lineJoin = 'round';
     ctx.beginPath();
@@ -925,20 +1330,35 @@ function drawLine(cvId, series, title, opts) {
   ctx.font = '11px system-ui';
   // peak marker + direct label on the primary series
   const p = series[0];
-  let ipk = 0;
-  for (let i = 1; i < p.ys.length; i++) if (p.ys[i] > p.ys[ipk]) ipk = i;
-  circle(ctx, px(p.xs[ipk]), py(p.ys[ipk]), 2.6, p.color);
-  ctx.fillStyle = INK2;
-  const lbl = `${(+p.ys[ipk]).toPrecision(3)} ${p.unit || ''}`;
-  const lx = Math.min(px(p.xs[ipk]) + 6, w - ctx.measureText(lbl).width - 4);
-  ctx.fillText(lbl, lx, Math.max(py(p.ys[ipk]) - 6, 26));
+  if (!opts.nopeak) {
+    let ipk = 0;
+    for (let i = 1; i < p.ys.length; i++) if (p.ys[i] > p.ys[ipk]) ipk = i;
+    circle(ctx, px(p.xs[ipk]), py(p.ys[ipk]), 2.6, p.color);
+    ctx.fillStyle = INK2;
+    const lbl = `${(+p.ys[ipk]).toPrecision(3)} ${p.unit || ''}`;
+    const lx = Math.min(px(p.xs[ipk]) + 6, w - ctx.measureText(lbl).width - 4);
+    ctx.fillText(lbl, lx, Math.max(py(p.ys[ipk]) - 6, 26));
+  }
+  // called-out points (high gate, and anything else worth naming)
+  for (const mk of (opts.marks || [])) {
+    const X = px(mk.x), Y = py(mk.y);
+    circle(ctx, X, Y, 3.4, mk.color);
+    ctx.strokeStyle = mk.color; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(X, Y, 6, 0, 2*Math.PI); ctx.stroke();
+    ctx.fillStyle = mk.color;
+    ctx.fillText(mk.label, Math.min(X + 9, w - ctx.measureText(mk.label).width - 4), Y - 6);
+  }
   // series name labels at line ends (identity not by color alone)
   if (series.length > 1) {
     for (const s of series) {
-      const n = s.xs.length - 1;
+      if (!s.label) continue;
+      const n = opts.labelAt === 'start' ? 0 : s.xs.length - 1;
       ctx.fillStyle = s.color;
-      const tx = Math.min(px(s.xs[n]) - ctx.measureText(s.label).width - 4, w - 60);
-      ctx.fillText(s.label, Math.max(tx, L + 2), py(s.ys[n]) - 5);
+      const tx = opts.labelAt === 'start' ? px(s.xs[0]) + 5
+               : Math.min(px(s.xs[n]) - ctx.measureText(s.label).width - 4, w - 60);
+      const ty = opts.labelAt === 'start' ? py(s.ys[0]) + 13 : py(s.ys[n]) - 5;
+      ctx.fillText(s.label, Math.max(Math.min(tx, w - ctx.measureText(s.label).width - 4), L + 2),
+                   Math.min(Math.max(ty, T + 12), h - B - 2));
     }
   }
   ctx.fillStyle = MUTED;
@@ -948,9 +1368,9 @@ function drawLine(cvId, series, title, opts) {
 function drawCharts() {
   const A = run.ascent, E = run.entry, D = run.cis;
   drawLine('c_asc_h', [{xs: A.t, ys: A.h, color: ACC, unit: 'km'}],
-           'ascent altitude vs time [s]');
+           'ascent altitude vs time', {xu: 's', yu: 'km'});
   drawLine('c_asc_q', [{xs: A.t, ys: A.qbar, color: ACC, unit: 'kPa'}],
-           'ascent dynamic pressure vs time [s]');
+           'ascent dynamic pressure vs time', {xu: 's', yu: 'kPa'});
   // full-mission geometry: distance from Earth and from the Moon
   const td = D.t.map(t => t/86400);
   const rE = D.x.map((x, i) => Math.hypot(x, D.y[i], D.z[i]));
@@ -958,14 +1378,57 @@ function drawCharts() {
   drawLine('c_dist', [
       {xs: td, ys: dM, color: '#199e70', label: 'to Moon', unit: 'k km'},
       {xs: td, ys: rE, color: ACC, label: 'to Earth', unit: 'k km'},
-    ], 'distance vs mission time [days] — 1000 km', {y0: 0});
+    ], 'distance from Earth and Moon', {y0: 0, xu: 'd', yu: 'k km'});
+  const hasEntry = E && E.t && E.t.length;
+  for (const id of ['c_corridor','c_ent_g','c_ent_q'])
+    $(id).style.display = hasEntry ? '' : 'none';
+  if (!hasEntry) { drawDescent(); return; }
   // the classic entry corridor: altitude vs velocity
   drawLine('c_corridor', [{xs: E.v.map(v => v/1000), ys: E.h, color: '#d55181', unit: 'km'}],
-           'entry altitude [km] vs velocity [km/s]');
+           'entry altitude vs velocity', {xu: 'km/s', yu: 'km'});
   drawLine('c_ent_g', [{xs: E.t, ys: E.g, color: ACC, unit: 'g'}],
-           'entry g-load vs time [s]');
+           'entry g-load vs time', {xu: 's', yu: 'g'});
   drawLine('c_ent_q', [{xs: E.t, ys: E.q, color: ACC, unit: 'W/cm²'}],
-           'entry heating vs time [s]');
+           'entry heating vs time', {xu: 's', yu: 'W/cm²'});
+}
+
+// ------------------------------------------------------- descent profile --
+// Altitude against downrange, in the plane the descent actually flies. The
+// braking phase and the throttled terminal phase are drawn as separate
+// series because they are separate control laws, and the seam between them
+// is high gate — the moment the vehicle stops being a decelerating orbit and
+// starts being a landing.
+function drawDescent() {
+  const d = run.descent, m = run.metrics;
+  if (!d || !d.t || !d.t.length) return;
+  const gate = m.gate_s;
+  const iGate = Math.max(1, d.t.findIndex(t => t >= gate));
+  const seg = (a, b) => ({ xs: d.dr.slice(a, b), ys: d.h.slice(a, b) });
+  const s1 = seg(0, iGate + 1), s2 = seg(iGate, d.t.length);
+  // the card's own legend names the two phases, so the series carry no
+  // labels here — they would land on top of the high-gate callout
+  drawLine('c_desc_prof', [
+      { xs: s1.xs, ys: s1.ys, color: '#c98500', unit: 'km' },
+      { xs: s2.xs, ys: s2.ys, color: '#d55181', unit: 'km' },
+    ], 'descent altitude vs downrange', { y0: 0, xu: 'km', yu: 'km', nopeak: true,
+        labelAt: 'start',
+        marks: [{ x: d.dr[iGate], y: d.h[iGate], color: '#8fbef0', label: 'high gate' }] });
+  drawLine('c_desc_v', [
+      { xs: d.t, ys: d.vh, color: '#c98500', label: 'horizontal', unit: 'm/s' },
+      { xs: d.t, ys: d.vv, color: '#8fbef0', label: 'vertical', unit: 'm/s' },
+    ], 'descent velocity vs time', { xu: 's', yu: 'm/s', nopeak: true, labelAt: 'start' });
+  drawLine('c_desc_thr', [{ xs: d.t, ys: d.thr, color: ACC, unit: '%' }],
+      'commanded throttle vs time', { y0: 0, xu: 's', yu: '%', nopeak: true });
+  const bad = m.outcome !== 'touchdown';
+  $('desc_note').innerHTML = bad
+    ? `<span class="bad">${m.outcome}</span> — arrived at ${fmt(m.touchdown_v,1)} m/s ` +
+      `sink, ${fmt(m.touchdown_vh,1)} m/s lateral. Give the lander more propellant, ` +
+      `more thrust, or a deeper throttle.`
+    : `braking ${fmt(m.braking_dv,0)} m/s at full thrust for ${fmt(m.gate_s,0)} s, ` +
+      `then ${fmt(m.terminal_dv,0)} m/s throttled down to ` +
+      `${fmt(m.touchdown_v,2)} m/s of sink — ${fmt(m.prop_left_kg,0)} kg left, ` +
+      `${fmt(m.hover_s,0)} s of hover at touchdown mass. The engine had to ` +
+      `throttle to ${fmt(m.min_throttle_pct,0)}% of rated thrust.`;
 }
 
 // ---------------------------------------------------------------- sweep --
@@ -1008,7 +1471,7 @@ function drawSweep() {
 // ------------------------------------------------------- vehicle geometry --
 // The viewer follows the mission clock: stages, fairing, and finally the
 // kick stage drop off as the scrubbed time passes their separation events.
-let geo = null, geoYaw = -0.9, geoPitch = 0.30, geoKey = '';
+let geo = null, geoYaw = -0.9, geoPitch = 0.30, geoKey = '', geoFollow = false;
 // stages get progressively lighter up the stack, whatever the stack height
 const GEO_COL = { pod: [126,146,168], fairing: [201,199,186] };
 const GEO_SHORT = { pod: 'pod', fairing: 'fairing' };
@@ -1043,6 +1506,9 @@ async function fetchGeo() {
     // Ideal delta-v is Tsiolkovsky with no losses — a circumlunar mission
     // wants roughly 12.5 km/s of it once gravity and drag are paid for.
     const twr = +j.liftoff_twr, dvt = +j.total_dv_mps;
+    $('lv_count').textContent =
+      `${(j.stages || []).length} stages · ${(+j.length).toFixed(0)} m · ` +
+      `${(j.liftoff_mass_kg/1000).toFixed(0)} t`;
     $('geo_perf').innerHTML =
       `${Math.round(j.liftoff_mass_kg).toLocaleString()} kg on the pad · ` +
       `T/W <b class="${twr < 1.15 ? 'bad' : twr < 1.25 ? 'warn' : 'good'}">` +
@@ -1117,7 +1583,10 @@ function geoConfigAt(tsec) {
   // whatever is still flying at SECO hands over to the kick stage, which
   // goes at the entry handoff
   if (nst >= 2 && drop['stage' + (nst-1)] == null) drop['stage' + (nst-1)] = ev.seco;
-  if (nst >= 1) drop['stage' + nst] = ev.entry_handoff;
+  // the last stage goes at the entry handoff on a flyby, and right after the
+  // trans-lunar burn on a landing mission — from there the lander is alone
+  if (nst >= 1) drop['stage' + nst] = ev.entry_handoff ??
+    (ev.loi != null ? ev.tli_cutoff : undefined);
   for (const k in drop) if (drop[k] != null && tsec >= drop[k]) cfg.gone[k] = true;
 
   if (ev.tli_ignition != null && tsec >= ev.tli_ignition &&
@@ -1135,7 +1604,10 @@ function geoConfigAt(tsec) {
 // redraw only when the orientation or the staging configuration changed
 function drawGeoLive() {
   if (!geo) return;
-  const tsec = (S && run) ? S.t[Math.min(ti, S.n-1)] : null;
+  // The viewer follows the mission clock — but only once you drive it. A
+  // fresh run parks the timeline at the end, and a "vehicle geometry" card
+  // showing the bare pod that came home is not what you asked to look at.
+  const tsec = (S && run && geoFollow) ? S.t[Math.min(ti, S.n-1)] : null;
   const cfg = geoConfigAt(tsec);
   const key = [geoYaw.toFixed(3), geoPitch.toFixed(3), Object.keys(cfg.gone).join(','),
                cfg.burn, cfg.burn ? (performance.now()/120|0) : 0,   // flame flicker
@@ -1239,40 +1711,180 @@ function drawGeo(cfg) {
 }
 
 // ---------------------------------------------------------------- presets --
+// Applying a preset means: back to the page defaults, then this preset's
+// fields on top. A preset that changes the stack height has to rebuild the
+// stage form before its own stage fields exist to be written.
+function applyPreset(o, opts) {
+  opts = opts || {};
+  if (o.nstages !== undefined) $('nstages').value = o.nstages;
+  else if (opts.reset && DEFAULTS.nstages !== undefined) $('nstages').value = DEFAULTS.nstages;
+  if (o.nboost !== undefined) $('nboost').value = o.nboost;
+  else if (opts.reset && DEFAULTS.nboost !== undefined) $('nboost').value = DEFAULTS.nboost;
+  buildStages();
+  if (opts.reset)
+    for (const f of FIELDS())
+      if (DEFAULTS[f] !== undefined && $(f)) setField(f, DEFAULTS[f]);
+  for (const k in o) if ($(k)) setField(k, o[k]);
+  syncSizeBy();
+}
+function setField(id, v) {
+  const el = $(id);
+  if (!el) return;
+  if (el.type === 'checkbox') el.checked = !!v && v !== '0' && v !== 'false';
+  else el.value = v;
+}
 function initPresets() {
   DEFAULTS = {};
-  for (const f of FIELDS()) DEFAULTS[f] = $(f).value;
-  $('presets').innerHTML = Object.keys(PRESETS).map(k =>
-    `<span class="chip" data-p="${k}">${k}</span>`).join('');
-  for (const el of $('presets').querySelectorAll('.chip'))
-    el.onclick = () => {
-      // a preset may change the stack height, so restore the count first
-      if (DEFAULTS.nstages !== undefined) $('nstages').value = DEFAULTS.nstages;
-      const o = PRESETS[el.dataset.p];
-      if (o.nstages !== undefined) $('nstages').value = o.nstages;
-      buildStages();
-      for (const f of FIELDS())
-        if (DEFAULTS[f] !== undefined && $(f)) $(f).value = DEFAULTS[f];
-      for (const k in o) if ($(k)) $(k).value = o[k];
-      fetchGeo();
-      doRun();
-    };
+  for (const f of FIELDS()) if ($(f))
+    DEFAULTS[f] = $(f).type === 'checkbox' ? $(f).checked : $(f).value;
+  const chips = (host, keys, run) => {
+    $(host).innerHTML = keys.map(k => `<span class="chip" data-p="${k}">${k}</span>`).join('');
+    for (const el of $(host).querySelectorAll('.chip')) el.onclick = () => run(el.dataset.p);
+  };
+  renderMissionPresets = () => chips('presets',
+    Object.keys(landing() ? LANDING_PRESETS : PRESETS), k => {
+      // a mission preset resets only mission fields — it must not undo the
+      // vehicle you just picked
+      const o = (landing() ? LANDING_PRESETS : PRESETS)[k];
+      const keep = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
+                    'tli_mag_err_pct','tli_point_err_deg'].concat(LANDING_FIELDS);
+      for (const f of keep) if (DEFAULTS[f] !== undefined) setField(f, DEFAULTS[f]);
+      for (const kk in o) setField(kk, o[kk]);
+      fetchGeo(); doRun();
+    });
+  renderMissionPresets();
+  chips('vpresets', Object.keys(VEHICLES), k => {
+    VNAME = k.replace(/\s*\(.*\)$/, '');
+    applyPreset(VEHICLES[k], { reset: true });
+    for (const el of $('vpresets').querySelectorAll('.chip'))
+      el.classList.toggle('sel', el.dataset.p === k);
+    fetchGeo(); doRun();
+  });
+}
+let renderMissionPresets = () => {};
+
+// ------------------------------------------------------------ mission mode --
+function setMode(m) {
+  MODE = m;
+  for (const b of $('modeswitch').querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.mode === m);
+  $('card_flyby').classList.toggle('hidden', landing());
+  $('card_landing').classList.toggle('hidden', !landing());
+  $('card_descent').classList.toggle('hidden', !landing());
+  $('moonview').classList.toggle('hidden', !landing());
+  // the cinematic view flies the pad-to-splashdown profile; say so rather
+  // than quietly showing a different mission
+  $('launchbtn').title = landing()
+    ? 'cinematic launch view — flies this vehicle on the free-return profile, pad to splashdown'
+    : "cinematic pad-cam liftoff, flown from this run's parameters";
+  $('tagline').textContent = landing()
+    ? 'free return, insertion, and a powered descent — pad to lunar surface'
+    : 'circumlunar free return — configure, run, explore';
+  $('modenote').textContent = landing()
+    ? 'the lander stops at the Moon: insertion at perilune, a lunar parking orbit, then a guided descent to touchdown'
+    : 'a pod around the Moon and home — nothing is left behind and nothing has to stop';
+  if (landing() && moonView === null) moonView = false;
+  renderMissionPresets();
+  fillSolveParams();
+  renderLegend();
+  updateLanderNote();
+}
+function renderLegend() {
+  const items = landing() ? [
+    ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'TLI burn'],
+    ['#199e70', 'outbound'], ['#c98500', 'lunar orbit'], ['#d55181', 'descent'],
+  ] : [
+    ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'TLI burn'],
+    ['#199e70', 'outbound'], ['#c98500', 'return'], ['#d55181', 'entry'],
+  ];
+  const dots = landing()
+    ? [['#6b6b66', 'Moon'], ['#8fbef0', 'launch site']]
+    : [['#6b6b66', 'Moon'], ['#8fbef0', 'launch site'], ['#f2c14e', 'splashdown']];
+  $('legend').innerHTML =
+    items.map(([c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join('') +
+    dots.map(([c, t]) =>
+      `<span><i style="background:${c};height:8px;width:8px;border-radius:50%"></i>${t}</span>`).join('');
+}
+// what the lander carries, before anything is flown — the number that decides
+// whether the mission is possible at all
+function updateLanderNote() {
+  if (!landing() || !$('l_derived')) return;
+  const dry = +$('l_dry').value, pr = +$('l_prop').value;
+  const isp = +$('l_isp').value, T = +$('l_thrust_kn').value * 1000;
+  const wet = dry + pr;
+  const dv = 9.80665 * isp * Math.log(wet / dry);
+  // insertion from a free return plus a descent is about 2.8 km/s
+  const need = 2800;
+  const twr = T / (wet * 1.625);
+  $('l_derived').innerHTML =
+    `${(wet/1000).toFixed(1)} t wet · Δv <b class="${dv < need ? 'bad' : dv < need*1.15 ? 'warn' : 'good'}">` +
+    `${Math.round(dv)} m/s</b> ideal (needs ≈ ${need})` +
+    ` · lunar T/W <b class="${twr < 1.05 ? 'bad' : ''}">${twr.toFixed(2)}</b> at ignition`;
 }
 
 // ---------------------------------------------------------------- wire up --
 $('run').onclick = () => { fetchGeo(); doRun(); };
 $('sweepbtn').onclick = doSweep;
 $('sweep_metric').onchange = drawSweep;
-$('play').onclick = () => togglePlay();
-$('scrub').oninput = e => { if (S) ti = Math.round(e.target.value/1000*(S.n-1)); };
+$('play').onclick = () => { geoFollow = true; togglePlay(); };
+$('scrub').oninput = e => {
+  geoFollow = true;
+  if (S) ti = Math.round(e.target.value/1000*(S.n-1));
+};
 $('frame').onclick = e => {
   rotFrame = !rotFrame;
   e.target.classList.toggle('on', rotFrame);
   e.target.textContent = rotFrame ? 'inertial frame' : 'rotating frame';
 };
 for (const el of document.querySelectorAll('[data-zoom]'))
-  el.onclick = () => camDist = +el.dataset.zoom;
-$('launchbtn').onclick = () => window.open('/launch?' + params(), '_blank');
+  el.onclick = () => {
+    moonView = false;
+    $('moonview').classList.remove('on');
+    if (el.dataset.zoom === 'fit') { autoFit = true; fitCamera(); }
+    else { autoFit = false; camDist = +el.dataset.zoom; }
+  };
+$('moonview').onclick = () => {
+  moonView = !moonView;
+  $('moonview').classList.toggle('on', moonView);
+};
+for (const b of $('modeswitch').querySelectorAll('button'))
+  b.onclick = () => {
+    if (b.dataset.mode === MODE) return;
+    setMode(b.dataset.mode);
+    // a landing mission needs a launcher that can throw a lander; the
+    // reference vehicle cannot, and saying so with a failed run is worse
+    // than starting from one that can
+    if (landing() && +$('diameter').value < 5) {
+      VNAME = 'Starship';
+      applyPreset(VEHICLES['Starship (expendable)'], { reset: true });
+      for (const el of $('vpresets').querySelectorAll('.chip'))
+        el.classList.toggle('sel', el.dataset.p === 'Starship (expendable)');
+    }
+    fetchGeo();
+    doRun();
+  };
+// the launch view is a flyby experience: it flies pad to splashdown
+$('launchbtn').onclick = () => {
+  const u = params();
+  u.set('mode', 'flyby');
+  window.open('/launch?' + u, '_blank');
+};
+for (const f of ['l_dry','l_prop','l_isp','l_thrust_kn'])
+  $(f).addEventListener('input', updateLanderNote);
+// keyboard: the timeline and the camera are things you drive, not click
+window.addEventListener('keydown', e => {
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test((e.target.tagName || ''))) return;
+  const k = e.key.toLowerCase();
+  if (k === 'r') { fetchGeo(); doRun(); }
+  else if (e.key === ' ') { togglePlay(); e.preventDefault(); }
+  else if (e.key === 'ArrowRight' && S) { geoFollow = true; ti = Math.min(S.n-1, ti + Math.max(1, S.n/200|0)); $('scrub').value = 1000*ti/(S.n-1); }
+  else if (e.key === 'ArrowLeft' && S) { geoFollow = true; ti = Math.max(0, ti - Math.max(1, S.n/200|0)); $('scrub').value = 1000*ti/(S.n-1); }
+  else if (k === 'f') $('frame').click();
+  else if (k === 'e') { moonView = false; autoFit = false; camDist = 30; }
+  else if (k === 'z') { moonView = false; autoFit = true; fitCamera(); }
+  else if (k === 'l') $('launchbtn').click();
+  else if (k === 'm' && landing()) $('moonview').click();
+});
 const scene = $('scene');
 let drag = null;
 scene.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; scene.setPointerCapture(e.pointerId); });
@@ -1285,7 +1897,9 @@ scene.addEventListener('pointermove', e => {
 scene.addEventListener('pointerup', () => drag = null);
 scene.addEventListener('wheel', e => {
   e.preventDefault();
-  camDist = Math.min(2400, Math.max(30, camDist * (e.deltaY > 0 ? 1.12 : 0.89)));
+  const f = e.deltaY > 0 ? 1.12 : 0.89;
+  if (moonView) moonDist = Math.min(60000, Math.max(1900, moonDist * f));
+  else { autoFit = false; camDist = Math.min(2400, Math.max(30, camDist * f)); }
 }, { passive: false });
 const geoCv = $('geo');
 let gdrag = null;
@@ -1318,11 +1932,33 @@ $('nboost').addEventListener('change', () => {
 $('solvebtn').onclick = doSolve;
 $('solve_param').addEventListener('change', e => e.target.dataset.touched = '1');
 
+// collapsible cards: click the header, and the state is remembered for the
+// session so a page you have arranged stays arranged
+for (const hd of document.querySelectorAll('h2.fold'))
+  hd.onclick = () => {
+    const c = hd.parentElement;
+    c.classList.toggle('closed');
+    try { sessionStorage.setItem('fold:' + c.id, c.classList.contains('closed')); }
+    catch (e) {}
+  };
+for (const c of document.querySelectorAll('.card')) {
+  try {
+    if (c.id && sessionStorage.getItem('fold:' + c.id) === 'true')
+      c.classList.add('closed');
+  } catch (e) {}
+}
+
 requestAnimationFrame(tick);
 // catalogues first: the stage form has no options until they arrive
 fillCatalogues().then(() => {
   buildStages();
   initPresets();
+  setMode(new URLSearchParams(location.search).get('mode') === 'landing'
+          ? 'landing' : 'flyby');
+  if (landing()) {
+    VNAME = 'Starship';
+    applyPreset(VEHICLES['Starship (expendable)'], { reset: true });
+  }
   fetchGeo();
   doRun();
 });

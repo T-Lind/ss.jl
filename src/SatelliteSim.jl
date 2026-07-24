@@ -55,12 +55,16 @@ include("rcs.jl")
 include("engines.jl")
 include("propulsion.jl")
 include("moon.jl")
+include("terrain.jl")
 include("launch.jl")
 include("translunar.jl")
 include("simulation.jl")
 include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
+include("landingnav.jl")
+include("landing.jl")
+include("lunarreturn.jl")
 include("maneuvers.jl")
 include("solve.jl")
 include("mesh.jl")
@@ -83,7 +87,8 @@ export
     # aero / vehicle
     Table1D, interp1, CapsuleAero, default_capsule_aero, scaled_aero,
     cd_coeff, cl_coeff, cm_coeff,
-    Parachute, Vehicle, default_reentry_pod, ballistic_coefficient,
+    Parachute, Vehicle, default_reentry_pod, apollo_capsule,
+    ballistic_coefficient,
     # heating
     heating_convective, heating_radiative, wall_temperature,
     # dynamics / sim
@@ -100,7 +105,7 @@ export
     Propellant, PROPELLANTS, propellant, bulk_density, propellant_volumes,
     Engine, ENGINES, engine, lookup_engine, stage_mass, sized_stage,
     # propulsion / launch vehicle
-    Stage, LaunchVehicle, BoosterSet, default_moon_rocket,
+    Stage, LaunchVehicle, BoosterSet, default_moon_rocket, starship_expendable,
     stage_thrust, stage_mdot, booster_mass, booster_thrust, booster_mdot,
     frontal_area, core_diameter, pad_thrust,
     stage_burn_time, stage_dv, liftoff_mass, stack_mass_above,
@@ -109,6 +114,11 @@ export
     MU_MOON, R_MOON, A_MOON, N_MOON,
     CircularMoonEphemeris, coplanar_moon, moon_position, moon_velocity,
     moon_distance, moon_altitude,
+    # lunar terrain
+    LunarTerrain, mare_terrain, highland_terrain, terrain_height, terrain_radius,
+    terrain_normal, terrain_slope, site_hazard, safe_site, surface_offset,
+    SurfaceModel, surface_radius, surface_altitude, ground_elevation,
+    terrain_profile, moonfixed, moonfixed_inv, moonfixed_basis,
     # launch
     AscentGuidance, AscentResult, simulate_ascent, tune_ascent, launch_azimuth,
     # rigid body / attitude
@@ -125,6 +135,23 @@ export
     design_tcm, fly_cislunar_tcm,
     # mission
     MoonshotResult, CruiseReport, moonshot, print_moonshot_summary,
+    translunar_design,
+    # lunar landing
+    Lander, default_lander, lander_mass, lander_dv, LandingResult, DescentResult,
+    DescentLog, LunarOrbitLog, moonlanding, print_landing_summary,
+    fly_to_perilune, loi_burn, doi_burn, powered_descent, tune_braking,
+    terminal_descent, mci_state, selenographic, apollo_landing,
+    AscentStage, ascent_mass, ascent_dv, Orbiter, orbiter_mass, orbiter_dv,
+    # coming back
+    LunarAscentResult, AscentMoonLog, ReturnResult, lunar_ascent,
+    tune_lunar_ascent, lunar_rendezvous, plan_rendezvous,
+    trans_earth_injection, moonreturn, print_return_summary,
+    DescentConfig, nominal,
+    # lunar gravity field
+    Mascon, LunarGravity, default_mascons, lunar_gravity, gravity_anomaly,
+    # descent navigation, radar and hazard avoidance
+    LandingRadar, DescentNav, perfect_nav, NavState, init_nav, nav_altitude,
+    nav_propagate!, radar_update!, nav_error, HazardScan, redesignate,
     # maneuvers
     lambert, hohmann, plane_change_dv, impulsive_prop, stumpff,
     cw_stm, cw_propagate, cw_two_impulse,

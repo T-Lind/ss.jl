@@ -167,6 +167,44 @@ const LV_CD_TABLE = Table1D(
 )
 
 """
+    starship_expendable(; payload = 12500.0)
+
+A Starship-class two-stage methalox vehicle, flown expendably: a 9 m core
+with 33 sea-level Raptors under 3400 t of propellant, and a 6-engine upper
+stage with 1200 t that does insertion *and* trans-lunar injection itself —
+no kick stage, because at this scale the ship is the kick stage.
+
+Dry masses come from `sized_stage`'s mass-estimating relations rather than
+from a data sheet, so they are conceptual figures (about 190 t and 60 t)
+rather than SpaceX's. The point of the vehicle here is the difference in
+kind: the reference Sable tops out around 400 kg through TLI, while this
+throws tens of tonnes, which is the entire reason a lander mission is
+possible at all.
+
+It wants a **shallower pitch-over kick** than the reference vehicle — around
+5° against Sable's 8°. Nothing is wrong with 8°; it simply lofts a stack
+with this much upper-stage thrust, and the shooter cannot recover the
+trajectory from there. `optimize_kick = true` finds the angle on its own.
+"""
+function starship_expendable(; payload::Float64 = 12500.0)
+    d = 9.0
+    LaunchVehicle(
+        name = "Starship (expendable)",
+        stages = [
+            sized_stage(:superheavy; engine = :raptor_2, n_engines = 33,
+                        prop_mass = 3400.0e3, diameter = d),
+            sized_stage(:ship; engine = :raptor_2, n_engines = 6,
+                        prop_mass = 1200.0e3, diameter = d),
+        ],
+        # the payload rides inside the ship, so there is no separate fairing
+        fairing_mass = 0.0,
+        payload_mass = payload,
+        sref = pi * (d / 2)^2,
+        cd = LV_CD_TABLE,
+    )
+end
+
+"""
     default_moon_rocket(; payload = 350.0)
 
 Three-stage launch vehicle sized to send a ~350 kg reentry pod around the

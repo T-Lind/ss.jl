@@ -42,7 +42,83 @@ struct MoonshotResult
 end
 
 """
-    moonshot(; pod_mass=350.0, h_park=200e3, hp_moon=2000e3, hp_return=35e3,
+    translunar_design(lv; h_park, hp_moon, hp_return, inclination,
+                      optimize_kick, cis_eta, perigee_tol, verbose)
+
+Everything both lunar missions share: fly the ascent, build the coplanar
+lunar ephemeris in the achieved plane, and design the free return. Returns
+the ascent products, the ephemeris, the TLI solution `(t_ign, dv)`, the
+verification flight, and the trans-lunar stack mass — from which a flyby
+mission carries on to entry and a landing mission stops at perilune.
+
+The landing mission arrives on a free return for the same reason Apollo did:
+if the insertion burn does not happen, the trajectory comes home on its own.
+"""
+function translunar_design(lv::LaunchVehicle;
+                           h_park::Float64 = 200.0e3,
+                           hp_moon::Float64 = 2000.0e3,
+                           hp_return::Float64 = 50.0e3,
+                           inclination::Float64 = deg2rad_(28.5),
+                           kick_angle::Float64 = deg2rad_(8.0),
+                           optimize_kick::Bool = false,
+                           cis_eta::Float64 = SatelliteSim.CIS_ETA,
+                           perigee_tol::Float64 = SatelliteSim.PERIGEE_TOL,
+                           tol_perigee_km::Float64 = 2.0,
+                           verbose::Bool = false)
+    az = launch_azimuth(inclination, deg2rad_(28.5))
+    guid0 = AscentGuidance(azimuth = az, h_target = h_park,
+                           kick_angle = kick_angle)
+    guid, asc = tune_ascent(lv, guid0; optimize_kick = optimize_kick,
+                            verbose = verbose)
+    asc.reached_orbit ||
+        error("ascent failed to reach orbit (h_cut=$(asc.h_cut/1e3) km, gamma=$(rad2deg_(asc.gamma_cut))°)")
+    # Reaching the target *energy* is not the same as reaching the target
+    # *orbit*: a stack whose pitch program the shooter could not close arrives
+    # fast and steep, and the elements come back with the perigee underground.
+    # Saying so here beats designing a trans-lunar injection off it.
+    el0 = asc.elements
+    (el0.rp > RE_MEAN + 0.5 * h_park && abs(asc.gamma_cut) < deg2rad_(1.0)) ||
+        error("ascent reached orbital energy but not the orbit " *
+              "(perigee $(round((el0.rp - RE_MEAN)/1e3, digits=0)) km, " *
+              "gamma $(round(rad2deg_(asc.gamma_cut), digits=2))°) — the pitch " *
+              "program did not close at a $(round(rad2deg_(kick_angle), digits=1))° " *
+              "pitch-over kick; try another kick angle or turn on the kick search")
+
+    # jettison the insertion stage (with any residuals) before the TLI coast:
+    # the kick stage + payload alone make the trans-lunar stack
+    m_stack = asc.m
+    for k in 1:length(lv.stages)-1
+        if asc.prop_left[k] > 0
+            m_stack -= lv.stages[k].mdry + asc.prop_left[k]
+        end
+    end
+
+    el = asc.elements
+    Tpark = 2pi * sqrt(el.a^3 / MU_EARTH)
+    n_sc = 2pi / Tpark
+    lead, tf, dv_seed = seed_free_return(asc.r, asc.v)
+    # put the patched-conic alignment ~0.55 revs after insertion so the
+    # design scan (one revolution wide) brackets it
+    t_des = 0.55 * Tpark
+    phase_at_insertion = lead + (n_sc - N_MOON) * t_des
+    eph = coplanar_moon(asc.r, asc.v;
+                        phase0 = phase_at_insertion - N_MOON * asc.t)
+
+    kick = lv.stages[end]
+    t_ign, dv, cis = design_free_return(asc.r, asc.v, asc.t, eph;
+                                        eta = cis_eta, perigee_tol = perigee_tol,
+                                        stage = kick, m_stack = m_stack,
+                                        prop_avail = asc.prop_left[end],
+                                        hp_moon_target = hp_moon,
+                                        hp_return_target = hp_return,
+                                        tol_perigee_km = tol_perigee_km,
+                                        verbose = verbose)
+    (guid = guid, ascent = asc, eph = eph, t_ign = t_ign, dv = dv,
+     cis = cis, m_stack = m_stack, kick = kick)
+end
+
+"""
+    moonshot(; pod_mass=350.0, h_park=200e3, hp_moon=2000e3, hp_return=50e3,
              inclination=deg2rad_(28.5), verbose=false) -> MoonshotResult
 
 Design and fly the whole mission. `hp_moon` is the perilune altitude of the
@@ -63,6 +139,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   tli_mag_err::Float64 = 0.0,
                   tli_point_err::Float64 = 0.0,
                   tcm_delay::Float64 = 86400.0,
+                  kick_angle::Float64 = deg2rad_(8.0),
                   optimize_kick::Bool = false,
                   # numerical knobs, exposed so a convergence study needs no
                   # source edit: coast step as a fraction of the local orbital
@@ -70,47 +147,18 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   cis_eta::Float64 = SatelliteSim.CIS_ETA,
                   perigee_tol::Float64 = SatelliteSim.PERIGEE_TOL,
                   verbose::Bool = false)
-    # --- 1. launch to parking orbit ----------------------------------------
+    # --- 1-3. launch, ephemeris, free-return design ------------------------
     # a supplied launch vehicle wins; its payload IS the pod
     lv === nothing && (lv = default_moon_rocket(payload = pod_mass))
     pod_mass = lv.payload_mass
-    az = launch_azimuth(inclination, deg2rad_(28.5))
-    guid0 = AscentGuidance(azimuth = az, h_target = h_park)
-    guid, asc = tune_ascent(lv, guid0; optimize_kick = optimize_kick,
+    des = translunar_design(lv; h_park = h_park, hp_moon = hp_moon,
+                            hp_return = hp_return, inclination = inclination,
+                            kick_angle = kick_angle, optimize_kick = optimize_kick,
+                            cis_eta = cis_eta, perigee_tol = perigee_tol,
                             verbose = verbose)
-    asc.reached_orbit ||
-        error("ascent failed to reach orbit (h_cut=$(asc.h_cut/1e3) km, gamma=$(rad2deg_(asc.gamma_cut))°)")
-
-    # jettison the insertion stage (with any residuals) before the TLI coast:
-    # the kick stage + pod alone make the trans-lunar stack
-    m_stack = asc.m
-    for k in 1:length(lv.stages)-1
-        if asc.prop_left[k] > 0
-            m_stack -= lv.stages[k].mdry + asc.prop_left[k]
-        end
-    end
-
-    # --- 2. lunar ephemeris in the achieved orbit plane --------------------
-    el = asc.elements
-    Tpark = 2pi * sqrt(el.a^3 / MU_EARTH)
-    n_sc = 2pi / Tpark
-    lead, tf, dv_seed = seed_free_return(asc.r, asc.v)
-    # put the patched-conic alignment ~0.55 revs after insertion so the
-    # design scan (one revolution wide) brackets it
-    t_des = 0.55 * Tpark
-    phase_at_insertion = lead + (n_sc - N_MOON) * t_des
-    eph = coplanar_moon(asc.r, asc.v;
-                        phase0 = phase_at_insertion - N_MOON * asc.t)
-
-    # --- 3. free-return design ---------------------------------------------
-    kick = lv.stages[end]
-    t_ign, dv, cis = design_free_return(asc.r, asc.v, asc.t, eph;
-                                        eta = cis_eta, perigee_tol = perigee_tol,
-                                        stage = kick, m_stack = m_stack,
-                                        prop_avail = asc.prop_left[end],
-                                        hp_moon_target = hp_moon,
-                                        hp_return_target = hp_return,
-                                        verbose = verbose)
+    guid, asc, eph = des.guid, des.ascent, des.eph
+    t_ign, dv, cis = des.t_ign, des.dv, des.cis
+    m_stack, kick = des.m_stack, des.kick
     cis.outcome == :entry_interface ||
         error("free-return design did not come home (outcome: $(cis.outcome))")
 
