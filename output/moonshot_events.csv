@@ -11,6 +11,6 @@ cislunar,tli_cutoff,3483.01,,
 cislunar,perilune,282554.34,1999983.7,
 cislunar,entry_handoff,562104.88,140000,
 entry,entry_interface,562121.17,120000.0,10589.1
-entry,deploy_drogue,567282.77,8995.4,106.1
-entry,deploy_main,567493.17,2998.6,23.8
-entry,splashdown,568100.40,-0.0,4.5
+entry,deploy_drogue,567272.97,8996.4,102.2
+entry,deploy_main,567484.57,2996.2,23.7
+entry,splashdown,568091.49,-0.0,4.5

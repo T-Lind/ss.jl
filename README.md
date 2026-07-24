@@ -307,7 +307,7 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (324 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (329 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
 # propellant/engine consistency and stage sizing, scalar targeting including
@@ -630,11 +630,34 @@ corridor by roughly 15 km. That is why the default stays fixed lift-up (the
 nominal perigee is held to 250 m) and the law is there for when the corridor
 is uncertain — a dispersed TLI, a missed correction, an off-nominal return.
 
-One assumption is worth naming: the 4-DOF model holds the trim lift vector at
-the commanded bank angle. A real capsule only does that with active roll
-control, and the 6-DOF model — which lets it roll freely — flies a visibly
-different trajectory with the same aero. The 6 g figure is therefore a
-*guided* entry number, not what an uncontrolled lifting capsule would get.
+**Roll control is simulated, not assumed.** The 4-DOF model holds the
+commanded bank by construction; a real capsule only does that with RCS. The
+6-DOF model flying `rcs_mode = :bank_hold` now reproduces the 4-DOF result to
+0.01 g and prices it at **0.26 kg** of propellant. Without roll control the
+same vehicle lets its lift vector tumble and pulls 13 g instead of 6.4 — so
+the low number is genuinely a *guided* entry number, and now the guidance is
+in the loop rather than in the assumptions.
+
+Getting there exposed a modelling inconsistency worth recording. Trim lift
+and trim angle of attack are the same physical fact — an offset centre of
+gravity produces both — but the aero database let you set one without the
+other. With `cl_trim_hyp = 0.45` and `alpha_trim = 0`, the 4-DOF looked fine
+(it constructs the lift direction from `bank`), while the 6-DOF flew at
+**0.0° AoA**: the pitching moment restored toward zero, the off-wind body
+component that carries the lift collapsed, and its direction became numerical
+noise. Roll control burned 2.7 kg chasing a vector that was not there. The
+two are now tied in `default_reentry_pod`, and the models agree.
+
+Reaction wheels are the wrong device for this and the numbers are not close.
+At peak dynamic pressure the aero restoring torque at 5° off trim is
+**182 N·m**; a large reaction wheel (0.5 N·m, 20 N·m·s) has 0.3% of that
+authority and saturates in **0.11 s**. RCS at 26 N·m is also under the aero
+torque — and does not need to match it, because the capsule is
+aerodynamically stable in pitch and yaw and self-trims. Roll is the only axis
+with no restoring moment, so roll is the only axis worth spending propellant
+on. For the cruise, RCS spends 1.04 kg over 6.5 days against an 11 kg margin,
+so wheels would save about a kilogram while costing more than that in mass,
+plus RCS for desaturation anyway.
 
 ### Verification
 

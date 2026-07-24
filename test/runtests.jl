@@ -818,6 +818,26 @@ end
     @test saved.peak_gload < 8.0
     @test fly(0.45; bank = gload_bank(6.0)).peak_gload > lift.peak_gload
 
+    # --- roll control, simulated rather than assumed --------------------
+    # The 4-DOF holds the commanded bank by construction. With a coherent
+    # trim (nonzero AoA from the same CG offset that makes the lift), the
+    # 6-DOF flying RCS roll control reproduces it — and prices it.
+    scn6 = Scenario(vehicle = mkpod(0.45), r0 = ms.cislunar.r, v0 = ms.cislunar.v,
+                    t0 = ms.cislunar.t, t_max = ms.cislunar.t + 6.0e4,
+                    alpha0 = deg2rad_(25.0), bank = 0.0)
+    held = simulate_entry6(scn6; rcs = default_pod_rcs(), rcs_mode = :bank_hold)
+    @test held.terminated == :splashdown
+    @test isapprox(held.peak_gload, lift.peak_gload; rtol = 0.02)
+    @test 0.05 < held.rcs_used < 1.0        # roll control costs a few hundred grams
+    # the capsule really does sit at its trim angle, which is what gives the
+    # lift vector a defined direction to be rolled
+    ip = argmax(held.log.gload)
+    @test isapprox(rad2deg_(held.log.alpha_t[ip]), 25.0; atol = 3.0)
+    # without roll control the same vehicle tumbles its lift vector and the
+    # entry is a different, harsher trajectory
+    free = simulate_entry6(scn6)
+    @test free.peak_gload > 1.3 * held.peak_gload
+
     # the law is a plain callable, evaluated on the current load factor
     law = gload_bank(6.0)
     @test law(0.0, 120e3, 11e3, 0.0) > deg2rad_(140.0)   # unloaded -> lift down
