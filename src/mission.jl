@@ -64,6 +64,13 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   tli_point_err::Float64 = 0.0,
                   tcm_delay::Float64 = 86400.0,
                   optimize_kick::Bool = false,
+                  # Earth rotation angle at liftoff. Every simulator in the
+                  # chain already took this; `moonshot` simply never passed it,
+                  # so every mission implicitly lifted off at Greenwich hour
+                  # angle 0 and no two flights could be placed on a common
+                  # clock. Set it (or get it from `launch_window`) and the
+                  # flight lands in a definite inertial plane.
+                  theta_g0::Float64 = 0.0,
                   # numerical knobs, exposed so a convergence study needs no
                   # source edit: coast step as a fraction of the local orbital
                   # period, and the free return's perigee acceptance band [m]
@@ -77,7 +84,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
     az = launch_azimuth(inclination, deg2rad_(28.5))
     guid0 = AscentGuidance(azimuth = az, h_target = h_park)
     guid, asc = tune_ascent(lv, guid0; optimize_kick = optimize_kick,
-                            verbose = verbose)
+                            theta_g0 = theta_g0, verbose = verbose)
     asc.reached_orbit ||
         error("ascent failed to reach orbit (h_cut=$(asc.h_cut/1e3) km, gamma=$(rad2deg_(asc.gamma_cut))°)")
 
@@ -106,6 +113,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
     kick = lv.stages[end]
     t_ign, dv, cis = design_free_return(asc.r, asc.v, asc.t, eph;
                                         eta = cis_eta, perigee_tol = perigee_tol,
+                                        theta_g0 = theta_g0,
                                         stage = kick, m_stack = m_stack,
                                         prop_avail = asc.prop_left[end],
                                         hp_moon_target = hp_moon,
@@ -121,18 +129,18 @@ function moonshot(; pod_mass::Float64 = 350.0,
         # value) so the TCM reproduces the same physical return, and grab the
         # nominal perilune-epoch position as the return-to-reference target
         nomfly = fly_cislunar(asc.r, asc.v, asc.t, eph;
-                              eta = cis_eta,
+                              eta = cis_eta, theta_g0 = theta_g0,
                               t_ign = t_ign, dv = dv, stage = kick,
                               m_stack = m_stack, prop_avail = asc.prop_left[end],
                               stop_after_flyby = true, t_max = 10.0 * 86400.0)
         proxy = nomfly.vac_perigee_alt
         refleg = fly_cislunar(asc.r, asc.v, asc.t, eph;
-                              eta = cis_eta,
+                              eta = cis_eta, theta_g0 = theta_g0,
                               t_ign = t_ign, dv = dv, stage = kick,
                               m_stack = m_stack, prop_avail = asc.prop_left[end],
                               t_max = nomfly.t_perilune - asc.t)
         cis_d, tcm_dv = fly_cislunar_tcm(asc.r, asc.v, asc.t, eph;
-                                         eta = cis_eta,
+                                         eta = cis_eta, theta_g0 = theta_g0,
                                          t_ign = t_ign, dv = dv, stage = kick,
                                          m_stack = m_stack,
                                          prop_avail = asc.prop_left[end],
@@ -156,7 +164,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
     # --- 4. entry handoff: jettison the spent kick stage, fly the pod ------
     pod = default_reentry_pod(mass = pod_mass)
     scn = Scenario(vehicle = pod, r0 = cis.r, v0 = cis.v,
-                   t0 = cis.t, t_max = cis.t + 3.0e4,
+                   t0 = cis.t, t_max = cis.t + 3.0e4, theta_g0 = theta_g0,
                    alpha0 = deg2rad_(5.0))
     entry = simulate(scn)
 
