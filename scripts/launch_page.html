@@ -446,9 +446,11 @@ function boxAt(out, c, s, col) {
     out[i+2] = c[2] + (out[i+2] - c[2]) * s[2];
   }
 }
-// capped cylinder along an arbitrary axis: tanks, pipes, columns, masts.
-// `r1` tapers the far end (lightning masts, vent stacks).
-function tube(out, p0, p1, r0, col, nseg = 12, r1 = r0) {
+// cylinder along an arbitrary axis: tanks, pipes, columns, masts. `r1` tapers
+// the far end (lightning masts, vent stacks); `caps` closes the ends, and is
+// worth turning off for runs whose ends are buried in something else — the
+// two cap fans are half the triangles of a short segment.
+function tube(out, p0, p1, r0, col, nseg = 12, r1 = r0, caps = true) {
   const ax = V.norm(V.sub(p1, p0));
   const up = Math.abs(ax[1]) > 0.9 ? [1,0,0] : [0,1,0];
   const s = V.norm(V.cross(ax, up)), u = V.cross(s, ax);
@@ -466,6 +468,7 @@ function tube(out, p0, p1, r0, col, nseg = 12, r1 = r0) {
     // 12-sided pipe does not read as a bundle of flat planks
     const n = V.norm(V.add(V.norm(V.sub(q00, p0)), V.norm(V.sub(q01, p0))));
     tri(q00, q01, q10, n); tri(q10, q01, q11, n);
+    if (!caps) continue;
     if (r0 > 1e-6) tri(p0, q01, q00, V.scale(ax, -1));
     if (r1 > 1e-6) tri(p1, q10, q11, ax);
   }
@@ -493,7 +496,7 @@ function railing(out, pts, h, col) {
     const a = pts[i], b = pts[i+1];
     for (const f of [0.55, 1.0])
       beam(out, [a[0], a[1]+h*f, a[2]], [b[0], b[1]+h*f, b[2]], 0.07, 0.07, col);
-    const n = Math.max(1, Math.round(V.len(V.sub(b, a))/2.6));
+    const n = Math.max(1, Math.round(V.len(V.sub(b, a))/3.4));
     for (let k = 0; k <= n; k++) {
       const q = V.lerp(a, b, k/n);
       beam(out, q, [q[0], q[1]+h, q[2]], 0.10, 0.10, col);
@@ -501,12 +504,12 @@ function railing(out, pts, h, col) {
   }
 }
 // sagging cable: the lightning catenary and every hoist and guy on the pad
-function cable(out, a, b, sag, r, col, n = 10) {
+function cable(out, a, b, sag, r, col, n = 8) {
   let prev = a;
   for (let k = 1; k <= n; k++) {
     const f = k/n, q = V.lerp(a, b, f);
     q[1] -= sag*4*f*(1-f);
-    tube(out, prev, q, r, col, 5);
+    tube(out, prev, q, r, col, 5, r, false);
     prev = q;
   }
 }
@@ -1100,6 +1103,16 @@ const HINGE_Z = TWZ + TWHF;        // swing arms pivot on the tower's near face
 const apR = () => Math.max(4.2, DIA*1.15);      // engine aperture radius [m]
 const trHW = () => Math.max(7.5, apR() + 3.0);  // trench half width, in x [m]
 const mntR = () => apR()*1.55 + 5.0;            // launch table outer radius [m]
+// Height of the deflector's working surface at a station down the trench:
+// the ramp is built to this profile and the exhaust is turned along it, so
+// the two cannot drift apart.
+const RAMP_Z1 = 11.0;
+function rampY(z) {
+  const za = TR_Z0 + 0.4;
+  if (z >= RAMP_Z1) return 0.9;                 // flat floor past the ramp
+  const f = Math.max(0, Math.min(1, (z - za)/(RAMP_Z1 - za)));
+  return 0.9 + (DECK - 1.2)*Math.pow(1 - f, 1.6);
+}
 
 const MAT = {
   conc:  [0.60,0.59,0.56], conc2:  [0.52,0.51,0.48], kerb:  [0.70,0.69,0.65],
@@ -1145,22 +1158,22 @@ function buildHardstand(out) {
   }
   // deflector: a stepped ramp climbing to the closed end, so the plume that
   // arrives straight down leaves horizontally toward +z
-  const N = 16, ZA = TR_Z0 + 0.4, ZB = 11.0;
+  const N = 16, ZA = TR_Z0 + 0.4;
   for (let k = 0; k < N; k++) {
-    const z0 = ZA + (ZB-ZA)*k/N, z1 = ZA + (ZB-ZA)*(k+1)/N;
-    const y = 0.6 + (DECK-1.2)*Math.pow(1 - k/(N-1), 1.6);
+    const z0 = ZA + (RAMP_Z1-ZA)*k/N, z1 = ZA + (RAMP_Z1-ZA)*(k+1)/N;
+    const y = rampY((z0 + z1)/2) - 0.3;
     boxAt(out, [0, 0.3 + y/2, (z0+z1)/2], [2*TR_HW-0.6, y, z1-z0],
           k % 2 ? M.steel : M.dark);
   }
   // deluge: headers down both lips, nozzles inboard, risers up from the main
   for (const sx of [-1, 1]) {
     tube(out, [sx*(TR_HW+1.9), DECK+0.55, TR_Z0], [sx*(TR_HW+1.9), DECK+0.55, TR_Z1],
-         0.34, M.pipe, 10);
-    for (let z = TR_Z0 + 3; z < TR_Z1 - 2; z += 3.2)
+         0.34, M.pipe, 8, 0.34, false);
+    for (let z = TR_Z0 + 3; z < TR_Z1 - 2; z += 4.5)
       tube(out, [sx*(TR_HW+1.9), DECK+0.55, z], [sx*(TR_HW-0.4), DECK+1.5, z],
-           0.11, M.pipe, 6);
+           0.11, M.pipe, 6, 0.11, false);
     tube(out, [sx*(TR_HW+1.9), 0.4, TR_Z0-6], [sx*(TR_HW+1.9), DECK+0.55, TR_Z0-6],
-         0.34, M.pipe, 10);
+         0.34, M.pipe, 8, 0.34, false);
   }
   // apron beyond the trench mouth, scoured where the plume lands and fading
   // back into the concrete at its edges
@@ -1191,9 +1204,9 @@ function buildHardstand(out) {
   }
   for (const [i, r] of [[0, 0.55], [1, 0.42], [2, 0.30]]) {
     const y = DECK + 1.9 + i*0.9;
-    tube(out, [-46, y, -32], [-11, y, -32], r, M.pipe, 10);
-    tube(out, [-11, y, -32], [-11, y, -6], r, M.pipe, 10);
-    tube(out, [-11, y, -6], [-11, PADH - 1.5, -6], r, M.pipe, 10);
+    tube(out, [-46, y, -32], [-11, y, -32], r, M.pipe, 8, r, false);
+    tube(out, [-11, y, -32], [-11, y, -6], r, M.pipe, 8, r, false);
+    tube(out, [-11, y, -6], [-11, PADH - 1.5, -6], r, M.pipe, 8, r, false);
   }
   for (let x = -44; x < -10; x += 7)                      // pipe-rack bents
     beam(out, [x, DECK, -32], [x, DECK+4.2, -32], 0.4, 0.4, M.steel);
@@ -1326,7 +1339,7 @@ function buildTower(out, th) {
   boxAt(out, [0, (y0+eh)/2, ez0-0.05], [4.0, eh-y0, 0.16], M.steel);
   for (const sx of [-1, 1])
     boxAt(out, [sx*2.05, (y0+eh)/2, (ez0+ez1)/2], [0.16, eh-y0, 3.4], M.steel);
-  for (let y = y0 + 2.4; y < eh; y += 2.4) {                        // rib lines
+  for (let y = y0 + 3.6; y < eh; y += 3.6) {                        // rib lines
     boxAt(out, [0, y, ez0-0.18], [4.2, 0.18, 0.2], M.tower);
     for (const sx of [-1, 1]) boxAt(out, [sx*2.18, y, (ez0+ez1)/2], [0.2, 0.18, 3.5], M.tower);
   }
@@ -1346,7 +1359,7 @@ function buildTower(out, th) {
   // service risers: propellant, gas and cable runs clamped to the -x face
   for (const [i, r] of [[0, 0.34], [1, 0.26], [2, 0.20], [3, 0.20]]) {
     const z = TWZ - 2.4 + i*1.6;
-    tube(out, [-HF-0.9, y0, z], [-HF-0.9, th-6, z], r, M.pipe, 8);
+    tube(out, [-HF-0.9, y0, z], [-HF-0.9, th-6, z], r, M.pipe, 8, r, false);
   }
   for (let y = y0 + 3; y < th - 6; y += BAY)
     beam(out, [-HF-0.5, y, TWZ-3.2], [-HF-0.5, y, TWZ+3.2], 0.3, 0.3, M.steel);
@@ -1455,7 +1468,7 @@ function buildGround(out) {
   for (let k = 0; k < 6; k++) {
     const a = k*Math.PI/3;
     tube(out, [wx + 6*Math.cos(a), 0, wz + 6*Math.sin(a)],
-         [wx + 3.4*Math.cos(a), 27, wz + 3.4*Math.sin(a)], 0.42, M.steel, 8);
+         [wx + 3.4*Math.cos(a), 27, wz + 3.4*Math.sin(a)], 0.42, M.steel, 8, 0.42, false);
   }
   for (const y of [9, 18])
     for (let k = 0; k < 6; k++) {
@@ -1468,9 +1481,9 @@ function buildGround(out) {
   tube(out, [wx, 24, wz], [wx, 27, wz], 6.4, M.tank, 18, 0.6);
   railing(out, [[wx-6.6, 40.2, wz], [wx, 40.2, wz-6.6], [wx+6.6, 40.2, wz],
                 [wx, 40.2, wz+6.6], [wx-6.6, 40.2, wz]], 1.0, M.steel);
-  tube(out, [wx+2, 27, wz], [wx+2, 1.2, wz], 0.6, M.pipe, 10);        // downcomer
-  tube(out, [wx+2, 1.2, wz], [wx+2, 1.2, TR_Z0-6], 0.6, M.pipe, 10);
-  tube(out, [wx+2, 1.2, TR_Z0-6], [-trHW()-1.9, 1.2, TR_Z0-6], 0.6, M.pipe, 10);
+  tube(out, [wx+2, 27, wz], [wx+2, 1.2, wz], 0.6, M.pipe, 8, 0.6, false);  // downcomer
+  tube(out, [wx+2, 1.2, wz], [wx+2, 1.2, TR_Z0-6], 0.6, M.pipe, 8, 0.6, false);
+  tube(out, [wx+2, 1.2, TR_Z0-6], [-trHW()-1.9, 1.2, TR_Z0-6], 0.6, M.pipe, 8, 0.6, false);
   boxAt(out, [wx+2, 1.6, TR_Z0-6], [3.0, 3.2, 3.0], M.steel);         // valve house
   // cryogenic farm: a LOX sphere and fuel tanks, each inside its own berm
   const bermRing = (x, z, r, h) => {
@@ -1486,12 +1499,12 @@ function buildGround(out) {
   for (let k = 0; k < 8; k++) {
     const a = k*Math.PI/4;
     tube(out, [lx + 7*Math.cos(a), 0, lz + 7*Math.sin(a)],
-         [lx + 7*Math.cos(a), 9, lz + 7*Math.sin(a)], 0.45, M.steel, 8);
+         [lx + 7*Math.cos(a), 9, lz + 7*Math.sin(a)], 0.45, M.steel, 8, 0.45, false);
   }
-  for (let i = 0; i < 5; i++)                            // ambient vaporisers
-    for (let k = 0; k < 4; k++)
-      tube(out, [lx + 15 + i*2.2, 0, lz + 14 + k*1.6],
-           [lx + 15 + i*2.2, 7, lz + 14 + k*1.6], 0.35, M.white, 6);
+  for (let i = 0; i < 4; i++)                            // ambient vaporisers
+    for (let k = 0; k < 3; k++)
+      tube(out, [lx + 15 + i*2.4, 0, lz + 14 + k*1.8],
+           [lx + 15 + i*2.4, 7, lz + 14 + k*1.8], 0.35, M.white, 6, 0.35, false);
   const fx = -74, fz = 22;
   bermRing(fx, fz, 18, 3.0);
   for (let i = 0; i < 3; i++) {
@@ -1503,10 +1516,10 @@ function buildGround(out) {
   // trestles, then up onto the hardstand
   for (const [i, r] of [[0, 0.55], [1, 0.42], [2, 0.30]]) {
     const y = 3.4 + i*0.9;
-    tube(out, [lx + 22, y, lz], [-50, y, lz], r, M.pipe, 8);
-    tube(out, [-50, y, lz], [-50, y, -32], r, M.pipe, 8);
-    tube(out, [-50, y, -32], [-46, DECK + 1.9 + i*0.9, -32], r, M.pipe, 8);
-    tube(out, [lx + 9, y, lz], [lx + 22, y, lz], r, M.pipe, 8);
+    tube(out, [lx + 22, y, lz], [-50, y, lz], r, M.pipe, 8, r, false);
+    tube(out, [-50, y, lz], [-50, y, -32], r, M.pipe, 8, r, false);
+    tube(out, [-50, y, -32], [-46, DECK + 1.9 + i*0.9, -32], r, M.pipe, 8, r, false);
+    tube(out, [lx + 9, y, lz], [lx + 22, y, lz], r, M.pipe, 8, r, false);
   }
   for (let x = lx + 24; x < -50; x += 8)
     beam(out, [x, 0, lz], [x, 3.2, lz], 0.45, 0.45, M.steel);
@@ -1549,11 +1562,11 @@ function buildGround(out) {
       boxAt(out, [x + i*1.1*Math.sin(a), 25.4, z - i*1.1*Math.cos(a)],
             [0.9, 0.7, 0.9], M.lamp);
   }
-  for (let k = 0; k < 72; k++) {
-    const a = k*2*Math.PI/72, b = (k+1)*2*Math.PI/72, R = 112;
+  for (let k = 0; k < 44; k++) {
+    const a = k*2*Math.PI/44, b = (k+1)*2*Math.PI/44, R = 112;
     const p = [R*Math.cos(a), 0, R*Math.sin(a)], q = [R*Math.cos(b), 0, R*Math.sin(b)];
     beam(out, p, [p[0], 2.6, p[2]], 0.14, 0.14, M.steel);
-    for (const y of [1.0, 2.0, 2.55])
+    for (const y of [1.3, 2.55])
       beam(out, [p[0], y, p[2]], [q[0], y, q[2]], 0.05, 0.05, M.steel);
   }
 }
@@ -1643,12 +1656,32 @@ const jit = s => [rnd(s,-s), rnd(s,-s), rnd(s,-s)];
 // Local "up" for the current world: the pad and splash frames are anchored
 // y-up, but ECI has no up at all, so buoyancy is simply switched off there.
 let PUP = [0, 1, 0];
+// The trench is only a shape until the exhaust obeys it. On the pad, a
+// particle that reaches the deflector stops descending and trades its
+// downward momentum for downrange momentum, so the plume turns in the
+// channel and leaves by the mouth — instead of falling through six metres
+// of concrete and lighting the ground under the hardstand (the planet is a
+// ray-marched pass that writes no depth, so nothing else would hide it).
+let TRENCH = false;
+function trenchFlow(q) {
+  const hw = trHW();
+  if (Math.abs(q.p[0]) > hw + 2.5 || q.p[1] > DECK ||
+      q.p[2] < TR_Z0 - 1 || q.p[2] > TR_Z1 + 4) return;
+  const floor = rampY(q.p[2]) + 0.5;
+  if (q.p[1] >= floor) return;
+  q.p[1] = floor;
+  const down = Math.max(0, -q.v[1]);
+  q.v[1] = down*0.10;                     // a little rebound up the ramp face
+  q.v[2] += down*0.80;                    // the rest of it goes downrange
+  q.v[0] *= 0.55;
+}
 function stepParticles(dt) {
   for (let i = parts.length-1; i >= 0; i--) {
     const q = parts[i];
     q.age += dt;
     if (q.age >= q.life) { parts.splice(i,1); continue; }
     q.p[0] += q.v[0]*dt; q.p[1] += q.v[1]*dt; q.p[2] += q.v[2]*dt;
+    if (TRENCH && q.kind !== 2) trenchFlow(q);
     q.size += q.grow*dt;
     if (q.kind === 1) {
       // isotropic drag: damping only the horizontal components turned every
@@ -2200,6 +2233,9 @@ function buildScene(ph) {
       }
     }
     PUP = [0, 1, 0];
+    // the deflector only has anything to turn while the vehicle is still on
+    // or just off the table
+    TRENCH = st.h < 260;
     return {
       world: 'pad', st, cam, craftM, craftPos: st.pos,
       earthC: [0, -RE, 0], moonC: null,
@@ -2220,6 +2256,7 @@ function buildScene(ph) {
     const cam = cameraEci(simT, cs, ph, craftM);
     const noz = V.add(cs.pos, V.scale(cs.bx, -0.5));
     PUP = null;                        // inertial frame: no up, no buoyancy
+    TRENCH = false;
     return {
       world: 'eci', cs, cam, craftM, craftPos: cs.pos, sun: SUNE,
       earthC: [0, 0, 0], moonC: cs.moon,
@@ -2239,6 +2276,7 @@ function buildScene(ph) {
                       mTrans([-xb, 0, 0]));
   const cam = cameraEntry(simT, es, craftM);
   PUP = [0, 1, 0];
+  TRENCH = false;
   return {
     world: 'entry', es, cam, craftM, craftPos: es.pos,
     earthC: [0, -RE, 0], moonC: null,
@@ -2409,10 +2447,15 @@ function drawScene(sc) {
     (s.name === 'cabin' ? !inCab : s.name === 'glass' ? inCab : false);
 
   if (sc.world === 'pad') {
-    drawWhole(padBuf, padN, mIdent(), proj);
-    drawWhole(towerBuf, towerN, mIdent(), proj);
-    bindMeshBuf(armBuf);
-    for (const a of armDraw) drawRange(armMat(a, simT), proj, a.first, a.count);
+    // The pad world runs all the way to orbit insertion, but the complex is
+    // 250 m across: from 20 km up it is a couple of pixels, so beyond that
+    // it is not drawn at all. The ground cameras never move, so they keep it.
+    if (V.len(cam.eye) < 20000) {
+      drawWhole(padBuf, padN, mIdent(), proj);
+      drawWhole(towerBuf, towerN, mIdent(), proj);
+      bindMeshBuf(armBuf);
+      for (const a of armDraw) drawRange(armMat(a, simT), proj, a.first, a.count);
+    }
     const rocketM = sc.craftM;
     bindMeshBuf(rocketBuf);
     for (const s of secDraw) {
