@@ -46,14 +46,18 @@ end
              inclination=deg2rad_(28.5), verbose=false) -> MoonshotResult
 
 Design and fly the whole mission. `hp_moon` is the perilune altitude of the
-flyby; `hp_return` the vacuum perigee of the return leg (sets the entry
-flight-path angle: ~35 km gives gamma_EI near -5.9 deg, mid-corridor for a
-ballistic lunar return).
+flyby; `hp_return` the vacuum perigee of the return leg, which sets the entry
+flight-path angle and so the whole character of the entry.
+
+The corridor is narrow. Below ~35 km the descent is steep enough that a
+ballistic capsule pulls 18 g; above ~65 km it skips back out and never comes
+home. The default 50 km gives gamma_EI ~ -6.25 deg, which with the pod's
+L/D ~ 0.3 flown lift-up peaks near 6 g — the Apollo entry point.
 """
 function moonshot(; pod_mass::Float64 = 350.0,
                   h_park::Float64 = 200.0e3,
                   hp_moon::Float64 = 2000.0e3,
-                  hp_return::Float64 = 35.0e3,
+                  hp_return::Float64 = 50.0e3,
                   inclination::Float64 = deg2rad_(28.5),
                   lv::Union{Nothing,LaunchVehicle} = nothing,
                   tli_mag_err::Float64 = 0.0,

@@ -132,9 +132,9 @@ against the 22.8 kg post-TLI kick margin, with 99% of samples reaching the
 entry corridor.
 
 Nominal circumlunar numbers (v0.2): TLI Δv 3151 m/s of a 3330 m/s budget,
-perilune 2000 ± 0.1 km, return vacuum perigee 35.2 km (γ ≈ −7.3° at 140 km),
-entry peak 18.0 g / 247 W/cm², stagnation heat load 104 MJ/m², splashdown
-6.5 days after liftoff at 4.5 m/s under main (3.3 d out, 3.2 d home — the
+perilune 2000 ± 0.1 km, return vacuum perigee 50.2 km (γ_EI ≈ −6.3°), entry
+peak **6.4 g** / 191 W/cm², stagnation heat load 187 MJ/m², splashdown
+6.6 days after liftoff at 4.5 m/s under main (3.3 d out, 3.2 d home — the
 symmetric free-return figure-8).
 
 These are reproducible, which they previously were not. The free-return
@@ -307,7 +307,7 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (308 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (318 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
 # propellant/engine consistency and stage sizing, scalar targeting including
@@ -584,6 +584,41 @@ geometry/           demo STL meshes (capsule, simplified Starship)
 | 6-DOF | the pitch channel is isolated in `dynamics.jl`; adding roll/yaw states extends the same pattern |
 | Higher-order integration | swap `rk4_step!` behind the same signature |
 | Mission Monte Carlo | disperse `Stage` performance, TLI execution errors, and ephemeris phase through `moonshot` the same way `run_montecarlo` disperses entry |
+
+### The entry corridor, and why the pod is lifting
+
+An early version of this flew a **ballistic** capsule down a 35 km-perigee
+return and peaked at **18 g**, holding above 15 g for 26 seconds. That is not
+a simulation artefact — it is the correct answer for that flight mode, and
+close to what Zond 5 actually pulled on the first ballistic circumlunar
+return. It is also why nobody flies crew that way.
+
+Two levers fix it, and the sim shows both:
+
+| return perigee | L/D | γ_EI | peak g | > 6 g | heat load |
+|---|---|---|---|---|---|
+| 35 km | 0 (ballistic) | −6.87° | 18.0 | 68 s | 104 MJ/m² |
+| 35 km | 0.3 | −6.87° | 9.4 | 30 s | 161 MJ/m² |
+| **50 km** | **0.3** | **−6.25°** | **6.4** | **12.5 s** | **187 MJ/m²** |
+| 65 km | 0.3 | −5.56° | 4.5 | 0 s | 247 MJ/m² |
+| 80 km | 0.3 | −4.77° | — | — | *skips out, never returns* |
+
+The default is the third row: `hp_return = 50 km` with `cl_trim_hyp = 0.45`
+(L/D ≈ 0.3, the Apollo figure) flown lift-up. That lands at 6.4 g and
+γ_EI = −6.3°, essentially the Apollo entry point.
+
+The corridor is genuinely narrow, and both walls are real: steepen it and the
+loads climb fast, shallow it past ~65 km and the vehicle skips back out and
+never comes home (the 80 km case terminates on timeout, not splashdown).
+The trade for the low g is **integrated heating, which nearly doubles** —
+a lifting entry soaks for longer even though its peak heat *rate* is lower,
+and it is the integral that sizes the ablator.
+
+One assumption is worth naming: the 4-DOF model holds the trim lift vector at
+the commanded bank angle. A real capsule only does that with active roll
+control, and the 6-DOF model — which lets it roll freely — flies a visibly
+different trajectory with the same aero. The 6 g figure is therefore a
+*guided* entry number, not what an uncontrolled lifting capsule would get.
 
 ### Verification
 

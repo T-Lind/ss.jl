@@ -252,7 +252,7 @@ end
     cis = ms.cislunar
     @test cis.outcome == :entry_interface
     @test isapprox(cis.perilune_alt, 2000e3; atol = 30e3)
-    @test isapprox(cis.vac_perigee_alt, 35e3; atol = 5e3)
+    @test isapprox(cis.vac_perigee_alt, 50e3; atol = 5e3)
     @test 2.5e3 < cis.dv_tli < 3.4e3
     # direct free return: entry on the FIRST post-flyby perigee pass, no
     # phasing loop back out past the Moon (regression: the design once
@@ -344,7 +344,7 @@ end
     @test abs(fine.entry.peak_gload - ms.entry.peak_gload) < 0.15
     # and both must actually sit on the requested target
     for r in (ms, fine)
-        @test abs(r.cislunar.vac_perigee_alt - 35e3) < 2 * SatelliteSim.PERIGEE_TOL
+        @test abs(r.cislunar.vac_perigee_alt - 50e3) < 2 * SatelliteSim.PERIGEE_TOL
     end
 end
 
@@ -402,7 +402,12 @@ end
 end
 
 @testset "6-DOF entry vs 4-DOF" begin
-    veh = default_reentry_pod()
+    # Compared ballistically on purpose. The 4-DOF model holds the trim lift
+    # vector at the commanded bank angle by construction; the 6-DOF model
+    # lets the capsule roll. With lift those are different physical problems
+    # — see the lifting-entry testset below — so the question "do the two
+    # integrators agree on the same dynamics" is only well posed at zero lift.
+    veh = default_reentry_pod(cl_trim_hyp = 0.0)
     scn = scenario_from_elements(DeorbitElements(), veh)
     r4 = simulate(scn)
     r6 = simulate_entry6(scn; rcs = default_pod_rcs())   # wind-hold coast
@@ -768,6 +773,41 @@ end
           length(pod_mesh(; radius = 1.20, ncrew = 3)[3])
 end
 
+@testset "lifting entry (lunar return corridor)" begin
+    # A ballistic capsule cannot fly a lunar return with people aboard: the
+    # same trajectory that peaks near 6 g with L/D 0.3 peaks at 18 g without
+    # it, and stays above 15 g for tens of seconds. This is the Zond-5 result,
+    # and it is why the default pod is lifting.
+    ms = moonshot()
+    @test ms.entry.peak_gload < 8.0                 # crew-survivable
+    @test 45e3 < ms.cislunar.vac_perigee_alt < 55e3
+
+    mkpod(cl) = default_reentry_pod(cl_trim_hyp = cl)
+    fly(cl; bank = 0.0) = simulate(Scenario(
+        vehicle = mkpod(cl), r0 = ms.cislunar.r, v0 = ms.cislunar.v,
+        t0 = ms.cislunar.t, t_max = ms.cislunar.t + 4.0e4,
+        alpha0 = deg2rad_(5.0), bank = bank))
+
+    ball, lift = fly(0.0), fly(0.45)
+    @test ball.peak_gload > 2.0 * lift.peak_gload    # lift roughly thirds it
+    @test ball.peak_gload > 12.0
+    @test lift.peak_gload < 8.0
+    @test lift.terminated == :splashdown
+    # the trade is integrated heating: a lifting entry soaks longer at a lower
+    # peak rate, and that is what sizes the ablator
+    @test lift.heat_load > ball.heat_load
+    @test lift.peak_qdot < ball.peak_qdot
+    # lift-down is the wrong way to point it: steeper, harder
+    @test fly(0.45; bank = Float64(pi)).peak_gload > lift.peak_gload
+
+    # the corridor really is bounded: too shallow and it never comes home
+    shallow = moonshot(hp_return = 80e3)
+    @test simulate(Scenario(vehicle = mkpod(0.45), r0 = shallow.cislunar.r,
+                            v0 = shallow.cislunar.v, t0 = shallow.cislunar.t,
+                            t_max = shallow.cislunar.t + 4.0e4,
+                            alpha0 = deg2rad_(5.0))).terminated == :timeout
+end
+
 @testset "Newtonian panel aero" begin
     @test isapprox(cp_max_newtonian(1e6), 1.8394; atol = 1e-3)  # M -> inf limit
     # sphere: CD = Cp_max/2 exactly in Newtonian theory
@@ -787,8 +827,12 @@ end
     @test abs(trim_alpha(pac)) < deg2rad_(1.0)
     @test 1.4 < cd_coeff(pac, 20.0, 0.0) < 2.0
 
-    # geometry-to-trajectory: fly the pod on mesh-derived aero
-    veh0 = default_reentry_pod()
+    # geometry-to-trajectory: fly the pod on mesh-derived aero. The panel
+    # method sees an axisymmetric capsule and so produces no trim lift, which
+    # is correct — trim lift comes from an offset CG, not from the outer mould
+    # line. The hand-tabulated reference is therefore taken ballistic too, or
+    # the comparison would be measuring lift rather than the aero model.
+    veh0 = default_reentry_pod(cl_trim_hyp = 0.0)
     veh = Vehicle(name = "mesh-pod", mass = 350.0, sref = pi * 0.75^2,
                   lref = 1.5, rn = 1.8, iyy = mp.inertia[2], aero = pac,
                   chutes = veh0.chutes)
