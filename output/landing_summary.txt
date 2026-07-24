@@ -1,0 +1,27 @@
+== Lunar landing summary ==
+  Liftoff mass    : 4876.9 t   (Starship (expendable), 2 stages)
+  Lander          : 12.5 t wet / 3.5 t dry, 45 kN, Isp 311 s, 3882 m/s ideal
+  Parking orbit   : 198.3 x 208.5 km  i=28.47°
+  TLI             : dv=3158.9 m/s at t=0.90 h
+  Perilune / LOI  : 99.9 km at t=2.90 d, dv=924.8 m/s
+  Lunar orbit     : 100 km circular, 1 rev, DOI dv=19.4 m/s to 15.0 km
+  Powered descent : 375.6 s, dv 1573 m/s braking + 326 m/s terminal, 248 km downrange
+  Braking program : pitch -4.1° + 0.0802 °/s, min throttle 10%
+  Ground          : +1652 m off the mean sphere, 0.1° slope, site 0.5° (was 9.5°), moved 608 m
+  Navigation      : 819 m position error at touchdown, +0 m in altitude, radar acquired
+  TOUCHDOWN       : 1.29 m/s down, 0.51 m/s lateral at 0.00°N, 10.04°W (near side)
+  Propellant      : 4252 kg used, 1420 kg left (543 s of hover)
+  Mission elapsed : 3.02 days pad to surface
+
+== Return from the surface ==
+  Surface stay    : 21.6 h, lift-off at t=4.00 d
+  Ascent stage    : 2800 kg wet / 1300 kg dry, 15.6 kN, 2340 m/s ideal
+  Ascent          : 243 s burn, pitch 24.8° -0.1346 °/s, dv 1791 m/s
+  Insertion       : 14.9 x 85.1 km, gamma -0.03°, 256 kg propellant left
+  Rendezvous      : dv 23.4 m/s (3.8 transfer + 19.6 braking), 55 min coast
+  Docking         : t=4.04 d, 244 kg ascent propellant unused
+  TEI             : dv 816.2 m/s at t=4.11 d (orbiter 7406 -> 5681 kg, 481 kg left)
+  Return perigee  : 50.2 km vacuum, gamma_EI -6.79°
+  Splashdown      : lat=-27.92°, lon=135.59°, 4.6 m/s at t=8.84 d
+  Entry loads     : 5.8 g peak, 232 W/cm² peak, 180 MJ/m² heat load
+  Mission total   : 8.84 days pad to splashdown

@@ -63,3 +63,14 @@ jobs:
             echo "::error::committed outputs differ from a fresh run — rerun scripts/run_moonshot.jl and scripts/make_meshes.jl, then commit"
             exit 1
           }
+      # The landing and the trip home are exercised as a smoke test, not
+      # diffed: the search layers under them (the braking shooter, the
+      # rendezvous window sweep, the trans-Earth secant) are stable in what
+      # they land on and not in the last bit of it. This runs last because it
+      # rewrites output/landing_*.csv.
+      - name: fly the lunar landing and come home
+        run: julia --project=. scripts/run_landing.jl
+      # and the same descent onto a smooth sphere, which is the configuration
+      # every figure predating terrain was flown against
+      - name: fly it onto a smooth sphere
+        run: SS_PLAIN=1 julia --project=. scripts/run_landing.jl

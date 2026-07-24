@@ -393,6 +393,13 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
                             hp_moon_target::Float64 = 2000.0e3,
                             hp_return_target::Float64 = 35.0e3,
                             perigee_tol::Float64 = PERIGEE_TOL,
+                            # inner-Newton acceptance, in km. A 2000 km flyby
+                            # is a slack target; a 100 km one is not, and a
+                            # landing mission that only needs the free return
+                            # as an abort path should not spend outer passes
+                            # polishing a perigee nobody intends to fly.
+                            tol_perilune_km::Float64 = 25.0,
+                            tol_perigee_km::Float64 = 2.0,
                             outer_iter::Int = 12,
                             eta::Float64 = CIS_ETA,
                             max_iter::Int = 15, verbose::Bool = false)
@@ -460,7 +467,7 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
         for it in 1:max_iter
             f1, f2, res = resid(tig, dvv)
             verbose && @info "free-return newton" it f_perilune_km = f1 f_perigee_km = f2 t_ign_hr = (tig - t0)/3600 dv = dvv outcome = res.outcome
-            (abs(f1) < 25.0 && abs(f2) < 2.0) && return true
+            (abs(f1) < tol_perilune_km && abs(f2) < tol_perigee_km) && return true
             d1 = 5.0; d2 = 0.5                  # FD steps: 5 s, 0.5 m/s
             f1a, f2a, _ = resid(tig + d1, dvv)
             f1b, f2b, _ = resid(tig, dvv + d2)
@@ -476,7 +483,11 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
             tig += clamp(0.7 * dt_, -120.0, 120.0)
             dvv += clamp(0.7 * dd_, -10.0, 10.0)
         end
-        false
+        # the loop applies an update after its last check, so the state the
+        # iteration actually finishes on has never been evaluated — test it
+        # rather than reporting a converged design as a stall
+        f1, f2, _ = resid(tig, dvv)
+        abs(f1) < tol_perilune_km && abs(f2) < tol_perigee_km
     end
 
     # --- outer corrector: proxy perigee -> true descent perigee -------------
