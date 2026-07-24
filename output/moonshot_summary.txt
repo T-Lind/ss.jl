@@ -4,7 +4,7 @@
   Kick-stage prop : 950.0 kg at insertion
   TLI             : t=0.91 h  dv=3151.4 m/s  burn 189.6 s  (m -> 519 kg)
   Perilune        : 2000 km altitude at t=3.27 d
-  Return perigee  : 35.5 km vacuum  gamma_EI-ish=-7.31°
+  Return perigee  : 35.2 km vacuum  gamma_EI-ish=-7.32°
   Entry interface : V_rel=10590 m/s  Mach 27.8  (t=6.51 d)
-  Splashdown      : lat=-27.23°  lon=-73.91°  V=4.5 m/s  (t=6.52 d)
-  Entry peak load : 17.9 g   peak q_dot 247 W/cm²   heat load 104 MJ/m²
+  Splashdown      : lat=-27.24°  lon=-73.97°  V=4.5 m/s  (t=6.52 d)
+  Entry peak load : 18.0 g   peak q_dot 247 W/cm²   heat load 104 MJ/m²

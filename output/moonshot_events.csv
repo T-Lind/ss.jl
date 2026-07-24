@@ -8,9 +8,9 @@ ascent,fairing_jettison,265.23,120021.5,3683.7
 ascent,seco,466.93,200222.7,7366.7
 cislunar,tli_ignition,3293.32,,
 cislunar,tli_cutoff,3482.96,,
-cislunar,perilune,282551.46,1999941.9,
-cislunar,entry_handoff,562080.01,140000,
-entry,entry_interface,562095.01,120000.0,10589.6
-entry,deploy_drogue,562355.36,9000.0,106.1
-entry,deploy_main,562565.96,2995.4,23.8
-entry,splashdown,563172.35,-0.0,4.5
+cislunar,perilune,282529.96,1999979.9,
+cislunar,entry_handoff,562082.07,140000,
+entry,entry_interface,562097.06,119999.9,10589.6
+entry,deploy_drogue,562357.06,8995.7,106.1
+entry,deploy_main,562567.46,2997.1,23.8
+entry,splashdown,563174.18,-0.0,4.5
