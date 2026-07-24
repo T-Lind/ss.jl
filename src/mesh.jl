@@ -187,3 +187,126 @@ end
 
 "Concatenate meshes (triangle soup union; volumes add, overlaps double-count)."
 merge_meshes(ms::TriMesh...) = TriMesh(vcat((m.tris for m in ms)...))
+
+"Translate every vertex of a mesh by `d` (internal helper)."
+_translate_mesh(m::TriMesh, d::V3) =
+    TriMesh([(vadd(t[1], d), vadd(t[2], d), vadd(t[3], d)) for t in m.tris])
+
+"Closed engine bell: exit plane at `xexit`, throat `len` above it, offset to (y, z)."
+function _bell_mesh(xexit, len, rex, rt, y, z; nseg::Int = 24)
+    prof = Tuple{Float64,Float64}[(xexit, 0.0), (xexit, rex)]
+    for f in range(0.0, 1.0; length = 7)[2:end]
+        push!(prof, (xexit + len * f, rt + (rex - rt) * (1 - f)^1.6))
+    end
+    push!(prof, (xexit + len, 0.0))
+    _translate_mesh(lathe_mesh(prof; nseg = nseg), (0.0, y, z))
+end
+
+"""
+    rocket_mesh(; diameter, prop_masses, densities, fairing_len, nseg)
+        -> (mesh, sections)
+
+Procedural launch-vehicle geometry with real detailing: a first stage with
+an engine skirt and a five-bell cluster, one cylindrical barrel per stage
+sized so its tank volume holds `prop_masses[k]` of propellant at
+`densities[k]` (plus ullage and an engine/interstage bay), recessed
+interstage collars with a nested vacuum bell on every upper stage, cable
+raceways, RCS pods and a payload adapter cone on the kick stage, a blunt
+entry-pod capsule on the adapter, and an ogive fairing enclosing both.
+Body +x is the nose axis; the tail plate sits at x = 0 with the first-stage
+bells extending to x ≈ -0.32·diameter.
+
+Each piece is a closed solid, so `sections` carries both the axial extent
+and the triangle range of every component in the merged soup:
+`(name, x0, x1, t0, t1)` bottom-up with `:pod` then `:fairing` last —
+viewers can hide/detach a section by dropping `tris[t0:t1]`.
+"""
+function rocket_mesh(; diameter::Float64 = 1.8,
+                     prop_masses::Vector{Float64} = [42000.0, 9500.0, 950.0],
+                     densities::Vector{Float64} = fill(1020.0, length(prop_masses)),
+                     fairing_len::Float64 = 2.2 * diameter,
+                     nseg::Int = 48)
+    length(prop_masses) == length(densities) ||
+        throw(ArgumentError("prop_masses and densities length mismatch"))
+    D = diameter
+    r = D / 2
+    A = pi * r^2
+    K = length(prop_masses)
+    nb = max(16, nseg ÷ 2)
+    parts = TriMesh[]
+    sections = NamedTuple[]
+    tcount = 0
+    function finish!(name, x0, x1, ms::Vector{TriMesh})
+        n = sum(length, ms)
+        append!(parts, ms)
+        push!(sections, (name = name, x0 = x0, x1 = x1,
+                         t0 = tcount + 1, t1 = tcount + n))
+        tcount += n
+    end
+    raceway(xa, xb) = box_mesh((xa, 0.955r, -0.030D), (xb, r + 0.048D, 0.030D))
+
+    x = 0.28D                                    # engine-skirt cone length
+    for (k, (mp, rho)) in enumerate(zip(prop_masses, densities))
+        len = mp / (rho * A) * 1.15 + 0.9D       # tank + ullage + engine bay
+        ms = TriMesh[]
+        if k == 1
+            # skirt + barrel, five-bell cluster half-recessed below the plate
+            push!(ms, lathe_mesh(Tuple{Float64,Float64}[
+                (0.0, 0.0), (0.0, 0.80r), (0.28D, r), (x + len, r), (x + len, 0.0)];
+                nseg = nseg))
+            push!(ms, _bell_mesh(-0.32D, 0.42D, 0.105D, 0.050D, 0.0, 0.0; nseg = nb))
+            for a in (0.25pi):(0.5pi):(1.99pi)
+                push!(ms, _bell_mesh(-0.32D, 0.42D, 0.105D, 0.050D,
+                                     0.52r * cos(a), 0.52r * sin(a); nseg = nb))
+            end
+            push!(ms, raceway(0.30D, x + len - 0.02D))
+            finish!(:stage1, -0.32D, x + len, ms)
+        else
+            # recessed interstage collar, then the barrel; the vacuum bell
+            # nests down into the stage below (revealed at separation)
+            push!(ms, lathe_mesh(Tuple{Float64,Float64}[
+                (x, 0.0), (x, 0.945r), (x + 0.10D, 0.945r), (x + 0.10D, r),
+                (x + len, r), (x + len, 0.0)]; nseg = nseg))
+            bex, blen = k == K ? (0.085D, 0.22D) : (0.155D, 0.36D)
+            push!(ms, _bell_mesh(x + 0.04D - blen, blen, bex, 0.045D, 0.0, 0.0;
+                                 nseg = nb))
+            k < K && push!(ms, raceway(x + 0.12D, x + len - 0.02D))
+            if k == K
+                # kick stage: four RCS pods + the payload adapter cone
+                xm = x + 0.5 * len
+                rc = 0.955r + 0.024D
+                for (py, pz) in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                    hy = py == 0 ? 0.033D : 0.024D
+                    hz = pz == 0 ? 0.033D : 0.024D
+                    push!(ms, box_mesh((xm - 0.05D, py * rc - hy, pz * rc - hz),
+                                       (xm + 0.05D, py * rc + hy, pz * rc + hz)))
+                end
+                push!(ms, lathe_mesh(Tuple{Float64,Float64}[
+                    (x + len, 0.0), (x + len, 0.90r),
+                    (x + len + 0.13D, 0.44r), (x + len + 0.13D, 0.0)]; nseg = nseg))
+            end
+            finish!(Symbol(:stage, k), x, x + len + (k == K ? 0.13D : 0.0), ms)
+        end
+        x += len
+    end
+    # pod: blunt capsule seated on the adapter, inside the fairing (base caps
+    # offset a hair so coincident flat faces don't z-fight in viewers)
+    rp = min(0.75, 0.85r)
+    lp = 2.0rp
+    xb = x + 0.13D + 0.02
+    finish!(:pod, x, xb + lp, TriMesh[lathe_mesh(Tuple{Float64,Float64}[
+        (xb, 0.0), (xb, 0.92rp), (xb + 0.06rp, rp), (xb + 0.14rp, rp),
+        (xb + 0.75lp, 0.40rp), (xb + 0.82lp, 0.34rp), (xb + 0.86lp, 0.34rp),
+        (xb + 0.97lp, 0.24rp), (xb + lp, 0.0)]; nseg = nseg)])
+    # fairing: closed shell — cylindrical shoulder, power-law ogive, eased tip
+    x0f = x
+    xsh = x0f + 0.12 * fairing_len
+    prof = Tuple{Float64,Float64}[(x0f, 0.0), (x0f, r), (xsh, r)]
+    for f in range(0.0, 1.0; length = 11)[2:end-1]
+        push!(prof, (xsh + f * 0.88 * fairing_len, r * (1 - f^2)^0.60))
+    end
+    push!(prof, (x0f + 0.985 * fairing_len, 0.055r))
+    push!(prof, (x0f + fairing_len, 0.0))
+    finish!(:fairing, x0f, x0f + fairing_len, TriMesh[lathe_mesh(prof; nseg = nseg)])
+    (merge_meshes(parts...), sections)
+end

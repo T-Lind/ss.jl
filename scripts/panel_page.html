@@ -76,6 +76,13 @@
     <div class="sub">circumlunar free return — configure, run, explore</div>
 
     <div class="card">
+      <h2>Presets</h2>
+      <div id="presets"></div>
+      <div class="sub" style="margin:2px 0 0">one click configures + runs a
+        reference case — then tweak any knob below</div>
+    </div>
+
+    <div class="card">
       <h2>Mission targets</h2>
       <div class="row">
         <div><label for="pod_mass">pod mass [kg]</label><input id="pod_mass" value="350"></div>
@@ -135,6 +142,13 @@
     </div>
 
     <div class="card">
+      <h2>Vehicle geometry</h2>
+      <canvas id="geo" style="width:100%;height:230px;display:block;cursor:grab;touch-action:none"></canvas>
+      <div class="sub" id="geo_state" style="margin:6px 0 0">full stack</div>
+      <div class="sub" id="geo_info" style="margin:2px 0 0">—</div>
+    </div>
+
+    <div class="card">
       <h2>Parameter sweep</h2>
       <div class="row3">
         <div><label for="sweep_param">parameter</label>
@@ -175,19 +189,28 @@
 
     <div class="card">
       <div class="legend">
+        <span><i style="background:#8fbef0"></i>ascent</span>
         <span><i style="background:#3987e5"></i>parking orbit</span>
         <span><i style="background:#d95926"></i>TLI burn</span>
         <span><i style="background:#199e70"></i>outbound</span>
         <span><i style="background:#c98500"></i>return</span>
+        <span><i style="background:#d55181"></i>entry</span>
         <span><i style="background:#6b6b66;height:8px;width:8px;border-radius:50%"></i>Moon</span>
+        <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>launch site</span>
+        <span><i style="background:#f2c14e;height:8px;width:8px;border-radius:50%"></i>splashdown</span>
       </div>
       <canvas id="scene"></canvas>
       <div class="bar">
         <button id="play" class="ghost">&#9654; play</button>
         <input id="scrub" type="range" min="0" max="1000" value="1000">
         <button id="frame" class="ghost">rotating frame</button>
+        <span class="chip" data-zoom="30">Earth</span>
+        <span class="chip" data-zoom="1150">full</span>
+        <span class="chip" id="launchbtn" title="cinematic pad-cam liftoff, flown from this run's parameters">&#128640; launch view</span>
         <span class="ro" id="readout"></span>
       </div>
+      <div class="sub" style="margin:6px 0 0">drag to orbit the camera · scroll to
+        zoom · dots ride the rotating surface (zoom in on Earth to see them)</div>
     </div>
 
     <div class="card">
@@ -221,13 +244,31 @@ const FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
   's1_prop','s1_dry','s1_thrust_kn','s1_isp','s2_prop','s2_dry','s2_thrust_kn','s2_isp',
   's3_prop','s3_dry','s3_thrust_kn','s3_isp','fairing','diameter',
   'tli_mag_err_pct','tli_point_err_deg'];
-const COL = {0:'#3987e5',1:'#d95926',2:'#199e70',3:'#c98500'};
+// trajectory phase colors: 4 ascent, 0 parking coast, 1 TLI burn,
+// 2 outbound, 3 return, 5 entry
+const COL = {4:'#8fbef0',0:'#3987e5',1:'#d95926',2:'#199e70',3:'#c98500',5:'#d55181'};
 const INK='#fff', INK2='#c3c2b7', MUTED='#898781', GRID='#2c2c2a', ACC='#3987e5';
+const OMEGA_E = 7.2921159e-5;                 // Earth rotation [rad/s]
+const N_MOON = 2*Math.PI/(27.321661*86400);   // lunar mean motion [rad/s]
+const RE_MM = 6.371, RM_MM = 1.7374;          // radii in 1000 km
+
+const PRESETS = {
+  'nominal':        {},
+  'heavy pod':      {pod_mass: 420},
+  'low flyby':      {hp_moon_km: 500},
+  'high flyby':     {hp_moon_km: 6000},
+  'steep entry':    {hp_return_km: 15},
+  'shallow entry':  {hp_return_km: 55},
+  'high parking':   {h_park_km: 350},
+  'inclined 50°':   {incl_deg: 50},
+  'dispersed TLI':  {tli_mag_err_pct: 0.3, tli_point_err_deg: 0.25},
+};
+let DEFAULTS = null;         // captured from the page's initial values
 
 let run = null;              // current run payload
 let history = [];
 let ti = 0, playing = false, lastTs = 0;
-let rotFrame = false, camYaw = 0, camPitch = 1.05, camDist = 1150;
+let rotFrame = false, camYaw = 0.6, camPitch = 1.05, camDist = 1150;
 { const z = new URLSearchParams(location.search).get('zoom');
   if (z) camDist = Math.min(2400, Math.max(30, +z)); }
 
@@ -292,9 +333,9 @@ function renderAll() {
   $('tiles').innerHTML = tiles.map(t =>
     `<div class="tile"><div class="v">${t[0]}</div><div class="k">${t[1]}</div></div>`).join('');
 
-  ti = run.cis.t.length - 1;
-  $('scrub').value = 1000;
   precompute();
+  ti = S.n - 1;
+  $('scrub').value = 1000;
   drawCharts();
   renderEvents();
   renderHistory();
@@ -339,7 +380,9 @@ function isLand(lat, lon) {
   return (LAND[idx >> 3] >> (7 - (idx & 7))) & 1;
 }
 let globeCv = null, globeCtx = null;
-function drawGlobe(ctx, cx, cy, R, spin, tilt) {
+// G maps camera axes (screen-x, screen-y, depth) -> ECEF: v_ecef = Gᵀ·u_cam,
+// where G = Rc·A (camera rotation times the ECEF->scene orientation)
+function drawGlobe(ctx, cx, cy, R, G) {
   const D = Math.ceil(2*R) + 2;
   if (!globeCv || globeCv.width < D) {
     globeCv = document.createElement('canvas');
@@ -348,18 +391,18 @@ function drawGlobe(ctx, cx, cy, R, spin, tilt) {
   }
   const img = globeCtx.createImageData(D, D);
   const px = img.data;
-  const st = Math.sin(tilt), ct = Math.cos(tilt);
   for (let j = 0; j < D; j++) {
     for (let i = 0; i < D; i++) {
       const nx = (i - D/2) / R, nyS = -(j - D/2) / R;
       const rr = nx*nx + nyS*nyS;
       if (rr > 1) continue;
-      const nz = Math.sqrt(1 - rr);
-      // un-tilt about the screen-x axis: tilt = camPitch (pole-on at pi/2)
-      const ny2 = nyS*ct + nz*st;
-      const nz2 = -nyS*st + nz*ct;
-      const lat = Math.asin(Math.max(-1, Math.min(1, ny2)));
-      const lon = Math.atan2(nx, nz2) + spin;
+      const nz = Math.sqrt(1 - rr);          // toward the viewer
+      const ux = nx, uy = nyS, uz = -nz;     // (screen-x, screen-y, depth)
+      const ex = G[0][0]*ux + G[1][0]*uy + G[2][0]*uz;
+      const ey = G[0][1]*ux + G[1][1]*uy + G[2][1]*uz;
+      const ez = G[0][2]*ux + G[1][2]*uy + G[2][2]*uz;
+      const lat = Math.asin(Math.max(-1, Math.min(1, ez)));
+      const lon = Math.atan2(ey, ex);
       const land = isLand(lat, lon);
       const sh = 0.45 + 0.55*nz;              // limb shading
       let r, g, b;
@@ -374,33 +417,88 @@ function drawGlobe(ctx, cx, cy, R, spin, tilt) {
 }
 
 // ------------------------------------------------------------- 3D scene --
-let rx, ry, ma, moonR;
-function precompute() {
-  const D = run.cis, N = D.t.length;
-  rx = new Float64Array(N); ry = new Float64Array(N); ma = new Float64Array(N);
-  for (let i = 0; i < N; i++) {
-    ma[i] = Math.atan2(D.my[i], D.mx[i]);
-    const c = Math.cos(-ma[i]), s = Math.sin(-ma[i]);
-    rx[i] = D.x[i]*c - D.y[i]*s;
-    ry[i] = D.x[i]*s + D.y[i]*c;
-  }
-  moonR = Math.hypot(D.mx[0], D.my[0]);
-}
-const P  = i => rotFrame ? [rx[i], ry[i]] : [run.cis.x[i], run.cis.y[i]];
-const Pm = i => rotFrame ? [moonR, 0] : [run.cis.mx[i], run.cis.my[i]];
+// The scene is true ECI geometry (units: 1000 km, scene z = Earth's pole).
+// `S` is the combined pad-to-splash track: ascent + cislunar + entry.
+let S = null;
 
-function project(cv, x, y) {
-  const cyw = Math.cos(camYaw), syw = Math.sin(camYaw);
-  const cp = Math.cos(camPitch), sp = Math.sin(camPitch);
-  const X = x*cyw - y*syw, Y = (x*syw + y*cyw)*sp;
+const dot3 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const cross3 = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+function norm3(a) {
+  const n = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0]/n, a[1]/n, a[2]/n];
+}
+function rotAxis(v, k, ang) {           // Rodrigues rotation of v about unit k
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const kv = cross3(k, v), kd = dot3(k, v)*(1-c);
+  return [v[0]*c + kv[0]*s + k[0]*kd,
+          v[1]*c + kv[1]*s + k[1]*kd,
+          v[2]*c + kv[2]*s + k[2]*kd];
+}
+const matmul = (A, B) => A.map((r, i) => B[0].map((_, j) =>
+  r[0]*B[0][j] + r[1]*B[1][j] + r[2]*B[2][j]));
+const matvec = (A, v) => [dot3(A[0], v), dot3(A[1], v), dot3(A[2], v)];
+
+function precompute() {
+  const A3 = run.asc3d, C = run.cis, E = run.ent3d;
+  const t = [], x = [], y = [], z = [], ph = [];
+  const t0c = C.t[0], tec = C.t[C.t.length-1];
+  for (let i = 0; i < A3.t.length; i++) if (A3.t[i] < t0c) {
+    t.push(A3.t[i]); x.push(A3.x[i]); y.push(A3.y[i]); z.push(A3.z[i]); ph.push(4);
+  }
+  for (let i = 0; i < C.t.length; i++) {
+    t.push(C.t[i]); x.push(C.x[i]); y.push(C.y[i]); z.push(C.z[i]); ph.push(C.ph[i]);
+  }
+  for (let i = 0; i < E.t.length; i++) if (E.t[i] > tec) {
+    t.push(E.t[i]); x.push(E.x[i]); y.push(E.y[i]); z.push(E.z[i]); ph.push(5);
+  }
+  const N = t.length, n = norm3(C.n);
+  // Moon at every combined sample (circular ephemeris: rotate the nearest
+  // cislunar sample about the plane normal at the lunar mean motion)
+  const mx = new Float64Array(N), my = new Float64Array(N), mz = new Float64Array(N);
+  let j = 0;
+  for (let i = 0; i < N; i++) {
+    while (j < C.t.length-1 && C.t[j+1] <= t[i]) j++;
+    const m = rotAxis([C.mx[j], C.my[j], C.mz[j]], n, N_MOON*(t[i] - C.t[j]));
+    mx[i] = m[0]; my[i] = m[1]; mz[i] = m[2];
+  }
+  // rotating-frame coordinates: components on (e1 = unit(moon), e2 = n×e1, n)
+  const rx = new Float64Array(N), ry = new Float64Array(N), rz = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const e1 = norm3([mx[i], my[i], mz[i]]), e2 = cross3(n, e1);
+    const p = [x[i], y[i], z[i]];
+    rx[i] = dot3(p, e1); ry[i] = dot3(p, e2); rz[i] = dot3(p, n);
+  }
+  S = { n: N, t, x, y, z, ph, mx, my, mz, rx, ry, rz, nrm: n,
+        moonR: Math.hypot(C.mx[0], C.my[0], C.mz[0]) };
+}
+const P  = i => rotFrame ? [S.rx[i], S.ry[i], S.rz[i]] : [S.x[i], S.y[i], S.z[i]];
+const Pm = i => rotFrame ? [S.moonR, 0, 0] : [S.mx[i], S.my[i], S.mz[i]];
+
+// orthographic orbit camera; returns [screen x, screen y, px per unit, depth]
+// (depth > 0 is behind the Earth's center plane, used for occlusion)
+function camMatrix() {
+  const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+  const sp = Math.sin(camPitch), cp = Math.cos(camPitch);
+  return [[cy, -sy, 0], [sy*sp, cy*sp, cp], [sy*cp, cy*cp, -sp]];
+}
+function project(cv, p) {
+  const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+  const sp = Math.sin(camPitch), cp = Math.cos(camPitch);
+  const X = p[0]*cy - p[1]*sy;
+  const Yh = p[0]*sy + p[1]*cy;
   const dpr = window.devicePixelRatio || 1;
   const w = cv.width/dpr, h = cv.height/dpr;
   const f = Math.min(w, h) * 0.95 / camDist;
-  return [w/2 + X*f, h*0.52 - Y*f, f];
+  return [w/2 + X*f, h*0.52 - (Yh*sp + p[2]*cp)*f, f, Yh*cp - p[2]*sp];
 }
 
 function circle(ctx, x, y, r, fill) {
   ctx.beginPath(); ctx.arc(x, y, r, 0, 2*Math.PI); ctx.fillStyle = fill; ctx.fill();
+}
+
+function fmtKm(mm) {   // Mm (1000 km) -> readable km
+  const km = mm*1000;
+  return km >= 99500 ? (km/1000).toFixed(0) + 'k km' : km.toFixed(0) + ' km';
 }
 
 function drawScene() {
@@ -410,72 +508,123 @@ function drawScene() {
   if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  if (!run) return;
-  const D = run.cis, N = D.t.length;
+  if (!run || !S) return;
+  const N = S.n, i0 = Math.min(ti, N-1);
+  const tNow = S.t[i0];
 
+  const Rc = camMatrix();
+  // globe orientation, ECEF -> scene
+  const th = OMEGA_E * tNow, c = Math.cos(th), s = Math.sin(th);
+  let A = [[c, -s, 0], [s, c, 0], [0, 0, 1]];
+  if (rotFrame) {
+    const e1 = norm3([S.mx[i0], S.my[i0], S.mz[i0]]), e2 = cross3(S.nrm, e1);
+    A = matmul([e1, e2, S.nrm], A);
+  }
+
+  // lunar orbit ring (in the true mission plane)
   ctx.strokeStyle = GRID; ctx.lineWidth = 1;
   ctx.beginPath();
+  const e10 = norm3([S.mx[0], S.my[0], S.mz[0]]), e20 = cross3(S.nrm, e10);
   for (let a = 0; a <= 128; a++) {
-    const th = a/128*2*Math.PI;
-    const p = project(cv, moonR*Math.cos(th), moonR*Math.sin(th));
-    a ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]);
+    const t2 = a/128*2*Math.PI, ca = Math.cos(t2)*S.moonR, sa = Math.sin(t2)*S.moonR;
+    const p = rotFrame ? [ca, sa, 0]
+      : [ca*e10[0]+sa*e20[0], ca*e10[1]+sa*e20[1], ca*e10[2]+sa*e20[2]];
+    const q = project(cv, p);
+    a ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
   }
   ctx.stroke();
 
+  // trajectory in two depth passes so the globe occludes the far side but
+  // never hides near-side lines (parking orbit, TLI, entry)
   ctx.lineCap = 'round';
-  let prev = null;
-  for (let i = 0; i < N; i++) {
-    const pos = P(i), pr = project(cv, pos[0], pos[1]);
-    if (prev) {
-      ctx.globalAlpha = i <= ti ? 1 : 0.16;
-      ctx.strokeStyle = COL[D.ph[i]] || INK2;
-      ctx.lineWidth = D.ph[i] === 1 ? 3 : 1.7;
-      ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(pr[0], pr[1]); ctx.stroke();
+  const drawSegs = behind => {
+    let prev = null;
+    for (let i = 0; i < N; i++) {
+      const pr = project(cv, P(i));
+      if (prev && ((pr[3] + prev[3]) > 0) === behind) {
+        ctx.globalAlpha = i <= ti ? 1 : 0.35;
+        ctx.strokeStyle = COL[S.ph[i]] || INK2;
+        ctx.lineWidth = S.ph[i] === 1 ? 3 : 1.7;
+        ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(pr[0], pr[1]); ctx.stroke();
+      }
+      prev = pr;
     }
-    prev = pr;
-  }
-  ctx.globalAlpha = 1;
+    ctx.globalAlpha = 1;
+  };
+  drawSegs(true);                             // far side of the Earth
 
-  const pe = project(cv, 0, 0);
-  const rE = Math.max(3, 6.371*pe[2]);
+  // Earth
+  const pe = project(cv, [0, 0, 0]);
+  const rE = Math.max(3, RE_MM*pe[2]);
   if (rE >= 7) {
-    // Earth rotates at the sidereal rate over mission time
-    drawGlobe(ctx, pe[0], pe[1], rE, 7.2921159e-5 * run.cis.t[ti], camPitch);
+    drawGlobe(ctx, pe[0], pe[1], rE, matmul(Rc, A));
   } else {
     const g = ctx.createRadialGradient(pe[0]-rE*.3, pe[1]-rE*.3, rE*.2, pe[0], pe[1], rE);
     g.addColorStop(0, '#4a7fa8'); g.addColorStop(1, '#193349');
     circle(ctx, pe[0], pe[1], rE, g);
   }
 
-  const pmv = Pm(Math.min(ti, N-1)), pm = project(cv, pmv[0], pmv[1]);
-  const rM = Math.max(2.5, 1.74*pm[2]*3);
+  // launch & splashdown markers fixed to the rotating surface
+  if (rE >= 9 && run.sites) {
+    const site = (latD, lonD, col, label) => {
+      if (latD == null || !isFinite(latD)) return;
+      const la = latD*Math.PI/180, lo = lonD*Math.PI/180;
+      const u = [Math.cos(la)*Math.cos(lo), Math.cos(la)*Math.sin(lo), Math.sin(la)];
+      const uc = matvec(Rc, matvec(A, u));
+      if (uc[2] >= 0) return;                 // far hemisphere
+      const px_ = pe[0] + uc[0]*rE, py_ = pe[1] - uc[1]*rE;
+      circle(ctx, px_, py_, 3.0, col);
+      ctx.strokeStyle = col; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(px_, py_, 5.5, 0, 2*Math.PI); ctx.stroke();
+      if (rE > 26) {
+        ctx.fillStyle = col; ctx.font = '11px system-ui';
+        ctx.fillText(label, px_ + 8, py_ + 3);
+      }
+    };
+    site(run.sites.launch_lat, run.sites.launch_lon, '#8fbef0', 'launch');
+    site(run.sites.splash_lat, run.sites.splash_lon, '#f2c14e', 'splash');
+  }
+
+  // Moon
+  const pm = project(cv, Pm(i0));
+  const rM = Math.max(2.5, RM_MM*pm[2]*3);
   const g2 = ctx.createRadialGradient(pm[0]-rM*.3, pm[1]-rM*.3, rM*.2, pm[0], pm[1], rM);
   g2.addColorStop(0, '#8d8d86'); g2.addColorStop(1, '#4a4a45');
   circle(ctx, pm[0], pm[1], rM, g2);
 
-  const pp = P(Math.min(ti, N-1)), pd = project(cv, pp[0], pp[1]);
-  circle(ctx, pd[0], pd[1], 3.2, '#fff');
+  drawSegs(false);                            // near side, over the globe
 
-  const days = D.t[ti]/86400;
-  const dm = Math.hypot(D.x[ti]-D.mx[ti], D.y[ti]-D.my[ti]);
+  // pod (hollow + dim when behind the globe)
+  const pd = project(cv, P(i0));
+  if (pd[3] > 0 && Math.hypot(pd[0]-pe[0], pd[1]-pe[1]) < rE) {
+    ctx.globalAlpha = 0.45; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(pd[0], pd[1], 3.2, 0, 2*Math.PI); ctx.stroke();
+    ctx.globalAlpha = 1;
+  } else {
+    circle(ctx, pd[0], pd[1], 3.2, '#fff');
+  }
+
+  const dm = Math.hypot(S.x[i0]-S.mx[i0], S.y[i0]-S.my[i0], S.z[i0]-S.mz[i0]);
+  const re_ = Math.hypot(S.x[i0], S.y[i0], S.z[i0]);
   $('readout').textContent =
-    `T+${days.toFixed(2)} d · Moon ${dm.toFixed(0)}k km`;
+    `T+${(tNow/86400).toFixed(2)} d · r⊕ ${fmtKm(re_)} · Moon ${fmtKm(dm)}`;
 }
 
 function tick(ts) {
-  if (playing && run) {
-    const N = run.cis.t.length;
+  if (playing && S) {
+    const N = S.n;
     ti = Math.min(N-1, ti + Math.max(1, Math.round(N/600)));
     $('scrub').value = (1000*ti/(N-1))|0;
     if (ti >= N-1) togglePlay(false);
   }
   lastTs = ts;
   drawScene();
+  drawGeoLive();
   requestAnimationFrame(tick);
 }
 function togglePlay(on) {
   playing = on === undefined ? !playing : on;
-  if (playing && run && ti >= run.cis.t.length-1) ti = 0;
+  if (playing && S && ti >= S.n-1) ti = 0;
   $('play').innerHTML = playing ? '&#10074;&#10074; pause' : '&#9654; play';
 }
 
@@ -547,8 +696,8 @@ function drawCharts() {
            'ascent dynamic pressure vs time [s]');
   // full-mission geometry: distance from Earth and from the Moon
   const td = D.t.map(t => t/86400);
-  const rE = D.x.map((x, i) => Math.hypot(x, D.y[i]));
-  const dM = D.x.map((x, i) => Math.hypot(x - D.mx[i], D.y[i] - D.my[i]));
+  const rE = D.x.map((x, i) => Math.hypot(x, D.y[i], D.z[i]));
+  const dM = D.x.map((x, i) => Math.hypot(x - D.mx[i], D.y[i] - D.my[i], D.z[i] - D.mz[i]));
   drawLine('c_dist', [
       {xs: td, ys: dM, color: '#199e70', label: 'to Moon', unit: 'k km'},
       {xs: td, ys: rE, color: ACC, label: 'to Earth', unit: 'k km'},
@@ -595,22 +744,177 @@ function drawSweep() {
     if (j.runs[i].ok && j.runs[i].metrics.on_target && isFinite(j.runs[i].metrics[key])) {
       xs.push(j.values[i]); ys.push(j.runs[i].metrics[key]);
     }
-  drawLine('sweepchart', xs, ys,
-    `${$('sweep_metric').selectedOptions[0].text} vs ${$('sweep_param').selectedOptions[0].text}`,
-    '', ACC);
+  drawLine('sweepchart', [{xs: xs, ys: ys, color: ACC, unit: ''}],
+    `${$('sweep_metric').selectedOptions[0].text} vs ${$('sweep_param').selectedOptions[0].text}`);
+}
+
+// ------------------------------------------------------- vehicle geometry --
+// The viewer follows the mission clock: stages, fairing, and finally the
+// kick stage drop off as the scrubbed time passes their separation events.
+let geo = null, geoYaw = -0.9, geoPitch = 0.30, geoKey = '';
+const GEO_COL = { stage1: [119,119,111], stage2: [141,141,134],
+                  stage3: [165,165,157], pod: [126,146,168], fairing: [201,199,186] };
+const GEO_SHORT = { stage1: 'S1', stage2: 'S2', stage3: 'S3', pod: 'pod', fairing: 'fairing' };
+
+async function fetchGeo() {
+  try {
+    const r = await fetch('/api/geometry', { method: 'POST', body: params() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'geometry failed');
+    geo = j;
+    geoKey = '';
+    $('geo_info').textContent =
+      `${j.length.toFixed(1)} m long × ${(+j.diameter).toFixed(1)} m — ` +
+      j.sections.filter(s => s.name !== 'pod')
+        .map(s => `${s.name} ${(s.x1 - s.x0).toFixed(1)} m`).join(' · ');
+    drawGeo();
+  } catch (e) {
+    $('geo_info').textContent = 'geometry: ' + String(e.message || e);
+  }
+}
+
+// which sections are still attached / burning at mission time t [s]
+function geoConfigAt(tsec) {
+  const cfg = { gone: {}, burn: null, t: tsec };
+  if (!run || tsec == null) return cfg;
+  const ev = {};
+  let sep1 = null, ign2 = null;
+  for (const e of run.events) {
+    ev[e.name] = e.t;
+    if (sep1 === null && e.name.startsWith('sep_')) sep1 = e.t;
+    if (ign2 === null && e.name.startsWith('ignition_')) ign2 = e.t;
+  }
+  const drop = { stage1: sep1, fairing: ev.fairing_jettison,
+                 stage2: ev.seco, stage3: ev.entry_handoff };
+  for (const k in drop) if (drop[k] != null && tsec >= drop[k]) cfg.gone[k] = true;
+  if (sep1 != null && tsec < sep1) cfg.burn = 'stage1';
+  else if (ign2 != null && tsec >= ign2 && tsec < (ev.seco ?? Infinity)) cfg.burn = 'stage2';
+  else if (ev.tli_ignition != null && tsec >= ev.tli_ignition && tsec < (ev.tli_cutoff ?? Infinity))
+    cfg.burn = 'stage3';
+  return cfg;
+}
+
+// redraw only when the orientation or the staging configuration changed
+function drawGeoLive() {
+  if (!geo) return;
+  const tsec = (S && run) ? S.t[Math.min(ti, S.n-1)] : null;
+  const cfg = geoConfigAt(tsec);
+  const key = [geoYaw.toFixed(3), geoPitch.toFixed(3), Object.keys(cfg.gone).join(','),
+               cfg.burn, cfg.burn ? (performance.now()/120|0) : 0,   // flame flicker
+               $('geo').clientWidth].join('|');
+  if (key === geoKey) return;
+  geoKey = key;
+  drawGeo(cfg);
+}
+
+function drawGeo(cfg) {
+  cfg = cfg || geoConfigAt((S && run) ? S.t[Math.min(ti, S.n-1)] : null);
+  const cv = $('geo'), ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!geo) return;
+  const secs = geo.sections.filter(s => !cfg.gone[s.name]);
+  if (!secs.length) return;
+  // fit the *attached* stack: after staging the view recenters on what's left
+  let xlo = Infinity, xhi = -Infinity;
+  for (const s of secs) { xlo = Math.min(xlo, s.x0); xhi = Math.max(xhi, s.x1); }
+  const span = Math.max(xhi - xlo, 4.0), half = (xlo + xhi)/2;
+  const f = (h - 26) / span;
+  const cyw = Math.cos(geoYaw), syw = Math.sin(geoYaw);
+  const cpt = Math.cos(geoPitch), spt = Math.sin(geoPitch);
+  // model: +x = nose axis. Spin about x by yaw, tip by pitch, x maps up-screen.
+  const xf = v => {
+    const a = v[0] - half;
+    const y1 = v[1]*cyw - v[2]*syw, z1 = v[1]*syw + v[2]*cyw;
+    return [w/2 + y1*f, h/2 - (a*cpt - z1*spt)*f, a*spt + z1*cpt];
+  };
+  // engine flame under the lowest attached section while a stage burns
+  if (cfg.burn && !cfg.gone[cfg.burn]) {
+    const d = +geo.diameter, flick = 0.85 + 0.3*Math.random();
+    const a = xf([xlo, 0, 0]), b = xf([xlo - 0.30*span*flick, 0, 0]);
+    const g = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
+    g.addColorStop(0, 'rgba(255,214,140,0.95)');
+    g.addColorStop(0.35, 'rgba(245,150,60,0.55)');
+    g.addColorStop(1, 'rgba(245,150,60,0)');
+    const dx = b[0]-a[0], dy = b[1]-a[1], dl = Math.hypot(dx, dy) || 1;
+    const px_ = -dy/dl * 0.42*d*f, py_ = dx/dl * 0.42*d*f;
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(a[0]-px_, a[1]-py_); ctx.lineTo(a[0]+px_, a[1]+py_);
+    ctx.lineTo(b[0], b[1]); ctx.closePath(); ctx.fill();
+  }
+  const light = norm3([-0.45, 0.55, -0.9]);
+  const tris = [];
+  for (const s of secs) {
+    const col0 = GEO_COL[s.name] || GEO_COL.fairing;
+    for (let k = s.t0 - 1; k < s.t1; k++) {
+      const t = geo.tris[k];
+      const p1 = xf([t[0], t[1], t[2]]), p2 = xf([t[3], t[4], t[5]]), p3 = xf([t[6], t[7], t[8]]);
+      // screen-space normal for backface culling + shading
+      const ux = p2[0]-p1[0], uy = p2[1]-p1[1], uz = p2[2]-p1[2];
+      const vx = p3[0]-p1[0], vy = p3[1]-p1[1], vz = p3[2]-p1[2];
+      const nz = ux*vy - uy*vx;
+      if (nz >= 0) continue;                  // backface (screen y is flipped)
+      const nrm = norm3([uy*vz - uz*vy, uz*vx - ux*vz, nz]);
+      const sh = 0.35 + 0.65*Math.max(0, -dot3(nrm, light));
+      tris.push({ p1, p2, p3, depth: (p1[2]+p2[2]+p3[2])/3,
+                  fill: `rgb(${col0[0]*sh|0},${col0[1]*sh|0},${col0[2]*sh|0})` });
+    }
+  }
+  tris.sort((a, b) => b.depth - a.depth);     // painter's algorithm
+  for (const t of tris) {
+    ctx.fillStyle = t.fill;
+    ctx.beginPath();
+    ctx.moveTo(t.p1[0], t.p1[1]); ctx.lineTo(t.p2[0], t.p2[1]); ctx.lineTo(t.p3[0], t.p3[1]);
+    ctx.closePath(); ctx.fill();
+  }
+  // scale bar: 10 m
+  ctx.strokeStyle = MUTED; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(12, h-10); ctx.lineTo(12 + 10*f, h-10); ctx.stroke();
+  ctx.fillStyle = MUTED; ctx.font = '10px system-ui';
+  ctx.fillText('10 m', 14, h-14);
+  // configuration readout under the canvas
+  const names = secs.map(s => GEO_SHORT[s.name] || s.name).join('+');
+  const tl = cfg.t == null ? '' :
+    cfg.t < 3600 ? `T+${Math.floor(cfg.t/60)}:${String(Math.floor(cfg.t%60)).padStart(2,'0')} · ` :
+    `T+${(cfg.t/86400).toFixed(2)} d · `;
+  $('geo_state').textContent = tl + names +
+    (cfg.burn && !cfg.gone[cfg.burn] ? ` · ${GEO_SHORT[cfg.burn]} burning` : '');
+}
+
+// ---------------------------------------------------------------- presets --
+function initPresets() {
+  DEFAULTS = {};
+  for (const f of FIELDS) DEFAULTS[f] = $(f).value;
+  $('presets').innerHTML = Object.keys(PRESETS).map(k =>
+    `<span class="chip" data-p="${k}">${k}</span>`).join('');
+  for (const el of $('presets').querySelectorAll('.chip'))
+    el.onclick = () => {
+      for (const f of FIELDS) $(f).value = DEFAULTS[f];
+      const o = PRESETS[el.dataset.p];
+      for (const k in o) $(k).value = o[k];
+      fetchGeo();
+      doRun();
+    };
 }
 
 // ---------------------------------------------------------------- wire up --
-$('run').onclick = doRun;
+$('run').onclick = () => { fetchGeo(); doRun(); };
 $('sweepbtn').onclick = doSweep;
 $('sweep_metric').onchange = drawSweep;
 $('play').onclick = () => togglePlay();
-$('scrub').oninput = e => { if (run) ti = Math.round(e.target.value/1000*(run.cis.t.length-1)); };
+$('scrub').oninput = e => { if (S) ti = Math.round(e.target.value/1000*(S.n-1)); };
 $('frame').onclick = e => {
   rotFrame = !rotFrame;
   e.target.classList.toggle('on', rotFrame);
   e.target.textContent = rotFrame ? 'inertial frame' : 'rotating frame';
 };
+for (const el of document.querySelectorAll('[data-zoom]'))
+  el.onclick = () => camDist = +el.dataset.zoom;
+$('launchbtn').onclick = () => window.open('/launch?' + params(), '_blank');
 const scene = $('scene');
 let drag = null;
 scene.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; scene.setPointerCapture(e.pointerId); });
@@ -625,8 +929,22 @@ scene.addEventListener('wheel', e => {
   e.preventDefault();
   camDist = Math.min(2400, Math.max(30, camDist * (e.deltaY > 0 ? 1.12 : 0.89)));
 }, { passive: false });
+const geoCv = $('geo');
+let gdrag = null;
+geoCv.addEventListener('pointerdown', e => { gdrag = [e.clientX, e.clientY]; geoCv.setPointerCapture(e.pointerId); });
+geoCv.addEventListener('pointermove', e => {
+  if (!gdrag) return;
+  geoYaw += (e.clientX - gdrag[0]) * 0.01;
+  geoPitch = Math.min(1.2, Math.max(-1.2, geoPitch + (e.clientY - gdrag[1]) * 0.008));
+  gdrag = [e.clientX, e.clientY];   // drawGeoLive picks the new angles up next frame
+});
+geoCv.addEventListener('pointerup', () => gdrag = null);
+for (const id of ['s1_prop', 's2_prop', 's3_prop', 'diameter'])
+  $(id).addEventListener('change', fetchGeo);
 
+initPresets();
 requestAnimationFrame(tick);
+fetchGeo();
 doRun();   // populate on load — the server pre-warms the sim at startup
 </script>
 </body>

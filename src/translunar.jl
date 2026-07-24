@@ -52,6 +52,8 @@ struct CislunarResult
     t_perilune::Float64
     vac_perigee_alt::Float64   # osculating return perigee altitude [m] (NaN unless returning)
     gamma_end::Float64         # inertial FPA at termination [rad]
+    miss_passes::Int           # post-flyby Earth perigee passes ABOVE the entry handoff
+    first_perigee_alt::Float64 # altitude of the first such missed pass [m] (NaN if none)
 end
 
 "Two-body + lunar third-body acceleration."
@@ -183,7 +185,8 @@ function fly_cislunar(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
                       log_every = log_every)
 
     CislunarResult(L, leg.outcome, leg.r, leg.v, leg.t, m, dv_del, t_ign, tburn,
-                   leg.peri_alt, leg.t_peri, leg.vac_perigee, leg.gamma_end)
+                   leg.peri_alt, leg.t_peri, leg.vac_perigee, leg.gamma_end,
+                   leg.miss_passes, leg.first_perigee_alt)
 end
 
 """
@@ -203,11 +206,13 @@ function _coast_leg!(L::CislunarLog, r::V3, v::V3, t::Float64,
                      t_stop::Float64 = Inf,
                      outbound::Bool = true,
                      peri_alt::Float64 = Inf, t_peri::Float64 = NaN,
-                     vac_perigee::Float64 = NaN)
+                     vac_perigee::Float64 = NaN,
+                     miss_passes::Int = 0, first_perigee_alt::Float64 = NaN)
     outcome = :timeout
     d_prev = moon_distance(eph, r, t)
     kount = 0
     gamma_end = NaN
+    rdot_prev = vdot(r, v)
     while t < t_end
         dtc = min(_cis_dt(r, t, eph), max(t_stop - t, 1.0e-3))
         (kount % log_every == 0) && _cis_push!(L, t, r, v, eph, theta_g0, outbound ? 2 : 3)
@@ -279,6 +284,17 @@ function _coast_leg!(L::CislunarLog, r::V3, v::V3, t::Float64,
             break
         end
 
+        # missed Earth perigee pass: heading home, the geocentric radial rate
+        # flips - to + near Earth while still above the entry handoff. The
+        # EI check above fires first whenever the pass dips below `h_stop`,
+        # so any pass recorded here failed to reach entry on this revolution.
+        rdot_now = vdot(rn_, vn_)
+        if !outbound && rdot_prev < 0.0 && rdot_now >= 0.0 && vnorm(rn_) < 0.5 * A_MOON
+            isnan(first_perigee_alt) && (first_perigee_alt = h)
+            miss_passes += 1
+        end
+        rdot_prev = rdot_now
+
         # escape check
         rn2 = vnorm(rn_)
         if rn2 > 2.0 * A_MOON
@@ -290,7 +306,8 @@ function _coast_leg!(L::CislunarLog, r::V3, v::V3, t::Float64,
     end
     (r = r, v = v, t = t, outcome = outcome, peri_alt = peri_alt,
      t_peri = t_peri, vac_perigee = vac_perigee, gamma_end = gamma_end,
-     outbound = outbound)
+     outbound = outbound, miss_passes = miss_passes,
+     first_perigee_alt = first_perigee_alt)
 end
 
 """
@@ -454,9 +471,14 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
         full = verify(tig, dvv)
         if converged && full.outcome == :entry_interface
             stalls = 0
-            err = full.vac_perigee_alt - hp_return_target
-            verbose && @info "free-return corrector" outer true_perigee_km = full.vac_perigee_alt/1e3 err_km = err/1e3
-            abs(err) < 3.0e3 && return (tig, dvv, full)
+            # the return must descend to entry on its FIRST perigee pass: if
+            # the pass stayed above the handoff (a phasing loop that re-crosses
+            # the lunar distance before finally entering), steer the proxy by
+            # that first pass, not by whichever later pass happened to descend
+            err = full.miss_passes > 0 ? full.first_perigee_alt - hp_return_target :
+                                         full.vac_perigee_alt - hp_return_target
+            verbose && @info "free-return corrector" outer true_perigee_km = full.vac_perigee_alt/1e3 err_km = err/1e3 miss_passes = full.miss_passes
+            abs(err) < 3.0e3 && full.miss_passes == 0 && return (tig, dvv, full)
             proxy_target[] -= err
         else
             @warn "free-return design stalled" converged outcome = full.outcome
@@ -605,7 +627,8 @@ function fly_cislunar_tcm(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeri
         # something dramatic happened before the TCM epoch (impact/escape)
         return (CislunarResult(L, leg1.outcome, leg1.r, leg1.v, leg1.t, m,
                                dv_del, t_ign, tburn, leg1.peri_alt, leg1.t_peri,
-                               leg1.vac_perigee, leg1.gamma_end), NaN)
+                               leg1.vac_perigee, leg1.gamma_end,
+                               leg1.miss_passes, leg1.first_perigee_alt), NaN)
     end
 
     dv_vec, f1, f2 = design_tcm(leg1.r, leg1.v, leg1.t, eph;
@@ -622,9 +645,12 @@ function fly_cislunar_tcm(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeri
                        stop_after_flyby = false, log_every = 4,
                        outbound = leg1.outbound,
                        peri_alt = leg1.peri_alt, t_peri = leg1.t_peri,
-                       vac_perigee = leg1.vac_perigee)
+                       vac_perigee = leg1.vac_perigee,
+                       miss_passes = leg1.miss_passes,
+                       first_perigee_alt = leg1.first_perigee_alt)
 
     (CislunarResult(L, leg2.outcome, leg2.r, leg2.v, leg2.t, m_after,
                     dv_del, t_ign, tburn, leg2.peri_alt, leg2.t_peri,
-                    leg2.vac_perigee, leg2.gamma_end), tcm_dv)
+                    leg2.vac_perigee, leg2.gamma_end, leg2.miss_passes,
+                    leg2.first_perigee_alt), tcm_dv)
 end

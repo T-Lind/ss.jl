@@ -13,7 +13,8 @@ using SatelliteSim
 using Sockets
 using Printf
 
-const PAGE = read(joinpath(@__DIR__, "panel_page.html"), String)
+const PAGE_PATH = joinpath(@__DIR__, "panel_page.html")
+const LAUNCH_PATH = joinpath(@__DIR__, "launch_page.html")
 const PORT = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 8137
 
 # ---------------------------------------------------------------- helpers --
@@ -116,7 +117,7 @@ end
 deci_idx(len, n) = len <= n ? collect(1:len) :
                    unique(round.(Int, range(1, len; length = n)))
 
-function run_mission(p)::Dict{String,Any}
+function panel_mission(p)::Dict{String,Any}
     ms = moonshot(
         pod_mass = getf(p, "pod_mass", 350.0),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
@@ -130,20 +131,21 @@ function run_mission(p)::Dict{String,Any}
     asc, cis, ent = ms.ascent, ms.cislunar, ms.entry
     el = asc.elements
 
-    # mission-plane projection for the 3D canvas (same convention as the viewer)
+    # 3D scene payload: true ECI geometry in units of 1000 km. The client
+    # renders the inclined trajectory plane, the textured globe about the real
+    # pole (scene z = ECI z), and launch/splashdown markers fixed to the
+    # rotating surface — all in one consistent frame.
     L = cis.log
-    b1 = SatelliteSim.vunit((L.mx[1], L.my[1], L.mz[1]))
     k = max(2, length(L.t) ÷ 3)
-    n = SatelliteSim.vunit(SatelliteSim.vcross((L.mx[1], L.my[1], L.mz[1]),
-                                               (L.mx[k], L.my[k], L.mz[k])))
-    b2 = SatelliteSim.vcross(n, b1)
+    nrm = SatelliteSim.vunit(SatelliteSim.vcross((L.mx[1], L.my[1], L.mz[1]),
+                                                 (L.mx[k], L.my[k], L.mz[k])))
     idx = deci_idx(length(L.t), 1600)
-    px = Float64[]; py = Float64[]; mx = Float64[]; my = Float64[]
+    px = Float64[]; py = Float64[]; pz = Float64[]
+    mx = Float64[]; my = Float64[]; mz = Float64[]
     tt = Float64[]; pp = Int[]
     for i in idx
-        r = (L.rx[i], L.ry[i], L.rz[i]); m = (L.mx[i], L.my[i], L.mz[i])
-        push!(px, SatelliteSim.vdot(r, b1) / 1e6); push!(py, SatelliteSim.vdot(r, b2) / 1e6)
-        push!(mx, SatelliteSim.vdot(m, b1) / 1e6); push!(my, SatelliteSim.vdot(m, b2) / 1e6)
+        push!(px, L.rx[i] / 1e6); push!(py, L.ry[i] / 1e6); push!(pz, L.rz[i] / 1e6)
+        push!(mx, L.mx[i] / 1e6); push!(my, L.my[i] / 1e6); push!(mz, L.mz[i] / 1e6)
         push!(tt, L.t[i]); push!(pp, L.phase[i])
     end
 
@@ -151,6 +153,20 @@ function run_mission(p)::Dict{String,Any}
     eidx = deci_idx(length(EL.t), 500)
     AL = asc.log
     aidx = deci_idx(length(AL.t), 400)
+
+    # ascent track is already ECI; the entry log is geodetic — rebuild ECI
+    ax3 = [AL.rx[i] / 1e6 for i in aidx]
+    ay3 = [AL.ry[i] / 1e6 for i in aidx]
+    az3 = [AL.rz[i] / 1e6 for i in aidx]
+    at3 = [AL.t[i] for i in aidx]
+    ex3 = Float64[]; ey3 = Float64[]; ez3 = Float64[]; et3 = Float64[]
+    for i in eidx
+        re_ = ecef_from_geodetic(EL.lat[i], EL.lon[i], EL.h[i])
+        th = SatelliteSim.earth_rotation_angle(0.0, EL.t[i])
+        reci = SatelliteSim.rot_z(re_, -th)
+        push!(ex3, reci[1] / 1e6); push!(ey3, reci[2] / 1e6); push!(ez3, reci[3] / 1e6)
+        push!(et3, EL.t[i])
+    end
 
     prop_margin = cis.m - (ms.lv.stages[end].mdry + ms.lv.payload_mass)
     ei = findfirst(e -> e.name == :entry_interface, ent.events)
@@ -167,6 +183,8 @@ function run_mission(p)::Dict{String,Any}
         push!(events, Dict("phase" => "ascent", "name" => string(e.name), "t" => e.t))
     end
     push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
+    push!(events, Dict("phase" => "cislunar", "name" => "tli_cutoff",
+                       "t" => cis.t_tli + cis.burn_duration))
     push!(events, Dict("phase" => "cislunar", "name" => "perilune", "t" => cis.t_perilune))
     push!(events, Dict("phase" => "cislunar", "name" => "entry_handoff", "t" => cis.t))
     for e in ent.events
@@ -199,13 +217,43 @@ function run_mission(p)::Dict{String,Any}
             "v_splash" => ent.v_splash,
             "t_days" => ent.t_splash / 86400,
         ),
-        "cis" => Dict("t" => tt, "x" => px, "y" => py, "mx" => mx, "my" => my, "ph" => pp),
+        "cis" => Dict("t" => tt, "x" => px, "y" => py, "z" => pz,
+                      "mx" => mx, "my" => my, "mz" => mz, "ph" => pp,
+                      "n" => [nrm[1], nrm[2], nrm[3]]),
+        "asc3d" => Dict("t" => at3, "x" => ax3, "y" => ay3, "z" => az3),
+        "ent3d" => Dict("t" => et3, "x" => ex3, "y" => ey3, "z" => ez3),
+        "sites" => Dict(
+            "launch_lat" => rad2deg_(ms.guid.site_lat),
+            "launch_lon" => rad2deg_(ms.guid.site_lon),
+            "splash_lat" => rad2deg_(ent.lat_splash),
+            "splash_lon" => rad2deg_(ent.lon_splash),
+        ),
         "ascent" => Dict("t" => deci(AL.t[aidx], 400), "h" => deci(AL.h[aidx] ./ 1e3, 400),
-                         "v" => deci(AL.vrel[aidx], 400), "qbar" => deci(AL.qbar[aidx] ./ 1e3, 400)),
+                         "v" => deci(AL.vrel[aidx], 400), "qbar" => deci(AL.qbar[aidx] ./ 1e3, 400),
+                         "gamma" => deci(AL.gamma[aidx], 400), "mach" => deci(AL.mach[aidx], 400),
+                         "thrust" => deci(AL.thrust[aidx], 400), "m" => deci(AL.m[aidx], 400),
+                         "dr" => deci(AL.downrange[aidx], 400)),
         "entry" => Dict("t" => deci(EL.t[eidx] .- EL.t[1], 500), "h" => deci(EL.h[eidx] ./ 1e3, 500),
                         "v" => deci(EL.vrel[eidx], 500), "g" => deci(EL.gload[eidx], 500),
                         "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500)),
         "events" => events,
+    )
+end
+
+"Procedural rocket geometry for the panel's vehicle viewer."
+function rocket_geometry(p)::Dict{String,Any}
+    d = getf(p, "diameter", 1.8)
+    props = [getf(p, "s1_prop", 42000.0), getf(p, "s2_prop", 9500.0),
+             getf(p, "s3_prop", 950.0)]
+    mesh, secs = rocket_mesh(diameter = d, prop_masses = props, nseg = 36)
+    Dict{String,Any}(
+        "ok" => true,
+        "length" => secs[end].x1,
+        "diameter" => d,
+        "sections" => [Dict("name" => string(s.name), "x0" => s.x0, "x1" => s.x1,
+                            "t0" => s.t0, "t1" => s.t1)
+                       for s in secs],
+        "tris" => [Float64[t[1]..., t[2]..., t[3]...] for t in mesh.tris],
     )
 end
 
@@ -225,7 +273,7 @@ function run_sweep(p)::Dict{String,Any}
         q = copy(p)
         q[param] = string(vals[i])
         runs[i] = try
-            r = run_mission(q)
+            r = panel_mission(q)
             Dict("ok" => true, "metrics" => r["metrics"])
         catch err
             Dict("ok" => false, "error" => sprint(showerror, err))
@@ -260,11 +308,14 @@ function handle(sock)
         body = clen > 0 ? String(read(sock, clen)) : ""
 
         if method == "GET" && (path == "/" || startswith(path, "/?"))
-            respond(sock, "200 OK", "text/html; charset=utf-8", PAGE)
+            # re-read per request so page edits show on refresh (dev-friendly)
+            respond(sock, "200 OK", "text/html; charset=utf-8", read(PAGE_PATH, String))
+        elseif method == "GET" && (path == "/launch" || startswith(path, "/launch?"))
+            respond(sock, "200 OK", "text/html; charset=utf-8", read(LAUNCH_PATH, String))
         elseif method == "POST" && path == "/api/run"
             p = parse_form(body)
             out = try
-                run_mission(p)
+                panel_mission(p)
             catch err
                 Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
             end
@@ -273,6 +324,14 @@ function handle(sock)
             p = parse_form(body)
             out = try
                 run_sweep(p)
+            catch err
+                Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
+            end
+            respond(sock, "200 OK", "application/json", json(out))
+        elseif method == "POST" && path == "/api/geometry"
+            p = parse_form(body)
+            out = try
+                rocket_geometry(p)
             catch err
                 Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
             end
@@ -289,7 +348,7 @@ end
 
 println("warming up (first mission run compiles the stack)...")
 t0 = time()
-run_mission(Dict{String,String}())
+panel_mission(Dict{String,String}())
 @printf("ready in %.1f s — panel at http://localhost:%d  (Ctrl-C to stop)\n",
         time() - t0, PORT)
 

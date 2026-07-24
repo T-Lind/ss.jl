@@ -167,6 +167,13 @@ end
     @test isapprox(cis.perilune_alt, 2000e3; atol = 30e3)
     @test isapprox(cis.vac_perigee_alt, 35e3; atol = 5e3)
     @test 2.5e3 < cis.dv_tli < 3.4e3
+    # direct free return: entry on the FIRST post-flyby perigee pass, no
+    # phasing loop back out past the Moon (regression: the design once
+    # converged onto a 19.7-day two-revolution return)
+    @test cis.miss_passes == 0
+    @test cis.t - cis.t_perilune < 5.0 * 86400.0   # return leg ~ outbound leg
+    rmax = maximum(hypot.(cis.log.rx, cis.log.ry, cis.log.rz))
+    @test rmax < 1.15 * A_MOON                     # never far beyond the lunar distance
     # entry interface speed near lunar-return values
     ent = ms.entry
     ei = ent.events[findfirst(e -> e.name == :entry_interface, ent.events)]
@@ -272,6 +279,7 @@ end
     @test c.rcs.margin > 0
     @test isapprox(ms.cislunar.perilune_alt, 2000e3; atol = 60e3)
     @test abs(ms.cislunar.vac_perigee_alt - 35e3) < 25e3
+    @test ms.cislunar.miss_passes == 0             # corrected cruise comes straight home
     @test ms.entry.terminated == :splashdown
     @test ms.entry.peak_gload < 30.0
 end
@@ -310,6 +318,21 @@ end
     sph2 = read_stl(path)
     @test length(sph2) == length(sph)
     @test isapprox(mesh_volume(sph2), mesh_volume(sph); rtol = 1e-6)
+    # procedural launcher: closed, positive volume, one section per stage
+    # plus the pod capsule and the fairing shell that encloses it
+    rk, secs = rocket_mesh(diameter = 2.0, prop_masses = [10_000.0, 2_000.0])
+    @test mesh_volume(rk) > 0
+    @test length(secs) == 4
+    @test secs[end-1].name == :pod
+    @test secs[end].name == :fairing
+    @test issorted([s.x0 for s in secs])
+    # triangle ranges tile the merged soup exactly, in order
+    @test secs[1].t0 == 1 && secs[end].t1 == length(rk)
+    @test all(secs[i+1].t0 == secs[i].t1 + 1 for i in 1:length(secs)-1)
+    # each section is itself a closed solid (viewers detach them individually)
+    @test all(mesh_volume(TriMesh(rk.tris[s.t0:s.t1])) > 0 for s in secs)
+    # barrel volume actually swallows the propellant it was sized for
+    @test mesh_volume(rk) > (10_000.0 + 2_000.0) / 1020.0
 end
 
 @testset "Newtonian panel aero" begin

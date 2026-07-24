@@ -68,4 +68,11 @@ mps = mass_properties(ship, 120_000.0)     # dry-ish + residuals, entry mass
 @printf("starship: %4d tris  vol %.0f m³  cg x %.2f m  I (%.2e, %.2e, %.2e)  offdiag %.4f\n",
         length(ship), mps.volume, mps.cg[1], mps.inertia..., mps.offdiag_frac)
 
-println("wrote geometry/capsule.stl, geometry/starship.stl")
+# --- Sable launcher: stacked stages + ogive fairing (panel visualizer) -----
+rk, secs = rocket_mesh()   # default = the Sable stack dimensions
+write_stl(joinpath(outdir, "sable.stl"), rk; name = "ss.jl sable")
+@printf("sable   : %4d tris  vol %.1f m³  length %.1f m  (%s)\n",
+        length(rk), mesh_volume(rk), secs[end].x1,
+        join(string.(s.name for s in secs), ", "))
+
+println("wrote geometry/capsule.stl, geometry/starship.stl, geometry/sable.stl")

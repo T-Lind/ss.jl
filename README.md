@@ -10,7 +10,8 @@ Mid-fidelity, extensible satellite mission simulation in pure Julia
    ascent inserts into a 200 km parking orbit, the kick stage performs a
    finite trans-lunar-injection burn, the pod coasts around the Moon on a
    free-return trajectory (2000 km perilune, no burns after TLI), and comes
-   home to a ballistic 10.6 km/s entry and Pacific splashdown.
+   straight home — 6.5 days pad to Pacific splashdown — to a ballistic
+   10.6 km/s entry.
 
 ![free return](output/plots/moonshot_3d_cislunar.png)
 
@@ -25,10 +26,10 @@ launch (57.8 t, 3 stages)  ──►  200 km parking orbit, i = 28.5°
                                         │  3.3 d outbound
                                         ▼
                           lunar flyby, perilune 2000 km (free return)
-                                        │  ~16 d coast home
+                                        │  3.2 d coast home (first-pass entry)
                                         ▼
-              vacuum perigee 35 km  ──►  EI at 10.6 km/s, Mach 28
-                                        │  4-DOF ballistic entry, 18 g
+              vacuum perigee ~35 km  ──►  EI at 10.6 km/s, Mach 28
+                                        │  4-DOF ballistic entry, 19 g
                                         ▼
                           drogue + main chutes, Pacific splashdown
 ```
@@ -70,7 +71,12 @@ time-of-flight to the crossing, Moon lead angle — scans the encounter window
 and its escape-side and free-return-side flanks are all a few minutes wide),
 then Newton-iterates (ignition time, Δv) onto (perilune altitude, return
 vacuum perigee), with an outer corrector that absorbs the few-hundred-km
-perigee drift the Moon's tides add over the long coast home.
+perigee drift the Moon's tides add over the coast home. The corrector
+requires entry on the **first** post-flyby perigee pass — the propagator
+counts perigee passes that stay above the entry handoff, and any such
+"phasing loop" solution (a return that misses entry, swings back out past
+the lunar distance, and enters a revolution later) is steered back onto the
+direct-return family.
 
 **Entry**: the pod hands off at 140 km to the original 4-DOF reentry
 simulation — same vehicle, same aero/heating models — now at 10.6 km/s
@@ -92,7 +98,7 @@ gram of propellant; damping 3°/s of tipoff costs ~9 grams. Long-coast
 attitude budgets (deadband limit cycling, slews, settling) use the standard
 closed-form results — which immediately re-sized the kick stage's thrusters:
 the first cut (25 N, 20 ms pulses) would have emptied its tank limit-cycling
-across the 19-day cruise.
+across a multi-week cruise.
 
 **Execution dispersions & mid-course correction** (`translunar.jl`): the TLI
 burn accepts magnitude and pointing errors, and they matter enormously — a
@@ -105,19 +111,21 @@ terminal polish on (perilune, proxy perigee). `moonshot(tli_mag_err=...,
 tli_point_err=...)` flies the dispersed cruise with the correction at
 T+24 h and reports the TCM Δv, its kick-propellant cost, and the cruise RCS
 budget. `scripts/run_tcm_mc.jl` runs the Monte Carlo: at σ = 0.2% / 0.25°,
-the TCM budget is ~36 m/s mean / 95 m/s p99 — p95 propellant 13.3 kg
-against the 22.9 kg post-TLI kick margin, with 98% of samples reaching the
+the TCM budget is ~36 m/s mean / ~100 m/s p99 — p95 propellant 13.7 kg
+against the 22.8 kg post-TLI kick margin, with 99% of samples reaching the
 entry corridor.
 
 Nominal circumlunar numbers (v0.2): TLI Δv 3151 m/s of a 3330 m/s budget,
-perilune 2000 ± 30 km, return vacuum perigee 35.5 km (γ ≈ −7.3° at 140 km),
-entry peak 17.9 g / 247 W/cm², stagnation heat load 104 MJ/m², splashdown
-19.7 days after liftoff at 4.5 m/s under main.
+perilune 2000 ± 30 km, return vacuum perigee 32.4 km (γ ≈ −7.4° at 140 km),
+entry peak 18.8 g / 253 W/cm², stagnation heat load 102 MJ/m², splashdown
+6.5 days after liftoff at 4.5 m/s under main (3.3 d out, 3.2 d home — the
+symmetric free-return figure-8).
 
 Plots: `output/plots/moonshot_*` — 3D ascent, Earth-Moon trajectory,
-rotating-frame figure-8, 3D entry. `scripts/make_viewer.py` builds an
-interactive HTML viewer (`output/moonshot_viewer.html`) with mission-time
-playback and an inertial/rotating frame toggle.
+rotating-frame figure-8, 3D entry — plus the full analysis suite from
+`scripts/make_mission_plots.py` (see Running). `scripts/make_viewer.py`
+builds an interactive HTML viewer (`output/moonshot_viewer.html`) with
+mission-time playback and an inertial/rotating frame toggle.
 
 **Maneuver planning** (`maneuvers.jl`): the two-body transfer toolbox — a
 universal-variables Lambert solver (validated against analytic ellipse
@@ -135,10 +143,16 @@ mission — pod, targets, all stages, dispersions — and
 and mission variants are files, not code.
 
 **Aerodynamics from geometry** (`mesh.jl`, `panelaero.jl`, `geometry/`):
-load an STL (or build one procedurally), get exact polyhedral mass
-properties (volume, CG, inertia — Eberly's method, validated to machine
-precision on primitives), and generate hypersonic aero tables with a
-modified-Newtonian panel method: CA/CN/Cm over (α, Mach) plus the pitch
+load an STL (or build one procedurally — `lathe_mesh`, `box_mesh`, and
+`rocket_mesh`, which sizes a stacked launcher so each stage's barrel holds
+its propellant and details it with a five-bell first-stage engine cluster,
+recessed interstage collars hiding nested vacuum bells, cable raceways,
+RCS pods and a payload adapter on the kick stage, and a pod capsule under
+the fairing — reporting each section's axial extent *and* triangle range
+so viewers can detach pieces individually), get exact
+polyhedral mass properties (volume, CG, inertia — Eberly's method,
+validated to machine precision on primitives), and generate hypersonic aero
+tables with a modified-Newtonian panel method: CA/CN/Cm over (α, Mach) plus the pitch
 damping derivative Cm_q from a rotating-panel sweep. The sphere reproduces
 the analytic Newtonian drag to 0.2%; the committed capsule mesh flies the
 full 6-DOF entry on mesh-derived aero within ~10% of the handbook-table
@@ -218,9 +232,10 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (80 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (169 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
-# circumlunar chain, and end-to-end reentry)
+# circumlunar chain — including a first-pass-return regression check —
+# meshes/panel aero, maneuvers, and end-to-end reentry)
 julia --project -e 'push!(LOAD_PATH, "src"); using SatelliteSim; include("test/runtests.jl")'
 
 # targeted nominal trajectory -> output/*.csv
@@ -235,16 +250,20 @@ julia --project -t auto scripts/run_tcm_mc.jl 100 0.2 0.25
 # missions from TOML specs
 julia --project scripts/run_mission.jl missions/moonshot.toml
 
-# regenerate the demo geometry (capsule + simplified Starship)
+# regenerate the demo geometry (capsule + simplified Starship + Sable launcher)
 julia --project scripts/make_meshes.jl
 
 # Monte Carlo (threaded) -> output/montecarlo.csv + summary
 julia --project -t auto scripts/run_montecarlo.jl 300
 
 # plots
-python3 scripts/make_plots.py        # reentry plots (matplotlib)
-python3 scripts/make_3d.py           # circumlunar 3D/mission-plane plots
-python3 scripts/make_viewer.py       # interactive HTML mission viewer
+python3 scripts/make_plots.py          # reentry plots (matplotlib)
+python3 scripts/make_3d.py             # circumlunar 3D/mission-plane plots
+python3 scripts/make_mission_plots.py  # full mission analysis suite: broken-
+                                       # time-axis overview, orbital energy,
+                                       # ascent/entry profiles, ground track,
+                                       # TCM Monte Carlo -> output/plots/
+python3 scripts/make_viewer.py         # interactive HTML mission viewer
 julia --project scripts/make_plots.jl  # requires Plots.jl installed
 
 # mission-control panel: configure, run, and explore in the browser
@@ -255,16 +274,72 @@ julia --project -t auto scripts/panel.jl   # then open http://localhost:8137
 
 `scripts/panel.jl` serves a local cockpit (pure stdlib — a raw-`Sockets`
 HTTP server, no dependencies): edit the mission targets and all three
-stages' propellant/dry mass/thrust/Isp, hit **Run**, and get the full
-design + flight back in about a second — stat tiles, the interactive 3D
-trajectory with mission-time playback and an inertial/rotating frame
-toggle, ascent & entry profile charts, the event timeline, and a run
-history for side-by-side comparison. A **parameter sweep** tab varies any
-knob across a range (threaded; ~50 missions/min) and plots the outcome
-curve — e.g. sweeping pod mass shows the TLI propellant margin hitting
-zero just above 400 kg, which is the actual payload limit of the default
-launcher. Runs that fly but miss the requested perilune/perigee (e.g. a
-prop-starved TLI) are flagged **off target** rather than silently plotted.
+stages' propellant/dry mass/thrust/Isp, hit **Run** (or pick a one-click
+**preset** — heavy pod, low/high flyby, steep/shallow entry, inclined,
+dispersed TLI), and get the full design + flight back in about a second —
+stat tiles, the interactive 3D scene, ascent & entry profile charts, the
+event timeline, and a run history for side-by-side comparison.
+
+The 3D scene is true ECI geometry: the full pad-to-splashdown track
+(ascent, parking orbit, TLI burn, outbound, return, entry — each its own
+color), a textured globe spinning about the real pole with **launch-site
+and splashdown markers riding the rotating surface**, correct
+depth-occlusion of trajectory lines behind the Earth, mission-time
+playback, an inertial/rotating frame toggle, and Earth/full zoom shortcuts.
+A **vehicle geometry** card renders the launcher your stage masses imply
+(procedural mesh from `rocket_mesh`, sized so each barrel actually holds
+its propellant) and updates as you edit the configuration — and it
+**follows the mission clock**: scrub the timeline and stage 1, the fairing,
+stage 2, and finally the spent kick stage drop away at their actual event
+times, with an engine flame while a stage burns and the view recentering
+on whatever is still flying (down to the bare pod on the return leg).
+
+### Mission experience
+
+The **🚀 launch view** chip (or `http://localhost:8137/launch`) opens a
+cinematic WebGL rendering of the whole mission, pad to splashdown, flown
+directly from the simulator's logs for the currently configured vehicle —
+same `/api/run` data, nothing canned. The timeline is phase-aware with
+automatic time warp (real-time through the burns and entry, thousands× on
+the quiet cruise, a warp ladder and a phase-segmented seek bar to jump
+around):
+
+* **Ascent** — from T−15 the umbilical arms swing back and the pad lights
+  under the real ignition ramp; the camera director cuts through pad,
+  tracker, chase, and onboard views as the actual trajectory unfolds:
+  gravity-turn pitch from the guidance solution, max-q vapor at the logged
+  transonic time, stage separation and fairing halves tumbling away
+  ballistically, Mach diamonds giving way to a vacuum-expanded plume.
+* **Orbit → TLI → translunar** — the scene switches to true ECI
+  coordinates: the kick stage + pod coast over a day/night Earth, relight
+  for the TLI burn against the limb, and cruise out with the Moon growing
+  from a disc (sim ephemeris) to a cratered sphere filling the frame at
+  the 2 000 km far-side flyby.
+* **Entry** — the pod hits the interface at ~10.6 km/s trailing an
+  incandescent plasma wake driven by the logged heating rate, then drogue,
+  gored orange-and-white main, and splashdown in the Pacific, with the
+  final stat card.
+
+Earth and Moon are **exact ray-traced spheres** rendered in a single
+fullscreen pass with camera-relative centers — the limb, horizon dip, and
+atmosphere shell are geometrically correct from the pad, from orbit, and
+from lunar distance (no flat terrain disc, no far-plane clipping). The
+surface combines the panel's real land-mask texture with procedural
+detail, cloud fields, polar ice, night-side shading, and Earth's actual
+rotation over the 6.5-day cruise. HUD readouts sample the same logs the
+analysis plots use; event callouts, procedural audio (distance-delayed
+rumble + crackle, vacuum-silent, wind on entry), and keyboard/manual
+cameras round it out. Everything is generated in-page — vehicle mesh from
+`rocket_mesh` via the API, lattice tower, pad, terrain, clouds, plume,
+parachutes, and sound are all procedural; no external assets, no
+libraries.
+
+A **parameter sweep** tab varies any knob across a range (threaded; ~50
+missions/min) and plots the outcome curve — e.g. sweeping pod mass shows
+the TLI propellant margin hitting zero just above 400 kg, which is the
+actual payload limit of the default launcher. Runs that fly but miss the
+requested perilune/perigee (e.g. a prop-starved TLI) are flagged **off
+target** rather than silently plotted.
 
 Programmatic use:
 
@@ -361,9 +436,10 @@ geometry/           demo STL meshes (capsule, simplified Starship)
   flying the free-return class, but real launch windows, the Moon's 5.1°
   plane and ±21,000 km eccentricity, and solar perturbation belong to the
   ephemeris upgrade (see extension points).
-* The designed free return is the slow, near-minimum-energy family (3.3 d
-  out, ~16 d home). Apollo flew a faster, higher-energy family — reachable
-  here by adding flight time as a third design target.
+* The designed free return is the near-minimum-energy family (3.3 d out,
+  3.2 d home, symmetric about the flyby). Apollo flew a faster,
+  higher-energy family — reachable here by adding flight time as a third
+  design target.
 * Splashdown of the lunar return lands wherever the geometry says; targeting
   a specific site couples TLI epoch to Earth rotation and is a
   straightforward outer loop that is not yet closed.

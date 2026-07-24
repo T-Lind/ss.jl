@@ -2,9 +2,9 @@
   Liftoff mass    : 57.8 t   (Sable, 3 stages + fairing)
   Parking orbit   : 198.7 x 204.9 km  i=28.40°  (insertion t=466.2 s, m=2559 kg)
   Kick-stage prop : 950.0 kg at insertion
-  TLI             : t=0.92 h  dv=3150.6 m/s  burn 187.3 s  (m -> 513 kg)
-  Perilune        : 2000 km altitude at t=3.29 d
-  Return perigee  : 35.5 km vacuum  gamma_EI-ish=-7.31°
-  Entry interface : V_rel=10589 m/s  Mach 27.8  (t=19.67 d)
-  Splashdown      : lat=-27.31°  lon=-147.47°  V=4.5 m/s  (t=19.68 d)
-  Entry peak load : 17.9 g   peak q_dot 247 W/cm²   heat load 104 MJ/m²
+  TLI             : t=0.91 h  dv=3151.1 m/s  burn 187.3 s  (m -> 513 kg)
+  Perilune        : 2000 km altitude at t=3.27 d
+  Return perigee  : 32.4 km vacuum  gamma_EI-ish=-7.41°
+  Entry interface : V_rel=10590 m/s  Mach 27.8  (t=6.51 d)
+  Splashdown      : lat=-27.31°  lon=-74.42°  V=4.5 m/s  (t=6.52 d)
+  Entry peak load : 18.8 g   peak q_dot 253 W/cm²   heat load 102 MJ/m²
