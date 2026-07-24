@@ -52,6 +52,7 @@ include("dynamics.jl")
 include("integrator.jl")
 include("rigidbody.jl")
 include("rcs.jl")
+include("engines.jl")
 include("propulsion.jl")
 include("moon.jl")
 include("launch.jl")
@@ -61,6 +62,7 @@ include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
 include("maneuvers.jl")
+include("solve.jl")
 include("mesh.jl")
 include("panelaero.jl")
 include("config.jl")
@@ -91,9 +93,17 @@ export
     WEST_COAST_TARGET_LAT, WEST_COAST_TARGET_LON,
     # monte carlo
     Dispersions, MCSample, run_montecarlo, mc_statistics,
+    # scalar targeting
+    SolveResult, find_root, converged,
+    # propellants, engines, conceptual sizing
+    Propellant, PROPELLANTS, propellant, bulk_density, propellant_volumes,
+    Engine, ENGINES, engine, lookup_engine, stage_mass, sized_stage,
     # propulsion / launch vehicle
-    Stage, LaunchVehicle, default_moon_rocket, stage_thrust, stage_mdot,
-    stage_burn_time, stage_dv, liftoff_mass,
+    Stage, LaunchVehicle, BoosterSet, default_moon_rocket,
+    stage_thrust, stage_mdot, booster_mass, booster_thrust, booster_mdot,
+    frontal_area, core_diameter, pad_thrust,
+    stage_burn_time, stage_dv, liftoff_mass, stack_mass_above,
+    stage_volume, stage_diameter,
     # moon
     MU_MOON, R_MOON, A_MOON, N_MOON,
     CircularMoonEphemeris, coplanar_moon, moon_position, moon_velocity,
@@ -119,7 +129,7 @@ export
     cw_stm, cw_propagate, cw_two_impulse,
     # mesh & panel aero
     TriMesh, read_stl, write_stl, mesh_area, mesh_volume, mass_properties,
-    lathe_mesh, box_mesh, merge_meshes, rocket_mesh,
+    lathe_mesh, box_mesh, merge_meshes, rocket_mesh, pod_mesh, interstage_length,
     PanelAero, panel_aero, cp_max_newtonian, trim_alpha,
     # config
     MissionSpec, load_mission, run_mission,

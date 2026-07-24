@@ -9,6 +9,7 @@ const RE_MEAN      = 6371008.8           # mean Earth radius [m] (for great-circ
 const J2_EARTH     = 1.08262668e-3       # second zonal harmonic
 const OMEGA_EARTH  = 7.2921159e-5        # Earth rotation rate [rad/s]
 const G0           = 9.80665             # standard gravity [m/s^2]
+const P0_SEA       = 101325.0            # sea-level standard pressure [Pa]
 const R_AIR        = 287.0528            # specific gas constant, air [J/(kg K)]
 const GAMMA_AIR    = 1.4                 # ratio of specific heats
 const SIGMA_SB     = 5.670374419e-8      # Stefan-Boltzmann [W/(m^2 K^4)]

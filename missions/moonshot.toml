@@ -24,13 +24,36 @@ name = "Sable"
 fairing_kg = 150.0
 diameter_m = 1.8
 
-[[vehicle.stage]]           # stage 1 — kerolox booster
+# A stage can be spelled out either way round.
+#
+#   1. Performance directly, as below: thrust, Isp and exit area are yours.
+#      `propellant` and `engines` are optional and carry no flight dynamics —
+#      they set the stage's physical size and how many bells it wears, since
+#      bulk density is what decides how long a tank has to be. Omit
+#      `propellant` and a stage is assumed kerolox.
+#
+#   2. Or name an engine from the catalogue and let everything follow:
+#
+#        [[vehicle.stage]]
+#        name = "booster"
+#        prop_kg = 411000.0
+#        engine = "merlin_1d"    # thrust, Isp, exit area, propellant
+#        engines = 9             # clustered: thrust and exit area x9
+#        # dry_kg omitted -> estimated from tank volume, engines and structure
+#
+#      Engines: merlin_1d, merlin_1d_vac, rutherford, rutherford_vac,
+#      raptor_2, rs25, rl10b2, vinci, aj10.
+#      Propellants: kerolox, hydrolox, methalox, hypergolic, hydrazine, solid.
+
+[[vehicle.stage]]           # stage 1 — kerolox booster, five engines
 name = "sable1"
 dry_kg = 3800.0
 prop_kg = 42000.0
 thrust_vac_kn = 950.0
 isp_vac_s = 305.0
 exit_area_m2 = 0.8
+propellant = "kerolox"
+engines = 5
 
 [[vehicle.stage]]           # stage 2 — kerolox upper
 name = "sable2"
@@ -38,6 +61,7 @@ dry_kg = 900.0
 prop_kg = 9500.0
 thrust_vac_kn = 95.0
 isp_vac_s = 345.0
+propellant = "kerolox"
 
 [[vehicle.stage]]           # stage 3 — storable kick stage (TLI)
 name = "sablek"
@@ -45,3 +69,29 @@ dry_kg = 140.0
 prop_kg = 950.0
 thrust_vac_kn = 15.0
 isp_vac_s = 315.0
+propellant = "hypergolic"
+
+# Strap-on boosters, if you want them. A [[vehicle.booster]] set is one
+# booster spelled out exactly like a stage — either way round, engine from
+# the catalogue or the four performance numbers — plus how the set behaves
+# in parallel with the core. `count` of them are clustered around stage 1
+# and burn with it; the numbers below describe ONE booster.
+#
+#   [[vehicle.booster]]
+#   name = "strap"
+#   count = 2
+#   diameter_m = 1.53          # defaults to 0.85 x the vehicle diameter
+#   dry_kg = 900.0
+#   prop_kg = 12000.0
+#   thrust_vac_kn = 380.0
+#   isp_vac_s = 285.0
+#   exit_area_m2 = 0.32
+#   propellant = "kerolox"
+#   engines = 2
+#   core_throttle = 0.75       # hold stage 1 down while the sides carry it
+#   ignition_delay_s = 0.0     # > 0 for an air-lit set
+#   sep_delay_s = 0.0          # dead-weight coast after burnout, before drop
+#
+# A spec with boosters automatically re-finds its pitch-over kick: the
+# reference 8 degrees lofts a high thrust-to-weight stack and wastes the
+# extra impulse.

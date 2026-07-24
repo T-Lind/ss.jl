@@ -69,7 +69,9 @@ mps = mass_properties(ship, 120_000.0)     # dry-ish + residuals, entry mass
         length(ship), mps.volume, mps.cg[1], mps.inertia..., mps.offdiag_frac)
 
 # --- Sable launcher: stacked stages + ogive fairing (panel visualizer) -----
-rk, secs = rocket_mesh()   # default = the Sable stack dimensions
+# built from the reference vehicle itself, so tank lengths follow each
+# stage's propellant density and the bells follow its engine count
+rk, secs = rocket_mesh(default_moon_rocket())
 write_stl(joinpath(outdir, "sable.stl"), rk; name = "ss.jl sable")
 @printf("sable   : %4d tris  vol %.1f m³  length %.1f m  (%s)\n",
         length(rk), mesh_volume(rk), secs[end].x1,

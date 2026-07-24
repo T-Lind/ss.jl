@@ -319,29 +319,36 @@ void main(){
 // lit meshes with baked per-vertex color; view-space lighting; a warm engine
 // (or plasma) point light
 const MESH = program(`
-attribute vec3 aP, aN, aC;
+attribute vec3 aP, aN, aC; attribute vec2 aUV; attribute float aPw;
 uniform mat4 uMV, uPr; uniform mat3 uNM;
-varying vec3 vVP, vN, vC;
+varying vec3 vVP, vN, vC; varying vec2 vUV; varying float vPw;
 void main(){
   vec4 vp = uMV * vec4(aP, 1.0);
-  vVP = vp.xyz; vN = uNM * aN; vC = aC;
+  vVP = vp.xyz; vN = uNM * aN; vC = aC; vUV = aUV; vPw = aPw;
   gl_Position = uPr * vp;
 }`, `
 precision highp float;
-varying vec3 vVP, vN, vC;
+varying vec3 vVP, vN, vC; varying vec2 vUV; varying float vPw;
 uniform vec3 uSunV, uFogCol, uEngV, uEngC;
 uniform float uFogDen, uEngI, uAmb;
+uniform sampler2D uLiv;
 void main(){
   vec3 n = normalize(vN);
+  // livery decal wrapped cylindrically over the painted skin
+  vec3 base = vC;
+  if (vPw > 0.5) {
+    vec4 d = texture2D(uLiv, vUV);
+    base = mix(base, d.rgb, d.a);
+  }
   float dif = max(dot(n, uSunV), 0.0);
   float sky = 0.5 + 0.5*n.y;
-  vec3 lit = vC * (0.82*dif + uAmb*(0.72 + 0.28*sky))
+  vec3 lit = base * (0.82*dif + uAmb*(0.72 + 0.28*sky))
            + vec3(0.5,0.6,0.8)*0.10*sky*uAmb*2.0;
   vec3 h = normalize(uSunV - normalize(vVP));
   lit += vec3(0.9)*pow(max(dot(n, h), 0.0), 42.0)*0.22;
   if (uEngI > 0.0) {
     vec3 dd = uEngV - vVP; float r2 = dot(dd, dd);
-    lit += vC * uEngC * uEngI * 90.0/(r2 + 18.0)
+    lit += base * uEngC * uEngI * 90.0/(r2 + 18.0)
            * max(dot(n, dd/sqrt(r2 + 0.001)), 0.0);
   }
   float fog = 1.0 - exp(-length(vVP)*uFogDen);
@@ -402,6 +409,8 @@ void main(){
 }`);
 
 // ------------------------------------------------------- procedural build --
+// mesh vertex: position, normal, baked color, livery uv, paint weight
+const VST = 12;
 // segBox with per-vertex color; boxAt rescales the cross-section
 function segBox(out, p0, p1, w, col) {
   const ax = V.norm(V.sub(p1, p0));
@@ -415,7 +424,8 @@ function segBox(out, p0, p1, w, col) {
   const quad = (a,b,c,d,n) => {
     for (const tri of [[a,b,c],[a,c,d]])
       for (const i of tri)
-        out.push(v[i][0],v[i][1],v[i][2], n[0],n[1],n[2], col[0],col[1],col[2]);
+        out.push(v[i][0],v[i][1],v[i][2], n[0],n[1],n[2],
+                 col[0],col[1],col[2], 0,0,0);       // uv + paint weight
   };
   const neg = x => V.scale(x, -1);
   quad(0,3,2,1, neg(ax)); quad(4,5,6,7, ax);
@@ -425,7 +435,7 @@ function segBox(out, p0, p1, w, col) {
 function boxAt(out, c, s, col) {
   segBox(out, [c[0], c[1]-s[1]/2, c[2]], [c[0], c[1]+s[1]/2, c[2]], 1, col);
   const n = out.length;
-  for (let i = n - 36*9; i < n; i += 9) {
+  for (let i = n - 36*VST; i < n; i += VST) {
     out[i]   = c[0] + (out[i]   - c[0]) * s[0];
     out[i+2] = c[2] + (out[i+2] - c[2]) * s[2];
   }
@@ -440,7 +450,8 @@ function lathe(out, prof, nseg, colFn) {
       const p = (x, r, a) => [x, r*Math.cos(a), r*Math.sin(a)];
       const q00 = p(x0,r0,a0), q01 = p(x0,r0,a1), q10 = p(x1,r1,a0), q11 = p(x1,r1,a1);
       const nrm = V.norm(V.cross(V.sub(q10,q00), V.sub(q01,q00)));
-      const emit = v => out.push(v[0],v[1],v[2], nrm[0],nrm[1],nrm[2], col[0],col[1],col[2]);
+      const emit = v => out.push(v[0],v[1],v[2], nrm[0],nrm[1],nrm[2],
+                                 col[0],col[1],col[2], 0,0,0);
       if (r0 > 1e-9) { emit(q00); emit(q01); emit(q10); }
       if (r1 > 1e-9) { emit(q10); emit(q01); emit(q11); }
     }
@@ -451,30 +462,76 @@ function lathe(out, prof, nseg, colFn) {
 const qs = location.search.slice(1);
 let run = null, geo = null;
 
-// mission timeline data
-let A = null, EV = {}, tMaxQ = 0, sep1T = 1e9, ign2T = 1e9, fairT = 1e9,
-    secoT = 466, pitchT = 10;
-let tTLI = 0, tCut = 0, tPeri = 0, tHand = 0, tEI = 0, tDrog = 0, tMain = 0,
-    tSplash = 0, tEnd = 0;
+// ---------------------------------------------------- mission timeline data --
+// Nothing below is assumed about the mission: the phase table, the event
+// markers and the seek bar are all derived from the events and data blocks
+// this particular run returned. A trajectory with no TLI has no translunar
+// phases; a vehicle with four stages gets four separations.
+let A = null, EV = {}, EVS = [], tMaxQ = 0, fairT = NaN, secoT = 0, pitchT = 10;
+let SEPS = [], NST = 0, LASTST = null, dropT = {};
+// strap-on booster sets: their names, and when each set lit and was dropped
+let BNAMES = [], BSEP = [], BIGN = [];
+let tTLI = NaN, tCut = NaN, tPeri = NaN, tHand = NaN, tEI = NaN, tDrog = NaN,
+    tMain = NaN, tSplash = NaN, tEnd = 0;
 let PH = [];   // phase table
-let CIS = null, ENT = null;
+let CIS = null, ENT = null, hasCis = false, hasEnt = false;
+
+// Sim event names are built from stage and parachute names, so only the
+// fixed ones can be spelled out; everything else is decoded or humanised.
+const EVNAME = {
+  liftoff: 'LIFTOFF', pitchover: 'PITCHOVER', gravity_turn: 'GRAVITY TURN',
+  meco: 'MECO', seco: 'SECO — ORBIT INSERTION',
+  fairing_jettison: 'FAIRING JETTISON', tli_ignition: 'TLI IGNITION',
+  tli_cutoff: 'TLI CUTOFF — GO FOR THE MOON',
+  entry_handoff: 'KICK STAGE JETTISON', entry_interface: 'ENTRY INTERFACE',
+  splashdown: 'SPLASHDOWN',
+};
+const EVSUF = { sep: 'SEPARATION', ignition: 'IGNITION', deploy: 'DEPLOY',
+                jettison: 'JETTISON', burnout: 'BURNOUT' };
+function eventLabel(name) {
+  if (EVNAME[name]) return EVNAME[name];
+  const pretty = s => s.replace(/_/g, ' ').toUpperCase();
+  const m = /^(sep|ignition|deploy|jettison|burnout)_(.+)$/.exec(name);
+  return m ? pretty(m[2]) + ' ' + EVSUF[m[1]] : pretty(name);
+}
+// entry pacing: real time through peak heating and the last seconds before
+// the water, compressed through the long glide and the chute ride
+function entryWarp(t) {
+  if (isFinite(tEI) && t < tEI + 130) return 1;
+  const dep = isFinite(tDrog) ? tDrog : tMain;
+  if (isFinite(dep) && t < dep - 8) return 4;
+  if (isFinite(tSplash) && t > tSplash - 25) return 1;
+  return isFinite(dep) ? 6 : 4;
+}
 
 function buildData() {
   A = run.ascent;
-  for (const e of run.events) {
-    if (!(e.name in EV)) EV[e.name] = e.t;
-    if (e.phase === 'ascent') {
-      if (e.name.startsWith('sep_') && sep1T > 1e8) sep1T = e.t;
-      if (e.name.startsWith('ignition_') && ign2T > 1e8) ign2T = e.t;
-    }
-  }
-  fairT = EV.fairing_jettison ?? 1e9;
-  secoT = EV.seco ?? A.t[A.t.length-1];
+  const C = run.cis, E = run.entry;
+  hasCis = !!(C && C.t && C.t.length > 2);
+  hasEnt = !!(E && E.t && E.t.length > 2);
+  for (const e of run.events) if (!(e.name in EV)) EV[e.name] = e.t;
+  const byPhase = (ph, re) => run.events
+    .filter(e => e.phase === ph && re.test(e.name)).sort((a, b) => a.t - b.t);
+  // Strap-on separations are sep_ events too, but they drop a booster set,
+  // not the next core stage — keep them out of the positional mapping.
+  BNAMES = ((geo && geo.boosters) || []).map(b => b.name);
+  const isBoost = e => BNAMES.some(n => e.name.endsWith('_' + n));
+  SEPS = byPhase('ascent', /^sep_/).filter(e => !isBoost(e));
+  BSEP = byPhase('ascent', /^sep_/).filter(isBoost);
+  BIGN = byPhase('ascent', /^ignition_/).filter(isBoost);
+  const DEP = byPhase('entry', /^deploy_/);
+  fairT = EV.fairing_jettison ?? NaN;
+  secoT = EV.seco ?? EV.meco ?? A.t[A.t.length-1];
   pitchT = EV.pitchover ?? 10;
-  tTLI = EV.tli_ignition; tCut = EV.tli_cutoff; tPeri = EV.perilune;
-  tHand = EV.entry_handoff; tEI = EV.entry_interface;
-  tDrog = EV.deploy_drogue; tMain = EV.deploy_main; tSplash = EV.splashdown;
-  tEnd = tSplash + 12;
+  tTLI = EV.tli_ignition ?? NaN; tCut = EV.tli_cutoff ?? NaN;
+  tPeri = EV.perilune ?? NaN;
+  tHand = EV.entry_handoff ?? (hasCis ? C.t[C.t.length-1] : NaN);
+  tEI = EV.entry_interface ?? NaN;
+  // the first of several deploys is the drogue, the last is the main; a lone
+  // deploy is treated as the main chute
+  tDrog = DEP.length > 1 ? DEP[0].t : NaN;
+  tMain = DEP.length ? DEP[DEP.length-1].t : NaN;
+  tSplash = EV.splashdown ?? NaN;
   let iq = 0;
   for (let i = 1; i < A.qbar.length; i++) if (A.qbar[i] > A.qbar[iq]) iq = i;
   tMaxQ = A.t[iq];
@@ -495,47 +552,103 @@ function buildData() {
   A.drv = A.dr.map((d, i) => Math.max(0, d - drift*A.t[i]));
 
   // cislunar track in meters (payload is ECI, units of 1000 km)
-  const C = run.cis;
-  CIS = { t: C.t, n: C.t.length,
-          x: C.x.map(v => v*1e6), y: C.y.map(v => v*1e6), z: C.z.map(v => v*1e6),
-          mx: C.mx.map(v => v*1e6), my: C.my.map(v => v*1e6), mz: C.mz.map(v => v*1e6),
-          nrm: V.norm(C.n) };
+  if (hasCis) {
+    CIS = { t: C.t, n: C.t.length,
+            x: C.x.map(v => v*1e6), y: C.y.map(v => v*1e6), z: C.z.map(v => v*1e6),
+            mx: C.mx.map(v => v*1e6), my: C.my.map(v => v*1e6),
+            mz: C.mz.map(v => v*1e6), nrm: V.norm(C.n) };
+  }
 
   // entry profile: downrange integrated from h/v, positioned so splashdown
   // lands exactly at the entry-world origin
-  const E = run.entry, ne = E.t.length;
-  const te = E.t.map(v => v + tHand);              // absolute time
-  const he = E.h.map(v => v*1000);
-  const dre = new Array(ne).fill(0);
-  const ge = new Array(ne);
-  for (let i = 0; i < ne; i++) {
-    const i0 = Math.max(0, i-1), i1 = Math.min(ne-1, i+1);
-    const hdot = (he[i1] - he[i0])/((te[i1] - te[i0]) || 1);
-    const vh = Math.sqrt(Math.max(E.v[i]*E.v[i] - hdot*hdot, 0));
-    ge[i] = Math.asin(Math.max(-1, Math.min(1, hdot/Math.max(E.v[i], 1))));
-    if (i) dre[i] = dre[i-1] + vh*(te[i] - te[i-1]);
+  if (hasEnt) {
+    const ne = E.t.length;
+    const t0e = isFinite(tHand) ? tHand : secoT;
+    const te = E.t.map(v => v + t0e);              // absolute time
+    const he = E.h.map(v => v*1000);
+    const dre = new Array(ne).fill(0);
+    const ge = new Array(ne);
+    for (let i = 0; i < ne; i++) {
+      const i0 = Math.max(0, i-1), i1 = Math.min(ne-1, i+1);
+      const hdot = (he[i1] - he[i0])/((te[i1] - te[i0]) || 1);
+      const vh = Math.sqrt(Math.max(E.v[i]*E.v[i] - hdot*hdot, 0));
+      ge[i] = Math.asin(Math.max(-1, Math.min(1, hdot/Math.max(E.v[i], 1))));
+      if (i) dre[i] = dre[i-1] + vh*(te[i] - te[i-1]);
+    }
+    const drTot = dre[ne-1];
+    ENT = { t: te, h: he, v: E.v, g: E.g, q: E.q, gam: ge,
+            dr: dre.map(v => v - drTot), n: ne };
   }
-  const drTot = dre[ne-1];
-  ENT = { t: te, h: he, v: E.v, g: E.g, q: E.q, gam: ge,
-          dr: dre.map(v => v - drTot), n: ne };
+  tEnd = isFinite(tSplash) ? tSplash + 12
+       : hasEnt ? ENT.t[ENT.n-1] + 10
+       : hasCis ? CIS.t[CIS.n-1] : A.t[A.t.length-1] + 30;
 
   // ECI sun: moonward (plus a plane-normal tilt). The free return swings
   // around the far side, so a moonward sun lights the hemisphere the pod
   // actually flies past — and the Earth face it sees looking back home.
-  const mdp = V.norm([samp(CIS.t, CIS.mx, tPeri), samp(CIS.t, CIS.my, tPeri),
-                      samp(CIS.t, CIS.mz, tPeri)]);
-  SUNE = V.norm(V.add(mdp, V.scale(CIS.nrm, 0.38)));
+  if (hasCis) {
+    const ts = isFinite(tPeri) ? tPeri : CIS.t[CIS.n >> 1];
+    const mdp = V.norm([samp(CIS.t, CIS.mx, ts), samp(CIS.t, CIS.my, ts),
+                        samp(CIS.t, CIS.mz, ts)]);
+    SUNE = V.norm(V.add(mdp, V.scale(CIS.nrm, 0.38)));
+  }
 
-  PH = [
-    { n: 'ASCENT',     t0: -15,          t1: secoT + 8,    w: 'pad',   warp: () => 1 },
-    { n: 'ORBIT',      t0: secoT + 8,    t1: tTLI - 12,    w: 'eci',   warp: () => 60 },
-    { n: 'TLI',        t0: tTLI - 12,    t1: tCut + 8,     w: 'eci',   warp: () => 1 },
-    { n: 'TRANSLUNAR', t0: tCut + 8,     t1: tPeri - 5400, w: 'eci',   warp: () => 9000 },
-    { n: 'FLYBY',      t0: tPeri - 5400, t1: tPeri + 5400, w: 'eci',   warp: () => 110 },
-    { n: 'RETURN',     t0: tPeri + 5400, t1: tEI - 20,     w: 'eci',   warp: () => 9000 },
-    { n: 'ENTRY',      t0: tEI - 20,     t1: tEnd,         w: 'entry',
-      warp: t => t < tEI + 130 ? 1 : t < tDrog - 8 ? 4 : t < tSplash - 25 ? 6 : 1 },
-  ];
+  // --- which body drops when ----------------------------------------------
+  // The k-th separation drops stage k. Whatever stage is still flying at SECO
+  // hands over to the kick stage, which goes at the entry handoff.
+  const stageNames = geo.sections.filter(s => /^stage\d+$/.test(s.name))
+                                 .map(s => s.name);
+  NST = stageNames.length;
+  LASTST = NST ? stageNames[NST-1] : null;
+  dropT = {};
+  SEPS.forEach((e, i) => { if (i < NST) dropT[stageNames[i]] = e.t; });
+  if (isFinite(fairT)) dropT.fairing = fairT;
+  if (NST >= 2 && dropT[stageNames[NST-2]] === undefined && hasCis)
+    dropT[stageNames[NST-2]] = secoT;
+  if (LASTST && isFinite(tHand) && (hasEnt || isFinite(tEI)))
+    dropT[LASTST] = tHand;
+  BSEP.forEach((e, i) => { dropT['booster' + (i+1)] = e.t; });
+
+  // --- every event the run reported, plus derived max-q --------------------
+  EVS = run.events.filter(e => isFinite(e.t))
+    .map(e => ({ t: e.t, phase: e.phase, name: e.name, s: eventLabel(e.name) }));
+  const pk = run.metrics && run.metrics.perilune_km;
+  if (isFinite(pk)) for (const e of EVS)
+    if (e.name === 'perilune') e.s = `PERILUNE — ${Math.round(pk)} KM`;
+  if (isFinite(tMaxQ)) EVS.push({ t: tMaxQ, phase: 'ascent', name: 'max_q',
+                                  s: 'MAX-Q' });
+  EVS.sort((a, b) => a.t - b.t);
+
+  // --- phase table: only the phases this trajectory actually flies ---------
+  PH = [];
+  const last = () => (PH.length ? PH[PH.length-1].t1 : -15);
+  const add = (n, t1, w, o) => {
+    const t0 = last();
+    if (!(isFinite(t1) && t1 > t0 + 2)) return;
+    PH.push(Object.assign({ n, t0, t1, w, warp: () => 1 }, o || {}));
+  };
+  add('ASCENT', secoT + 8, 'pad');
+  if (hasCis) {
+    const cisEnd = CIS.t[CIS.n-1];
+    add('ORBIT', isFinite(tTLI) ? tTLI - 12 : cisEnd, 'eci', { pace: 14 });
+    if (isFinite(tTLI))
+      add('TLI', (isFinite(tCut) ? tCut : tTLI + 120) + 8, 'eci');
+    if (isFinite(tPeri)) {
+      const win = Math.max(600, Math.min(5400, (tPeri - last())*0.25));
+      add('TRANSLUNAR', tPeri - win, 'eci', { pace: 26 });
+      add('FLYBY', tPeri + win, 'eci', { pace: 45 });
+    }
+    add('RETURN', hasEnt && isFinite(tEI) ? Math.min(tEI - 20, cisEnd) : cisEnd,
+        'eci', { pace: 26 });
+  }
+  if (hasEnt) add('ENTRY', tEnd, 'entry', { warp: entryWarp });
+  if (!PH.length) add('FLIGHT', tEnd, 'pad');
+  // a paced phase compresses to roughly a fixed wall-clock length, so a
+  // three-day coast and a three-week one both stay watchable
+  for (const p of PH) if (p.pace)
+    p.warp = () => Math.max(1, Math.min(20000, (p.t1 - p.t0)/p.pace));
+  if (PH.length) PH[PH.length-1].t1 = Math.max(PH[PH.length-1].t1, tEnd);
+  else PH = [{ n: 'FLIGHT', t0: -15, t1: tEnd, w: 'pad', warp: () => 1 }];
 }
 function phaseAt(t) {
   for (const p of PH) if (t < p.t1) return p;
@@ -582,9 +695,17 @@ function state(t) {
 // ECI craft state (orbit through return)
 function cisState(t) {
   const p = [samp(CIS.t, CIS.x, t), samp(CIS.t, CIS.y, t), samp(CIS.t, CIS.z, t)];
-  const dtv = 40;
-  const p2 = [samp(CIS.t, CIS.x, t+dtv), samp(CIS.t, CIS.y, t+dtv), samp(CIS.t, CIS.z, t+dtv)];
-  const vel = V.scale(V.sub(p2, p), 1/dtv);
+  // Short symmetric difference, clamped to the track so it degrades to a
+  // one-sided difference at the ends. The baseline has to stay short: over
+  // a 40 s span the TLI burn's acceleration inflates the speed by 200-400
+  // m/s, and the exhaust — spawned relative to this — then outruns the
+  // rocket instead of trailing it. The log is sampled at 0.5 s through the
+  // burn, so 1 s resolves it exactly.
+  const ta = Math.max(CIS.t[0], t - 1), tb = Math.min(CIS.t[CIS.n-1], t + 1);
+  const dtv = Math.max(tb - ta, 1e-3);
+  const pa = [samp(CIS.t, CIS.x, ta), samp(CIS.t, CIS.y, ta), samp(CIS.t, CIS.z, ta)];
+  const pb = [samp(CIS.t, CIS.x, tb), samp(CIS.t, CIS.y, tb), samp(CIS.t, CIS.z, tb)];
+  const vel = V.scale(V.sub(pb, pa), 1/dtv);
   const moon = [samp(CIS.t, CIS.mx, t), samp(CIS.t, CIS.my, t), samp(CIS.t, CIS.mz, t)];
   const bx = V.norm(vel), bz = CIS.nrm, by = V.norm(V.cross(bz, bx));
   return { pos: p, vel, speed: V.len(vel), moon, bx, by, bz,
@@ -616,9 +737,64 @@ let drogueBuf, drogueN, mainBuf, mainN, landTex;
 
 function podRange() { return secDraw.find(s => s.name === 'pod'); }
 
+// A stack whose stages have different diameters still has to paint and
+// frame correctly. Stage radii come from the API, which knows them exactly;
+// measuring the mesh instead would pick up RCS pods and raceways that stand
+// proud of the barrel. TOPD is the stage the capsule and fairing ride on.
+let TOPD = 1.8, POD_RP = 0.75, SECR = {}, BAX = [];
+function measureRadii() {
+  const maxRad = sec => {
+    let m = 0;
+    for (let k = sec.t0-1; k < sec.t1; k++) {
+      const t = geo.tris[k];
+      for (let v = 0; v < 3; v++)
+        m = Math.max(m, Math.hypot(t[v*3+1], t[v*3+2]));
+    }
+    return m;
+  };
+  SECR = {};
+  const st = geo.stages || [];
+  geo.sections.filter(s => /^stage\d+$/.test(s.name)).forEach((s, i) => {
+    SECR[s.name] = st[i] ? +st[i].diameter_m / 2 : maxRad(s);
+  });
+  const stages = geo.sections.filter(s => /^stage\d+$/.test(s.name));
+  TOPD = stages.length ? 2*SECR[stages[stages.length-1].name] : DIA;
+  for (const nm of ['pod', 'glass', 'cabin', 'fairing']) {
+    const s = geo.sections.find(x => x.name === nm);
+    if (s) SECR[nm] = maxRad(s);
+  }
+  POD_RP = SECR.pod || Math.min(0.75, 0.85*TOPD/2);
+  // Strap-ons stand beside the core, so a vertex's distance from the stack
+  // axis says nothing about where it sits on its own booster. Record each
+  // set's stand-off radius and body radius, and the colouring works off the
+  // distance to the nearest booster axis instead.
+  BAX = [];
+  const r1 = SECR.stage1 || DIA/2;
+  ((geo.boosters) || []).forEach((b, i) => {
+    const rb = +b.diameter_m / 2;
+    BAX[i] = { R: r1 + rb, rb: rb, count: b.count };
+    SECR['booster' + (i+1)] = rb;
+  });
+}
+
+// capsule stations in vehicle coordinates, mirroring pod_mesh
+function capStations(secX0) {
+  const D = TOPD, rp = POD_RP;
+  const ta = Math.tan(32.5*Math.PI/180);
+  const xsh = 2.4*rp - Math.sqrt((2.4*rp)*(2.4*rp) - rp*rp);
+  const xb0 = xsh + 0.05*rp, Lc = (rp - 0.26*rp)/ta;
+  return { rp, ta, xsh, xb0, Lc, xtop: xb0 + Lc,
+           xb: secX0 + 0.13*D + 0.02,
+           xfl: xb0 + 0.04*rp, xa: xb0 + 0.085*rp, xcon: xb0 + 0.62*Lc,
+           rcone: u => rp - ta*(u - xb0) };
+}
+const angNear = (a, c, half) => Math.abs(((a - c + Math.PI*3) % (Math.PI*2)) - Math.PI) < half;
+
 // per-vertex material colors for the detailed vehicle
-function rocketColor(sec, cx, rad) {
-  const D = DIA, r = D/2, s = sec;
+function rocketColor(sec, cx, rad, cy, cz, secRad) {
+  const s = sec;
+  // material bands are relative to *this* section's radius, not the stack's
+  const r = secRad || DIA/2, D = 2*r;
   const j = 0.97 + 0.06*Math.abs(Math.sin(cx*37.7 + rad*91.3));   // facet jitter
   let c;
   if (s.name === 'stage1') {
@@ -627,55 +803,204 @@ function rocketColor(sec, cx, rad) {
     else if (rad > r*1.001) c = [0.35,0.34,0.33];                 // raceway
     else if (cx > s.x1 - 0.45) c = [0.20,0.21,0.24];              // interstage band
     else c = [0.93,0.93,0.90];
-  } else if (s.name === 'stage2' || (s.name === 'stage3' && false)) {
+  } else if (/^stage\d+$/.test(s.name) && s.name !== LASTST) {
     if (cx < s.x0 + 0.05*D) c = [0.30,0.29,0.28];                 // vacuum bell
     else if (cx < s.x0 + 0.11*D) c = [0.20,0.21,0.24];            // collar
     else if (rad > r*1.001) c = [0.35,0.34,0.33];
     else c = [0.90,0.90,0.86];
-  } else if (s.name === 'stage3') {
+  } else if (s.name === LASTST) {                                 // kick stage
     if (cx < s.x0 + 0.05*D) c = [0.30,0.29,0.28];
     else if (cx < s.x0 + 0.11*D) c = [0.20,0.21,0.24];
     else if (rad > r*1.001) c = [0.55,0.53,0.35];                 // RCS pods
     else if (cx > s.x1 - 0.14*D) c = [0.62,0.62,0.60];            // adapter cone
     else c = [0.82,0.82,0.77];
+  } else if (/^booster\d+$/.test(s.name)) {
+    const B = BAX[+/^booster(\d+)$/.exec(s.name)[1] - 1];
+    const rb = B ? B.rb : r, D2 = 2*rb;
+    // distance to this vertex's own booster axis, not the stack's
+    let lr = rad;
+    if (B) {
+      lr = Infinity;
+      for (let jj = 0; jj < B.count; jj++) {
+        const th = 2*Math.PI*jj/B.count;
+        lr = Math.min(lr, Math.hypot(cy - B.R*Math.cos(th), cz - B.R*Math.sin(th)));
+      }
+    }
+    if (cx < 0.02*D2) c = [0.30,0.29,0.28];                       // bells + plate
+    else if (cx < 0.30*D2) c = [0.16,0.15,0.14];                  // engine skirt
+    else if (cx > s.x1 - 1.80*rb) c = [0.85,0.85,0.82];           // nose cone
+    else if (lr < 0.55*rb) c = [0.30,0.29,0.28];                  // inside the bell
+    else c = [0.66,0.64,0.60];                                    // booster skin
   } else if (s.name === 'pod') {
-    const lp = s.x1 - s.x0;
-    if (cx < s.x0 + 0.20) c = [0.38,0.26,0.18];                   // ablative shield
-    else if (cx > s.x0 + 0.86*lp) c = [0.55,0.56,0.58];           // docking nub
-    else c = [0.52,0.58,0.66];
+    const K = capStations(s.x0), u = cx - K.xb, rc = K.rcone(u), a = Math.atan2(cz, cy);
+    const inWin = angNear(a, 0, 0.40) || angNear(a, 1.187, 0.28) ||
+                  angNear(a, -1.187, 0.28);
+    if (u < K.xsh + 0.03*K.rp) c = [0.30,0.20,0.14];              // ablator
+    else if (u > K.xtop - 0.02*K.rp) c = [0.60,0.61,0.63];        // tunnel
+    else if (rad > rc + 0.008*K.rp)                               // raised metal
+      c = inWin ? [0.44,0.45,0.47] : [0.38,0.38,0.40];            // frames / hatch
+    else if (inWin && u > K.xb0 + 0.30*K.Lc && u < K.xb0 + 0.62*K.Lc)
+      c = [0.07,0.10,0.15];                                       // window glass
+    else if (rad < rc - 0.03*K.rp) c = [0.24,0.26,0.30];          // inner wall
+    else c = [0.72,0.73,0.76];                                    // afterbody
+  } else if (s.name === 'glass') {
+    c = [0.06,0.09,0.14];                                           // window pane
+  } else if (s.name === 'cabin') {
+    const K = capStations(s.x0), u = cx - K.xb;
+    if (u < K.xa + 0.01*K.rp) c = [0.40,0.43,0.41];               // deck
+    else if (u > K.xcon) c = [0.16,0.17,0.19];                    // console panel
+    else if (u > K.xcon - 0.07*K.rp) c = [0.11,0.27,0.31];        // instruments
+    else if (rad > 0.45*K.rp) c = [0.52,0.50,0.42];               // wall racks
+    else c = [0.29,0.32,0.38];                                    // crew couch
   } else {                                                        // fairing
     c = cx < s.x0 + 0.10 ? [0.55,0.55,0.53] : [0.96,0.96,0.93];
   }
   return [c[0]*j, c[1]*j, c[2]*j];
 }
 
+// ------------------------------------------------------------- livery ------
+// The paint is a decal sheet in (station, roll) space, wrapped cylindrically
+// over the vehicle's skin. Baked vertex colors could never carry lettering or
+// a crisp insignia at this triangle count; a texture can, and it keeps the
+// mesh itself clean — the markings live entirely in the viewer.
+let livTex = null, LIVX0 = 0, LIVX1 = 1;
+function buildLiveryTex() {
+  const W = 2048, H = 512;
+  LEN = geo.length; DIA = +geo.diameter;
+  LIVX0 = Math.min(...geo.sections.map(s => s.x0));
+  LIVX1 = Math.max(...geo.sections.map(s => s.x1));
+  const span = LIVX1 - LIVX0;
+  const AX = W/span;                       // px per metre along the stack
+  // the decal sheet wraps by angle, so its metres-per-pixel around the body
+  // is set by whichever stage the markings actually sit on
+  const AY = H/(Math.PI*DIA);
+  const cvL = document.createElement('canvas');
+  cvL.width = W; cvL.height = H;
+  const g = cvL.getContext('2d');
+  const X = x => (x - LIVX0)*AX;           // station -> px
+  const Y = v => (v + 0.5)*H;              // roll fraction (-.5...5) -> px
+  const band = (x0, x1, v0, v1, col) => {
+    g.fillStyle = col;
+    g.fillRect(X(x0), Y(v0), (x1-x0)*AX, (v1-v0)*H);
+  };
+  // a physically round mark becomes an ellipse in this stretched space
+  const disc = (x, v, R, col) => {
+    g.beginPath(); g.ellipse(X(x), Y(v), R*AX, R*AY, 0, 0, 7);
+    g.fillStyle = col; g.fill();
+  };
+  const star = (x, v, R, col) => {
+    g.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI/2 + i*Math.PI/5, rr = i % 2 ? R*0.42 : R;
+      const px = X(x) + rr*AX*Math.sin(a), py = Y(v) - rr*AY*Math.cos(a);
+      i ? g.lineTo(px, py) : g.moveTo(px, py);
+    }
+    g.closePath(); g.fillStyle = col; g.fill();
+  };
+  // text reads up the body, so glyph advance runs along +station and glyph
+  // height around the circumference; squash x to undo the space's stretch
+  const label = (str, x, v, hMet, col, weight) => {
+    g.save();
+    g.translate(X(x), Y(v));
+    g.scale(AX/AY, 1);
+    g.font = `${weight || 800} ${hMet*AY}px "Arial Black", Impact, sans-serif`;
+    g.textBaseline = 'middle';
+    g.fillStyle = col;
+    g.fillText(str, 0, 0);
+    g.restore();
+  };
+  const INK = '#15171c', RED = '#c0392b', NAVY = '#1b3a6b';
+  g.clearRect(0, 0, W, H);
+
+  const stages = geo.sections.filter(s => /^stage\d+$/.test(s.name));
+  const s1 = stages[0], fair = geo.sections.find(s => s.name === 'fairing');
+  if (s1) {
+    const L = s1.x1 - s1.x0;
+    // roll pattern: alternating quadrants top and bottom of the booster, the
+    // classic marking that makes roll visible from the ground
+    for (const [xa, xb] of [[s1.x0 + 0.10*L, s1.x0 + 0.17*L],
+                            [s1.x1 - 0.13*L, s1.x1 - 0.06*L]])
+      for (const f of [-0.5, 0.0]) band(xa, xb, f, f + 0.25, INK);
+    band(s1.x1 - 0.045*L, s1.x1 - 0.015*L, -0.5, 0.5, RED);   // interstage trim
+    label('SABLE', s1.x0 + 0.30*L, -0.24, 1.05, INK);
+    label('SABLE', s1.x0 + 0.30*L,  0.26, 1.05, INK);
+    // insignia + ensign on the flanks
+    disc(s1.x0 + 0.62*L, 0.0, 0.62, NAVY);
+    disc(s1.x0 + 0.62*L, 0.0, 0.44, '#f2f0e8');
+    disc(s1.x0 + 0.62*L, 0.0, 0.27, RED);
+    star(s1.x0 + 0.62*L, 0.0, 0.20, '#f2f0e8');
+    for (const [i, col] of [[0, NAVY], [1, '#f2f0e8'], [2, RED]])
+      band(s1.x0 + 0.74*L, s1.x0 + 0.74*L + 0.55, -0.06 + i*0.04,
+           -0.06 + (i+1)*0.04, col);
+    label('1', s1.x0 + 0.06*L, 0.0, 0.9, INK);
+  }
+  for (let k = 1; k < stages.length; k++) {
+    const s = stages[k], L = s.x1 - s.x0;
+    band(s.x0 + 0.10*L, s.x0 + 0.14*L, -0.5, 0.5, INK);
+    if (L > 3) label(String(k + 1), s.x0 + 0.30*L, 0.0, 0.75, INK);
+  }
+  if (fair) {
+    const L = fair.x1 - fair.x0;
+    band(fair.x0 + 0.02*L, fair.x0 + 0.05*L, -0.5, 0.5, INK);
+    label('SABLE', fair.x0 + 0.18*L, 0.0, 0.85, INK);
+    // fairing split line runs down the z = 0 plane, i.e. roll ±90 degrees
+    for (const v of [-0.25, 0.25]) band(fair.x0, fair.x1, v - 0.004, v + 0.004, '#8c8c86');
+  }
+
+  livTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, livTex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cvL);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.generateMipmap(gl.TEXTURE_2D);
+}
+
 function buildRocket() {
   LEN = geo.length; DIA = +geo.diameter;
+  measureRadii();
+  const secR = SECR;                 // each section's own radius
   const verts = [];
   const pushTri = (t, sec) => {
     const p1 = [t[0],t[1],t[2]], p2 = [t[3],t[4],t[5]], p3 = [t[6],t[7],t[8]];
     const n = V.norm(V.cross(V.sub(p2,p1), V.sub(p3,p1)));
     const cx = (t[0]+t[3]+t[6])/3;
-    const rad = Math.hypot((t[1]+t[4]+t[7])/3, (t[2]+t[5]+t[8])/3);
-    const c = rocketColor(sec, cx, rad);
-    for (const p of [p1,p2,p3])
-      verts.push(p[0],p[1],p[2], n[0],n[1],n[2], c[0],c[1],c[2]);
+    const cy = (t[1]+t[4]+t[7])/3, cz = (t[2]+t[5]+t[8])/3;
+    const rad = Math.hypot(cy, cz);
+    const sr = secR[sec.name] || DIA/2;
+    const c = rocketColor(sec, cx, rad, cy, cz, sr);
+    // paint only the outer skin: raceways, bells and capsule internals keep
+    // their baked material
+    const pw = /^stage\d+$/.test(sec.name) ? (rad > 0.88*sr && rad < 1.02*sr ? 1 : 0)
+             : sec.name === 'fairing' ? 1 : 0;
+    const ac = Math.atan2(cz, cy);
+    for (const p of [p1,p2,p3]) {
+      let a = Math.atan2(p[2], p[1]);
+      // unwrap onto the centroid's branch, or the seam triangle smears the
+      // whole decal sheet across itself
+      while (a - ac >  Math.PI) a -= 2*Math.PI;
+      while (a - ac < -Math.PI) a += 2*Math.PI;
+      verts.push(p[0],p[1],p[2], n[0],n[1],n[2], c[0],c[1],c[2],
+                 (p[0] - LIVX0)/(LIVX1 - LIVX0), a/(2*Math.PI) + 0.5, pw);
+    }
   };
   for (const s of geo.sections) {
-    const v0 = verts.length/9;
+    const v0 = verts.length/VST;
     for (let k = s.t0-1; k < s.t1; k++) pushTri(geo.tris[k], s);
-    secDraw.push({ name: s.name, first: v0, count: verts.length/9 - v0,
+    secDraw.push({ name: s.name, first: v0, count: verts.length/VST - v0,
                    x0: s.x0, x1: s.x1 });
   }
   const fs = geo.sections.find(s => s.name === 'fairing');
   if (fs) {
     for (const sgn of [1, -1]) {
-      const v0 = verts.length/9;
+      const v0 = verts.length/VST;
       for (let k = fs.t0-1; k < fs.t1; k++) {
         const t = geo.tris[k];
         if (sgn*(t[2]+t[5]+t[8]) >= -1e-9) pushTri(t, fs);
       }
-      halfDraw.push({ first: v0, count: verts.length/9 - v0, sgn });
+      halfDraw.push({ first: v0, count: verts.length/VST - v0, sgn });
     }
   }
   rocketBuf = buffer(new Float32Array(verts));
@@ -790,6 +1115,9 @@ function spawn(p, v, life, size, grow, kind) {
 const rnd = (a=1, b=0) => b + (a-b)*Math.random();
 const jit = s => [rnd(s,-s), rnd(s,-s), rnd(s,-s)];
 
+// Local "up" for the current world: the pad and splash frames are anchored
+// y-up, but ECI has no up at all, so buoyancy is simply switched off there.
+let PUP = [0, 1, 0];
 function stepParticles(dt) {
   for (let i = parts.length-1; i >= 0; i--) {
     const q = parts[i];
@@ -798,16 +1126,26 @@ function stepParticles(dt) {
     q.p[0] += q.v[0]*dt; q.p[1] += q.v[1]*dt; q.p[2] += q.v[2]*dt;
     q.size += q.grow*dt;
     if (q.kind === 1) {
-      q.v[1] += 2.2*dt;
+      // isotropic drag: damping only the horizontal components turned every
+      // puff into a vertical column instead of leaving it behind the vehicle
       const k = Math.pow(0.45, dt);
-      q.v[0] *= k; q.v[2] *= k;
+      q.v[0] *= k; q.v[1] *= k; q.v[2] *= k;
+      if (PUP) {
+        q.v[0] += PUP[0]*2.6*dt; q.v[1] += PUP[1]*2.6*dt; q.v[2] += PUP[2]*2.6*dt;
+      }
+    } else if (q.kind === 3) {
+      // wake smoke rides with the vehicle: it is already spawned with the
+      // right closing speed, so damping or buoyancy would only bend it away
+    } else if (q.kind === 2 && PUP) {
+      q.v[0] -= PUP[0]*9.0*dt; q.v[1] -= PUP[1]*9.0*dt; q.v[2] -= PUP[2]*9.0*dt;
     }
   }
 }
 function drawParticles(view, proj, fov, smoke) {
   if (!parts.length) return;
   const smokeL = [], glow = [];
-  for (const q of parts) (q.kind === 1 ? smokeL : glow).push(q);
+  // kind 3 is wake smoke: same look as kind 1, different physics
+  for (const q of parts) (q.kind === 1 || q.kind === 3 ? smokeL : glow).push(q);
   const pack = (list, off) => {
     let k = off;
     for (const q of list) {
@@ -816,7 +1154,8 @@ function drawParticles(view, proj, fov, smoke) {
       if (vp[2] > -0.3) continue;
       const f = 1 - q.age/q.life;
       partArr[k*6] = vp[0]; partArr[k*6+1] = vp[1]; partArr[k*6+2] = vp[2];
-      partArr[k*6+3] = q.size; partArr[k*6+4] = f; partArr[k*6+5] = q.kind;
+      partArr[k*6+3] = q.size; partArr[k*6+4] = f;
+      partArr[k*6+5] = q.kind === 3 ? 1 : q.kind;
       k++;
     }
     return k - off;
@@ -847,17 +1186,21 @@ function drawParticles(view, proj, fov, smoke) {
 // ------------------------------------------------------------- detachables --
 const debris = [];
 function spawnDebris(kind, t) {
+  // debris tumbles in the pad world only; anything shed later (the kick stage
+  // at handoff) is drawn by the cruise renderer in its own frame
+  if (!(t <= secoT + 5)) return;
   const st = state(t);
-  if (kind === 'stage1') {
-    debris.push({ draw: secDraw.find(s => s.name === 'stage1'),
-                  p: st.pos.slice(), v: V.scale(st.dir, st.v*0.985),
-                  bx: st.dir.slice(), ax: V.norm([0.2, 0.1, 0.97]), w: 0.25, a: 0 });
-  } else if (kind === 'fairing') {
+  if (kind === 'fairing') {
     for (const hd of halfDraw)
       debris.push({ draw: hd, p: st.pos.slice(),
                     v: V.add(V.scale(st.dir, st.v), [0, 0, hd.sgn*3.2]),
                     bx: st.dir.slice(), ax: [0, 0, hd.sgn], w: 0.9, a: 0 });
+    return;
   }
+  const sec = secDraw.find(s => s.name === kind);
+  if (!sec) return;
+  debris.push({ draw: sec, p: st.pos.slice(), v: V.scale(st.dir, st.v*0.985),
+                bx: st.dir.slice(), ax: V.norm([0.2, 0.1, 0.97]), w: 0.25, a: 0 });
 }
 function stepDebris(dt) {
   for (let i = debris.length-1; i >= 0; i--) {
@@ -918,16 +1261,113 @@ function updateAudio(sc, camEye) {
 
 // ---------------------------------------------------------------- cameras --
 let camMode = 'auto', freeYaw = -2.4, freePitch = 0.12, freeDist = 0;
-const CAMS = ['auto','wide','chase','onboard','free'];
+let headYaw = 0, headPitch = 0;      // look around from inside the capsule
+const CAMS = ['auto','wide','chase','onboard','cabin','window','free'];
+
+// Camera stations inside the crew capsule, in vehicle model coordinates.
+// These mirror pod_mesh's layout (heat-shield sagitta, 32.5 deg afterbody,
+// deck and couch stations) so the eye lands in the cabin, not in a wall.
+function cabinPose(aim, roll) {
+  const pr = podRange();
+  if (!pr) return null;
+  const D = TOPD, rp = POD_RP;
+  const ta = Math.tan(32.5*Math.PI/180);
+  const xsh = 2.4*rp - Math.sqrt((2.4*rp)*(2.4*rp) - rp*rp);
+  const xb = pr.x0 + 0.13*D + 0.02;            // capsule base along the stack
+  const xb0 = xsh + 0.05*rp, Lc = (rp - 0.26*rp)/ta;
+  const rcone = x => rp - ta*(x - xb0);
+  const rin = x => rcone(x) - 0.05*rp;
+  const xa = xb0 + 0.085*rp;                   // couch back
+  const ln = 0.60*rin(xa + 0.07*rp);           // couch half-length
+  // eye just above the headrest, set back from the wall so the viewport, the
+  // console edge and the couch all fall inside a wide lens
+  const head = [xb + xa + 0.16*rp, 0.12*ln, -0.30*rp];
+  if (aim === 'window') {
+    // Pressed up to a viewport, looking straight out along the cone's own
+    // surface normal, so the aperture frames the view. `roll` selects which
+    // of the three windows.
+    const cw = Math.cos(roll || 0), sw = Math.sin(roll || 0);
+    const c32 = Math.cos(0.5672), s32 = Math.sin(0.5672);
+    const nrm = [s32, c32*cw, c32*sw];         // outward normal at the pane
+    const xw = xb0 + 0.458*Lc, rw = rcone(xw); // centre of the window band
+    const ctr = [xb + xw, rw*cw, rw*sw];
+    const d = 0.33*rp;                         // face up against the glass
+    return { eye: [ctr[0] - nrm[0]*d, ctr[1] - nrm[1]*d, ctr[2] - nrm[2]*d],
+             look: [ctr[0] + nrm[0]*60, ctr[1] + nrm[1]*60, ctr[2] + nrm[2]*60],
+             up: [1,0,0], fov: 1.35 };
+  }
+  if (aim === 'console')
+    return { eye: head, look: [xb + xb0 + 0.62*Lc, 0.06*ln, 0], up: [0,1,0],
+             fov: 1.25 };
+  // wide interior: looking across the cabin so couch, console and the
+  // window wall are all in frame, with the capsule axis as up
+  return { eye:  [xb + xb0 + 0.26*Lc, -0.10*rp,  0.56*rp],
+           look: [xb + xb0 + 0.42*Lc,  0.16*rp, -0.16*rp], up: [1,0,0], fov: 1.45 };
+}
+// the capsule carries three windows; pick whichever currently looks nearest
+// to something worth seeing
+const WINROLL = [0, 1.187, -1.187];
+function pickWindow(M, targetW) {
+  if (!targetW) return 0;
+  const o = mApply(M, [0,0,0]);
+  const dir = V.norm(V.sub(targetW, o));
+  const c32 = Math.cos(0.5672), s32 = Math.sin(0.5672);
+  let best = 0, bd = -2;
+  for (const rl of WINROLL) {
+    const nm = [s32, c32*Math.cos(rl), c32*Math.sin(rl)];
+    const w = V.norm(V.sub(mApply(M, nm), o));
+    const dp = V.dot(w, dir);
+    if (dp > bd) { bd = dp; best = rl; }
+  }
+  return best;
+}
+// place a model-space pose into the world using the craft's model matrix
+function poseToWorld(pose, M, mode) {
+  let eye = mApply(M, pose.eye), look = mApply(M, pose.look);
+  const up = V.sub(mApply(M, V.add(pose.eye, pose.up)), eye);
+  // free head-look from the seat: drag turns the view about the eye point,
+  // it does not move the camera out of the capsule
+  if (headYaw || headPitch) {
+    const f = V.sub(look, eye), d = V.len(f), fw = V.scale(f, 1/d);
+    const rt = V.norm(V.cross(fw, up)), uu = V.cross(rt, fw);
+    const cy = Math.cos(headYaw), sy = Math.sin(headYaw);
+    const cp = Math.cos(headPitch), sp = Math.sin(headPitch);
+    const dir = V.add(V.add(V.scale(fw, cy*cp), V.scale(rt, sy*cp)),
+                      V.scale(uu, sp));
+    look = V.add(eye, V.scale(dir, d));
+  }
+  return { eye, look, up, fov: pose.fov, mode: mode || 'cabin' };
+}
+// Riding inside, the crew moves *with* the vehicle: the camera translates
+// with the hull and only a few millimetres of vibration remain. Shaking the
+// eye against a fixed look point (as the exterior cameras do) throws the
+// whole cabin across the frame at arm's length.
+function cabinShake(cam, amp) {
+  if (!(amp > 0)) return cam;
+  const d = V.len(V.sub(cam.look, cam.eye));
+  const body = shakeVec(amp*0.05);                    // ~1 cm of hull motion
+  cam.eye = V.add(cam.eye, body);
+  cam.look = V.add(V.add(cam.look, body), shakeVec(amp*0.02*d));
+  return cam;
+}
+function cabinCam(M, aim, targetW) {
+  if (!M) return null;
+  const p = cabinPose(aim, aim === 'window' ? pickWindow(M, targetW) : 0);
+  return p ? poseToWorld(p, M, aim === 'window' ? 'window' : 'cabin') : null;
+}
 const CS = { ly: 20, tly: 20 };   // tilt-lag state for the pad cameras
 function autoPickPad(t) {
+  const sep1 = SEPS.length ? SEPS[0].t : Infinity;
   if (t < -2.5) return 'pad';
   if (t < 14) return 'padlow';
   if (t < 70) return 'wide';
-  if (t < sep1T - 6) return 'chase';
-  if (t < sep1T + 14) return 'onboard';
+  if (t < sep1 - 6) return 'chase';
+  if (t < sep1 + 14) return 'onboard';
   if (t < fairT - 6) return 'chase';
-  if (t < fairT + 12) return 'onboard';
+  if (t < fairT + 2) return 'onboard';
+  // the shell splits and daylight reaches the cabin for the first time
+  if (t < fairT + 8) return 'cabin';
+  if (t < fairT + 16) return 'window';
   if (t < secoT - 35) return 'wide';
   return 'chase';
 }
@@ -940,11 +1380,16 @@ function shakeVec(amp) {
   return [amp*0.14*(s(8.8)+0.5*s(13.7)), amp*0.14*(s(11.3)+0.5*s(7.1)),
           amp*0.14*(s(9.7)+0.5*s(15.4))];
 }
-function cameraPad(t, st) {
+function cameraPad(t, st, M) {
   const mode = camMode === 'auto' ? autoPickPad(t) : camMode;
   const mid = V.add(st.pos, V.scale(st.dir, LEN*0.5));
   let eye, look = mid, up = [0,1,0], fov = 0.42, shake = 0;
   const tn = Math.min(1, st.thr/9.5e5)*Math.exp(-st.h/15000);
+  if (mode === 'cabin' || mode === 'window') {
+    const c = cabinCam(M, mode === 'window' ? 'window' :
+                          t > fairT + 1 ? 'window' : 'wide');
+    if (c) return cabinShake(c, tn*0.9 + st.q/50*0.5);
+  }
   if (mode === 'pad') {
     // fixed lens on a tripod: the vehicle climbs through the frame
     eye = [150, 2.2, 340];
@@ -985,11 +1430,18 @@ function cameraPad(t, st) {
   if (shake > 0) eye = V.add(eye, shakeVec(shake));
   return { eye, look, up, fov, mode };
 }
-function cameraEci(t, cs, ph) {
+function cameraEci(t, cs, ph, M) {
   const mode = camMode === 'auto' ?
     (ph.n === 'FLYBY' ? 'moonframe' : ph.n === 'TLI' ? 'chase' :
      ph.n === 'RETURN' ? 'earthframe' : ph.n === 'ORBIT' ? 'earthframe' : 'drift')
     : camMode;
+  if (mode === 'cabin' || mode === 'window') {
+    // out the viewport, through whichever window faces the Moon near the
+    // flyby and Earth the rest of the time
+    const tgt = ph.n === 'FLYBY' ? cs.moon : [0, 0, 0];
+    const c = cabinCam(M, mode === 'window' ? 'window' : 'wide', tgt);
+    if (c) return cabinShake(c, cs.burning ? 0.5 : 0);
+  }
   const p = cs.pos;
   let eye, look = p, up = cs.bz, fov = 0.42;
   const uE = V.norm(p);                       // radial away from Earth
@@ -1018,14 +1470,25 @@ function cameraEci(t, cs, ph) {
   }
   return { eye, look, up, fov, mode };
 }
-function cameraEntry(t, es) {
-  const mode = camMode === 'auto' ?
-    (t < tEI + 100 ? 'chase' : t < tDrog - 5 ? 'onboard' :
-     t < tMain + 25 ? 'chase' : t < tSplash - 30 ? 'onboard' : 'wide')
-    : camMode;
+function autoPickEntry(t) {
+  const dep = isFinite(tDrog) ? tDrog : tMain;
+  if (t < tEI + 45) return 'chase';
+  if (t < tEI + 110) return 'cabin';       // peak heating, seen from inside
+  if (t < tEI + 175) return 'window';      // and out through the viewport
+  if (isFinite(dep) && t < dep - 5) return 'onboard';
+  if (isFinite(tMain) && t < tMain + 25) return 'chase';
+  if (isFinite(tSplash) && t < tSplash - 30) return 'onboard';
+  return 'wide';
+}
+function cameraEntry(t, es, M) {
+  const mode = camMode === 'auto' ? autoPickEntry(t) : camMode;
   const p = es.pos;
   let eye, look = p, up = es.up, fov = 0.42, shake = Math.min(1.4, es.g/9);
   const side = [0, 0, 1];
+  if (mode === 'cabin' || mode === 'window') {
+    const c = cabinCam(M, mode === 'window' ? 'window' : 'wide');
+    if (c) return cabinShake(c, shake);
+  }
   if (mode === 'chase') {
     eye = V.add(p, V.add(V.scale(side, 34), V.scale(es.vdir, -10)));
     fov = 0.30;
@@ -1064,18 +1527,28 @@ function beginMeshes(view, sunV, fogDen, fogCol, amb, engI, engV, engC) {
   gl.uniform3fv(MESH.u.uEngV, engV);
   gl.uniform3fv(MESH.u.uEngC, engC || [1.0, 0.55, 0.22]);
   gl.uniform1f(MESH.u.uAmb, amb);
+  if (livTex) {
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, livTex);
+    gl.uniform1i(MESH.u.uLiv, 1);
+    gl.activeTexture(gl.TEXTURE0);
+  }
   meshCommon = { view };
 }
 function bindMeshBuf(buf) {
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   const aP = gl.getAttribLocation(MESH.p, 'aP'),
         aN = gl.getAttribLocation(MESH.p, 'aN'),
-        aC = gl.getAttribLocation(MESH.p, 'aC');
-  gl.enableVertexAttribArray(aP); gl.enableVertexAttribArray(aN);
-  gl.enableVertexAttribArray(aC);
-  gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 36, 0);
-  gl.vertexAttribPointer(aN, 3, gl.FLOAT, false, 36, 12);
-  gl.vertexAttribPointer(aC, 3, gl.FLOAT, false, 36, 24);
+        aC = gl.getAttribLocation(MESH.p, 'aC'),
+        aUV = gl.getAttribLocation(MESH.p, 'aUV'),
+        aPw = gl.getAttribLocation(MESH.p, 'aPw');
+  for (const a of [aP, aN, aC, aUV, aPw]) if (a >= 0) gl.enableVertexAttribArray(a);
+  const S = VST*4;
+  gl.vertexAttribPointer(aP,  3, gl.FLOAT, false, S, 0);
+  gl.vertexAttribPointer(aN,  3, gl.FLOAT, false, S, 12);
+  gl.vertexAttribPointer(aC,  3, gl.FLOAT, false, S, 24);
+  if (aUV >= 0) gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, S, 36);
+  if (aPw >= 0) gl.vertexAttribPointer(aPw, 1, gl.FLOAT, false, S, 44);
 }
 function drawRange(model, proj, first, count) {
   const mv = mMul(meshCommon.view, model);
@@ -1090,24 +1563,14 @@ function drawWhole(buf, n, model, proj) { bindMeshBuf(buf); drawRange(model, pro
 // ------------------------------------------------------------- main state --
 let simT = -15, running = false, started = false, ended = false;
 let manualWarp = 0, warpCur = 1, warpEff = 1;
+// above this the vehicle moves so far per frame that a trail cannot connect
+const PARTWARP = 300;
 let lastNow = 0, armAng = 0, scorch = 0, splashed = false;
 const toasts = [];
 function buildToasts() {
-  const add = (t, s) => isFinite(t) && t < 1e8 && toasts.push({ t, s, done: false });
-  add(0, 'LIFTOFF');
-  add(tMaxQ, 'MAX-Q');
-  add(sep1T, 'STAGE SEPARATION');
-  add(ign2T, 'STAGE 2 IGNITION');
-  add(fairT, 'FAIRING JETTISON');
-  add(secoT, 'SECO — ORBIT');
-  add(tTLI, 'TLI IGNITION');
-  add(tCut, 'TLI CUTOFF — GO FOR THE MOON');
-  add(tPeri, `PERILUNE — ${Math.round(run.metrics.perilune_km)} KM`);
-  add(tHand, 'KICK STAGE JETTISON');
-  add(tEI, 'ENTRY INTERFACE');
-  add(tDrog, 'DROGUE DEPLOY');
-  add(tMain, 'MAIN CHUTE');
-  add(tSplash, 'SPLASHDOWN');
+  toasts.length = 0;
+  for (const e of EVS)
+    if (isFinite(e.t) && e.t <= tEnd) toasts.push({ t: e.t, s: e.s, done: false });
   toasts.sort((a, b) => a.t - b.t);
 }
 
@@ -1148,20 +1611,28 @@ function frame(now) {
   }
 
   const gone = {};
-  if (simT >= sep1T) gone.stage1 = true;
-  if (simT >= fairT) gone.fairing = true;
+  for (const k in dropT) {
+    if (simT >= dropT[k]) gone[k] = true;
+    if (tPrev < dropT[k] && simT >= dropT[k] && warpEff <= 8)
+      spawnDebris(k, dropT[k]);
+  }
   secGone = gone;
-  if (tPrev < sep1T && simT >= sep1T && warpEff <= 8) spawnDebris('stage1', sep1T);
-  if (tPrev < fairT && simT >= fairT && warpEff <= 8) spawnDebris('fairing', fairT);
   if (tPrev < tSplash && simT >= tSplash) splashed = true;
 
   armAng = simT > -4.6 ? Math.min(1.75, armAng + dtReal*0.8) : 0;
 
   const scene = buildScene(ph);
-  if (warpEff <= 8) {
-    stepDebris(dt);
-    stepParticles(dt);
-    scene.spawn && scene.spawn(dt);
+  // Plume and wake run on their own near-real-time clock. Stepping them with
+  // the warped dt would spawn thousands of particles per frame and tear the
+  // trail into disconnected blobs, which is why this used to switch off
+  // entirely above ×8 — and made a burning engine go dark the moment you
+  // sped up. Clamping the particle step keeps the flame lit at any warp.
+  const dtP = Math.min(dt, 0.05);
+  if (warpEff <= 8) stepDebris(dt);
+  else debris.length = 0;
+  if (warpEff <= PARTWARP) {
+    stepParticles(dtP);
+    scene.spawn && scene.spawn(dtP);
   } else { parts.length = 0; }
 
   updateAudio(scene, scene.cam.eye);
@@ -1179,27 +1650,48 @@ function buildScene(ph) {
     const stPrev = state(simT - 0.25);
     const rocketVel = V.scale(V.sub(st.pos, stPrev.pos), 4);
     if (st.thr > 2e5 && st.h < 50) scorch = Math.min(1, scorch + 0.4*0.016);
-    const cam = cameraPad(simT, st);
+    const bxp = st.dir, bzp = [0,0,1];
+    const craftM = mBasis(bxp, V.cross(bzp, bxp), bzp, st.pos);
+    const cam = cameraPad(simT, st, craftM);
     const tailX = attachedTailX(secGone);
     const noz = V.add(st.pos, V.scale(st.dir, tailX));
+    // strap-ons burn beside the core, so they get their own plumes, placed in
+    // the vehicle's own frame at each booster's stand-off radius
+    const bnoz = [];
+    const BSET = (geo.boosters || [])[0];
+    if (BSET && !secGone.booster1 && BIGN.length && simT >= BIGN[0].t &&
+        simT < (BSEP.length ? BSEP[0].t : Infinity)) {
+      const byv = V.cross(bzp, bxp);
+      const R = (SECR.stage1 || DIA/2) + (+BSET.diameter_m / 2);
+      for (let j = 0; j < BSET.count; j++) {
+        const th = 2*Math.PI*j/BSET.count;
+        bnoz.push(V.add(noz, V.add(V.scale(byv, R*Math.cos(th)),
+                                   V.scale(bzp, R*Math.sin(th)))));
+      }
+    }
+    PUP = [0, 1, 0];
     return {
-      world: 'pad', st, cam, craftPos: st.pos,
+      world: 'pad', st, cam, craftM, craftPos: st.pos,
       earthC: [0, -RE, 0], moonC: null,
       eMat: anchorMat(run.sites.launch_lat, run.sites.launch_lon),
       spin: OME*Math.max(simT, 0), near: 1,
       loud: Math.min(1, st.thr/9.5e5)*Math.exp(-st.h/12000),
       engI: st.thr > 0 ? Math.min(1, st.thr/9.5e5)*(0.8 + 0.4*Math.random()) : 0,
       engW: noz, engC: [1.0, 0.55, 0.22],
-      spawn: dt => spawnAscent(dt, st, rocketVel, noz),
+      spawn: dt => spawnAscent(dt, st, rocketVel, noz, bnoz),
     };
   }
   if (ph.w === 'eci') {
     const cs = cisState(simT);
-    const cam = cameraEci(simT, cs, ph);
-    const s3 = secDraw.find(s => s.name === 'stage3');
+    // model x = 0 at the last stage's base, so the stack sits on the track
+    const ls = secDraw.find(s => s.name === LASTST);
+    const base = mBasis(cs.bx, cs.by, cs.bz, cs.pos);
+    const craftM = ls ? mMul(base, mTrans([-ls.x0, 0, 0])) : base;
+    const cam = cameraEci(simT, cs, ph, craftM);
     const noz = V.add(cs.pos, V.scale(cs.bx, -0.5));
+    PUP = null;                        // inertial frame: no up, no buoyancy
     return {
-      world: 'eci', cs, cam, craftPos: cs.pos, sun: SUNE,
+      world: 'eci', cs, cam, craftM, craftPos: cs.pos, sun: SUNE,
       earthC: [0, 0, 0], moonC: cs.moon,
       eMat: [1,0,0, 0,1,0, 0,0,1], spin: OME*simT, near: 0,
       loud: cs.burning ? 0.5 : 0,
@@ -1209,20 +1701,27 @@ function buildScene(ph) {
     };
   }
   const es = entState(simT);
-  const cam = cameraEntry(simT, es);
+  const pr = podRange();
+  const bze = [0, 0, 1];
+  // anchor the heat-shield apex on the trajectory, not the section origin
+  const xb = pr ? capStations(pr.x0).xb : 0;
+  const craftM = mMul(mBasis(es.bx, V.cross(bze, es.bx), bze, es.pos),
+                      mTrans([-xb, 0, 0]));
+  const cam = cameraEntry(simT, es, craftM);
+  PUP = [0, 1, 0];
   return {
-    world: 'entry', es, cam, craftPos: es.pos,
+    world: 'entry', es, cam, craftM, craftPos: es.pos,
     earthC: [0, -RE, 0], moonC: null,
     eMat: anchorMat(run.sites.splash_lat, run.sites.splash_lon),
     spin: 0, near: 0,
     loud: Math.min(1, es.g/6 + (simT > tDrog ? 0.25 : 0)),
-    engI: Math.min(0.85, es.q/160),
+    engI: Math.min(0.50, es.q/240),
     engW: es.pos, engC: [1.0, 0.5, 0.25],
     spawn: dt => spawnEntry(dt, es),
   };
 }
 
-function spawnAscent(dt, st, rocketVel, noz) {
+function spawnAscent(dt, st, rocketVel, noz, bnoz) {
   if (!(st.thr > 0)) {
     if (st.mach > 0.92 && st.mach < 1.08 && st.q > 12) spawnVapor(st, rocketVel);
     return;
@@ -1247,6 +1746,16 @@ function spawnAscent(dt, st, rocketVel, noz) {
     spawn(V.add(noz, jit(0.5)), V.add(rocketVel, V.scale(st.dir, -60)),
           rnd(2.2, 0.9), DIA*1.1*E, DIA*3.0, 1);
   }
+  // one plume per lit strap-on, shorter and narrower than the core's
+  for (const bn of (bnoz || [])) {
+    for (let i = 0; i < Math.max(1, Math.round(nf*0.45)); i++) {
+      const vex = V.add(V.add(rocketVel,
+                        V.scale(st.dir, -(80+rnd(38))*Math.min(E, 2.2) - 0.12*st.v)),
+                        jit(6*E));
+      spawn(V.add(bn, jit(0.22*DIA)), vex, rnd(0.34, 0.15),
+            DIA*(0.34+rnd(0.20))*E, DIA*1.5*E, 0);
+    }
+  }
   if (st.mach > 0.92 && st.mach < 1.08 && st.q > 12) spawnVapor(st, rocketVel);
 }
 function spawnVapor(st, rocketVel) {
@@ -1256,31 +1765,48 @@ function spawnVapor(st, rocketVel) {
           DIA*rnd(2.4, 1.4), 18, 2);
 }
 function spawnTli(dt, cs) {
+  // exhaust leaves the bell aft of the kick stage and is carried by the
+  // craft's own velocity, so what you see is the *relative* recession
   const noz = V.add(cs.pos, V.scale(cs.bx, -0.4));
-  const n = Math.min(10, Math.round(60*dt*8));
+  const n = Math.min(12, Math.round(60*dt*10));
   for (let i = 0; i < n; i++)
-    spawn(V.add(noz, jit(0.25)), V.add(cs.vel, V.add(V.scale(cs.bx, -(60+rnd(50))), jit(9))),
-          rnd(0.5, 0.2), rnd(2.6, 1.4), 6.0, 0);
+    spawn(V.add(noz, jit(0.22)),
+          V.add(cs.vel, V.add(V.scale(cs.bx, -(40 + rnd(60))), jit(7))),
+          rnd(0.35, 0.15), rnd(1.1, 0.5), 2.6, 0);
 }
 function spawnEntry(dt, es) {
   const I = Math.min(1, es.q/120);
   if (I > 0.015) {
-    // long incandescent wake streaming behind the pod
-    const n = Math.min(14, Math.round(60*dt*(5 + 30*I)));
+    // Wake particles carry most of the capsule's own velocity. Left at rest
+    // in the world frame they fall 8 km behind within one frame and no trail
+    // is ever visible; entrained in the near wake they stream backwards at a
+    // few hundred m/s *relative to the pod*, which is what you actually see.
+    const vC = V.scale(es.vdir, es.v);
+    const rel = r => V.sub(vC, V.scale(es.vdir, r));
+    // shock layer: stands just ahead of the blunt face, co-moving with it
+    for (let i = 0; i < Math.min(3, Math.round(60*dt*(1 + 4*I))); i++)
+      spawn(V.add(V.add(es.pos, V.scale(es.vdir, 0.9)), jit(0.55)),
+            V.add(rel(20 + 60*I), jit(5*I + 2)),
+            rnd(0.22, 0.09), (0.34 + 0.55*I)*rnd(1.2, 0.7), 1.1*I + 0.4, 0);
+    // additive sprites saturate fast, so the wake is many small short-lived
+    // puffs rather than a few big ones
+    const n = Math.min(11, Math.round(60*dt*(4 + 22*I)));
     for (let i = 0; i < n; i++) {
-      const back = rnd(45*I + 4);
-      spawn(V.add(V.sub(es.pos, V.scale(es.vdir, back)), jit(0.8 + back*0.06)),
-            V.add(V.scale(es.vdir, -(140 + 520*I)*(0.7+rnd(0.6))), jit(40*I + 6)),
-            rnd(1.1, 0.3), (1.0 + 3.2*I)*rnd(1.4, 0.8), 9*I + 2, 0);
+      const back = rnd(14*I + 2);
+      spawn(V.add(V.sub(es.pos, V.scale(es.vdir, back)), jit(0.5 + back*0.05)),
+            V.add(rel((40 + 220*I)*(0.7 + rnd(0.6))), jit(18*I + 4)),
+            rnd(0.55, 0.20), (0.36 + 0.85*I)*rnd(1.3, 0.8), 2.2*I + 0.6, 0);
     }
-    if (Math.random() < 60*dt*0.7)
-      spawn(es.pos.slice(), V.scale(es.vdir, -(60 + 260*I)), rnd(5, 2),
-            2.2 + 4*I, 6, 1);
+    // wake smoke: non-buoyant while hypersonic, otherwise it climbs away
+    // from the trail instead of following it
+    if (Math.random() < 60*dt*0.9)
+      spawn(V.sub(es.pos, V.scale(es.vdir, 2.5)), rel(30 + 130*I),
+            rnd(2.6, 1.1), 2.0 + 3.5*I, 5, es.v > 400 ? 3 : 1);
   }
-  if (splashed && parts.length < 600 && simT < tSplash + 2.5) {
-    for (let i = 0; i < 30; i++)
+  if (splashed && parts.length < 420 && simT < tSplash + 2.5) {
+    for (let i = 0; i < 14; i++)
       spawn([rnd(2,-2), rnd(1.5,0.2), rnd(2,-2)],
-            [rnd(9,-9), rnd(11,3), rnd(9,-9)], rnd(1.4,0.5), rnd(2.6,1.2), 2.5, 2);
+            [rnd(9,-9), rnd(11,3), rnd(9,-9)], rnd(1.4,0.5), rnd(1.5,0.7), 1.4, 2);
   }
 }
 
@@ -1290,9 +1816,12 @@ function drawScene(sc) {
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   gl.viewport(0, 0, w, h);
   const cam = sc.cam, asp = w/h;
+  const inCab = cam.mode === 'cabin' || cam.mode === 'window';
   const sun = sc.sun || SUN;
   const view = mLookAt(cam.eye, cam.look, cam.up);
-  const proj = mPersp(cam.fov, asp, 0.35, 3.0e6);
+  // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
+  // nearer clip plane than the outside views
+  const proj = mPersp(cam.fov, asp, inCab ? 0.04 : 0.35, 3.0e6);
   const camAlt = Math.max(V.len(V.sub(cam.eye, sc.earthC)) - RE, 2);
   const dens = Math.exp(-camAlt/9000);
   const fogCol = [0.62*dens + 0.02, 0.75*dens + 0.04, 0.92*dens + 0.08];
@@ -1333,21 +1862,25 @@ function drawScene(sc) {
   // lit meshes
   const rotSun = V.sub(mApply(view, V.add(cam.eye, sun)), mApply(view, cam.eye));
   const engV = mApply(view, sc.engW);
-  const amb = sc.world === 'eci' ? 0.24 : 0.30 + 0.16*dens;
+  // a cabin has its own lighting: raise the fill so interior surfaces facing
+  // away from the sun still read (the plasma/engine point light still applies)
+  const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 : 0.30 + 0.16*dens;
   beginMeshes(view, V.norm(rotSun), fogDen, fogCol, amb, sc.engI, engV, sc.engC);
+  // from inside, the cabin is drawn and the window panes are dropped, so the
+  // apertures in the pressure shell become real openings onto the world
+  const skip = s => secGone[s.name] ||
+    (s.name === 'cabin' ? !inCab : s.name === 'glass' ? inCab : false);
 
   if (sc.world === 'pad') {
-    const st = sc.st;
     drawWhole(padBuf, padN, mIdent(), proj);
     drawWhole(towerBuf, towerN, mIdent(), proj);
     const hinge = [0, 0, -10.8];
     const armM = mMul(mTrans(hinge), mMul(mRotY(armAng), mTrans(V.scale(hinge, -1))));
     drawWhole(armBuf, armN, armM, proj);
-    const bx = st.dir, bz = [0,0,1], by = V.cross(bz, bx);
-    const rocketM = mBasis(bx, by, bz, st.pos);
+    const rocketM = sc.craftM;
     bindMeshBuf(rocketBuf);
     for (const s of secDraw) {
-      if (secGone[s.name]) continue;
+      if (skip(s)) continue;
       drawRange(rocketM, proj, s.first, s.count);
     }
     for (const d of debris) {
@@ -1358,14 +1891,17 @@ function drawScene(sc) {
     drawClouds(view, proj, fogCol, fogDen, cam.eye[1]);
   } else if (sc.world === 'eci') {
     const cs = sc.cs;
-    const m = mBasis(cs.bx, cs.by, cs.bz, cs.pos);
+    const stackM = sc.craftM;
     bindMeshBuf(rocketBuf);
-    // craft = kick stage + pod (stage jettisoned before entry interface)
-    const stackM = mMul(m, mTrans([-(secDraw.find(s => s.name === 'stage3').x0), 0, 0]));
+    // craft = whatever is still attached: kick stage + capsule, until the
+    // stage is jettisoned ahead of entry interface
     for (const s of secDraw) {
-      if (s.name === 'pod') { drawRange(stackM, proj, s.first, s.count); continue; }
-      if (s.name !== 'stage3') continue;
-      if (simT < tHand) drawRange(stackM, proj, s.first, s.count);
+      if (s.name === 'pod' || s.name === 'cabin' || s.name === 'glass') {
+        if (!skip(s)) drawRange(stackM, proj, s.first, s.count);
+        continue;
+      }
+      if (s.name !== LASTST) continue;
+      if (!(simT >= tHand)) drawRange(stackM, proj, s.first, s.count);
       else {
         // jettisoned kick stage drifting away behind
         const off = V.scale(cs.bx, -(3 + 0.6*(simT - tHand)));
@@ -1375,20 +1911,20 @@ function drawScene(sc) {
     }
   } else {
     const es = sc.es;
-    const bz = [0,0,1], by = V.cross(bz, es.bx);
-    const pr = podRange();
-    const podM = mMul(mBasis(es.bx, by, bz, es.pos), mTrans([-pr.x0 - 0.02, 0, 0]));
+    const podM = sc.craftM;
     bindMeshBuf(rocketBuf);
-    drawRange(podM, proj, pr.first, pr.count);
+    for (const s of secDraw)
+      if ((s.name === 'pod' || s.name === 'cabin' || s.name === 'glass') && !skip(s))
+        drawRange(podM, proj, s.first, s.count);
     // parachutes: canopy axis opposite the velocity, scale-in on deploy
     const drawChute = (buf, n, t0, lineLen) => {
-      if (simT < t0) return;
+      if (!isFinite(t0) || simT < t0) return;
       const s = Math.min(1, (simT - t0)/1.2);
       const cx = V.scale(es.vdir, -1), cz = [0,0,1], cyv = V.cross(cz, cx);
       const cp = V.add(es.pos, V.scale(cx, 2.2 + lineLen*s));
       drawWhole(buf, n, mBasis(cx, cyv, cz, cp, 0.15 + 0.85*s), proj);
     };
-    if (simT < tMain) drawChute(drogueBuf, drogueN, tDrog, 3.2);
+    if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2);
     else drawChute(mainBuf, mainN, tMain, 8.5);
     drawClouds(view, proj, fogCol, fogDen, cam.eye[1]);
   }
@@ -1529,7 +2065,7 @@ function chipRow(el, items, cur, cb) {
 }
 function initControls() {
   chipRow($('cams'), CAMS, 'auto', m => camMode = m);
-  const sp = ['auto','×1','×10','×100','×1k','×10k','skip ›'];
+  const sp = ['auto','×1','×2','×4','×10','×100','×1k','×10k','skip ›'];
   const setSpeed = s => {
     if (s === 'skip ›') {
       const nxt = toasts.find(q => q.t > simT + 2);
@@ -1541,15 +2077,23 @@ function initControls() {
       +s.slice(1).replace('k', '000');
   };
   chipRow($('speed'), sp, 'auto', setSpeed);
+  const inside = () => camMode === 'cabin' || camMode === 'window';
   cv.addEventListener('pointerdown', e => {
-    if (camMode !== 'free') return;
+    if (camMode !== 'free' && !inside()) return;
     cv.setPointerCapture(e.pointerId);
     cv._drag = [e.clientX, e.clientY];
   });
   cv.addEventListener('pointermove', e => {
     if (!cv._drag) return;
-    freeYaw += (e.clientX - cv._drag[0])*0.006;
-    freePitch = Math.min(1.4, Math.max(-1.2, freePitch + (e.clientY - cv._drag[1])*0.004));
+    const dx = e.clientX - cv._drag[0], dy = e.clientY - cv._drag[1];
+    if (inside()) {
+      // turn your head on the couch rather than orbiting the capsule
+      headYaw = Math.min(1.5, Math.max(-1.5, headYaw + dx*0.005));
+      headPitch = Math.min(1.2, Math.max(-1.2, headPitch - dy*0.005));
+    } else {
+      freeYaw += dx*0.006;
+      freePitch = Math.min(1.4, Math.max(-1.2, freePitch + dy*0.004));
+    }
     cv._drag = [e.clientX, e.clientY];
   });
   cv.addEventListener('pointerup', () => cv._drag = null);
@@ -1571,14 +2115,22 @@ function initControls() {
 
 function showEndCard() {
   const m = run.metrics;
-  $('ov_title').textContent = 'SPLASHDOWN';
-  $('ov_sub').textContent = 'pod recovered — mission complete';
-  $('ov_body').innerHTML = `<table>
-    <tr><td>mission elapsed</td><td>${m.t_days.toFixed(2)} days</td></tr>
-    <tr><td>perilune</td><td>${m.perilune_km.toFixed(0)} km (day ${m.t_perilune_d.toFixed(1)})</td></tr>
-    <tr><td>entry interface</td><td>${(m.ei_v_ms/1000).toFixed(2)} km/s</td></tr>
-    <tr><td>peak load · heating</td><td>${m.peak_g.toFixed(1)} g · ${m.peak_q_wcm2.toFixed(0)} W/cm²</td></tr>
-    <tr><td>splashdown</td><td>${m.splash_lat.toFixed(1)}°, ${m.splash_lon.toFixed(1)}° at ${m.v_splash.toFixed(1)} m/s</td></tr></table>`;
+  // the card reports whatever this trajectory actually produced
+  const rows = [];
+  const row = (k, ok, v) => { if (ok) rows.push(`<tr><td>${k}</td><td>${v}</td></tr>`); };
+  row('mission elapsed', isFinite(m.t_days), `${(m.t_days || 0).toFixed(2)} days`);
+  row('perilune', isFinite(m.perilune_km),
+      `${(m.perilune_km || 0).toFixed(0)} km (day ${(m.t_perilune_d || 0).toFixed(1)})`);
+  row('entry interface', isFinite(m.ei_v_ms), `${((m.ei_v_ms || 0)/1000).toFixed(2)} km/s`);
+  row('peak load · heating', isFinite(m.peak_g),
+      `${(m.peak_g || 0).toFixed(1)} g · ${(m.peak_q_wcm2 || 0).toFixed(0)} W/cm²`);
+  row('splashdown', isFinite(m.splash_lat),
+      `${(m.splash_lat || 0).toFixed(1)}°, ${(m.splash_lon || 0).toFixed(1)}° ` +
+      `at ${(m.v_splash || 0).toFixed(1)} m/s`);
+  $('ov_title').textContent = isFinite(tSplash) ? 'SPLASHDOWN' : 'END OF MISSION';
+  $('ov_sub').textContent = isFinite(tSplash) ?
+    'pod recovered — mission complete' : (EVS.length ? EVS[EVS.length-1].s : '');
+  $('ov_body').innerHTML = `<table>${rows.join('')}</table>`;
   $('ov_go').textContent = 'REPLAY';
   $('ov_go').classList.remove('hidden');
   $('overlay').classList.remove('hidden');
@@ -1598,6 +2150,7 @@ async function boot() {
     if (!run.ok) throw new Error(run.error || 'mission failed');
     if (!geo.ok) throw new Error(geo.error || 'geometry failed');
     buildData();
+    buildLiveryTex();
     buildRocket();
     buildStatics();
     buildLandTex();
