@@ -198,15 +198,28 @@ here it is the arcsine running out of domain rather than a check bolted on.
 
 The two latitudes in that paragraph are deliberately different. The epoch uses
 the **geocentric** latitude, because the condition is about where the site's
-position vector actually points and geodetic would misplace it by 0.19°
-(~21 km); the azimuth uses the **geodetic** latitude, because that is what
-`launch_azimuth` and the guidance already fly. One imperfect convention beats
-two that disagree, and neither corrects for the rotating launch site — that is
-the larger error, the same one that lands the reference mission at i = 28.40°
-for a 28.5° target. It is measured rather than assumed: the suite solves a
-window, flies the real ascent at that epoch, and checks the **achieved** RAAN
-against the target, which closes to under 3° across ascending and descending
-opportunities at i = 51.6°.
+position vector actually points and geodetic would misplace it — by 0.161° at
+the Cape, and by up to 0.192° near 45°, which is ~21 km of position. The
+azimuth uses the **geodetic** latitude, because that is what `launch_azimuth`
+and the guidance already fly, and one imperfect convention beats two that
+disagree.
+
+Which leaves the honest limit. The epoch fixes the RAAN; the *azimuth* fixes
+the inclination, and `launch_azimuth` is the classic non-rotating formula, so
+the inclination it delivers is not the one asked for. That is nearly free at
+the reference mission's almost-due-east heading — 28.40° achieved for a 28.5°
+target — and expensive away from it: commanding 44.98° for a 51.6° orbit gets
+**46.8°**, because at that heading the site's own 408 m/s of eastward motion
+lies across the flight path rather than along it. Correcting it would move
+every committed number in this repo, so it is measured and left alone.
+
+The window is therefore solved for the inclination the vehicle *will* achieve,
+which costs one extra flight to measure (the achieved inclination depends on
+the azimuth, not on the epoch) and is the same design-then-correct shape as the
+free-return corrector. Done that way the suite solves a window, flies the real
+ascent at that epoch, and closes the **achieved** RAAN to under 2° on both the
+ascending and descending opportunities — the remainder being the eight minutes
+of ascent during which the site keeps turning under a plane matched at liftoff.
 
 **Maneuver planning** (`maneuvers.jl`): the two-body transfer toolbox — a
 universal-variables Lambert solver (validated against analytic ellipse

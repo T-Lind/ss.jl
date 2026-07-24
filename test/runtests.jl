@@ -230,35 +230,63 @@ end
 
     # 7. geocentric latitude sits inside geodetic, by the WGS-84 flattening
     @test site_geocentric_lat(guid.site_lat, guid.site_lon) < guid.site_lat
+    # 0.161 deg at the Cape; the ~0.19 deg maximum is up at 45 deg
     @test isapprox(rad2deg_(guid.site_lat -
                             site_geocentric_lat(guid.site_lat, guid.site_lon)),
-                   0.19; atol = 0.02)
+                   0.161; atol = 0.005)
+    @test isapprox(rad2deg_(deg2rad_(45.0) - site_geocentric_lat(deg2rad_(45.0), 0.0)),
+                   0.192; atol = 0.005)
+    # and vanishes on the equator and at the poles, where the ellipsoid normal
+    # passes through the centre
     @test isapprox(site_geocentric_lat(0.0, 0.0), 0.0; atol = 1e-15)
+    @test isapprox(site_geocentric_lat(pi / 2, 0.0), pi / 2; atol = 1e-9)
 end
 
 @testset "launch window flown end to end" begin
-    # The closed form is only worth having if the vehicle it steers actually
-    # arrives in the plane it promised. Fly the real ascent at a solved epoch
-    # and compare the ACHIEVED RAAN with the target.
+    # A closed form is only worth having if the vehicle it steers arrives where
+    # it promised, so this flies the REAL ascent at a solved epoch and reads
+    # back the achieved plane.
+    #
+    # Two separate things decide that plane, and the window owns only one of
+    # them. The epoch fixes the RAAN; the azimuth fixes the inclination — and
+    # `launch_azimuth` is the classic non-rotating formula, so the inclination
+    # it actually delivers is not the one asked for. That error is nearly free
+    # at the reference mission's almost-due-east azimuth (28.40 deg for a 28.5
+    # deg target) and expensive away from it: commanding 44.98 deg for a 51.6
+    # deg orbit gets 46.8 deg, because at that heading the site's own 408 m/s
+    # of eastward motion is across the flight path rather than along it.
+    #
+    # So the window is solved for the inclination the vehicle WILL achieve, not
+    # the one nominally requested — one extra flight to measure it, since the
+    # achieved inclination depends on the azimuth and not on the epoch. That is
+    # the same design-then-correct shape as the free-return corrector, and it
+    # tests the epoch solver rather than the azimuth approximation underneath.
     lv = default_moon_rocket()
-    inc = deg2rad_(51.6)
-    guid0 = AscentGuidance(azimuth = launch_azimuth(inc, deg2rad_(28.5)))
+    inc_cmd = deg2rad_(51.6)
+    guid0 = AscentGuidance(azimuth = launch_azimuth(inc_cmd, deg2rad_(28.5)))
+
+    probe_guid, probe = tune_ascent(lv, guid0)
+    @test probe.reached_orbit
+    inc_ach = probe.elements.i
+    # the approximation is real and worth pinning: several degrees, one way
+    @test rad2deg_(inc_cmd - inc_ach) > 3.0
+
     for raan_deg in (40.0, 215.0)
         raan = deg2rad_(raan_deg)
-        w = next_launch_window(guid0, inc, raan)
+        w = next_launch_window(guid0, inc_ach, raan)
         @test w !== nothing
         # theta_g0 IS the launch epoch: rotating the Earth to where it will be
         # at time w.t and lifting off at t = 0 is the same flight
-        guid, asc = tune_ascent(lv, guid0; theta_g0 = OMEGA_EARTH * w.t)
+        _, asc = tune_ascent(lv, guid0; theta_g0 = OMEGA_EARTH * w.t)
         @test asc.reached_orbit
         el = asc.elements
+        # inclination is epoch-independent, so the probe's value still holds
+        @test isapprox(rad2deg_(el.i), rad2deg_(inc_ach); atol = 0.05)
+        # ...and the RAAN is now the window's to answer for. What is left is
+        # the ~8 min of ascent during which the site keeps turning under a
+        # plane that was matched at liftoff.
         dO = rad2deg_(mod(el.raan - raan + pi, 2pi) - pi)
-        # The residual is the rotating-launch-site approximation in the azimuth
-        # (the same one that lands the reference mission at 28.40 deg for a
-        # 28.5 deg target), plus the ~8 min of ascent during which the site
-        # keeps turning. Both are small and neither is corrected here.
-        @test abs(dO) < 3.0
-        @test isapprox(rad2deg_(el.i), 51.6; atol = 1.0)
+        @test abs(dO) < 2.0
     end
 end
 
