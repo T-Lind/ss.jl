@@ -307,7 +307,7 @@ behavior, ground track, MC footprint and statistics.
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
 ```bash
-# tests (318 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+# tests (324 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
 # propellant/engine consistency and stage sizing, scalar targeting including
@@ -613,6 +613,22 @@ never comes home (the 80 km case terminates on timeout, not splashdown).
 The trade for the low g is **integrated heating, which nearly doubles** —
 a lifting entry soaks for longer even though its peak heat *rate* is lower,
 and it is the integral that sizes the ablator.
+
+**Bank modulation** (`gload_bank`) is available and is *not* a way to reduce
+peak load — inside the corridor, full lift-up is already the minimum-g
+solution and modulating costs 1–2 g. What a roll law buys is the shallow
+wall:
+
+| return perigee | fixed lift-up | modulated (g=6) |
+|---|---|---|
+| 50 km | 6.4 g | 8.4 g |
+| 65 km | 4.5 g | 5.5 g |
+| **80 km** | **skips out — lost** | **4.5 g, home** |
+
+It converts a mission loss into a survivable entry, widening the usable
+corridor by roughly 15 km. That is why the default stays fixed lift-up (the
+nominal perigee is held to 250 m) and the law is there for when the corridor
+is uncertain — a dispersed TLI, a missed correction, an off-nominal return.
 
 One assumption is worth naming: the 4-DOF model holds the trim lift vector at
 the commanded bank angle. A real capsule only does that with active roll

@@ -24,6 +24,36 @@
 #   h >= h_ei (120 km): pure orbital mechanics — no aero, attitude frozen.
 #   h <  h_ei          : aerodynamics, pitch dynamics, heating, parachutes.
 
+"""
+    bank_command(bank, t, h, vrel, gload) -> Float64
+
+Resolve a scenario's bank setting: a number is a fixed angle, anything else
+is called as a roll-control law.
+"""
+@inline bank_command(b::Real, t, h, v, gl) = Float64(b)
+@inline bank_command(b, t, h, v, gl) = Float64(b(t, h, v, gl))
+
+"""
+    gload_bank(g_target; bank_max = 150 deg, kp = 1.0) -> law
+
+Roll-control law flying the entry at roughly constant deceleration — the job
+Apollo's entry guidance did with its bank-angle command.
+
+A capsule cannot change how much lift it makes; that is fixed by its trim
+angle of attack. What it can do is point that lift anywhere on a cone about
+the velocity vector by rolling. Lift **up** raises the trajectory into
+thinner air and sheds load; lift **down** holds the vehicle in and prevents a
+skip-out. So this commands lift-down while the load is below target
+(capture), and rolls smoothly toward lift-up as it builds (pull-out).
+
+`bank_max` stops short of pi so the law never commits to pure lift-down,
+which would leave nothing in reserve to recover with.
+"""
+function gload_bank(g_target::Float64; bank_max::Float64 = deg2rad_(150.0),
+                    kp::Float64 = 1.0)
+    (t, h, v, gl) -> bank_max * clamp(kp * (g_target - gl) / g_target, 0.0, 1.0)
+end
+
 "Runtime (mutable) flight status carried alongside the state vector."
 mutable struct FlightContext
     chute_deploy_t::Vector{Float64}  # NaN until deployed, else deployment time [s]
@@ -38,10 +68,15 @@ any_chute_deployed(ctx::FlightContext) = any(!isnan, ctx.chute_deploy_t)
 
 Everything needed to run one flight. `extra_accel(r, v, t) -> V3` is a hook
 for additional accelerations (thrust for launch/deorbit extensions, solar
-radiation pressure, ...). `bank` is the bank angle [rad] orienting the trim
-lift vector about the relative velocity (0 = lift up).
+radiation pressure, ...). `bank` orients the trim lift vector about the
+relative velocity (0 = lift up, pi = lift down). A number is held fixed; a
+callable `(t, h, vrel, gload) -> rad` is a roll-control law evaluated every
+derivative, which is how a real capsule flies — see [`gload_bank`](@ref).
+An axisymmetric capsule has no aerodynamic restoring moment about its own
+axis, so bank is the one attitude freedom that needs RCS during entry, and
+the only one worth spending propellant on.
 """
-Base.@kwdef struct Scenario{V<:Vehicle,A<:AbstractAtmosphere,G<:AbstractGravity,F}
+Base.@kwdef struct Scenario{V<:Vehicle,A<:AbstractAtmosphere,G<:AbstractGravity,F,B}
     vehicle::V
     atmosphere::A = USSA76()
     gravity::G = J2Gravity()
@@ -51,7 +86,7 @@ Base.@kwdef struct Scenario{V<:Vehicle,A<:AbstractAtmosphere,G<:AbstractGravity,
     t0::Float64 = 0.0
     theta_g0::Float64 = 0.0           # Earth rotation angle at t0 [rad]
     h_ei::Float64 = 120.0e3           # entry interface altitude [m]
-    bank::Float64 = 0.0
+    bank::B = 0.0
     extra_accel::F = (r, v, t) -> (0.0, 0.0, 0.0)
     target_lat::Float64 = NaN         # splashdown target [rad]
     target_lon::Float64 = NaN
@@ -121,7 +156,11 @@ function dynamics!(dx::Vector{Float64}, x::Vector{Float64},
             if L != 0.0 && cosgam > COSGAMMA_MIN
                 uhat = vunit(vsub(rhat, vscale(vhat, singam)))   # in-plane "up" ⊥ v
                 shat = vcross(vhat, uhat)                        # completes right-handed set
-                lhat = vadd(vscale(uhat, cos(scn.bank)), vscale(shat, sin(scn.bank)))
+                # lift magnitude is bank-independent, so the load factor
+                # driving the roll law can be formed here without circularity
+                gl_now = sqrt(D * D + L * L) / (veh.mass * G0)
+                bk = bank_command(scn.bank, t, h, Vr, gl_now)
+                lhat = vadd(vscale(uhat, cos(bk)), vscale(shat, sin(bk)))
                 f_aero = vadd(f_aero, vscale(lhat, L))
             end
             a = vadd(a, vscale(f_aero, 1 / veh.mass))

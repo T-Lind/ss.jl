@@ -88,6 +88,7 @@ export
     heating_convective, heating_radiative, wall_temperature,
     # dynamics / sim
     Scenario, FlightContext, simulate, SimResult, FlightEvent, flight_data,
+    bank_command, gload_bank,
     # scenarios
     DeorbitElements, scenario_from_elements, target_deorbit, west_coast_scenario,
     WEST_COAST_TARGET_LAT, WEST_COAST_TARGET_LON,

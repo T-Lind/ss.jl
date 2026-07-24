@@ -802,10 +802,27 @@ end
 
     # the corridor really is bounded: too shallow and it never comes home
     shallow = moonshot(hp_return = 80e3)
-    @test simulate(Scenario(vehicle = mkpod(0.45), r0 = shallow.cislunar.r,
-                            v0 = shallow.cislunar.v, t0 = shallow.cislunar.t,
-                            t_max = shallow.cislunar.t + 4.0e4,
-                            alpha0 = deg2rad_(5.0))).terminated == :timeout
+    fly_sh(bk) = simulate(Scenario(vehicle = mkpod(0.45), r0 = shallow.cislunar.r,
+                                   v0 = shallow.cislunar.v, t0 = shallow.cislunar.t,
+                                   t_max = shallow.cislunar.t + 6.0e4,
+                                   alpha0 = deg2rad_(5.0), bank = bk))
+    @test fly_sh(0.0).terminated == :timeout            # fixed lift-up skips out
+
+    # --- bank modulation ------------------------------------------------
+    # A roll law is NOT a way to reduce peak load: inside the corridor, full
+    # lift-up is already the minimum-g solution and modulating costs 1-2 g.
+    # What it buys is the shallow wall — it converts a skip-out (mission loss)
+    # into a survivable entry, widening the usable corridor by ~15 km.
+    saved = fly_sh(gload_bank(6.0))
+    @test saved.terminated == :splashdown
+    @test saved.peak_gload < 8.0
+    @test fly(0.45; bank = gload_bank(6.0)).peak_gload > lift.peak_gload
+
+    # the law is a plain callable, evaluated on the current load factor
+    law = gload_bank(6.0)
+    @test law(0.0, 120e3, 11e3, 0.0) > deg2rad_(140.0)   # unloaded -> lift down
+    @test law(0.0, 40e3, 5e3, 12.0) == 0.0               # over target -> lift up
+    @test bank_command(0.3, 0.0, 0.0, 0.0, 0.0) == 0.3   # a number is held
 end
 
 @testset "Newtonian panel aero" begin
