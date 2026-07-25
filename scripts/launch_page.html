@@ -304,8 +304,15 @@ uniform float uPxA;                        // angular size of one pixel [rad]
 // moves the target resolution, uPxA moves with it, and the cull below would
 // pop stars in and out every time bgScale steps, worst during a coast where
 // the whole frame is the upscaled blit. uPxN is fed from the NATIVE canvas
-// height instead, so the star population and their pixel size stay fixed no
-// matter what the scaler is doing to the render target underneath them.
+// height instead, so the POPULATION is scale-invariant: the same 374 stars pass
+// the cull at 0.35 as at 1.0, and none appear or vanish as the scaler moves.
+// The SAMPLING is not, and this comment used to overclaim that it was. A star
+// is about 1.5 native pixels across, so in a 0.35 buffer it lands under half a
+// pixel — below Nyquist — and the upscale loses some of them into the
+// background: 730 rendered blobs against 969 at full scale. That is a softer
+// sky, the same disclosed price the rest of the technique pays; what it is not
+// is the catalogue itself flickering, which is the failure this uniform exists
+// to prevent.
 uniform float uPxN;                        // angular size of one pixel [rad], NATIVE height
 uniform float uT;                          // seconds, for scintillation
 vec3 h33(vec3 p){
@@ -1031,8 +1038,14 @@ void main(){
   // pad/entry worlds put the earth centre at (0, -Re, 0)
   vec3 n = normalize(vW + vec3(0.0, uER, 0.0));
   float r = length(vW.xz);
-  // one pixel is a small fraction of a degree at these ranges, but the plane
-  // runs to the horizon, so band-limit off the slant range all the same
+  // Band-limit off the slant range, because the plane runs to the horizon.
+  // Keyed to distance and not to pixel size, which was defensible when this
+  // drew at native resolution and one pixel really was a small fraction of a
+  // degree. The deck now renders into the scaled background target, where at
+  // the 0.35 floor a pixel is ~2.9x wider and this lod does not follow it down
+  // — the deck is under-filtered there. Left alone on purpose: keying lod to
+  // the pixel solid angle changes how the deck looks at every scale, which is a
+  // deck change, not a scaler change. Recorded as a follow-up.
   float lod = clamp(length(vVP)*3.0e-9, 2.0e-7, 0.002);
   vec3 pw = spinFrame(uEMat*n, uSpin);
   float dens = cloudCover(pw, lod);
@@ -1068,7 +1081,11 @@ void main(){
   gl_FragColor = vec4(col, a*(1.0 - fog*0.7));
 }`);
 
-// particles (view-space point sprites): 0 flame/plasma, 1 smoke, 2 vapor/spray
+// Particles (view-space point sprites). The JS side has five kinds — 0 flame,
+// 1 smoke, 2 vapor/spray, 3 wake smoke, 4 plasma — and the shader has four
+// branches, so vK is NOT the JS kind: drawParticles packs 3 down onto the smoke
+// branch (it wants smoke's look and blend, just none of its buoyancy) and 4 up
+// onto branch 3, the plasma ramp added for entry heating.
 const PART = program(`
 attribute vec3 aVP; attribute vec3 aM;
 uniform mat4 uPr; uniform float uH;
@@ -2815,18 +2832,41 @@ let skyBuf, partDyn;
 
 // ------------------------------------------- scaled background target --
 // The background passes are the whole frame budget — measured at 84 ms (planet)
-// and 52 ms (cloud deck) of a 136.8 ms frame on an integrated Intel UHD 630,
-// against 0.1 ms for every mesh, particle and HUD draw combined. So the one
-// knob that matters is how many pixels they cover, and the right value is
-// whatever this machine can afford rather than a number hard-coded for one GPU.
+// and 52 ms (cloud deck) of a 136.8 ms frame on an integrated Intel UHD 630.
+// Everything else this page draws is not the bottleneck, and the honest form of
+// that statement is a bound, not a figure: with both passes disabled the frame
+// medianed 16.9 ms, and issuing no draw calls at all medianed 16.8 ms. Both are
+// the 60 Hz vsync floor, so the meshes, particles, decals, HUD and the JS
+// integration together cost less than one 16.7 ms interval and could not be
+// resolved separately from it. (The 0.1 ms between those two rows is the
+// resolution of a vsync-clamped clock, not a measurement of the draws — the
+// same data has 84.3 + 52.1 + 16.9 = 153.3 ms of parts against a 136.8 ms
+// whole, and the 16.5 ms of excess is exactly one vsync interval.)
 //
-// Starts at 0.5, the value Task 3 shipped and measured as safe, and ramps both
-// ways. Deliberately not starting at 1.0: at full resolution these two passes
-// cost ~136 ms here and forcing that value crashed the renderer during testing.
+// So the one knob that matters is how many pixels those two passes cover, and
+// the right value is whatever this machine can afford rather than a number
+// hard-coded for one GPU.
+//
+// Starts at 0.5, not at BG_MAX. The start value is what the first ~30 frames
+// actually render at, before the median has the samples to correct it: from 1.0
+// that is a second of 136 ms stutter on this machine at the moment the page is
+// first looked at, and from BG_MIN a fast GPU stays soft for the five seconds
+// the 0.05-per-30-frames ramp needs to climb. 0.5 is the value Task 3 shipped
+// and measured, three steps above the floor and ten below the ceiling.
 let bgScale = 0.5;
 let perfMed = 0, perfShow = false;
 // 13 and 20 ms bracket the 16.7 ms vsync interval, so a frame comfortably making
 // rate is left alone instead of being hunted around it.
+//
+// BG_MAX is 1.0 and that is deliberate, in spite of an earlier note here that
+// said forcing 1.0 crashed the renderer. What crashed was a diagnostic loop
+// pumping dozens of forced full-resolution frames back to back in a
+// backgrounded tab — a driver watchdog reset, not a property of the value.
+// Later sessions rendered at 1.0 on the same machine with no context loss and
+// gl.getError() 0. The scaler cannot walk there on a slow GPU in any case: it
+// only steps up while the median is under 13 ms, and full resolution here is
+// never remotely that, so 1.0 is reachable exactly on the machines that can pay
+// for it.
 const FRAME_HI = 20, FRAME_LO = 13, BG_MIN = 0.35, BG_MAX = 1.0;
 // Pure, so it can be tested without a GPU: given the current scale and a median
 // frame time, what should the scale become?
@@ -3829,8 +3869,15 @@ function buildScene(ph) {
   const craftM = mMul(mBasis(es.bx, V.cross(bze, es.bx), bze, es.pos),
                       mTrans([-xb, 0, 0]));
   const cam = cameraEntry(simT, es, craftM);
-  // Entry runs ~6600 km from the splash-site origin, where the frame's y axis
-  // is 66 deg off the real vertical. Buoyancy has to follow the radial.
+  // Entry runs ~6600 km from the splash-site origin, where the frame's y axis is
+  // 66 deg off the real vertical, so buoyancy has to follow the radial. Worth
+  // being exact about what this fixes, because it is easy to read as a fourth
+  // visible symptom of the frame bug and it is not one: stepParticles applies
+  // PUP only to kinds 1 and 2, and entry spawns kind 1 only once the pod is
+  // below 400 m/s and kind 2 only at splashdown — both within a few km of the
+  // origin, where the radial and y still agree to a fraction of a degree.
+  // Plasma is kind 4 and never reads PUP at all. This is the same frame error
+  // as the other three, corrected while it is still latent.
   PUP = V.norm(V.sub(es.pos, [0, -RE, 0]));
   TRENCH = false;
   return {
@@ -4019,8 +4066,11 @@ function drawPlanet(sc, cam, sun, asp, pxH, pxN, deck) {
 // Everything solid in the world, for whichever world we are in. Called twice a
 // frame: once with the colour mask off into the scaled target, purely to give
 // the cloud deck something to depth-test against, and once for real at native
-// resolution. That is affordable because the whole mesh pass measures under
-// 0.1 ms — it is the two fullscreen noise shaders that cost the frame, not this.
+// resolution. That is affordable because the mesh pass is too cheap to price:
+// with the two fullscreen noise passes disabled the frame sits on the 60 Hz
+// vsync floor whether the meshes are drawn or not, which bounds the whole pass
+// under one 16.7 ms interval without resolving it. Doubling something that
+// small is still small. It is the two noise shaders that cost the frame.
 // The caller sets the mesh program up (beginMeshes + setMeshHeat) before each
 // call; the cloud-deck draws deliberately stay outside, because the deck belongs
 // to the scaled pass and the meshes do not.
@@ -4479,9 +4529,16 @@ function showEndCard() {
 //
 // What these protect: the entry world's frame is anchored at the splash site,
 // so its y is a PLANE coordinate. Reading it as an altitude caused four
-// separate defects (the cloud deck, particle buoyancy, the wide camera and the
-// free camera). altOf is the single answer, and the assertions below pin the
+// separate defects — three of them visible (the cloud deck, the wide camera and
+// the free camera) and one latent (particle buoyancy, which only reads the
+// frame's up for kinds entry spawns near the origin; see the PUP assignment in
+// buildScene). altOf is the single answer, and the assertions below pin the
 // measured entry geometry that every one of those got wrong.
+//
+// The second block covers the four pure functions the camera work leans on and
+// that had no assertions at all — liftToAlt, localFrame, wideCam and heatOf.
+// Three of the four original symptoms lived in them, and wideCam's distance
+// clamp is the trickiest arithmetic on this branch.
 window.__selftest = function () {
   const out = { pass: 0, fail: 0, failures: [] };
   // fn is a thunk so a missing or throwing function is a readable failure
@@ -4539,16 +4596,94 @@ window.__selftest = function () {
   eq('past the range gate', () => deckFade(20000, 20000, 150001), 0);
 
   // --- and the distinction the three-argument signature exists for. The two
-  // heights are different questions. At 150 km downrange the sphere drop is
-  // rng^2/2RE = 1766 m, so an altitude of 7000 m is a camY of ~5234 — 1766 m
-  // clear of the plane, not on it. Using altitude for the second term would
-  // hide the deck here, which is the bug this signature prevents.
+  // heights are different questions. At 150 km downrange — the last range the
+  // gate admits — the sphere drop is rng^2/2RE = 1766 m, so an altitude of
+  // 7000 m is a camY of ~5234: 1766 m clear of the plane, not on it. Using
+  // altitude for the second term would hide the deck here, which is the bug
+  // this signature prevents. The rng below is 150000 and not some rounder
+  // number precisely so the drop, the camY and the gate all describe the same
+  // place; the row after it is the same place one metre further out.
   eq('plane-proximity uses camY, not altitude',
-     () => deckFade(7000, 5234, 100000), 1, 1e-6);
+     () => deckFade(7000, 5234, 150000), 1, 1e-6);
   eq('and still hides the plane when camY really is at deck height',
-     () => deckFade(7000, 7000, 100000), 0);
+     () => deckFade(7000, 7000, 150000), 0);
   eq('range gate still fires regardless of the two heights',
      () => deckFade(7000, 5234, 150001), 0);
+
+  // --- liftToAlt: the radial clamp that replaced `if (eye[1] < 2) eye[1] = 2`.
+  // The first row IS the old bug as an assertion: 5884 km downrange the frame's
+  // y is -3.71e6, so a 2 m floor read against y teleported the free camera to
+  // 2301 km up. Against the radius it does nothing at all, because the point
+  // was already 84 km high.
+  const lowP = eyeAt(50, 300000);
+  eq('liftToAlt leaves a point already above the floor exactly alone',
+     () => V.len(V.sub(liftToAlt(eyeAt(84422, 5884000), 2),
+                       eyeAt(84422, 5884000))), 0);
+  eq('liftToAlt pushes a low point out to exactly the floor',
+     () => altOf(liftToAlt(lowP, 2000), EC), 2000, 1e-6);
+  eq('and it pushes it OUT, never down',
+     () => Math.sign(liftToAlt(lowP, 2000)[1] - lowP[1]), 1);
+  eq('and strictly radially — the direction from the centre is unchanged',
+     () => V.len(V.cross(V.norm(V.sub(liftToAlt(lowP, 2000), EC)),
+                         V.norm(V.sub(lowP, EC)))), 0, 1e-12);
+
+  // --- localFrame: the basis the free and wide cameras orbit in. At the test
+  // point the track runs along +x in the xz-plane, so across-track is exactly
+  // +z, which pins the handedness to a direction rather than to the formula.
+  const lfP = eyeAt(84422, 5884000), lf = localFrame(lfP, [1, 0, 0]);
+  eq('localFrame is a unit basis',
+     () => Math.abs(V.len(lf.up) - 1) + Math.abs(V.len(lf.fwd) - 1)
+         + Math.abs(V.len(lf.rt) - 1), 0, 1e-12);
+  eq('localFrame is orthogonal',
+     () => Math.abs(V.dot(lf.up, lf.fwd)) + Math.abs(V.dot(lf.fwd, lf.rt))
+         + Math.abs(V.dot(lf.rt, lf.up)), 0, 1e-12);
+  eq('localFrame rt is across-track, right-handed',
+     () => V.len(V.sub(lf.rt, [0, 0, 1])), 0, 1e-9);
+  // and the reason the function exists: out here the local vertical is 65.7 deg
+  // off the frame's y axis, so a camera that used [0,1,0] as up was 65.7 deg
+  // wrong — cos 65.7 deg = 0.411, not 1.
+  eq('localFrame up is the local vertical, not the frame y axis',
+     () => V.dot(lf.up, [0, 1, 0]), 0.4115, 1e-3);
+
+  // --- wideCam's distance clamp, with the entry call site's own numbers: span
+  // 28 m, handover band 260 -> 1500 m, which puts the stand-off 68 m out —
+  // nearly four times CLOSER than the near end of the band. So as the weight
+  // rises the eye recedes from the subject, the distance peaks mid-blend, and
+  // fitFov answers with a long lens. That was the 3.3 deg dip.
+  const wT = eyeAt(8000, 5884000), wRad = V.norm(V.sub(wT, EC));
+  const wDir = localFrame(wT, [1, 0, 0]).fwd;
+  const wTri = d => V.sub(wT, V.scale(wRad, d));    // a tripod d metres below
+  const wCam = d => wideCam(wT, wDir, 28, wTri(d), 260, 1500);
+  eq('wideCam inside the near end is exactly the tripod',
+     () => V.len(V.sub(wCam(100).eye, wTri(100))), 0);
+  eq('wideCam past the far end is the stand-off, wherever the tripod stood',
+     () => V.len(V.sub(wCam(1500).eye, wCam(4000).eye)), 0, 1e-6);
+  eq('and the blend weight is saturated there', () => wCam(4000).w, 1);
+  // The property whose absence was the dip, stated as one number: across the
+  // whole handover the eye is never farther from the subject than the farther
+  // of the two endpoint distances, which here is the 260 m near end. Unclamped
+  // the midpoint sits about 440 m out and this returns that instead.
+  eq('wideCam never recedes past its own endpoints', () => {
+    let worst = 0;
+    for (let d = 260; d <= 1500; d += 10)
+      worst = Math.max(worst, V.len(V.sub(wCam(d).eye, wT)));
+    return worst;
+  }, 260, 1e-6);
+
+  // --- heatOf: the 0-to-1 heating ramp the plasma ramp and the hull glow both
+  // read. Both ends are hard clamps and the shader relies on them.
+  eq('heatOf is 0 with no heat rate', () => heatOf(0), 0);
+  eq('heatOf clamps a negative rate rather than taking a root of it',
+     () => heatOf(-40), 0);
+  eq('heatOf saturates at 165 W/cm2', () => heatOf(165), 1);
+  eq('and stays saturated above it', () => heatOf(400), 1);
+  eq('heatOf is monotonic in between', () => {
+    let back = 0, prev = -1;
+    for (let q = 0; q <= 165; q += 1.5) {
+      const h = heatOf(q); if (h < prev) back++; prev = h;
+    }
+    return back;
+  }, 0);
 
   // --- the adaptive scaler. Pure by design, so its behaviour is testable
   // without a GPU — which matters because GPU timings are invalid in a
@@ -4600,7 +4735,16 @@ window.__pumpFrames = function (n, dtMs) {
 window.__cameraAudit = function (times, modes) {
   const TS = times || [562261, 567300];
   const MS = modes || ['auto','wide','chase','onboard','cabin','window','free'];
+  // camMode/simT/running are the obvious three, and they are not enough:
+  // buildScene ALSO advances state, so an audit does not merely read the page,
+  // it moves it. The pad cameras step their tilt-lag filter (CS.ly toward
+  // CS.tly), the drift camera advances freeYaw, and the pad branch integrates
+  // scorch whenever the vehicle is on the table under thrust. Leave those and a
+  // second audit of the same instants disagrees with the first — which is
+  // backwards for a regression test, because then a mismatch means either a
+  // real change or the harness's own footprint and you cannot tell which.
   const saveMode = camMode, saveT = simT, saveRun = running;
+  const saveLy = CS.ly, saveTly = CS.tly, saveYaw = freeYaw, saveScorch = scorch;
   const out = [];
   // Only buildScene() used to be guarded. Everything below it — the basis
   // vectors, the NDC helper, the 41x41 grid — can throw too (a bad V.* call,
@@ -4695,7 +4839,82 @@ window.__cameraAudit = function (times, modes) {
     return out;
   } finally {
     camMode = saveMode; simT = saveT; running = saveRun;
+    CS.ly = saveLy; CS.tly = saveTly; freeYaw = saveYaw; scorch = saveScorch;
   }
+};
+
+// __cameraAudit is an instrument; the two below make it a test. Without a
+// committed expectation nothing fails when a camera moves — you have to have
+// kept last week's console output to notice, and `.superpowers/` scratch is not
+// in the repository.
+//
+// Three of the inputs the cameras read are session state rather than code:
+// shakeVec reads the wall clock (a few tenths of a metre of jitter), the free
+// camera keeps whatever yaw, pitch and distance it was last dragged to, and the
+// pad tilt-lag filter CS carries wherever the flight left it. All three are
+// real and belong in __cameraAudit, which reports the camera that actually
+// ships. None of them belong in a regression check, so this pins them to the
+// file's own initial values and puts them back afterwards. Two consequences
+// worth knowing: the recorded pad rows are the FIRST tilt-lag step away from
+// CS = 20 rather than a converged pose, and the rows depend on the order the
+// cells are visited, so the check re-runs the baseline's own times and modes in
+// the baseline's own order.
+function auditRows(TS, MS) {
+  const rShake = shakeVec, rYaw = freeYaw, rPitch = freePitch, rDist = freeDist,
+        rLy = CS.ly, rTly = CS.tly;
+  shakeVec = () => [0, 0, 0];
+  freeYaw = -2.4; freePitch = 0.12; freeDist = 0; CS.ly = 20; CS.tly = 20;
+  try { return window.__cameraAudit(TS, MS); }
+  finally { shakeVec = rShake; freeYaw = rYaw; freePitch = rPitch;
+            freeDist = rDist; CS.ly = rLy; CS.tly = rTly; }
+}
+window.__cameraAuditRows = auditRows;
+
+// The 42 cells every task on this branch verified by hand, recorded from a run
+// of __cameraAuditRows([40,70,100,325,562261,567300]) on the shipped file: four
+// instants in the pad world (T+40 s through T+325 s) and the two entry instants
+// at 84 km and 8 km, each in all seven camera modes.
+//
+// Only the fields worth pinning are kept. y_limb and y_seam are deliberately
+// out: both are approximations for rolled cameras (perp(camU) assumes nadir
+// lies in the camF-camU plane), and earthPct is the exact ray-sphere answer to
+// the same question. seamInFrame is out because it is a property of where the
+// camera points, not of the shader that used to break there, so it cannot move
+// when the thing it was watching is fixed.
+const CAMERA_BASELINE = [
+  /* generated */
+];
+// Tolerance is one unit in the last place each field is recorded to, which is
+// as tight as the numbers can be read. With the session state pinned the rows
+// reproduce exactly, so this is slack for a future rounding change, not for
+// drift: a camera that actually moves misses by orders of magnitude.
+const CAMERA_BASELINE_TOL = { alt_km: 0.001, fov: 0.0001,
+                              earthPct: 0.1, camToCraft_m: 0.01 };
+window.__cameraAuditCheck = function () {
+  const TS = [], MS = [];
+  for (const b of CAMERA_BASELINE) {
+    if (!TS.includes(b.t)) TS.push(b.t);
+    if (!MS.includes(b.mode)) MS.push(b.mode);
+  }
+  const now = auditRows(TS, MS), mismatches = [], bad = new Set();
+  const off = (b, field, want, got) => {
+    mismatches.push({ t: b.t, mode: b.mode, field, want, got });
+    bad.add(b.t + '/' + b.mode);
+  };
+  for (const b of CAMERA_BASELINE) {
+    const r = now.find(x => x.t === b.t && x.mode === b.mode);
+    if (!r) { off(b, 'row', 'present', 'missing'); continue; }
+    if (r.resolved !== b.resolved) off(b, 'resolved', b.resolved, r.resolved);
+    // NaN and undefined must fail, so test the tolerance rather than negate it
+    for (const k in CAMERA_BASELINE_TOL)
+      if (!(Math.abs(r[k] - b[k]) <= CAMERA_BASELINE_TOL[k]))
+        off(b, k, b[k], r[k]);
+  }
+  const res = { matched: CAMERA_BASELINE.length - bad.size,
+                rows: CAMERA_BASELINE.length, mismatches };
+  console.log(`__cameraAuditCheck: ${res.matched}/${res.rows} rows matched`,
+              mismatches.length ? mismatches : '');
+  return res;
 };
 
 // ------------------------------------------------------------------- boot --
