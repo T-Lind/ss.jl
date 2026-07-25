@@ -67,7 +67,7 @@ Everything else in this plan is verified by measurement in a real browser, becau
 - The capsule is drawn: pod section present, 10,392 vertices, not in `secGone`.
 
 **Files:**
-- Create: `.superpowers/sdd/2026-07-24-launch-page-rendering/task-1-finding.md`
+- Create: `.superpowers/sdd/2026-07-24-launch-page-rendering-and-entry-frame/task-1-finding.md`
 - Read only: `scripts/launch_page.html:597-908` (the `SPACE` program)
 
 **Interfaces:**
@@ -123,7 +123,7 @@ To test a hypothesis, recompile the `SPACE` fragment shader with one expression 
 
 - [ ] **Step 4: Write the finding**
 
-Create `.superpowers/sdd/2026-07-24-launch-page-rendering/task-1-finding.md` containing:
+Create `.superpowers/sdd/2026-07-24-launch-page-rendering-and-entry-frame/task-1-finding.md` containing:
 
 - the exact expression and line number at fault;
 - **why** it misbehaves in this camera regime specifically and not on the pad or in `eci` — a cause that only says "it is wrong here" has not been found yet;
@@ -148,7 +148,7 @@ git checkout -- scripts/launch_page.html
 - [ ] **Step 6: Commit**
 
 ```bash
-git add .superpowers/sdd/2026-07-24-launch-page-rendering/task-1-finding.md
+git add .superpowers/sdd/2026-07-24-launch-page-rendering-and-entry-frame/task-1-finding.md
 git commit -m "Find why the planet goes flat during entry"
 ```
 
@@ -159,7 +159,7 @@ git commit -m "Find why the planet goes flat during entry"
 **Files:**
 - Modify: `scripts/launch_page.html` — `deckFade` (~`:3751`), `drawScene` (`:3612-3648`, `:3740`), `drawClouds` (`:3757`), `buildScene` pad branch (`:3421`) and entry branch (`:3489`)
 - Modify: `scripts/launch_page.html` — add `window.__selftest` near `boot()` (~`:4030`)
-- Read: `.superpowers/sdd/2026-07-24-launch-page-rendering/task-1-finding.md`
+- Read: `.superpowers/sdd/2026-07-24-launch-page-rendering-and-entry-frame/task-1-finding.md`
 
 **Interfaces:**
 - Consumes: Task 1's finding — the faulty expression, line number and replacement line.
@@ -356,7 +356,7 @@ Expected: the definition, the single call inside `deckWeight`, and the calls ins
 
 - [ ] **Step 6: Apply Task 1's finding**
 
-Read `.superpowers/sdd/2026-07-24-launch-page-rendering/task-1-finding.md` and make the single replacement it names. Nothing more — if the finding says the fix is larger than one expression, stop and report rather than improvising a bigger change.
+Read `.superpowers/sdd/2026-07-24-launch-page-rendering-and-entry-frame/task-1-finding.md` and make the single replacement it names. Nothing more — if the finding says the fix is larger than one expression, stop and report rather than improvising a bigger change.
 
 - [ ] **Step 7: Fix `PUP` in both surface worlds**
 
