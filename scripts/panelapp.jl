@@ -837,6 +837,10 @@ function route(method::AbstractString, path::AbstractString,
             return ("200 OK", "application/json", json(safe_call(rocket_geometry, body)))
         elseif method == "POST" && path == "/api/solve"
             return ("200 OK", "application/json", json(safe_call(run_solve, body)))
+        elseif method == "OPTIONS"
+            # no CORS here — the panel is same-origin — but a bare 404 for a
+            # preflight is a confusing thing to hand a browser
+            return ("204 No Content", "text/plain", "")
         end
         return ("404 Not Found", "application/json",
                 json(Dict{String,Any}("ok" => false,

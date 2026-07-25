@@ -104,6 +104,21 @@ end
                              body = "nstages=3&nboost=0&diameter=1.8")
         @test st == 200
         @test occursin("\"ok\":true", bod)
+
+        # --- method handling ------------------------------------------------
+        st, hdrs, bod = http("HEAD", "/api/catalogue"; port = port)
+        @test st == 200
+        @test isempty(bod)                       # HEAD carries no body ...
+        @test haskey(hdrs, "content-length")     # ... but does say how long
+        @test parse(Int, hdrs["content-length"]) > 0
+
+        st, hdrs, bod = http("OPTIONS", "/api/run"; port = port)
+        @test st == 204
+
+        st, hdrs, bod = http("GET", "/no/such/route"; port = port)
+        @test st == 404
+        @test occursin("\"ok\":false", bod)
+        @test hdrs["content-type"] == "application/json"
     finally
         PanelApp.stop_panel(srv)
     end
