@@ -742,6 +742,19 @@ end
 
 # -------------------------------------------------------------- http loop --
 
+"When this server started, so /api/health can report how long it has been up."
+const START_TIME = Ref(time())
+
+"""
+Liveness and environment, for a browser or a script that wants to know the
+panel is actually there before blaming the network.
+"""
+health_payload() = Dict{String,Any}(
+    "ok" => true,
+    "uptime_s" => time() - START_TIME[],
+    "julia" => string(VERSION),
+    "threads" => Base.Threads.nthreads())
+
 """
 What the page builds its dropdowns from, so the UI can never offer a
 propellant or an engine the simulator does not have.
@@ -829,6 +842,8 @@ function route(method::AbstractString, path::AbstractString,
             return ("200 OK", "text/html; charset=utf-8", read(LAUNCH_PATH, String))
         elseif method in ("GET", "HEAD") && path == "/api/catalogue"
             return ("200 OK", "application/json", json(catalogue_payload()))
+        elseif method in ("GET", "HEAD") && path == "/api/health"
+            return ("200 OK", "application/json", json(health_payload()))
         elseif method == "POST" && path == "/api/run"
             return ("200 OK", "application/json", json(safe_call(panel_mission, body)))
         elseif method == "POST" && path == "/api/sweep"
@@ -852,29 +867,33 @@ function route(method::AbstractString, path::AbstractString,
     end
 end
 
-"""
-Serve one connection, and answer it whatever happens.
-
-Two layers, because one is not enough: `route` turns any error below it into a
-response, and the `catch` here is the last resort for a failure in `route`'s
-own serialization or in the socket write.
-"""
 function handle(sock)
+    t0 = time()
+    method, path, status, nbytes = "-", "-", "500", 0
     try
         req = read_request(sock)
         req === nothing && return
         method, path, body = req
-        status, ctype, payload = route(method, path, body)
-        write_response(sock, status, ctype, payload; head = method == "HEAD")
+        st, ctype, payload = route(method, path, body)
+        status = first(st, 3)
+        nbytes = sizeof(payload)
+        write_response(sock, st, ctype, payload; head = method == "HEAD")
     catch err
         try
-            write_response(sock, "500 Internal Server Error", "application/json",
-                           json(Dict{String,Any}("ok" => false,
-                                                 "error" => sprint(showerror, err))))
+            payload = json(Dict{String,Any}("ok" => false,
+                                            "error" => sprint(showerror, err)))
+            nbytes = sizeof(payload)
+            write_response(sock, "500 Internal Server Error",
+                           "application/json", payload)
         catch
             # the socket itself is gone; nothing left to say
         end
     finally
+        # One line per request. This is how an intermittent "Failed to fetch"
+        # gets diagnosed from a record rather than from a hypothesis.
+        @printf("[panel] %-7s %-44s %s %7.0f ms %9d B\n",
+                method, first(path, 44), status, 1e3 * (time() - t0), nbytes)
+        flush(stdout)
         close(sock)
     end
 end
@@ -894,6 +913,7 @@ end
 Bind and start accepting. Returns immediately; the accept loops run as tasks.
 """
 function start_panel(port::Int)
+    START_TIME[] = time()
     listeners = Sockets.TCPServer[listen(IPv4(127, 0, 0, 1), port)]
     acceptors = Task[]
     for l in listeners

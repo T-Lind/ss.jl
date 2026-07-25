@@ -119,6 +119,13 @@ end
         @test st == 404
         @test occursin("\"ok\":false", bod)
         @test hdrs["content-type"] == "application/json"
+
+        # --- health ---------------------------------------------------------
+        st, hdrs, bod = http("GET", "/api/health"; port = port)
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test occursin("uptime_s", bod)
+        @test occursin("threads", bod)
     finally
         PanelApp.stop_panel(srv)
     end
