@@ -916,6 +916,14 @@ Bind and start accepting. Returns immediately; the accept loops run as tasks.
 function start_panel(port::Int)
     START_TIME[] = time()
     listeners = Sockets.TCPServer[listen(IPv4(127, 0, 0, 1), port)]
+    # `localhost` resolves to ::1 before 127.0.0.1 on Windows and on most
+    # modern Linux, so an IPv4-only bind makes every new connection pay for a
+    # failed attempt first. Best-effort: a host without IPv6 still works.
+    try
+        push!(listeners, listen(IPv6(0, 0, 0, 0, 0, 0, 0, 1), port))
+    catch err
+        @warn "IPv6 loopback unavailable; localhost falls back to IPv4" err
+    end
     acceptors = Task[]
     for l in listeners
         push!(acceptors, @async begin

@@ -126,6 +126,15 @@ end
         @test occursin("\"ok\":true", bod)
         @test occursin("uptime_s", bod)
         @test occursin("threads", bod)
+
+        # --- both IP stacks -------------------------------------------------
+        # `localhost` resolves to ::1 first on Windows 11 and on most modern
+        # Linux. Binding IPv4 only makes every new connection pay for a
+        # failed attempt before falling back.
+        st, hdrs, bod = http("GET", "/api/health"; port = port, host = ip"127.0.0.1")
+        @test st == 200
+        st, hdrs, bod = http("GET", "/api/health"; port = port, host = ip"::1")
+        @test st == 200
     finally
         PanelApp.stop_panel(srv)
     end
