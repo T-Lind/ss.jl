@@ -3244,14 +3244,37 @@ function cameraEntry(t, es, M) {
     look = V.add(p, V.scale(es.vdir, -60));    // looking back up the wake
     fov = 0.9;
   } else if (mode === 'wide') {
-    eye = V.add([es.pos[0], 4, 0], V.scale(side, 120));
-    look = V.lerp(p, [0, 2, 0], 0.35);
-    fov = fitFov(V.len(V.sub(p, eye)), Math.max(30, es.h*0.4));
+    // The entry frame's y is a plane coordinate, not an altitude: 6000 km uprange
+    // the y = 0 plane is 3700 km under the sea, so pinning the eye at y = 4 threw
+    // it to 2300 km and clamped fitFov onto its 0.02 floor. Anchor the tripod to
+    // the water BELOW THE VEHICLE, and only use a tripod once the vehicle is low
+    // enough for one to mean anything.
+    const ground = V.add([0, -RE, 0], V.scale(es.up, RE));
+    if (es.h < 12000) {
+      eye = V.add(V.add(ground, V.scale(es.up, 4)), V.scale(side, 120));
+      look = V.lerp(p, V.add(ground, V.scale(es.up, 2)), 0.35);
+      fov = fitFov(V.len(V.sub(p, eye)), Math.max(30, es.h*0.4));
+    } else {
+      // no tripod up here: stand off the capsule with the limb behind it
+      const off = V.add(V.scale(side, 120), V.scale(es.up, 18));
+      const dip = Math.acos(RE/(RE + es.h));
+      eye = V.add(p, off);
+      look = V.add(p, V.scale(es.up, -V.len(off)*Math.tan(Math.min(0.6*dip, 0.126))));
+      fov = 0.42;
+    }
   } else {
     const R = freeDist || 28;
     const cp = Math.cos(freePitch), sp = Math.sin(freePitch);
-    eye = V.add(p, [R*cp*Math.cos(freeYaw), R*sp, R*cp*Math.sin(freeYaw)]);
-    if (eye[1] < 2) eye[1] = 2;
+    // Orbit in the vehicle's LOCAL frame. 6000 km uprange the entry frame's y is
+    // 66 deg off the local vertical, so a frame-axis orbit puts "up" underground -
+    // and clamping eye[1], a plane coordinate, as though it were an altitude threw
+    // the eye 3700 km straight up.
+    const e2 = es.up, e1 = V.norm(V.cross(e2, [0, 0, 1])), e3 = V.cross(e1, e2);
+    eye = V.add(p, V.add(V.add(V.scale(e1, R*cp*Math.cos(freeYaw)),
+                               V.scale(e3, R*cp*Math.sin(freeYaw))),
+                         V.scale(e2, R*sp)));
+    const alt = altOf(eye, [0, -RE, 0]);
+    if (alt < 2) eye = V.add(eye, V.scale(es.up, 2 - alt));
   }
   if (shake > 0.04 && mode !== 'wide') eye = V.add(eye, shakeVec(shake));
   return { eye, look, up, fov, mode };
@@ -3418,7 +3441,9 @@ function buildScene(ph) {
                                    V.scale(bzp, R*Math.sin(th)))));
       }
     }
-    PUP = [0, 1, 0];
+    // True local up. At the pad this is [0,1,0] to within the width of the
+    // complex, so it is a no-op here and a correction downrange.
+    PUP = V.norm(V.sub(st.pos, [0, -RE, 0]));
     // the deflector only has anything to turn while the vehicle is still on
     // or just off the table
     TRENCH = st.h < 260;
@@ -3486,7 +3511,9 @@ function buildScene(ph) {
   const craftM = mMul(mBasis(es.bx, V.cross(bze, es.bx), bze, es.pos),
                       mTrans([-xb, 0, 0]));
   const cam = cameraEntry(simT, es, craftM);
-  PUP = [0, 1, 0];
+  // Entry runs ~6600 km from the splash-site origin, where the frame's y axis
+  // is 66 deg off the real vertical. Buoyancy has to follow the radial.
+  PUP = V.norm(V.sub(es.pos, [0, -RE, 0]));
   TRENCH = false;
   return {
     world: 'entry', es, cam, craftM, craftPos: es.pos,
@@ -3609,12 +3636,13 @@ function drawScene(sc) {
   // nearer clip plane than the outside views
   const proj = mPersp(cam.fov, asp,
                       inCab ? 0.04 : sc.nearZ || 0.35, 3.0e6);
-  const camAlt = Math.max(V.len(V.sub(cam.eye, sc.earthC)) - RE, 2);
+  const camAlt = Math.max(altOf(cam.eye, sc.earthC), 2);
   // no air on the Moon, so no haze, no scattered fill, and a black sky at
   // noon — the single most recognisable thing about the place
   const dens = sc.world === 'moon' ? 0 : Math.exp(-camAlt/9000);
   const fogCol = [0.62*dens + 0.02, 0.75*dens + 0.04, 0.92*dens + 0.08];
   const fogDen = (sc.world === 'eci' || sc.world === 'moon') ? 0 : 5e-5*dens + 2e-7;
+  const deck = deckWeight(sc.world, cam.eye, sc.earthC);
   gl.enable(gl.DEPTH_TEST);
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -3644,8 +3672,7 @@ function drawScene(sc) {
   gl.uniform1f(SPACE.u.uScorch, scorch);
   // how much of the cloud deck the drawn plane is taking care of; the planet
   // pass stands its own shell down by the same amount
-  gl.uniform1f(SPACE.u.uDeck,
-               sc.world === 'pad' || sc.world === 'entry' ? deckFade(cam.eye[1]) : 0);
+  gl.uniform1f(SPACE.u.uDeck, deck);
   gl.uniformMatrix3fv(SPACE.u.uCRot, false, CSEED);
   gl.uniform3fv(SPACE.u.uCamW, cam.eye);
   gl.activeTexture(gl.TEXTURE0);
@@ -3692,7 +3719,7 @@ function drawScene(sc) {
       const m = mMul(mBasis(d.bx, dby, dbz, d.p), mRotAxis(d.ax, d.a));
       drawRange(m, proj, d.draw.first, d.draw.count);
     }
-    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1]);
+    drawClouds(sc, view, proj, fogCol, fogDen, deck);
   } else if (sc.world === 'eci') {
     const cs = sc.cs;
     const stackM = sc.craftM;
@@ -3737,7 +3764,7 @@ function drawScene(sc) {
     };
     if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2);
     else drawChute(mainBuf, mainN, tMain, 8.5);
-    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1]);
+    drawClouds(sc, view, proj, fogCol, fogDen, deck);
   }
 
   drawParticles(view, proj, cam.fov,
@@ -3749,20 +3776,46 @@ function drawScene(sc) {
 // runs out of it at range; the shell is the other way round. deckFade is the
 // weight of the handover — one number, used by both, so it always sums to one.
 const DECK_H = 7000;
-function deckFade(camY) {
-  if (camY > 45000) return 0;
-  return Math.min(1, (45000 - camY)/15000)
-       * Math.min(1, Math.abs(camY - DECK_H)/140);
+const DECK_RNG = 150000;
+// True geometric altitude of a point in a surface-anchored local frame.
+// The pad and entry worlds both put their origin ON the surface with +y up
+// through it, so p[1] is an altitude only near the origin: 5900 km downrange
+// the y = 0 plane is 3700 km below the sea. Four defects came from reading
+// p[1] as an altitude, so there is now exactly one function that answers it.
+function altOf(pos, earthC) {
+  return V.len(V.sub(pos, earthC || [0, -RE, 0])) - RE;
 }
-function drawClouds(sc, view, proj, fogCol, fogDen, camY) {
-  if (deckFade(camY) <= 0) return;
+function deckFade(alt, rng) {
+  if (alt > 45000) return 0;
+  // The shader hands over on exp(-|xz|/45000) about the origin (uDeck's use in
+  // cloudLayer), so by 150 km the plane contributes 3.6% and nothing is given
+  // up — while a late ascent tens of km downrange keeps the deck it should
+  // have. The pad world runs to orbit insertion, so it does go downrange.
+  if (rng > DECK_RNG) return 0;
+  return Math.min(1, (45000 - alt)/15000)
+       * Math.min(1, Math.abs(alt - DECK_H)/140);
+}
+// The call site, as a function rather than an expression inside drawScene, so
+// it can be asserted on. This is where the bug lived: deckFade was already
+// correct given an altitude — it was being handed cam.eye[1].
+function deckWeight(world, camEye, earthC) {
+  if (world !== 'pad' && world !== 'entry') return 0;   // only these draw a deck
+  return deckFade(Math.max(altOf(camEye, earthC), 2),
+                  Math.hypot(camEye[0], camEye[2]));
+}
+function drawClouds(sc, view, proj, fogCol, fogDen, deck) {
+  if (deck <= 0) return;
   gl.useProgram(CLOUD.p);
   gl.uniformMatrix4fv(CLOUD.u.uMV, false, view);
   gl.uniformMatrix4fv(CLOUD.u.uPr, false, proj);
   gl.uniform1f(CLOUD.u.uY, DECK_H);
-  gl.uniform1f(CLOUD.u.uCamY, camY);
+  // This one stays a frame coordinate on purpose: the shader compares it with
+  // uY to get the slant through a plane that really does sit at y = DECK_H in
+  // this frame, and to decide whether the camera is under the deck. It is a
+  // distance to a plane, not an altitude, so altOf would be the wrong answer.
+  gl.uniform1f(CLOUD.u.uCamY, sc.cam.eye[1]);
   gl.uniform1f(CLOUD.u.uER, RE);
-  gl.uniform1f(CLOUD.u.uFade, deckFade(camY));
+  gl.uniform1f(CLOUD.u.uFade, deck);
   gl.uniformMatrix3fv(CLOUD.u.uEMat, false, sc.eMat);
   gl.uniform1f(CLOUD.u.uSpin, sc.spin);
   gl.uniformMatrix3fv(CLOUD.u.uCRot, false, CSEED);
@@ -3982,6 +4035,77 @@ function showEndCard() {
     scorch = 0; seekTo(-15);
   };
 }
+
+// ------------------------------------------------------------- self-test --
+// No JS test runner here, and adding one would mean a build step for a page
+// whose whole value is being a single dependency-free file. Run by hand, or
+// load the page with ?selftest=1.
+//
+// What these protect: the entry world's frame is anchored at the splash site,
+// so its y is a PLANE coordinate. Reading it as an altitude caused four
+// separate defects (the cloud deck, particle buoyancy, the wide camera and the
+// free camera). altOf is the single answer, and the assertions below pin the
+// measured entry geometry that every one of those got wrong.
+window.__selftest = function () {
+  const out = { pass: 0, fail: 0, failures: [] };
+  // fn is a thunk so a missing or throwing function is a readable failure
+  // rather than a crash that hides every assertion after it.
+  const eq = (name, fn, want, tol) => {
+    let got;
+    try { got = fn(); }
+    catch (e) { out.fail++; out.failures.push(`${name}: threw ${e.message}`); return; }
+    if (Math.abs(got - want) <= (tol === undefined ? 1e-9 : tol)) out.pass++;
+    else { out.fail++; out.failures.push(`${name}: got ${got}, want ${want}`); }
+  };
+  const EC = [0, -RE, 0];
+  // A camera position with a known true altitude and known horizontal range
+  // from the frame origin. Solving rng^2 + (y+RE)^2 = (RE+alt)^2 for y is what
+  // makes the frame's y come out hugely negative at range — the number all
+  // four defects were reading as an altitude.
+  const eyeAt = (alt, rng) => [rng, Math.sqrt((RE + alt)**2 - rng**2) - RE, 0];
+
+  // --- altOf: the root cause, named
+  eq('altOf at the frame origin', () => altOf([0, 0, 0], EC), 0);
+  eq('altOf straight up from the origin', () => altOf([0, 1000, 0], EC), 1000, 1e-6);
+  // the measured entry frame. y is -3.71e6; the true altitude is 84 km.
+  eq('altOf 5884 km downrange', () => altOf([5883535.5, -3714612, 0], EC), 84422, 40);
+  // and the wide camera's old bug as a number: y=4 is not "4 m up"
+  eq('altOf shows why y=4 was 2301 km', () => altOf([5883535.5, 4, 120], EC), 2301124, 2000);
+
+  // --- deckWeight: the call site that carried defect #1
+  eq('entry 64 km, 5645 km downrange', () => deckWeight('entry', eyeAt(64351, 5645000), EC), 0);
+  eq('entry 84 km, 5884 km downrange', () => deckWeight('entry', eyeAt(84422, 5884000), EC), 0);
+  eq('entry 272 km, 6642 km downrange', () => deckWeight('entry', eyeAt(272266, 6642000), EC), 0);
+  eq('frame y is nothing like an altitude at range',
+     () => Math.sign(eyeAt(84422, 5884000)[1]), -1);
+  // the cases the range gate must NOT break
+  eq('entry 8 km over the splash site', () => deckWeight('entry', eyeAt(7981, 0), EC), 1);
+  eq('entry at the water', () => deckWeight('entry', eyeAt(4, 0), EC), 1);
+  eq('pad at 30 km, 5 km downrange', () => deckWeight('pad', eyeAt(30000, 5000), EC), 1);
+  eq('eci has no deck', () => deckWeight('eci', eyeAt(30000, 0), EC), 0);
+  eq('moon has no deck', () => deckWeight('moon', eyeAt(30000, 0), EC), 0);
+
+  // --- deckFade's own arithmetic. NOTE: every one of these passes against the
+  // buggy code, because deckFade was correct GIVEN an altitude. That is the
+  // whole reason deckWeight and altOf exist.
+  eq('above the 45 km cutoff', () => deckFade(50000, 0), 0);
+  eq('at the cutoff', () => deckFade(45000, 0), 0);
+  eq('30 km at the origin', () => deckFade(30000, 0), 1);
+  eq('40 km fades on altitude', () => deckFade(40000, 0), 1/3, 1e-6);
+  eq('exactly at deck height', () => deckFade(7000, 0), 0);
+  eq('70 m under the deck', () => deckFade(6930, 0), 0.5, 1e-6);
+  // The shader hands over on exp(-|xz|/45000) about the origin, so by 150 km
+  // the plane contributes 3.6% and nothing is given up — while a late ascent
+  // tens of km downrange keeps the deck it should have.
+  eq('60 km downrange keeps the deck', () => deckFade(20000, 60000), 1);
+  eq('past the range gate', () => deckFade(20000, 150001), 0);
+
+  console.log(`__selftest: ${out.pass} passed, ${out.fail} failed`,
+              out.failures.length ? out.failures : '');
+  return out;
+};
+if (new URLSearchParams(location.search).get('selftest') === '1')
+  setTimeout(window.__selftest, 0);
 
 // ------------------------------------------------------------------- boot --
 async function boot() {
