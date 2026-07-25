@@ -793,7 +793,9 @@ vec3 skyCol(vec3 d, vec3 up, float dens){
     // The gate this replaces was a hard cut at dot(uEc,d) == 0 — the local
     // horizontal — so it drew a 1-pixel brightness step clean across any frame
     // aimed within a half-FOV of level: worth 62 of 255 in the blue channel from
-    // a vehicle camera at 84 km, and more in the 20-60 km band during ascent.
+    // a vehicle camera at 84 km, and 156 from an ascent camera at 15 km, where
+    // (1 - dens) and exp(-camAlt/55000) are both still large — their product
+    // peaks near 18 km, so ascent had this worse than entry ever did.
     // Clamping b alone leaves the term at its b = 0 value for the whole upward
     // sky, i.e. a uniform exp(-camAlt/55000) navy floor at the zenith, which is
     // wrong: overhead there is no limb to glow. So fade it out over one horizon
