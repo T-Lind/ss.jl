@@ -782,13 +782,26 @@ vec3 skyCol(vec3 d, vec3 up, float dens){
   vec3 zen = vec3(0.09,0.30,0.70), hor = vec3(0.62,0.78,0.95);
   vec3 day = mix(hor, zen, clamp(pow(max(e, 0.0), 0.42), 0.0, 1.0));
   vec3 col = day * clamp(dens*1.25, 0.0, 1.0);
-  // atmosphere shell glow hugging the limb (exact: ray's closest approach)
-  float b = dot(uEc, d);
-  if (b > 0.0) {
+  // atmosphere shell glow hugging the limb.
+  // closest approach of the RAY, not of the infinite line: at b <= 0 the nearest
+  // point is the camera itself, so the shell term is continuous through the local
+  // horizontal instead of stepping to zero across it
+  float b = max(dot(uEc, d), 0.0);
+  {
     float dmin = sqrt(max(dot(uEc,uEc) - b*b, 0.0)) - uER;
     float g1 = exp(-max(dmin, 0.0)/55000.0);
+    // The gate this replaces was a hard cut at dot(uEc,d) == 0 — the local
+    // horizontal — so it drew a 1-pixel brightness step clean across any frame
+    // aimed within a half-FOV of level: worth 62 of 255 in the blue channel from
+    // a vehicle camera at 84 km, and more in the 20-60 km band during ascent.
+    // Clamping b alone leaves the term at its b = 0 value for the whole upward
+    // sky, i.e. a uniform exp(-camAlt/55000) navy floor at the zenith, which is
+    // wrong: overhead there is no limb to glow. So fade it out over one horizon
+    // dip above the horizontal. dot(d, up) is 0 exactly where the clamp takes
+    // over, and smoothstep is flat there, so the two meet with matching value
+    // AND slope — no step, no kink, and the zenith goes back to black.
     col += (vec3(0.30,0.52,0.92)*g1 + vec3(0.9,0.5,0.3)*exp(-max(dmin,0.0)/16000.0)*0.35)
-           * (1.0 - dens) * 1.05;
+           * (1.0 - dens) * 1.05 * (1.0 - smoothstep(0.0, dip, max(dot(d, up), 0.0)));
   }
   float s = max(dot(d, uSun), 0.0);
   col += vec3(1.0,0.97,0.9) * pow(s, 1500.0) * 5.0;
@@ -3190,8 +3203,8 @@ function hullPose() {
     // the shield is a shallow spherical cap of radius 2.4 rp, so even at its rim
     // the outward normal is only 24.6 deg off the flow axis. Nothing of the
     // WINDWARD face is visible from anywhere behind the rim's tangent plane —
-    // the condition is z > rp + 2.18*(x - xb0), and an eye 1.3 rp aft of the
-    // apex fails it at any lateral offset short of 7 rp. Mounted back there the
+    // the condition is z > rp + 2.18*(x - xsh), and an eye 2.73 rp aft of the
+    // apex fails it at any lateral offset short of 6.48 rp. Mounted back there the
     // shot showed only the leeward afterbody, and the heating shader
     // deliberately renders that as nothing but its 0.14 ambient-gas constant:
     // measured over the visible hull at peak heating, stag*face and rim were
@@ -3250,7 +3263,25 @@ function wideCam(target, dirV, span, tripod, near, far) {
   const stand = V.add(target,
     V.add(V.add(V.scale(L.rt, D*0.82), V.scale(L.up, D*0.34)),
           V.scale(L.fwd, -D*0.30)));
-  return { eye: V.lerp(tripod, stand, w), up: L.up, w };
+  let eye = V.lerp(tripod, stand, w);
+  // Lerping the eye POSITION says nothing about how far the eye ends up from the
+  // subject, and the callers derive the fov from exactly that distance — so
+  // mid-blend the lens does whatever the two rigs' geometry happens to imply.
+  // Both call sites hand over while the tripod is still several times farther
+  // out than the stand-off (entry: 260 m against 68 m), so as the weight falls
+  // the eye RECEDES, the distance peaks in the middle of the band, and fitFov
+  // answers with a long lens: the entry shot dipped to a 3.3 deg lens between a
+  // 23 deg and a 6 deg end, the pad shot to 3.4 deg between 5.3 and 23. Widening
+  // the band makes that worse, not better — it holds the eye far out for longer.
+  // Instead hold the distance between the two distances the handover starts and
+  // ends at, so the lens can only ever travel between its two endpoint values.
+  // Both ends stay exact: at w = 0 the eye is d out and at w = 1 it is rs out,
+  // and neither bound binds at either, so the tripod is still the tripod.
+  const rs = V.len(V.sub(stand, target)), r = V.len(V.sub(eye, target));
+  const lo = Math.min(rs, d), hi = Math.max(rs, Math.min(d, near));
+  if (r > 1e-6 && (r < lo || r > hi))
+    eye = V.add(target, V.scale(V.sub(eye, target), Math.min(hi, Math.max(lo, r))/r));
+  return { eye, up: L.up, w };
 }
 function shakeVec(amp) {
   const w = performance.now()/1000;
@@ -3398,6 +3429,15 @@ function cameraEntry(t, es, M) {
   if (mode === 'chase') {
     eye = V.add(p, V.add(V.scale(side, 34), V.scale(es.vdir, -10)));
     fov = 0.30;
+    // At 84 km the horizon has dropped 9.3 deg below the local horizontal - more
+    // than this lens's 8.6 deg half-FOV - so a level side-on chase frames nothing
+    // but sky and the atmosphere seam. Lift the eye over the capsule by a fraction
+    // of the horizon dip, capped so the aim never swings past 60% of the half-FOV
+    // and the capsule can never leave the frame. The dip goes to zero on the way
+    // down, so the low-altitude shot is untouched.
+    const dip = Math.acos(RE/(RE + Math.max(es.h, 0)));
+    const L = V.len(V.sub(eye, p));
+    eye = V.add(eye, V.scale(es.up, L*Math.tan(Math.min(0.6*dip, 0.3*fov))));
   } else if (mode === 'onboard') {
     eye = V.add(p, V.add(V.scale(es.bx, 4.5), V.scale(side, 2.2)));
     look = V.add(p, V.scale(es.vdir, -60));    // looking back up the wake
