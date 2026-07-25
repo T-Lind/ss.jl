@@ -632,6 +632,13 @@ stages' propellant/dry mass/thrust/Isp, hit **Run** (or pick a one-click
 stat tiles, the interactive 3D scene, ascent & entry profile charts, the
 event timeline, and a run history for side-by-side comparison.
 
+The panel logs one line per request — method, path, status, duration, bytes —
+and answers `GET /api/health` with its uptime, Julia version and thread count.
+Both exist because an intermittent browser-side "Failed to fetch" is otherwise
+invisible from the server: it leaves no trace unless the server writes one.
+It listens on IPv4 and IPv6 loopback, so `localhost` resolves either way
+without a failed connection attempt first.
+
 A switch at the top picks the **mission**: the free-return flyby, or the
 lunar landing. They share every launch field — the launcher, the ascent, the
 trans-lunar leg are the same mission underneath — so switching keeps the

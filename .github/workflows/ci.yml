@@ -26,6 +26,16 @@ jobs:
         include:
           - julia: '1'
             os: windows-latest
+          # one multi-threaded lane: the panel hands each request to
+          # Threads.@spawn instead of @async, and a guarded test asserts a
+          # slow request doesn't block a concurrent one. With no thread
+          # setting that assertion always skips, so a revert back to @async
+          # would pass every other lane silently — this is the one entry that
+          # would catch it. Kept singular: single-threaded is also a real
+          # configuration users run (`julia --project scripts/panel.jl`).
+          - julia: '1'
+            os: ubuntu-latest
+            threads: '4'
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -33,6 +43,8 @@ jobs:
           version: ${{ matrix.julia }}
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-runtest@v1
+        env:
+          JULIA_NUM_THREADS: ${{ matrix.threads || 1 }}
 
   scripts:
     name: reference mission runs
