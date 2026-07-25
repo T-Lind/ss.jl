@@ -4334,6 +4334,115 @@ window.__selftest = function () {
 if (new URLSearchParams(location.search).get('selftest') === '1')
   setTimeout(window.__selftest, 0);
 
+// ---------------------------------------------------------- test harness --
+// rAF does not fire in a background tab, so anything that needs the sim to
+// advance has to drive frame() itself. Timestamps are synthetic and monotonic
+// because frame() differences them; feeding it performance.now() in a loop
+// would hand it a ~0 ms dt and nothing would move.
+window.__pumpFrames = function (n, dtMs) {
+  const step = dtMs || 30;
+  if (!window.__rafStubbed) {
+    window.__realRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    window.__rafStubbed = true;
+  }
+  let t = performance.now();
+  for (let i = 0; i < (n || 1); i++) { t += step; frame(t); }
+  return { frames: n || 1, simT: simT, parts: parts.length };
+};
+
+// Where the Earth actually lands in each camera, as data rather than as a
+// screenshot somebody has to squint at. This is the regression test for the
+// bug class this file kept hitting: a camera positioned by reading the frame's
+// y as an altitude, which put eyes 2300 km up and left the planet off-frame.
+//
+// SIGN CONVENTION, and it is the thing everyone gets wrong: y_limb > +1 means
+// the limb is off the TOP of frame, which means the Earth FILLS it — healthy.
+// y_limb < -1 means the limb is below the bottom edge and the planet is gone —
+// the defect. So `y_limb inside [-1,1]` is NOT the in-frame test. Always read
+// it together with earthPct, which is the ground truth.
+window.__cameraAudit = function (times, modes) {
+  const TS = times || [562261, 567300];
+  const MS = modes || ['auto','wide','chase','onboard','cabin','window','free'];
+  const saveMode = camMode, saveT = simT, saveRun = running;
+  const out = [];
+  for (const t of TS) for (const m of MS) {
+    camMode = m; simT = t; running = false;
+    let sc;
+    try { sc = buildScene(phaseAt(t)); }
+    catch (e) { out.push({ t, mode: m, error: String(e.message || e) }); continue; }
+    const cam = sc.cam;
+    const uEc = V.sub(sc.earthC, cam.eye);
+    const R = Math.hypot(uEc[0], uEc[1], uEc[2]);
+    const nadir = [uEc[0]/R, uEc[1]/R, uEc[2]/R];
+    const camF = V.norm(V.sub(cam.look, cam.eye));
+    const camR = V.norm(V.cross(camF, cam.up));
+    const camU = V.cross(camR, camF);
+    const uTan = Math.tan(cam.fov/2), asp = (cv.width || 1)/(cv.height || 1);
+    // NDC of a view direction, matching the SPACE program's own ray build:
+    //   d = uF + uR*x*uTan*uAsp + uU*y*uTan
+    const ndc = d => { const f = V.dot(d, camF);
+      return { x: V.dot(d, camR)/(f*uTan*asp), y: V.dot(d, camU)/(f*uTan), behind: f <= 0 }; };
+    // The limb ray, in the vertical plane containing nadir and camU. Take the
+    // component of camU perpendicular to nadir — but if camU is nearly parallel
+    // to nadir that component is a near-null vector and normalising it flips
+    // the sign, which is exactly the trap that once reported +0.966 for a frame
+    // with zero Earth pixels. Fall back to camF's perpendicular component.
+    const perp = (v) => { const p = V.sub(v, V.scale(nadir, V.dot(v, nadir)));
+      return V.dot(p, p) > 1e-6 ? V.norm(p) : null; };
+    const tvec0 = perp(camU) || perp(camF) || perp([0,0,1]) || [1,0,0];
+    // perp()'s guard only catches an exactly-degenerate camU (squared length
+    // under 1e-6, i.e. camU within ~0.06 deg of dead vertical); `chase` at
+    // 84 km is 0.97 deg off — past the guard, but still close enough that the
+    // leftover component's SIGN is arbitrary, not just its magnitude small.
+    // dot(tvec0,camF) there measures -0.9999: the vector survives the guard
+    // but points dead backward, so dLimb/tvec0 land behind the camera and the
+    // NDC divide's negative depth would flip the sign right back into the
+    // +0.966-for-zero-Earth-pixels trap the guard exists for. ndc()'s x and y
+    // are unchanged by negating d (both terms of the ratio flip together), so
+    // reorienting into the forward hemisphere costs nothing where tvec0 was
+    // already forward and fixes it where it was not.
+    const tvec = V.dot(tvec0, camF) < 0 ? V.scale(tvec0, -1) : tvec0;
+    const limb = Math.asin(Math.min(1, RE/R));
+    const dLimb = V.add(V.scale(nadir, Math.cos(limb)), V.scale(tvec, Math.sin(limb)));
+    const nl = ndc(dLimb), ns = ndc(tvec);       // tvec IS the dot(uEc,d)==0 locus
+    // earthPct: exact ray-sphere test on a coarse grid. No GPU, no readPixels,
+    // valid in a hidden tab. 41x41 is plenty to separate "gone" from "fills it".
+    // The same grid also answers whether the seam (dot(uEc,d) == 0) crosses the
+    // frame at all: y_seam alone is the x=0 column's crossing, but a rolled
+    // camera's seam line can be steep enough (cabin at 84 km runs -83 NDC per
+    // NDC) to cut the frame well away from centre while the column's own
+    // crossing sits far outside [-1,1]. Sampling the sign of b across the whole
+    // grid catches that; a single column sample does not.
+    const N = 41; let hit = 0, tot = 0, seamPos = false, seamNeg = false;
+    for (let iy = 0; iy < N; iy++) for (let ix = 0; ix < N; ix++) {
+      const px = -1 + 2*ix/(N-1), py = -1 + 2*iy/(N-1);
+      const d = V.norm(V.add(V.add(camF, V.scale(camR, px*uTan*asp)),
+                             V.scale(camU, py*uTan)));
+      tot++;
+      const b = V.dot(uEc, d);
+      if (b > 0) seamPos = true; else if (b < 0) seamNeg = true;
+      if (b <= 0) continue;
+      const h2 = V.dot(uEc, uEc) - b*b;
+      if (h2 <= RE*RE) hit++;
+    }
+    out.push({ t, mode: m, resolved: cam.mode,
+      // R and RE are metres, like every other position in this file — divide
+      // before the field named _km claims otherwise. Left as metres this once
+      // read 265,695,952 for a translunar coast camera 265,696 km out: a
+      // 1000x unit mislabel, the exact bug class this harness exists to catch.
+      alt_km: +((R - RE)/1000).toFixed(3), fov: +cam.fov.toFixed(4),
+      y_limb: nl.behind ? null : +nl.y.toFixed(3),
+      y_seam: ns.behind ? null : +ns.y.toFixed(3),
+      seamInFrame: seamPos && seamNeg,
+      earthPct: +(100*hit/tot).toFixed(1),
+      camToCraft_m: +Math.hypot(cam.eye[0]-sc.craftPos[0], cam.eye[1]-sc.craftPos[1],
+                                cam.eye[2]-sc.craftPos[2]).toFixed(2) });
+  }
+  camMode = saveMode; simT = saveT; running = saveRun;
+  return out;
+};
+
 // ------------------------------------------------------------------- boot --
 async function boot() {
   try {
