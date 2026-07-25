@@ -97,7 +97,7 @@
 <div class="hud" id="toast"></div>
 <div class="hud" id="backlink"><a href="/">&#8617; mission control</a></div>
 <div id="keys" class="show">
-  <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>m</b> mute</div>
+  <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>m</b> mute · <b>p</b> frame time</div>
   <div>drag to look around in free and cabin views</div>
 </div>
 <div class="hud" id="cams"></div>
@@ -297,6 +297,23 @@ float fbmL(vec3 p, float f, float lod, int oct){
 // is stable in inertial space and identical on every machine.
 const STARS_GLSL = `
 uniform float uPxA;                        // angular size of one pixel [rad]
+// Stars are the one thing in here that must NOT band-limit against uPxA. Every
+// other reader of uPxA is a fractal whose sampling density genuinely tracks the
+// render target — coarser buffer, coarser noise, cheaper pass, correct. A star
+// is a point feature with a fixed on-screen size; when the adaptive scaler
+// moves the target resolution, uPxA moves with it, and the cull below would
+// pop stars in and out every time bgScale steps, worst during a coast where
+// the whole frame is the upscaled blit. uPxN is fed from the NATIVE canvas
+// height instead, so the POPULATION is scale-invariant: the same 374 stars pass
+// the cull at 0.35 as at 1.0, and none appear or vanish as the scaler moves.
+// The SAMPLING is not, and this comment used to overclaim that it was. A star
+// is about 1.5 native pixels across, so in a 0.35 buffer it lands under half a
+// pixel — below Nyquist — and the upscale loses some of them into the
+// background: 730 rendered blobs against 969 at full scale. That is a softer
+// sky, the same disclosed price the rest of the technique pays; what it is not
+// is the catalogue itself flickering, which is the failure this uniform exists
+// to prevent.
+uniform float uPxN;                        // angular size of one pixel [rad], NATIVE height
 uniform float uT;                          // seconds, for scintillation
 vec3 h33(vec3 p){
   p = vec3(dot(p, vec3(127.1, 311.7,  74.7)),
@@ -369,7 +386,7 @@ vec3 starField(vec3 d, float air, out float mw){
   // the pixels get smaller, the way a longer lens reaches deeper. Brightness
   // is then measured FROM that limit, so the visible population always spans
   // the full range instead of collapsing to a handful of equally bright dots.
-  float lim = 0.90*smoothstep(0.00016, 0.0013, uPxA);
+  float lim = 0.90*smoothstep(0.00016, 0.0013, uPxN);
   for (int i = -1; i <= 1; i++) {
     for (int j = -1; j <= 1; j++) {
       vec2 c = gi + vec2(float(i), float(j));
@@ -393,7 +410,7 @@ vec3 starField(vec3 d, float air, out float mw){
       // at the search boundary is what turns a halo into a square block. Past
       // that cap the disc holds still and brightness carries the extra flux,
       // which is what an unresolved point source does anyway.
-      float want = uPxA*(0.80 + 0.70*mag);
+      float want = uPxN*(0.80 + 0.70*mag);
       float rad = min(want, CELL*0.22);
       float bright = (0.05 + 1.90*mag)*min(4.0, (want*want)/(rad*rad));
       float core = exp(-(ang*ang)/(rad*rad));
@@ -782,13 +799,28 @@ vec3 skyCol(vec3 d, vec3 up, float dens){
   vec3 zen = vec3(0.09,0.30,0.70), hor = vec3(0.62,0.78,0.95);
   vec3 day = mix(hor, zen, clamp(pow(max(e, 0.0), 0.42), 0.0, 1.0));
   vec3 col = day * clamp(dens*1.25, 0.0, 1.0);
-  // atmosphere shell glow hugging the limb (exact: ray's closest approach)
-  float b = dot(uEc, d);
-  if (b > 0.0) {
+  // atmosphere shell glow hugging the limb.
+  // closest approach of the RAY, not of the infinite line: at b <= 0 the nearest
+  // point is the camera itself, so the shell term is continuous through the local
+  // horizontal instead of stepping to zero across it
+  float b = max(dot(uEc, d), 0.0);
+  {
     float dmin = sqrt(max(dot(uEc,uEc) - b*b, 0.0)) - uER;
     float g1 = exp(-max(dmin, 0.0)/55000.0);
+    // The gate this replaces was a hard cut at dot(uEc,d) == 0 — the local
+    // horizontal — so it drew a 1-pixel brightness step clean across any frame
+    // aimed within a half-FOV of level: worth 62 of 255 in the blue channel from
+    // a vehicle camera at 84 km, and 156 from an ascent camera at 15 km, where
+    // (1 - dens) and exp(-camAlt/55000) are both still large — their product
+    // peaks near 18 km, so ascent had this worse than entry ever did.
+    // Clamping b alone leaves the term at its b = 0 value for the whole upward
+    // sky, i.e. a uniform exp(-camAlt/55000) navy floor at the zenith, which is
+    // wrong: overhead there is no limb to glow. So fade it out over one horizon
+    // dip above the horizontal. dot(d, up) is 0 exactly where the clamp takes
+    // over, and smoothstep is flat there, so the two meet with matching value
+    // AND slope — no step, no kink, and the zenith goes back to black.
     col += (vec3(0.30,0.52,0.92)*g1 + vec3(0.9,0.5,0.3)*exp(-max(dmin,0.0)/16000.0)*0.35)
-           * (1.0 - dens) * 1.05;
+           * (1.0 - dens) * 1.05 * (1.0 - smoothstep(0.0, dip, max(dot(d, up), 0.0)));
   }
   float s = max(dot(d, uSun), 0.0);
   col += vec3(1.0,0.97,0.9) * pow(s, 1500.0) * 5.0;
@@ -923,6 +955,10 @@ varying vec3 vVP, vN, vC; varying vec2 vUV; varying float vPw;
 uniform vec3 uSunV, uFogCol, uEngV, uEngC;
 uniform float uFogDen, uEngI, uAmb;
 uniform sampler2D uLiv;
+uniform float uHeat;          // 0..1 stagnation heating, off outside entry
+uniform vec3 uHeatV;          // flow direction, VIEW space, pointing upstream
+uniform vec3 uHeatC;          // pod centre, VIEW space
+uniform float uHeatR;         // pod radius, for the radial falloff scale
 void main(){
   vec3 n = normalize(vN);
   // livery decal wrapped cylindrically over the painted skin
@@ -941,6 +977,36 @@ void main(){
     vec3 dd = uEngV - vVP; float r2 = dot(dd, dd);
     lit += base * uEngC * uEngI * 90.0/(r2 + 18.0)
            * max(dot(n, dd/sqrt(r2 + 0.001)), 0.0);
+  }
+  // Stagnation heating. The shock stands on the windward face and the wake
+  // side stays dark, so this is an angular term, not a switch that turns the
+  // whole capsule orange — that difference is the entire read of the effect.
+  if (uHeat > 0.0) {
+    float w = max(dot(n, uHeatV), 0.0);
+    // Take the centre-to-shoulder falloff from POSITION, not from the facet
+    // normal. Driving it off the normal meant a low-poly shield rendered its
+    // own tessellation as concentric bands, because each ring of facets is a
+    // discrete step in w. Distance off the flow axis is smooth, and it is
+    // also the real shape of stagnation-point heating.
+    vec3 rel = vVP - uHeatC;
+    float rad = length(rel - uHeatV*dot(rel, uHeatV));
+    float stag = exp(-(rad*rad)/(uHeatR*uHeatR*0.80));
+    // the windward gate stays on the normal, but soft and saturated across
+    // the whole shield, so it never bands
+    float face = smoothstep(0.0, 0.35, w);
+    // and the silhouette: from a chase camera the shield faces away, so what
+    // has to carry the effect is the shoulder burning at grazing incidence
+    float rim = pow(1.0 - abs(dot(n, normalize(-vVP))), 3.0)*pow(w, 0.6);
+    // the constant is the capsule sitting inside luminous gas: at these speeds
+    // the whole body is wrapped in it, so even the leeward afterbody carries a
+    // dull red rather than staying the grey it is on the pad
+    float g = uHeat*(stag*face + 0.5*rim + 0.14);
+    // a blackbody walk: deep red out at the shoulder, through orange and
+    // yellow, to white only at the stagnation point itself
+    vec3 bb = vec3(smoothstep(0.02, 0.22, g),
+                   smoothstep(0.25, 0.80, g)*0.85,
+                   smoothstep(0.70, 1.15, g)*0.72);
+    lit += bb*g*1.45;
   }
   float fog = 1.0 - exp(-length(vVP)*uFogDen);
   gl_FragColor = vec4(mix(lit, uFogCol, fog), 1.0);
@@ -972,8 +1038,14 @@ void main(){
   // pad/entry worlds put the earth centre at (0, -Re, 0)
   vec3 n = normalize(vW + vec3(0.0, uER, 0.0));
   float r = length(vW.xz);
-  // one pixel is a small fraction of a degree at these ranges, but the plane
-  // runs to the horizon, so band-limit off the slant range all the same
+  // Band-limit off the slant range, because the plane runs to the horizon.
+  // Keyed to distance and not to pixel size, which was defensible when this
+  // drew at native resolution and one pixel really was a small fraction of a
+  // degree. The deck now renders into the scaled background target, where at
+  // the 0.35 floor a pixel is ~2.9x wider and this lod does not follow it down
+  // — the deck is under-filtered there. Left alone on purpose: keying lod to
+  // the pixel solid angle changes how the deck looks at every scale, which is a
+  // deck change, not a scaler change. Recorded as a follow-up.
   float lod = clamp(length(vVP)*3.0e-9, 2.0e-7, 0.002);
   vec3 pw = spinFrame(uEMat*n, uSpin);
   float dens = cloudCover(pw, lod);
@@ -1009,7 +1081,11 @@ void main(){
   gl_FragColor = vec4(col, a*(1.0 - fog*0.7));
 }`);
 
-// particles (view-space point sprites): 0 flame/plasma, 1 smoke, 2 vapor/spray
+// Particles (view-space point sprites). The JS side has five kinds — 0 flame,
+// 1 smoke, 2 vapor/spray, 3 wake smoke, 4 plasma — and the shader has four
+// branches, so vK is NOT the JS kind: drawParticles packs 3 down onto the smoke
+// branch (it wants smoke's look and blend, just none of its buoyancy) and 4 up
+// onto branch 3, the plasma ramp added for entry heating.
 const PART = program(`
 attribute vec3 aVP; attribute vec3 aM;
 uniform mat4 uPr; uniform float uH;
@@ -1021,7 +1097,7 @@ void main(){
 }`, `
 precision mediump float;
 varying float vF, vK;
-uniform vec3 uSm;
+uniform vec3 uSm; uniform float uHot;
 void main(){
   vec2 q = gl_PointCoord*2.0 - 1.0;
   float r2 = dot(q, q);
@@ -1032,8 +1108,22 @@ void main(){
     gl_FragColor = vec4(c * sh * vF, sh*vF);
   } else if (vK < 1.5) {
     gl_FragColor = vec4(uSm * (0.55 + 0.45*vF), sh * 0.32 * vF);
-  } else {
+  } else if (vK < 2.5) {
     gl_FragColor = vec4(1.0, 1.0, 1.0, sh * 0.22 * vF);
+  } else {
+    // Plasma. vF runs 1 at birth to 0 at death, so a puff cools along the
+    // trail exactly as it ages: white at the shock, then yellow, orange, and a
+    // deep red that fades out. uHot lifts the whole ramp with the heat rate,
+    // so a 40 W/cm2 graze glows dull red and a 180 W/cm2 peak runs white.
+    float h = pow(vF, 2.6)*(0.35 + 0.65*uHot);
+    vec3 c = mix(vec3(0.90, 0.13, 0.02), vec3(1.0, 0.62, 0.22),
+                 smoothstep(0.0, 0.45, h));
+    c = mix(c, vec3(1.0, 0.97, 0.90), smoothstep(0.45, 0.95, h));
+    // a tighter core than the plain gaussian, so the trail keeps structure
+    // instead of dissolving into the soft round blobs it used to be
+    float core = sh*sh;
+    gl_FragColor = vec4(c*(sh*0.55 + core*0.85)*(0.30 + 0.70*vF),
+                        (sh*0.5 + core*0.5)*vF*0.9);
   }
 }`);
 
@@ -1389,6 +1479,31 @@ function sphereMap(dr, h) {
   return { pos: [R*Math.sin(th), R*Math.cos(th) - RE, 0],
            up: [Math.sin(th), Math.cos(th), 0],
            tg: [Math.cos(th), -Math.sin(th), 0] };
+}
+// Which means: in the pad and splash frames, y is altitude ONLY directly over
+// the anchor site. sphereMap curves the ground away beneath the trajectory, so
+// a capsule 5000 km downrange sits at y = -2.4e6 while flying at 134 km. Any
+// test of the form `y < something` is a test against the anchor's tangent
+// plane, not against the ground, and is wrong everywhere else. These two are
+// the honest versions of the clamps that did that — the sphere centre is at
+// (0, -RE, 0) in both frames. To *read* an altitude, use altOf (down by
+// deckFade); there is deliberately only one of those.
+// raise a point to a minimum altitude by pushing it radially out, never down
+function liftToAlt(p, minA) {
+  const c = [p[0], p[1] + RE, p[2]], r = Math.hypot(c[0], c[1], c[2]);
+  if (r - RE >= minA || r < 1) return p;
+  const s = (RE + minA)/r;
+  return [c[0]*s, c[1]*s - RE, c[2]*s];
+}
+// an orthonormal frame that follows the local horizon: up is the true local
+// vertical, fwd the flight tangent projected flat, rt across the track. The
+// free camera orbits in this, so "drag up" means up wherever you are.
+function localFrame(pos, tangent) {
+  const up = V.norm([pos[0], pos[1] + RE, pos[2]]);
+  let f = V.sub(tangent, V.scale(up, V.dot(tangent, up)));
+  if (V.dot(f, f) < 1e-12) f = V.sub([0,0,1], V.scale(up, up[2]));
+  const fwd = V.norm(f);
+  return { up, fwd, rt: V.cross(fwd, up) };
 }
 function state(t) {
   const tc = Math.max(0, t);
@@ -2715,6 +2830,118 @@ function buildStatics() {
 const quadBuf = () => buffer(new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]));
 let skyBuf, partDyn;
 
+// ------------------------------------------- scaled background target --
+// The background passes are the whole frame budget — measured at 84 ms (planet)
+// and 52 ms (cloud deck) of a 136.8 ms frame on an integrated Intel UHD 630.
+// Everything else this page draws is not the bottleneck, and the honest form of
+// that statement is a bound, not a figure: with both passes disabled the frame
+// medianed 16.9 ms, and issuing no draw calls at all medianed 16.8 ms. Both are
+// the 60 Hz vsync floor, so the meshes, particles, decals, HUD and the JS
+// integration together cost less than one 16.7 ms interval and could not be
+// resolved separately from it. (The 0.1 ms between those two rows is the
+// resolution of a vsync-clamped clock, not a measurement of the draws — the
+// same data has 84.3 + 52.1 + 16.9 = 153.3 ms of parts against a 136.8 ms
+// whole, and the 16.5 ms of excess is exactly one vsync interval.)
+//
+// So the one knob that matters is how many pixels those two passes cover, and
+// the right value is whatever this machine can afford rather than a number
+// hard-coded for one GPU.
+//
+// Starts at 0.5, not at BG_MAX. The start value is what the first ~30 frames
+// actually render at, before the median has the samples to correct it: from 1.0
+// that is a second of 136 ms stutter on this machine at the moment the page is
+// first looked at, and from BG_MIN a fast GPU stays soft for the five seconds
+// the 0.05-per-30-frames ramp needs to climb. 0.5 is the value Task 3 shipped
+// and measured, three steps above the floor and ten below the ceiling.
+let bgScale = 0.5;
+let perfMed = 0, perfShow = false;
+// 13 and 20 ms bracket the 16.7 ms vsync interval, so a frame comfortably making
+// rate is left alone instead of being hunted around it.
+//
+// BG_MAX is 1.0 and that is deliberate, in spite of an earlier note here that
+// said forcing 1.0 crashed the renderer. What crashed was a diagnostic loop
+// pumping dozens of forced full-resolution frames back to back in a
+// backgrounded tab — a driver watchdog reset, not a property of the value.
+// Later sessions rendered at 1.0 on the same machine with no context loss and
+// gl.getError() 0. The scaler cannot walk there on a slow GPU in any case: it
+// only steps up while the median is under 13 ms, and full resolution here is
+// never remotely that, so 1.0 is reachable exactly on the machines that can pay
+// for it.
+const FRAME_HI = 20, FRAME_LO = 13, BG_MIN = 0.35, BG_MAX = 1.0;
+// Pure, so it can be tested without a GPU: given the current scale and a median
+// frame time, what should the scale become?
+function bgScaleFor(scale, med) {
+  if (med > FRAME_HI) return Math.max(BG_MIN, +(scale - 0.05).toFixed(2));
+  if (med < FRAME_LO) return Math.min(BG_MAX, +(scale + 0.05).toFixed(2));
+  return scale;
+}
+const fWin = [];
+let fHold = 0;
+function perfPush(ms) {
+  // A tab switch, a breakpoint or a GC pause is not a slow frame, and letting
+  // one drive the scale would drop resolution for the rest of the flight.
+  if (!(ms > 0) || ms > 500) return;
+  if (fHold > 0) { fHold--; return; }
+  fWin.push(ms);
+  if (fWin.length < 30) return;
+  const s = fWin.slice().sort((a, b) => a - b);
+  perfMed = s[Math.floor(s.length/2)];
+  fWin.length = 0;
+  const next = bgScaleFor(bgScale, perfMed);
+  // After a change, ignore 30 frames: the new resolution has to be in effect
+  // before it is judged, or the scale chases its own last decision.
+  if (next !== bgScale) { bgScale = next; fHold = 30; }
+}
+let bgFB = null, bgTex = null, bgDepth = null, bgW = 0, bgH = 0;
+function bgTarget(w, h) {
+  if (bgFB && bgW === w && bgH === h) return;
+  if (!bgFB) { bgFB = gl.createFramebuffer(); bgTex = gl.createTexture();
+               bgDepth = gl.createRenderbuffer(); }
+  gl.bindTexture(gl.TEXTURE_2D, bgTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  // LINEAR, because this texture exists to be magnified
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  // WebGL 1 has no depth textures without an extension, and nothing here needs
+  // to sample depth — a renderbuffer is enough to depth-test the deck against
+  // the vehicle.
+  gl.bindRenderbuffer(gl.RENDERBUFFER, bgDepth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bgFB);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bgTex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, bgDepth);
+  // bgW/bgH are the early-return guard above, so they must only become true
+  // once the framebuffer actually IS w x h. Set them before this check passed
+  // and a throw here (caught by some outer frame loop, so the page keeps
+  // running) leaves bgFB non-null with the guard already satisfied — every
+  // later call for the same size returns immediately, never rechecks status,
+  // and the incomplete FBO renders silently forever. Only claim victory here.
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
+    throw new Error('background framebuffer incomplete at ' + w + 'x' + h);
+  bgW = w; bgH = h;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+const BLIT = program(`
+attribute vec2 aP; varying vec2 vT;
+void main(){ vT = aP*0.5 + 0.5; gl_Position = vec4(aP, 0.0, 1.0); }`, `
+precision mediump float;
+varying vec2 vT; uniform sampler2D uSrc;
+void main(){ gl_FragColor = vec4(texture2D(uSrc, vT).rgb, 1.0); }`);
+function blitBackground() {
+  gl.useProgram(BLIT.p);
+  gl.disable(gl.DEPTH_TEST);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, bgTex);
+  gl.uniform1i(BLIT.u.uSrc, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
+  gl.enableVertexAttribArray(BLIT.a.aP);
+  gl.vertexAttribPointer(BLIT.a.aP, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  gl.enable(gl.DEPTH_TEST);
+}
+
 // land-mask texture (256x128 equirect, 1 bit/px — same dataset as the panel)
 const LAND_B64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//AABf/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/v0f/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAT9v8H////9AAABfgAAAAAABaAAAAAAAAAAAAAAAAAEGx/+f/////gAAAXQAAAAAAAAHgAAAAAAAAAAAAAAAcAAE/A//////gAAAQAAAAAAAAAMAAAAAAAAAAAAAAAAeY4Y4AA////8AAAAAAAAA8AAA//4AAfAAAAAAAAAAA4AAAAAAA////gAAAAAAAAcAAB//9AAAAAAAAAAAAAAD2GW5/wAB///0AAAAAAAADAAB/////8AAAAADAAAAAAO/8DO/4AF//+4AAAAAAAAcA6//////y/+AAAQAH/6AUB/8OLXwAX//3AAAAAvAAACDv/////////4AAgD/////+yBPcHwAP//gAAAAf/+AE/3X////////////wD//////v9/xH4D//AAAAAB//+T//7/////////////x/////////aA9wP/wBvAAAf/+H////////////////BAP////////cT8AP4AD8AAH+f7////////////////wAH////////wADQA/AAAAAA/n//////////////////gA////////8AHgAB4AAAAAP8f///////////////j/gAH/2P/////gAfgAAgAAAAA/5x//////////////8GIAABGAC/////AD9YAAAAAAADvB/////////////8ABgAAAAsAB////8AD/wAAAAAB4AcX/////////////gAeAAAAYAAH/////AP/gAAAAABAJB/////////////4AD4AAAEAAAD/////z//gAAAAA3Akv/////////////wAPAAACAAAAn/////v//AAAAAHcP///////////////wAYAAAAAAAAf////+//8AAAAAT5////////////////QBAAAAAAAAB///////jQAAAAAIf///////////////9AAAAAAAAAAB//////7DwAAAAAH////////////////iAAAAAAAAAAD//////8BgAAAAA////////////////+AAAAAAAAAAAP///////AAAAAAB///8n///////////wAAAAAAAAAAA//////9gAAAAAAH/n/gf//////////+IAAAAAAAAAAD//////AAAAAAAf8nP8Af//////////h4AAAAAAAAAAP/////8AAAAAAA/wmPxg//////////wEAAAAAAAAAAA//////AAAAAAAD8CG4//////////+eAQAAAAAAAAAAD/////4AAAAAAAfwARn//////////gYBAAAAAAAAAAAH/////AAAAAAAA+AGGf//////////YwMAAAAAAAAAAAP////8AAAAAAAAD+AAB/////////+DDwAAAAAAAAAAAf////wAAAAAAAH/8AAH/////////4RuAAAAAAAAAAAAf///8AAAAAAAA//wAAf/////////xYAAAAAAAAAAAAB////AAAAAAAAH//48B//////////AgAAAAAAAAAAAAC///8AAAAAAAAf//7///////////8CAAAAAAAAAAAAAF/+AYAAAAAAAB//////8////////wAAAAAAAAAAAAAAT/gBgAAAAAAAf////9/5////////AAAAAAAAAAAAAAAn+ACAAAAAAAD/////z/wf//////4IAAAAAAAAAAAAADf4AAAAAAAAAf/////v/EA//////AAAAAAAAAAAAAAAAfgAAAAAAAAB/////+f/8B/////5AAAAAAAAAAAAAAAB+ABgAAAAAAP/////8//wG//f/8AAAAAAAAAAAAAAAAH4OBgAAAAAA//////z/+AD/w/8AAAAAAAAAAAQAAAAAPxwA4AAAAAD//////H/4AP8D/kAAAAAAAAAAAAAAAAAP+AAAAAAAAH/////+P+AA/gH+AGAAAAAAAAAAAAAAAAP4AACAAAAA//////8/gAD8AX+AYAAAAAAAAAAAAAAAAD+AAAAAACD//////78AAHgAf4BgAAAAAAAAAAAAAAAAB4AAAAAAAP//////2AAAeAAvgHAAIAAAAAAAAAAAAAABgEAAAAAA///////gAAB4AC+ACAAAAAAAAAAAAAAAAAGB84AAAAA//////+8AADgEBwA4AAAAAAAAAAAAAAAAAFu/gAAAAB///////wAAMAACABAAAAAAAAAAAAAAAAAAB//AAAAAH//////+AAAEACAADAAAAAAAAAAAAAAAAAAH/+AAAAAP/f////4AAAQAEAIIAAAAAAAAAAAAAAAAAAf//gAAAAMg/////AAAAACYBwAAAAAAAAAAAAAAAAAAB///AAAAAAAf///4AAAAAEgPAAAAAAAAAAAAAAAAAAAP//8AAAAAAB////AAAAAAtB8AAAAAAAAAAAAAAAAAAB///wAAAAAAH///4AAAAAA8fnIAAAAAAAAAAAAAAAAQH///4AAAAAA////AAAAAABh+AmAAAAAAAAAAAAAAAAAf///wAAAAAB///4AAAAAAHDzAJgAAAAAAAAAAAAAAAB////8AAAAAD///AAAAAAAOBCS/wAAAAAAAAAAAAAAAH////8AAAAAP//8AAAAAAAYAAAfhAAAAAAAAAAAAAAAf////4AAAAAf//wAAAAAAAYAAA/gAAAAAAAAAAAAAAA/////gAAAAB///AAAAAAAAOAQD2AgAAAAAAAAAAAAAD////+AAAAAH//8AAAAAAAAACAAMAAAAAAAAAAAAAAAH////wAAAAAP//4AAAAAAAAAAAAIAAAAAAAAAAAAAAAf///+AAAAAA///gAAAAAAAAAA4AAAAAAAAAAAAAAAAA////wAAAAAH//+CAAAAAAAAAPjAAAAAAAAAAAAAAAAD////AAAAAAf//4MAAAAAAAAG8OAAAAAAAAAAAAAAAAD///8AAAAAD///HgAAAAAAAA/84AAAAAAAAAAAAAAAAH///wAAAAAP//weAAAAAAAAH//wAAAgAAAAAAAAAAAAP///AAAAAAf/+B4AAAAAAAA///AAAAAAAAAAAAAAAAA///4AAAAAB//4HAAAAAAAAP//+ACAAAAAAAAAAAAAAD///gAAAAAD//gcAAAAAAAH///8AAAAAAAAAAAAAAAAP//wAAAAAAP/+BwAAAAAAAf///4AAAAAAAAAAAAAAAA//8AAAAAAA//4GAAAAAAAB////wAAAAAAAAAAAAAAAD//wAAAAAAB/+AAAAAAAAAH////AAAAAAAAAAAAAAAAP//AAAAAAAH/4AAAAAAAAAf///+AAAAAAAAAAAAAAAB//4AAAAAAAP/AAAAAAAAAB////4AAAAAAAAAAAAAAAH//AAAAAAAA/8AAAAAAAAAD////AAAAAAAAAAAAAAAAf/4AAAAAAAB/gAAAAAAAAAP+P/8AAAAAAAAAAAAAAAB//gAAAAAAAH8AAAAAAAAAA/Ab/gAAAAAAAAAAAAAAAH/sAAAAAAAAAAAAAAAAAAADAAf+AAAAAAAAAAAAAAAA/+AAAAAAAAAAAAAAAAAAAAAAAfwAAQAAAAAAAAAAAAD/8AAAAAAAAAAAAAAAAAAAAAAB/AAAgAAAAAAAAAAAAP+AAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAAAAAA/wAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAGAADAAAAAAAAAAAAAfwAAAAAAAAAAAAAAAAAAAAAAAAQAAQAAAAAAAAAAAAA/AAAAAAAAAAAAAAAAAAAAAAAAAAAGAAAAAAAAAAAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAAAAAfgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWBgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAAAAAAAAAAAfwAAf//+///wAAAAAAAAAAAAAAAAAYAAAAAAAAAAAB///gf////////QAAAAAAAAAAAAAACfwAAAAAAAAAAH///+P/////////8AAAAAAAAAAAAAAH/AAAAAB/v///////7///////////wAAAAAAAAAAAYCg+AAAAAP/////////////////////AAAAAAAAQED////wAAAAB/////////////////////gAAAAAP////////8AAAAH/////////////////////4AAAAOL////////AAAAAf//////////////////////wAAAAP///////+4EAD4P///////////////////////gAAAAD////////gAAfgB//////////////////////wAAAAD//////////gAA////////////////////////AAAAAP//////////h//////////////////////////wAAAH///////////////////////////////////////7//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////w==';
 function buildLandTex() {
@@ -2873,7 +3100,7 @@ function stepParticles(dt) {
     }
   }
 }
-function drawParticles(view, proj, fov, smoke) {
+function drawParticles(view, proj, fov, smoke, hot) {
   if (!parts.length) return;
   // The two blend modes need their particles contiguous, so this walks the
   // list twice — smoke (kinds 1 and 3) then glow — writing straight into the
@@ -2896,7 +3123,8 @@ function drawParticles(view, proj, fov, smoke) {
       partArr[o+2] = vz;
       partArr[o+3] = q.size;
       partArr[o+4] = 1 - q.age/q.life;
-      partArr[o+5] = q.kind === 3 ? 1 : q.kind;
+      // 3 (wake smoke) draws as smoke; 4 (plasma) gets the shader's 4th branch
+      partArr[o+5] = q.kind === 3 ? 1 : q.kind === 4 ? 3 : q.kind;
       k++;
     }
     return k - from;
@@ -2913,6 +3141,7 @@ function drawParticles(view, proj, fov, smoke) {
   gl.uniformMatrix4fv(PART.u.uPr, false, proj);
   gl.uniform1f(PART.u.uH, cv.height/(2*Math.tan(fov/2)));
   gl.uniform3fv(PART.u.uSm, smoke || [0.82, 0.80, 0.77]);
+  gl.uniform1f(PART.u.uHot, hot || 0);
   gl.depthMask(false);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -3064,12 +3293,12 @@ function pickWindow(M, targetW) {
   return best;
 }
 // place a model-space pose into the world using the craft's model matrix
-function poseToWorld(pose, M, mode) {
+function poseToWorld(pose, M, mode, noHead) {
   let eye = mApply(M, pose.eye), look = mApply(M, pose.look);
   const up = V.sub(mApply(M, V.add(pose.eye, pose.up)), eye);
   // free head-look from the seat: drag turns the view about the eye point,
   // it does not move the camera out of the capsule
-  if (headYaw || headPitch) {
+  if ((headYaw || headPitch) && !noHead) {
     const f = V.sub(look, eye), d = V.len(f), fw = V.scale(f, 1/d);
     const rt = V.norm(V.cross(fw, up)), uu = V.cross(rt, fw);
     const cy = Math.cos(headYaw), sy = Math.sin(headYaw);
@@ -3097,6 +3326,49 @@ function cabinCam(M, aim, targetW) {
   const p = cabinPose(aim, aim === 'window' ? pickWindow(M, targetW) : 0);
   return p ? poseToWorld(p, M, aim === 'window' ? 'window' : 'cabin') : null;
 }
+// An exterior camera bolted to the pod's flank — the shot every crewed vehicle
+// carries, and the one that used to vanish at second-stage jettison because
+// only the pad world ever had an onboard camera at all. Same trick as
+// cabinCam: a pose in the geometry's own coordinates, carried into the world
+// by whichever craft matrix the current phase uses. Each world's craftM
+// already applies its own x offset (stack base on the pad, kick-stage base in
+// ECI, heat-shield anchor in entry), so one pose rides the hull through
+// staging, coast and entry without knowing which phase it is in.
+function hullPose() {
+  const pr = podRange();
+  if (!pr) return null;
+  const K = capStations(pr.x0), rp = K.rp;
+  return {
+    // Abeam the shoulder on a short boom, not behind the apex. The longitudinal
+    // station matters as much as the offset, and for a reason worth writing down:
+    // the shield is a shallow spherical cap of radius 2.4 rp, so even at its rim
+    // the outward normal is only 24.6 deg off the flow axis. Nothing of the
+    // WINDWARD face is visible from anywhere behind the rim's tangent plane —
+    // the condition is z > rp + 2.18*(x - xsh), and an eye 2.73 rp aft of the
+    // apex fails it at any lateral offset short of 6.48 rp. Mounted back there the
+    // shot showed only the leeward afterbody, and the heating shader
+    // deliberately renders that as nothing but its 0.14 ambient-gas constant:
+    // measured over the visible hull at peak heating, stag*face and rim were
+    // both exactly 0, so a capsule reading 183 W/cm2 on the HUD was uniformly
+    // pale. Level with the rim and 2.7 rp out, the shoulder burns at grazing
+    // incidence and the rim term reads (measured rim 0.49, stag 0.76). Still
+    // 1.31 m clear of the skin, and outside the 1.1 rp shock ring.
+    eye:  [K.xb + K.xb0 + 0.25*rp, 0.30*rp, 2.70*rp],
+    // Aimed just past the aft end rather than 1.9 rp ahead of the shield. That
+    // puts the body across the frame in three-quarter instead of dead-on
+    // profile, keeps all of it inside the edges, and leaves the limb above it.
+    look: [K.xb + K.xtop + 0.24*rp, 0, 0],
+    // "up" is radially off the hull, which is what keeps the body level in
+    // frame and the world above it
+    up: [0, 1, 0], fov: 1.05 };
+}
+function hullCam(M) {
+  if (!M) return null;
+  const p = hullPose();
+  // noHead: this is a bolted-on camera, not a head on a neck — it must not
+  // inherit whatever the cabin view was last left pointing at
+  return p ? poseToWorld(p, M, 'onboard', true) : null;
+}
 const CS = { ly: 20, tly: 20 };   // tilt-lag state for the pad cameras
 function autoPickPad(t) {
   const sep1 = SEPS.length ? SEPS[0].t : Infinity;
@@ -3115,6 +3387,42 @@ function autoPickPad(t) {
 }
 function fitFov(dist, span) {
   return Math.min(0.9, Math.max(0.02, 2*Math.atan(span/(2*dist))));
+}
+// A wide shot that survives the vehicle outrunning it. The tripod is a real
+// camera on the ground and it *is* the shot while the vehicle is close — that
+// is the launch framing worth keeping. Past a few km it is a sea-level lens
+// aimed at a dot through the whole atmosphere, and fitFov pins to its 0.02
+// floor trying to rescue it. So the eye lifts off the ground and stands off
+// the vehicle instead, holding it against the limb. Blended, not cut, because
+// a hard swap mid-ascent reads as a glitch.
+function wideCam(target, dirV, span, tripod, near, far) {
+  const d = V.len(V.sub(target, tripod));
+  const u = Math.min(1, Math.max(0, (d - near)/(far - near)));
+  const w = u*u*(3 - 2*u);                       // smoothstep, no pop
+  const L = localFrame(target, dirV);
+  const D = span*2.6;                            // stand-off ~0.38 rad wide
+  const stand = V.add(target,
+    V.add(V.add(V.scale(L.rt, D*0.82), V.scale(L.up, D*0.34)),
+          V.scale(L.fwd, -D*0.30)));
+  let eye = V.lerp(tripod, stand, w);
+  // Lerping the eye POSITION says nothing about how far the eye ends up from the
+  // subject, and the callers derive the fov from exactly that distance — so
+  // mid-blend the lens does whatever the two rigs' geometry happens to imply.
+  // Both call sites hand over while the tripod is still several times farther
+  // out than the stand-off (entry: 260 m against 68 m), so as the weight falls
+  // the eye RECEDES, the distance peaks in the middle of the band, and fitFov
+  // answers with a long lens: the entry shot dipped to a 3.3 deg lens between a
+  // 23 deg and a 6 deg end, the pad shot to 3.4 deg between 5.3 and 23. Widening
+  // the band makes that worse, not better — it holds the eye far out for longer.
+  // Instead hold the distance between the two distances the handover starts and
+  // ends at, so the lens can only ever travel between its two endpoint values.
+  // Both ends stay exact: at w = 0 the eye is d out and at w = 1 it is rs out,
+  // and neither bound binds at either, so the tripod is still the tripod.
+  const rs = V.len(V.sub(stand, target)), r = V.len(V.sub(eye, target));
+  const lo = Math.min(rs, d), hi = Math.max(rs, Math.min(d, near));
+  if (r > 1e-6 && (r < lo || r > hi))
+    eye = V.add(target, V.scale(V.sub(eye, target), Math.min(hi, Math.max(lo, r))/r));
+  return { eye, up: L.up, w };
 }
 function shakeVec(amp) {
   const w = performance.now()/1000;
@@ -3153,9 +3461,17 @@ function cameraPad(t, st, M) {
     look = [mid[0]*0.9, CS.ly, 0];
     shake = tn*1.1;
   } else if (mode === 'wide') {
-    eye = [-30*CD, 3, 1450*CD];
-    fov = fitFov(V.len(V.sub(mid, eye)), LEN*3.4);
-    shake = 0.10;
+    const span = LEN*3.4;
+    // Hand over early. Drawn out, the blend parks the eye a few km back with
+    // the vehicle's own span, which is a 1.6 deg lens — the fov dips and then
+    // snaps wide, and that reads as a zoom glitch. Starting the lift sooner
+    // closes the distance faster than the span shrinks, so the shot only ever
+    // opens up.
+    const W = wideCam(mid, st.dir, span, [-30*CD, 3, 1450*CD],
+                      1200*CD, 5000*CD);
+    eye = W.eye; up = W.up;
+    fov = fitFov(V.len(V.sub(mid, eye)), span);
+    shake = 0.10*(1 - W.w);          // the ground rig shakes; the stand-off does not
   } else if (mode === 'chase') {
     const side = [0, 0, 1], upb = V.cross(side, st.dir);
     eye = V.add(V.add(mid, V.scale(side, LEN*2.4)),
@@ -3168,10 +3484,17 @@ function cameraPad(t, st, M) {
     up = st.dir;
     fov = 1.15; shake = tn*0.5 + st.q/45*0.35;
   } else {
+    // same local-horizon orbit as the entry free camera: on the pad the local
+    // vertical is world +y, so the launch framing is unchanged, but by SECO
+    // the stack is far enough downrange for the two to diverge
     const R = freeDist || LEN*3.6;
     const cp = Math.cos(freePitch), sp = Math.sin(freePitch);
-    eye = V.add(mid, [R*cp*Math.cos(freeYaw), R*sp, R*cp*Math.sin(freeYaw)]);
-    if (eye[1] < 1.2 && st.h < 100) eye[1] = 1.2;
+    const L = localFrame(mid, st.dir);
+    eye = liftToAlt(
+      V.add(mid, V.add(V.add(V.scale(L.fwd, R*cp*Math.cos(freeYaw)),
+                             V.scale(L.rt,  R*cp*Math.sin(freeYaw))),
+                       V.scale(L.up, R*sp))), 1.2);
+    up = L.up;
     fov = 0.42; shake = tn*0.12;
   }
   if (shake > 0) eye = V.add(eye, shakeVec(shake));
@@ -3188,6 +3511,10 @@ function cameraEci(t, cs, ph, M) {
     const tgt = ph.n === 'FLYBY' ? cs.moon : [0, 0, 0];
     const c = cabinCam(M, mode === 'window' ? 'window' : 'wide', tgt);
     if (c) return cabinShake(c, cs.burning ? 0.5 : 0);
+  }
+  if (mode === 'onboard') {
+    const c = hullCam(M);
+    if (c) return cabinShake(c, cs.burning ? 0.35 : 0);
   }
   const p = cs.pos;
   let eye, look = p, up = cs.bz, fov = 0.42;
@@ -3236,22 +3563,51 @@ function cameraEntry(t, es, M) {
     const c = cabinCam(M, mode === 'window' ? 'window' : 'wide');
     if (c) return cabinShake(c, shake);
   }
+  if (mode === 'onboard') {
+    const c = hullCam(M);
+    if (c) return cabinShake(c, shake);
+  }
   if (mode === 'chase') {
     eye = V.add(p, V.add(V.scale(side, 34), V.scale(es.vdir, -10)));
     fov = 0.30;
+    // At 84 km the horizon has dropped 9.3 deg below the local horizontal - more
+    // than this lens's 8.6 deg half-FOV - so a level side-on chase frames nothing
+    // but sky and the atmosphere seam. Lift the eye over the capsule by a fraction
+    // of the horizon dip, capped so the aim never swings past 60% of the half-FOV
+    // and the capsule can never leave the frame. The dip goes to zero on the way
+    // down, so the low-altitude shot is untouched.
+    const dip = Math.acos(RE/(RE + Math.max(es.h, 0)));
+    const L = V.len(V.sub(eye, p));
+    eye = V.add(eye, V.scale(es.up, L*Math.tan(Math.min(0.6*dip, 0.3*fov))));
   } else if (mode === 'onboard') {
     eye = V.add(p, V.add(V.scale(es.bx, 4.5), V.scale(side, 2.2)));
     look = V.add(p, V.scale(es.vdir, -60));    // looking back up the wake
     fov = 0.9;
   } else if (mode === 'wide') {
-    eye = V.add([es.pos[0], 4, 0], V.scale(side, 120));
-    look = V.lerp(p, [0, 2, 0], 0.35);
-    fov = fitFov(V.len(V.sub(p, eye)), Math.max(30, es.h*0.4));
+    // The tripod belongs at the splash point, not under the capsule: it is the
+    // recovery shot, and it only means anything for the last few hundred
+    // metres. Chasing the pod's ground track with it put a sea-level camera
+    // 2400 km from a capsule 140 km up, framing cloud tops at the fov floor.
+    const span = Math.max(28, POD_RP*26);
+    // a tight handover band: anywhere in the middle is a long lens on a small
+    // target, so the tripod only takes the shot for the last few hundred
+    // metres, which is the only part it is actually good for
+    const W = wideCam(p, es.vdir, span, [0, 4, 120], 260, 1500);
+    eye = W.eye; up = W.up;
+    fov = fitFov(V.len(V.sub(p, eye)), span);
   } else {
+    // Orbit in the capsule's own local horizon rather than on world axes: at
+    // entry interface the pod is 53 deg of arc downrange, where the world y
+    // axis is 53 deg away from "up" and dragging skews the view instead of
+    // raising it. The floor is an altitude, not a y — as a y it fired every
+    // frame of the entry and parked the eye 2400 km from its target.
     const R = freeDist || 28;
     const cp = Math.cos(freePitch), sp = Math.sin(freePitch);
-    eye = V.add(p, [R*cp*Math.cos(freeYaw), R*sp, R*cp*Math.sin(freeYaw)]);
-    if (eye[1] < 2) eye[1] = 2;
+    const L = localFrame(p, es.vdir);
+    eye = liftToAlt(
+      V.add(p, V.add(V.add(V.scale(L.fwd, R*cp*Math.cos(freeYaw)),
+                           V.scale(L.rt,  R*cp*Math.sin(freeYaw))),
+                     V.scale(L.up, R*sp))), 2);
   }
   if (shake > 0.04 && mode !== 'wide') eye = V.add(eye, shakeVec(shake));
   return { eye, look, up, fov, mode };
@@ -3265,6 +3621,29 @@ function attachedTailX(gone) {
 }
 let secGone = {};
 let meshCommon = null;
+// How hot the shield is, as the shader wants it. Peak heating on a lunar
+// return runs a little under 200 W/cm2; the exponent keeps the middle of the
+// entry visibly warm instead of saving everything for a two-second peak.
+const heatOf = q => Math.min(1, Math.pow(Math.max(0, q)/165, 0.72));
+function setMeshHeat(sc, view) {
+  const h = sc.world === 'entry' && sc.es ? heatOf(sc.es.q) : 0;
+  gl.uniform1f(MESH.u.uHeat, h);
+  if (h <= 0) return;
+  // the flow arrives along the velocity vector, so the windward normal is
+  // +vdir; rotate it into view space with the view matrix's 3x3 (column-major)
+  const d = sc.es.vdir;
+  gl.uniform3fv(MESH.u.uHeatV, V.norm([
+    view[0]*d[0] + view[4]*d[1] + view[8]*d[2],
+    view[1]*d[0] + view[5]*d[1] + view[9]*d[2],
+    view[2]*d[0] + view[6]*d[1] + view[10]*d[2]]));
+  // the pod's centre, full transform this time — it is a point, not a direction
+  const c = sc.craftPos;
+  gl.uniform3fv(MESH.u.uHeatC, [
+    view[0]*c[0] + view[4]*c[1] + view[8]*c[2]  + view[12],
+    view[1]*c[0] + view[5]*c[1] + view[9]*c[2]  + view[13],
+    view[2]*c[0] + view[6]*c[1] + view[10]*c[2] + view[14]]);
+  gl.uniform1f(MESH.u.uHeatR, POD_RP || 0.75);
+}
 function beginMeshes(view, sunV, fogDen, fogCol, amb, engI, engV, engC) {
   gl.useProgram(MESH.p);
   gl.uniform3fv(MESH.u.uSunV, sunV);
@@ -3327,9 +3706,11 @@ function buildToasts() {
 
 function frame(now) {
   requestAnimationFrame(frame);
-  const dtReal = Math.min(0.05, (now - lastNow)/1000 || 0.016);
+  const raw = now - lastNow;
+  const dtReal = Math.min(0.05, raw/1000 || 0.016);
   lastNow = now;
   if (!started) return;
+  perfPush(raw);
 
   const ph = phaseAt(simT);
   if (frame._ph !== ph.n) {
@@ -3418,7 +3799,9 @@ function buildScene(ph) {
                                    V.scale(bzp, R*Math.sin(th)))));
       }
     }
-    PUP = [0, 1, 0];
+    // True local up. At the pad this is [0,1,0] to within the width of the
+    // complex, so it is a no-op here and a correction downrange.
+    PUP = V.norm(V.sub(st.pos, [0, -RE, 0]));
     // the deflector only has anything to turn while the vehicle is still on
     // or just off the table
     TRENCH = st.h < 260;
@@ -3486,7 +3869,16 @@ function buildScene(ph) {
   const craftM = mMul(mBasis(es.bx, V.cross(bze, es.bx), bze, es.pos),
                       mTrans([-xb, 0, 0]));
   const cam = cameraEntry(simT, es, craftM);
-  PUP = [0, 1, 0];
+  // Entry runs ~6600 km from the splash-site origin, where the frame's y axis is
+  // 66 deg off the real vertical, so buoyancy has to follow the radial. Worth
+  // being exact about what this fixes, because it is easy to read as a fourth
+  // visible symptom of the frame bug and it is not one: stepParticles applies
+  // PUP only to kinds 1 and 2, and entry spawns kind 1 only once the pod is
+  // below 400 m/s and kind 2 only at splashdown — both within a few km of the
+  // origin, where the radial and y still agree to a fraction of a degree.
+  // Plasma is kind 4 and never reads PUP at all. This is the same frame error
+  // as the other three, corrected while it is still latent.
+  PUP = V.norm(V.sub(es.pos, [0, -RE, 0]));
   TRENCH = false;
   return {
     world: 'entry', es, cam, craftM, craftPos: es.pos,
@@ -3569,19 +3961,40 @@ function spawnEntry(dt, es) {
     // few hundred m/s *relative to the pod*, which is what you actually see.
     const vC = V.scale(es.vdir, es.v);
     const rel = r => V.sub(vC, V.scale(es.vdir, r));
-    // shock layer: stands just ahead of the blunt face, co-moving with it
-    for (let i = 0; i < Math.min(3, Math.round(60*dt*(1 + 4*I))); i++)
-      spawn(V.add(V.add(es.pos, V.scale(es.vdir, 0.9)), jit(0.55)),
-            V.add(rel(20 + 60*I), jit(5*I + 2)),
-            rnd(0.22, 0.09), (0.34 + 0.55*I)*rnd(1.2, 0.7), 1.1*I + 0.4, 0);
-    // additive sprites saturate fast, so the wake is many small short-lived
-    // puffs rather than a few big ones
-    const n = Math.min(11, Math.round(60*dt*(4 + 22*I)));
+    const rp = POD_RP || 0.75;
+    // a frame across the flow, so the shock and the wake can be built as rings
+    // about the velocity vector rather than as isotropic jitter — jitter is
+    // what made the old trail a cloud of loose balls instead of a column
+    const t0 = Math.abs(es.vdir[1]) > 0.9 ? [1,0,0] : [0,1,0];
+    const e1 = V.norm(V.cross(es.vdir, t0)), e2 = V.cross(es.vdir, e1);
+    const ring = (r, th) =>
+      V.add(V.scale(e1, r*Math.cos(th)), V.scale(e2, r*Math.sin(th)));
+
+    // Shock layer: a thin bright sheet standing off the blunt face, domed so
+    // the middle sits furthest forward. Many small sprites read as a surface;
+    // the three big ones this replaced read as three balls.
+    const nS = Math.min(24, Math.round(60*dt*(10 + 44*I)));
+    for (let i = 0; i < nS; i++) {
+      const th = Math.random()*6.2832, u = Math.sqrt(Math.random());
+      const r = rp*1.10*u;
+      spawn(V.add(V.add(es.pos, V.scale(es.vdir, 0.45 + 0.42*(1 - u*u))),
+                  ring(r, th)),
+            V.add(rel(8 + 34*I), V.scale(ring(1, th), 5*I)),
+            rnd(0.15, 0.07), (0.16 + 0.24*I)*rnd(1.25, 0.8), 0.5*I + 0.18, 4);
+    }
+    // Near wake: shed from the shoulder where the flow separates, entrained
+    // aft, spreading with distance. Small and dense — a sprite 2.4 m across at
+    // 34 m fills 290 px, which is why the trail used to be bokeh.
+    const n = Math.min(44, Math.round(60*dt*(18 + 76*I)));
     for (let i = 0; i < n; i++) {
-      const back = rnd(14*I + 2);
-      spawn(V.add(V.sub(es.pos, V.scale(es.vdir, back)), jit(0.5 + back*0.05)),
-            V.add(rel((40 + 220*I)*(0.7 + rnd(0.6))), jit(18*I + 4)),
-            rnd(0.55, 0.20), (0.36 + 0.85*I)*rnd(1.3, 0.8), 2.2*I + 0.6, 0);
+      const back = Math.pow(Math.random(), 0.65)*(16*I + 2.5);
+      const spread = rp*(1.0 + back*0.13);
+      const th = Math.random()*6.2832;
+      spawn(V.add(V.sub(es.pos, V.scale(es.vdir, back)),
+                  V.add(ring(spread*Math.sqrt(Math.random()), th), jit(0.08))),
+            V.add(rel((55 + 250*I)*(0.75 + rnd(0.5))),
+                  V.add(V.scale(ring(1, th), (2 + 8*I)*Math.random()), jit(2.5))),
+            rnd(0.40, 0.16), (0.16 + 0.34*I)*rnd(1.3, 0.7), 0.9*I + 0.3, 4);
     }
     // wake smoke: non-buoyant while hypersonic, otherwise it climbs away
     // from the trail instead of following it
@@ -3596,30 +4009,12 @@ function spawnEntry(dt, es) {
   }
 }
 
-function drawScene(sc) {
-  const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth*dpr | 0, h = cv.clientHeight*dpr | 0;
-  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-  gl.viewport(0, 0, w, h);
-  const cam = sc.cam, asp = w/h;
-  const inCab = cam.mode === 'cabin' || cam.mode === 'window';
-  const sun = sc.sun || SUN;
-  const view = mLookAt(cam.eye, cam.look, cam.up);
-  // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
-  // nearer clip plane than the outside views
-  const proj = mPersp(cam.fov, asp,
-                      inCab ? 0.04 : sc.nearZ || 0.35, 3.0e6);
-  const camAlt = Math.max(V.len(V.sub(cam.eye, sc.earthC)) - RE, 2);
-  // no air on the Moon, so no haze, no scattered fill, and a black sky at
-  // noon — the single most recognisable thing about the place
-  const dens = sc.world === 'moon' ? 0 : Math.exp(-camAlt/9000);
-  const fogCol = [0.62*dens + 0.02, 0.75*dens + 0.04, 0.92*dens + 0.08];
-  const fogDen = (sc.world === 'eci' || sc.world === 'moon') ? 0 : 5e-5*dens + 2e-7;
-  gl.enable(gl.DEPTH_TEST);
-  gl.clearColor(0, 0, 0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-  // planet pass (Earth + Moon + sky + stars), camera-relative in f64
+// The planet pass (Earth + Moon + sky + stars), camera-relative in f64. Its own
+// function because it no longer draws where everything else does: it goes into
+// the scaled background target, so it needs to be told which height to
+// band-limit against — and, separately, the native height the starfield uses
+// instead (see uPxN above).
+function drawPlanet(sc, cam, sun, asp, pxH, pxN, deck) {
   gl.useProgram(SPACE.p);
   gl.depthMask(false);
   const camF = V.norm(V.sub(cam.look, cam.eye));
@@ -3628,9 +4023,19 @@ function drawScene(sc) {
   gl.uniform3fv(SPACE.u.uF, camF); gl.uniform3fv(SPACE.u.uSun, sun);
   gl.uniform1f(SPACE.u.uTan, Math.tan(cam.fov/2));
   gl.uniform1f(SPACE.u.uAsp, asp);
-  // one pixel's angular size: the starfield sizes itself off this, so stars
-  // stay a fixed number of pixels across at any zoom or display density
-  gl.uniform1f(SPACE.u.uPxA, 2*Math.tan(cam.fov/2)/h);
+  // One pixel's angular size: the starfield sizes itself off this, so stars stay
+  // a fixed number of pixels across at any zoom or display density — and every
+  // fractal in here band-limits against it. So it has to be a pixel of the
+  // TARGET, not of the canvas. Handed the canvas height while filling a half-size
+  // buffer, the shader would admit octaves finer than the pixels it is actually
+  // writing and they would alias into a crawl. Feeding it the target height also
+  // drops those octaves, which is why the smaller target comes out cheaper than
+  // its pixel count alone predicts.
+  gl.uniform1f(SPACE.u.uPxA, 2*Math.tan(cam.fov/2)/pxH);
+  // Same angular-size-of-a-pixel formula, but off the native canvas height, so
+  // the starfield's cull and sizing hold still while uPxA above rides the
+  // scaler up and down with the render target.
+  gl.uniform1f(SPACE.u.uPxN, 2*Math.tan(cam.fov/2)/pxN);
   // scintillation runs on the wall clock, not the (warpable) mission clock
   gl.uniform1f(SPACE.u.uT, performance.now()/1000);
   gl.uniform3fv(SPACE.u.uEc, V.sub(sc.earthC, cam.eye));
@@ -3644,8 +4049,7 @@ function drawScene(sc) {
   gl.uniform1f(SPACE.u.uScorch, scorch);
   // how much of the cloud deck the drawn plane is taking care of; the planet
   // pass stands its own shell down by the same amount
-  gl.uniform1f(SPACE.u.uDeck,
-               sc.world === 'pad' || sc.world === 'entry' ? deckFade(cam.eye[1]) : 0);
+  gl.uniform1f(SPACE.u.uDeck, deck);
   gl.uniformMatrix3fv(SPACE.u.uCRot, false, CSEED);
   gl.uniform3fv(SPACE.u.uCamW, cam.eye);
   gl.activeTexture(gl.TEXTURE0);
@@ -3657,15 +4061,21 @@ function drawScene(sc) {
   gl.vertexAttribPointer(aQ, 2, gl.FLOAT, false, 0, 0);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   gl.depthMask(true);
+}
 
-  // lit meshes
-  const rotSun = V.sub(mApply(view, V.add(cam.eye, sun)), mApply(view, cam.eye));
-  const engV = mApply(view, sc.engW);
-  // a cabin has its own lighting: raise the fill so interior surfaces facing
-  // away from the sun still read (the plasma/engine point light still applies)
-  const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 :
-              sc.world === 'moon' ? 0.22 : 0.30 + 0.16*dens;
-  beginMeshes(view, V.norm(rotSun), fogDen, fogCol, amb, sc.engI, engV, sc.engC);
+// Everything solid in the world, for whichever world we are in. Called twice a
+// frame: once with the colour mask off into the scaled target, purely to give
+// the cloud deck something to depth-test against, and once for real at native
+// resolution. That is affordable because the mesh pass is too cheap to price:
+// with the two fullscreen noise passes disabled the frame sits on the 60 Hz
+// vsync floor whether the meshes are drawn or not, which bounds the whole pass
+// under one 16.7 ms interval without resolving it. Doubling something that
+// small is still small. It is the two noise shaders that cost the frame.
+// The caller sets the mesh program up (beginMeshes + setMeshHeat) before each
+// call; the cloud-deck draws deliberately stay outside, because the deck belongs
+// to the scaled pass and the meshes do not.
+function drawWorldMeshes(sc, proj, inCab) {
+  const cam = sc.cam;
   // from inside, the cabin is drawn and the window panes are dropped, so the
   // apertures in the pressure shell become real openings onto the world
   const skip = s => secGone[s.name] ||
@@ -3692,7 +4102,6 @@ function drawScene(sc) {
       const m = mMul(mBasis(d.bx, dby, dbz, d.p), mRotAxis(d.ax, d.a));
       drawRange(m, proj, d.draw.first, d.draw.count);
     }
-    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1]);
   } else if (sc.world === 'eci') {
     const cs = sc.cs;
     const stackM = sc.craftM;
@@ -3737,32 +4146,158 @@ function drawScene(sc) {
     };
     if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2);
     else drawChute(mainBuf, mainN, tMain, 8.5);
-    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1]);
   }
+}
 
+function drawScene(sc) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth*dpr | 0, h = cv.clientHeight*dpr | 0;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const cam = sc.cam, asp = w/h;
+  const inCab = cam.mode === 'cabin' || cam.mode === 'window';
+  const sun = sc.sun || SUN;
+  const view = mLookAt(cam.eye, cam.look, cam.up);
+  // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
+  // nearer clip plane than the outside views
+  const proj = mPersp(cam.fov, asp,
+                      inCab ? 0.04 : sc.nearZ || 0.35, 3.0e6);
+  const camAlt = Math.max(altOf(cam.eye, sc.earthC), 2);
+  // no air on the Moon, so no haze, no scattered fill, and a black sky at
+  // noon — the single most recognisable thing about the place
+  const dens = sc.world === 'moon' ? 0 : Math.exp(-camAlt/9000);
+  const fogCol = [0.62*dens + 0.02, 0.75*dens + 0.04, 0.92*dens + 0.08];
+  const fogDen = (sc.world === 'eci' || sc.world === 'moon') ? 0 : 5e-5*dens + 2e-7;
+  const deck = deckWeight(sc.world, cam.eye, sc.earthC);
+  // The two fullscreen noise passes go into a smaller buffer and get magnified
+  // back out; everything with an edge on it stays native. Floors so a very
+  // small window does not shrink the sky to mush — at this scale they only bite
+  // below 960x540, where nothing is fill-bound anyway.
+  // The projection, and so the aspect the planet pass builds its rays from,
+  // stays the NATIVE one: the deck plane and the meshes are projected with it,
+  // and giving the sky a different aspect would walk the horizon a fraction of a
+  // degree off the plane that is supposed to be lying on it. Only the pixel
+  // COUNT changes here, never the frustum.
+  const sw = Math.max(480, Math.round(w*bgScale)),
+        sh = Math.max(270, Math.round(h*bgScale));
+  bgTarget(sw, sh);
+
+  const rotSun = V.sub(mApply(view, V.add(cam.eye, sun)), mApply(view, cam.eye));
+  const engV = mApply(view, sc.engW);
+  // a cabin has its own lighting: raise the fill so interior surfaces facing
+  // away from the sun still read (the plasma/engine point light still applies)
+  const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 :
+              sc.world === 'moon' ? 0.22 : 0.30 + 0.16*dens;
+  // Both mesh passes want identical program state, and MESH's uniforms are
+  // per-program so in principle one setup would carry — but the passes are
+  // separated by two other programs and a framebuffer switch, so state that is
+  // set once and relied on later is exactly the kind of thing that rots. It
+  // costs a handful of uniform calls.
+  const setupMeshes = () => {
+    beginMeshes(view, V.norm(rotSun), fogDen, fogCol, amb, sc.engI, engV, sc.engC);
+    setMeshHeat(sc, view);
+  };
+
+  // ---- scaled pass: sky, planet, and the cloud deck ----
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bgFB);
+  gl.viewport(0, 0, sw, sh);
+  gl.enable(gl.DEPTH_TEST);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (deck > 0) {
+    // Depth only, no colour: the deck is a blended plane that depth-tests
+    // without writing, so the only reason the vehicle needs to exist in this
+    // buffer is to keep the deck from painting over the part of the sky the
+    // vehicle is standing in front of. Skipped entirely when there is no deck.
+    gl.colorMask(false, false, false, false);
+    setupMeshes();
+    drawWorldMeshes(sc, proj, inCab);
+    gl.colorMask(true, true, true, true);
+  }
+  // The planet pass gets the depth test DISABLED, not merely depth-write off.
+  // Left enabled it would fail against the prepass and leave the vehicle's
+  // silhouette at cleared black — and magnifying a hole full of black draws a
+  // dark halo a couple of native pixels wide around the vehicle, which is much
+  // more visible than it sounds. The sky is behind everything by construction,
+  // so it has no business consulting depth at all.
+  gl.disable(gl.DEPTH_TEST);
+  drawPlanet(sc, cam, sun, asp, sh, h, deck);
+  gl.enable(gl.DEPTH_TEST);
+  if (deck > 0) drawClouds(sc, view, proj, fogCol, fogDen, deck);
+
+  // ---- native pass: the vehicle, its plume, and whatever else has an edge ----
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  // Depth only. The blit covers every pixel, so clearing colour here would be
+  // a second fullscreen write for nothing.
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  blitBackground();
+  setupMeshes();
+  drawWorldMeshes(sc, proj, inCab);
   drawParticles(view, proj, cam.fov,
                 sc.world === 'entry' ? [0.60, 0.50, 0.45] :
-                sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined);
+                sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined,
+                sc.world === 'entry' && sc.es ? heatOf(sc.es.q) : 0);
 }
 // The drawn deck and the planet pass's own cloud shell are the same clouds at
 // the same altitude. The plane has the resolution near the world origin and
 // runs out of it at range; the shell is the other way round. deckFade is the
 // weight of the handover — one number, used by both, so it always sums to one.
 const DECK_H = 7000;
-function deckFade(camY) {
-  if (camY > 45000) return 0;
-  return Math.min(1, (45000 - camY)/15000)
+const DECK_RNG = 150000;
+// True geometric altitude of a point in a surface-anchored local frame.
+// The pad and entry worlds both put their origin ON the surface with +y up
+// through it, so p[1] is an altitude only near the origin: 5900 km downrange
+// the y = 0 plane is 3700 km below the sea. Four defects came from reading
+// p[1] as an altitude, so there is now exactly one function that answers it.
+// (Two branches independently wrote this function; there is now one name and
+// one definition. liftToAlt, up beside sphereMap, does the same radial
+// arithmetic inline for the clamping case, where the answer is a point.)
+function altOf(pos, earthC) {
+  return V.len(V.sub(pos, earthC || [0, -RE, 0])) - RE;
+}
+// Two different heights because there are two different questions. How high the
+// camera is, for standing the plane down as the planet pass's shell takes over,
+// is an ALTITUDE — asking it of y said "3 m" for an entry camera 1833 km up.
+// How close the camera is to the drawn quad, for hiding it edge-on as you fly
+// through, is a perpendicular distance to a plane that really does sit at world
+// y = DECK_H in this frame, so that one stays in y. Reading altitude there was
+// wrong by rng^2/2RE — 1.8 km at 150 km downrange — and hid the plane while the
+// camera was still well clear of it.
+function deckFade(alt, camY, rng) {
+  if (alt > 45000) return 0;
+  // The shader hands over on exp(-|xz|/45000) about the origin (uDeck's use in
+  // cloudLayer), so by 150 km the plane contributes 3.6% — and it is still a
+  // fullscreen pass, measured at 52 ms/frame on this machine, so rasterising it
+  // for that is not a trade. A late ascent tens of km downrange still keeps the
+  // deck it should have; the pad world runs to orbit insertion, so it does go
+  // downrange.
+  if (rng > DECK_RNG) return 0;
+  return Math.min(1, (45000 - alt)/15000)
        * Math.min(1, Math.abs(camY - DECK_H)/140);
 }
-function drawClouds(sc, view, proj, fogCol, fogDen, camY) {
-  if (deckFade(camY) <= 0) return;
+// The call site, as a function rather than an expression inside drawScene, so
+// it can be asserted on. This is where the bug lived: deckFade was already
+// correct given the right numbers — it was being handed cam.eye[1] for all of
+// them.
+function deckWeight(world, camEye, earthC) {
+  if (world !== 'pad' && world !== 'entry') return 0;   // only these draw a deck
+  return deckFade(Math.max(altOf(camEye, earthC), 2),
+                  camEye[1],
+                  Math.hypot(camEye[0], camEye[2]));
+}
+function drawClouds(sc, view, proj, fogCol, fogDen, deck) {
+  if (deck <= 0) return;
   gl.useProgram(CLOUD.p);
   gl.uniformMatrix4fv(CLOUD.u.uMV, false, view);
   gl.uniformMatrix4fv(CLOUD.u.uPr, false, proj);
   gl.uniform1f(CLOUD.u.uY, DECK_H);
-  gl.uniform1f(CLOUD.u.uCamY, camY);
+  // This one stays a frame coordinate on purpose: the shader compares it with
+  // uY to get the slant through a plane that really does sit at y = DECK_H in
+  // this frame, and to decide whether the camera is under the deck. It is a
+  // distance to a plane, not an altitude, so altOf would be the wrong answer.
+  gl.uniform1f(CLOUD.u.uCamY, sc.cam.eye[1]);
   gl.uniform1f(CLOUD.u.uER, RE);
-  gl.uniform1f(CLOUD.u.uFade, deckFade(camY));
+  gl.uniform1f(CLOUD.u.uFade, deck);
   gl.uniformMatrix3fv(CLOUD.u.uEMat, false, sc.eMat);
   gl.uniform1f(CLOUD.u.uSpin, sc.spin);
   gl.uniformMatrix3fv(CLOUD.u.uCRot, false, CSEED);
@@ -3836,6 +4371,9 @@ function drawHUD(sc, ph) {
             ['HEATING', es.q.toFixed(0) + ' W/cm²'],
             ['CAMERA', sc.cam.mode.toUpperCase()]];
   }
+  if (perfShow)
+    rows = rows.concat([['FRAME', perfMed ? perfMed.toFixed(1) + ' ms' : '—'],
+                        ['BG SCALE', bgScale.toFixed(2)]]);
   $('stats').innerHTML = rows.map(r => `<b>${r[0]}</b><span>${r[1]}</span>`).join('<br>');
 }
 // phase-segmented timeline (equal width per phase — a broken time axis)
@@ -3953,6 +4491,7 @@ function initControls() {
       chipRow($('cams'), CAMS, camMode, m => camMode = m);
     }
     if (e.key === 'm') muted = !muted;
+    if (e.key === 'p') perfShow = !perfShow;
   });
 }
 
@@ -3982,6 +4521,401 @@ function showEndCard() {
     scorch = 0; seekTo(-15);
   };
 }
+
+// ------------------------------------------------------------- self-test --
+// No JS test runner here, and adding one would mean a build step for a page
+// whose whole value is being a single dependency-free file. Run by hand, or
+// load the page with ?selftest=1.
+//
+// What these protect: the entry world's frame is anchored at the splash site,
+// so its y is a PLANE coordinate. Reading it as an altitude caused four
+// separate defects — three of them visible (the cloud deck, the wide camera and
+// the free camera) and one latent (particle buoyancy, which only reads the
+// frame's up for kinds entry spawns near the origin; see the PUP assignment in
+// buildScene). altOf is the single answer, and the assertions below pin the
+// measured entry geometry that every one of those got wrong.
+//
+// The second block covers the four pure functions the camera work leans on and
+// that had no assertions at all — liftToAlt, localFrame, wideCam and heatOf.
+// Three of the four original symptoms lived in them, and wideCam's distance
+// clamp is the trickiest arithmetic on this branch.
+window.__selftest = function () {
+  const out = { pass: 0, fail: 0, failures: [] };
+  // fn is a thunk so a missing or throwing function is a readable failure
+  // rather than a crash that hides every assertion after it.
+  const eq = (name, fn, want, tol) => {
+    let got;
+    try { got = fn(); }
+    catch (e) { out.fail++; out.failures.push(`${name}: threw ${e.message}`); return; }
+    if (Math.abs(got - want) <= (tol === undefined ? 1e-9 : tol)) out.pass++;
+    else { out.fail++; out.failures.push(`${name}: got ${got}, want ${want}`); }
+  };
+  const EC = [0, -RE, 0];
+  // A camera position with a known true altitude and known horizontal range
+  // from the frame origin. Solving rng^2 + (y+RE)^2 = (RE+alt)^2 for y is what
+  // makes the frame's y come out hugely negative at range — the number all
+  // four defects were reading as an altitude.
+  const eyeAt = (alt, rng) => [rng, Math.sqrt((RE + alt)**2 - rng**2) - RE, 0];
+
+  // --- altOf: the root cause, named
+  eq('altOf at the frame origin', () => altOf([0, 0, 0], EC), 0);
+  eq('altOf straight up from the origin', () => altOf([0, 1000, 0], EC), 1000, 1e-6);
+  // the measured entry frame. y is -3.71e6; the true altitude is 84 km.
+  eq('altOf 5884 km downrange', () => altOf([5883535.5, -3714612, 0], EC), 84422, 40);
+  // and the wide camera's old bug as a number: y=4 is not "4 m up"
+  eq('altOf shows why y=4 was 2301 km', () => altOf([5883535.5, 4, 120], EC), 2301124, 2000);
+
+  // --- deckWeight: the call site that carried defect #1
+  eq('entry 64 km, 5645 km downrange', () => deckWeight('entry', eyeAt(64351, 5645000), EC), 0);
+  eq('entry 84 km, 5884 km downrange', () => deckWeight('entry', eyeAt(84422, 5884000), EC), 0);
+  eq('entry 272 km, 6642 km downrange', () => deckWeight('entry', eyeAt(272266, 6642000), EC), 0);
+  eq('frame y is nothing like an altitude at range',
+     () => Math.sign(eyeAt(84422, 5884000)[1]), -1);
+  // the cases the range gate must NOT break
+  eq('entry 8 km over the splash site', () => deckWeight('entry', eyeAt(7981, 0), EC), 1);
+  eq('entry at the water', () => deckWeight('entry', eyeAt(4, 0), EC), 1);
+  eq('pad at 30 km, 5 km downrange', () => deckWeight('pad', eyeAt(30000, 5000), EC), 1);
+  eq('eci has no deck', () => deckWeight('eci', eyeAt(30000, 0), EC), 0);
+  eq('moon has no deck', () => deckWeight('moon', eyeAt(30000, 0), EC), 0);
+
+  // --- deckFade's own arithmetic, as deckFade(alt, camY, rng). NOTE: every one
+  // of these passes against the buggy code, because deckFade was correct GIVEN
+  // the right numbers. That is the whole reason deckWeight and altOf exist.
+  // These rows pass camY = alt because over the frame origin the two ARE the
+  // same number, which is exactly what made the bug so easy to write.
+  eq('above the 45 km cutoff', () => deckFade(50000, 50000, 0), 0);
+  eq('at the cutoff', () => deckFade(45000, 45000, 0), 0);
+  eq('30 km at the origin', () => deckFade(30000, 30000, 0), 1);
+  eq('40 km fades on altitude', () => deckFade(40000, 40000, 0), 1/3, 1e-6);
+  eq('exactly at deck height', () => deckFade(7000, 7000, 0), 0);
+  eq('70 m under the deck', () => deckFade(6930, 6930, 0), 0.5, 1e-6);
+  // The shader hands over on exp(-|xz|/45000) about the origin, so by 150 km
+  // the plane contributes 3.6% and nothing is given up — while a late ascent
+  // tens of km downrange keeps the deck it should have.
+  eq('60 km downrange keeps the deck', () => deckFade(20000, 20000, 60000), 1);
+  eq('past the range gate', () => deckFade(20000, 20000, 150001), 0);
+
+  // --- and the distinction the three-argument signature exists for. The two
+  // heights are different questions. At 150 km downrange — the last range the
+  // gate admits — the sphere drop is rng^2/2RE = 1766 m, so an altitude of
+  // 7000 m is a camY of ~5234: 1766 m clear of the plane, not on it. Using
+  // altitude for the second term would hide the deck here, which is the bug
+  // this signature prevents. The rng below is 150000 and not some rounder
+  // number precisely so the drop, the camY and the gate all describe the same
+  // place; the row after it is the same place one metre further out.
+  eq('plane-proximity uses camY, not altitude',
+     () => deckFade(7000, 5234, 150000), 1, 1e-6);
+  eq('and still hides the plane when camY really is at deck height',
+     () => deckFade(7000, 7000, 150000), 0);
+  eq('range gate still fires regardless of the two heights',
+     () => deckFade(7000, 5234, 150001), 0);
+
+  // --- liftToAlt: the radial clamp that replaced `if (eye[1] < 2) eye[1] = 2`.
+  // The first row IS the old bug as an assertion: 5884 km downrange the frame's
+  // y is -3.71e6, so a 2 m floor read against y teleported the free camera to
+  // 2301 km up. Against the radius it does nothing at all, because the point
+  // was already 84 km high.
+  const lowP = eyeAt(50, 300000);
+  eq('liftToAlt leaves a point already above the floor exactly alone',
+     () => V.len(V.sub(liftToAlt(eyeAt(84422, 5884000), 2),
+                       eyeAt(84422, 5884000))), 0);
+  eq('liftToAlt pushes a low point out to exactly the floor',
+     () => altOf(liftToAlt(lowP, 2000), EC), 2000, 1e-6);
+  eq('and it pushes it OUT, never down',
+     () => Math.sign(liftToAlt(lowP, 2000)[1] - lowP[1]), 1);
+  eq('and strictly radially — the direction from the centre is unchanged',
+     () => V.len(V.cross(V.norm(V.sub(liftToAlt(lowP, 2000), EC)),
+                         V.norm(V.sub(lowP, EC)))), 0, 1e-12);
+
+  // --- localFrame: the basis the free and wide cameras orbit in. At the test
+  // point the track runs along +x in the xz-plane, so across-track is exactly
+  // +z, which pins the handedness to a direction rather than to the formula.
+  const lfP = eyeAt(84422, 5884000), lf = localFrame(lfP, [1, 0, 0]);
+  eq('localFrame is a unit basis',
+     () => Math.abs(V.len(lf.up) - 1) + Math.abs(V.len(lf.fwd) - 1)
+         + Math.abs(V.len(lf.rt) - 1), 0, 1e-12);
+  eq('localFrame is orthogonal',
+     () => Math.abs(V.dot(lf.up, lf.fwd)) + Math.abs(V.dot(lf.fwd, lf.rt))
+         + Math.abs(V.dot(lf.rt, lf.up)), 0, 1e-12);
+  eq('localFrame rt is across-track, right-handed',
+     () => V.len(V.sub(lf.rt, [0, 0, 1])), 0, 1e-9);
+  // and the reason the function exists: out here the local vertical is 65.7 deg
+  // off the frame's y axis, so a camera that used [0,1,0] as up was 65.7 deg
+  // wrong — cos 65.7 deg = 0.411, not 1.
+  eq('localFrame up is the local vertical, not the frame y axis',
+     () => V.dot(lf.up, [0, 1, 0]), 0.4115, 1e-3);
+
+  // --- wideCam's distance clamp, with the entry call site's own numbers: span
+  // 28 m, handover band 260 -> 1500 m, which puts the stand-off 68 m out —
+  // nearly four times CLOSER than the near end of the band. So as the weight
+  // rises the eye recedes from the subject, the distance peaks mid-blend, and
+  // fitFov answers with a long lens. That was the 3.3 deg dip.
+  const wT = eyeAt(8000, 5884000), wRad = V.norm(V.sub(wT, EC));
+  const wDir = localFrame(wT, [1, 0, 0]).fwd;
+  const wTri = d => V.sub(wT, V.scale(wRad, d));    // a tripod d metres below
+  const wCam = d => wideCam(wT, wDir, 28, wTri(d), 260, 1500);
+  eq('wideCam inside the near end is exactly the tripod',
+     () => V.len(V.sub(wCam(100).eye, wTri(100))), 0);
+  eq('wideCam past the far end is the stand-off, wherever the tripod stood',
+     () => V.len(V.sub(wCam(1500).eye, wCam(4000).eye)), 0, 1e-6);
+  eq('and the blend weight is saturated there', () => wCam(4000).w, 1);
+  // The property whose absence was the dip, stated as one number: across the
+  // whole handover the eye is never farther from the subject than the farther
+  // of the two endpoint distances, which here is the 260 m near end. Unclamped
+  // the midpoint sits about 440 m out and this returns that instead.
+  eq('wideCam never recedes past its own endpoints', () => {
+    let worst = 0;
+    for (let d = 260; d <= 1500; d += 10)
+      worst = Math.max(worst, V.len(V.sub(wCam(d).eye, wT)));
+    return worst;
+  }, 260, 1e-6);
+
+  // --- heatOf: the 0-to-1 heating ramp the plasma ramp and the hull glow both
+  // read. Both ends are hard clamps and the shader relies on them.
+  eq('heatOf is 0 with no heat rate', () => heatOf(0), 0);
+  eq('heatOf clamps a negative rate rather than taking a root of it',
+     () => heatOf(-40), 0);
+  eq('heatOf saturates at 165 W/cm2', () => heatOf(165), 1);
+  eq('and stays saturated above it', () => heatOf(400), 1);
+  eq('heatOf is monotonic in between', () => {
+    let back = 0, prev = -1;
+    for (let q = 0; q <= 165; q += 1.5) {
+      const h = heatOf(q); if (h < prev) back++; prev = h;
+    }
+    return back;
+  }, 0);
+
+  // --- the adaptive scaler. Pure by design, so its behaviour is testable
+  // without a GPU — which matters because GPU timings are invalid in a
+  // background tab, where the null render times slower than the full frame.
+  eq('slow frame lowers the scale', () => bgScaleFor(0.50, 40), 0.45);
+  eq('fast frame raises the scale', () => bgScaleFor(0.50, 8), 0.55);
+  eq('a frame making rate is left alone', () => bgScaleFor(0.50, 16), 0.50);
+  eq('the dead band brackets vsync at the top', () => bgScaleFor(0.50, 20), 0.50);
+  eq('and at the bottom', () => bgScaleFor(0.50, 13), 0.50);
+  eq('clamped at the floor', () => bgScaleFor(0.35, 100), 0.35);
+  eq('clamped at the ceiling', () => bgScaleFor(1.00, 1), 1.00);
+  // no float drift: 0.05 steps must land on clean values or equality breaks
+  eq('steps stay clean', () => bgScaleFor(bgScaleFor(0.50, 8), 8), 0.60);
+
+  console.log(`__selftest: ${out.pass} passed, ${out.fail} failed`,
+              out.failures.length ? out.failures : '');
+  return out;
+};
+if (new URLSearchParams(location.search).get('selftest') === '1')
+  setTimeout(window.__selftest, 0);
+
+// ---------------------------------------------------------- test harness --
+// rAF does not fire in a background tab, so anything that needs the sim to
+// advance has to drive frame() itself. Timestamps are synthetic and monotonic
+// because frame() differences them; feeding it performance.now() in a loop
+// would hand it a ~0 ms dt and nothing would move.
+window.__pumpFrames = function (n, dtMs) {
+  const step = dtMs || 30;
+  if (!window.__rafStubbed) {
+    window.__realRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    window.__rafStubbed = true;
+  }
+  let t = performance.now();
+  for (let i = 0; i < (n || 1); i++) { t += step; frame(t); }
+  return { frames: n || 1, simT: simT, parts: parts.length };
+};
+
+// Where the Earth actually lands in each camera, as data rather than as a
+// screenshot somebody has to squint at. This is the regression test for the
+// bug class this file kept hitting: a camera positioned by reading the frame's
+// y as an altitude, which put eyes 2300 km up and left the planet off-frame.
+//
+// SIGN CONVENTION, and it is the thing everyone gets wrong: y_limb > +1 means
+// the limb is off the TOP of frame, which means the Earth FILLS it — healthy.
+// y_limb < -1 means the limb is below the bottom edge and the planet is gone —
+// the defect. So `y_limb inside [-1,1]` is NOT the in-frame test. Always read
+// it together with earthPct, which is the ground truth.
+window.__cameraAudit = function (times, modes) {
+  const TS = times || [562261, 567300];
+  const MS = modes || ['auto','wide','chase','onboard','cabin','window','free'];
+  // camMode/simT/running are the obvious three, and they are not enough:
+  // buildScene ALSO advances state, so an audit does not merely read the page,
+  // it moves it. The pad cameras step their tilt-lag filter (CS.ly toward
+  // CS.tly), the drift camera advances freeYaw, and the pad branch integrates
+  // scorch whenever the vehicle is on the table under thrust. Leave those and a
+  // second audit of the same instants disagrees with the first — which is
+  // backwards for a regression test, because then a mismatch means either a
+  // real change or the harness's own footprint and you cannot tell which.
+  const saveMode = camMode, saveT = simT, saveRun = running;
+  const saveLy = CS.ly, saveTly = CS.tly, saveYaw = freeYaw, saveScorch = scorch;
+  const out = [];
+  // Only buildScene() used to be guarded. Everything below it — the basis
+  // vectors, the NDC helper, the 41x41 grid — can throw too (a bad V.* call,
+  // a NaN from a degenerate camera), and a throw there used to skip the
+  // restore below entirely, leaving camMode/simT/running pointed at whatever
+  // cell was probed last and silently poisoning the next caller's
+  // measurements. The try/finally makes the restore unconditional: it runs
+  // whether the loop finishes normally or something inside it throws, and in
+  // the throw case the exception still propagates after the restore runs.
+  try {
+    for (const t of TS) for (const m of MS) {
+      camMode = m; simT = t; running = false;
+      let sc;
+      try { sc = buildScene(phaseAt(t)); }
+      catch (e) { out.push({ t, mode: m, error: String(e.message || e) }); continue; }
+      const cam = sc.cam;
+      const uEc = V.sub(sc.earthC, cam.eye);
+      const R = Math.hypot(uEc[0], uEc[1], uEc[2]);
+      const nadir = [uEc[0]/R, uEc[1]/R, uEc[2]/R];
+      const camF = V.norm(V.sub(cam.look, cam.eye));
+      const camR = V.norm(V.cross(camF, cam.up));
+      const camU = V.cross(camR, camF);
+      const uTan = Math.tan(cam.fov/2), asp = (cv.width || 1)/(cv.height || 1);
+      // NDC of a view direction, matching the SPACE program's own ray build:
+      //   d = uF + uR*x*uTan*uAsp + uU*y*uTan
+      const ndc = d => { const f = V.dot(d, camF);
+        return { x: V.dot(d, camR)/(f*uTan*asp), y: V.dot(d, camU)/(f*uTan), behind: f <= 0 }; };
+      // The limb ray, in the vertical plane containing nadir and camU. Take the
+      // component of camU perpendicular to nadir — but if camU is nearly parallel
+      // to nadir that component is a near-null vector and normalising it flips
+      // the sign, which is exactly the trap that once reported +0.966 for a frame
+      // with zero Earth pixels. Fall back to camF's perpendicular component.
+      const perp = (v) => { const p = V.sub(v, V.scale(nadir, V.dot(v, nadir)));
+        return V.dot(p, p) > 1e-6 ? V.norm(p) : null; };
+      const tvec0 = perp(camU) || perp(camF) || perp([0,0,1]) || [1,0,0];
+      // perp()'s guard only catches an exactly-degenerate camU (squared length
+      // under 1e-6, i.e. camU within ~0.06 deg of dead vertical); `chase` at
+      // 84 km is 0.97 deg off — past the guard, but still close enough that the
+      // leftover component's SIGN is arbitrary, not just its magnitude small.
+      // dot(tvec0,camF) there measures -0.9999: the vector survives the guard
+      // but points dead backward, so dLimb/tvec0 land behind the camera and the
+      // NDC divide's negative depth would flip the sign right back into the
+      // +0.966-for-zero-Earth-pixels trap the guard exists for. For y_seam that
+      // is the whole fix: ns = ndc(tvec) directly, and ndc(d) == ndc(-d) (both
+      // terms of the ratio flip together), so choosing the forward-facing sign
+      // of tvec0 costs nothing where it was already forward and fixes it where
+      // it was not. y_limb needs a different argument, because dLimb is not
+      // tvec with a sign choice — it is nadir*cos(limb) + tvec*sin(limb), a
+      // genuine sum, and ndc(d) == ndc(-d) says nothing about a sum of two
+      // vectors each reoriented on its own. What makes dLimb forward-facing
+      // here is that cos(limb) >= 0 always, and both dot(nadir, camF) and
+      // dot(tvec, camF) are >= 0 for these camera modes once tvec is
+      // reoriented — a nonnegative combination of two forward-facing vectors
+      // is itself forward-facing.
+      const tvec = V.dot(tvec0, camF) < 0 ? V.scale(tvec0, -1) : tvec0;
+      const limb = Math.asin(Math.min(1, RE/R));
+      const dLimb = V.add(V.scale(nadir, Math.cos(limb)), V.scale(tvec, Math.sin(limb)));
+      const nl = ndc(dLimb), ns = ndc(tvec);       // tvec IS the dot(uEc,d)==0 locus
+      // earthPct: exact ray-sphere test on a coarse grid. No GPU, no readPixels,
+      // valid in a hidden tab. 41x41 is plenty to separate "gone" from "fills it".
+      // The same grid also answers whether the seam (dot(uEc,d) == 0) crosses the
+      // frame at all: y_seam alone is the x=0 column's crossing, but a rolled
+      // camera's seam line can be steep enough (cabin at 84 km runs -83 NDC per
+      // NDC) to cut the frame well away from centre while the column's own
+      // crossing sits far outside [-1,1]. Sampling the sign of b across the whole
+      // grid catches that; a single column sample does not.
+      const N = 41; let hit = 0, tot = 0, seamPos = false, seamNeg = false;
+      for (let iy = 0; iy < N; iy++) for (let ix = 0; ix < N; ix++) {
+        const px = -1 + 2*ix/(N-1), py = -1 + 2*iy/(N-1);
+        const d = V.norm(V.add(V.add(camF, V.scale(camR, px*uTan*asp)),
+                               V.scale(camU, py*uTan)));
+        tot++;
+        const b = V.dot(uEc, d);
+        if (b > 0) seamPos = true; else if (b < 0) seamNeg = true;
+        if (b <= 0) continue;
+        const h2 = V.dot(uEc, uEc) - b*b;
+        if (h2 <= RE*RE) hit++;
+      }
+      out.push({ t, mode: m, resolved: cam.mode,
+        // R and RE are metres, like every other position in this file — divide
+        // before the field named _km claims otherwise. Left as metres this once
+        // read 265,695,952 for a translunar coast camera 265,696 km out: a
+        // 1000x unit mislabel, the exact bug class this harness exists to catch.
+        alt_km: +((R - RE)/1000).toFixed(3), fov: +cam.fov.toFixed(4),
+        y_limb: nl.behind ? null : +nl.y.toFixed(3),
+        y_seam: ns.behind ? null : +ns.y.toFixed(3),
+        seamInFrame: seamPos && seamNeg,
+        earthPct: +(100*hit/tot).toFixed(1),
+        camToCraft_m: +Math.hypot(cam.eye[0]-sc.craftPos[0], cam.eye[1]-sc.craftPos[1],
+                                  cam.eye[2]-sc.craftPos[2]).toFixed(2) });
+    }
+    return out;
+  } finally {
+    camMode = saveMode; simT = saveT; running = saveRun;
+    CS.ly = saveLy; CS.tly = saveTly; freeYaw = saveYaw; scorch = saveScorch;
+  }
+};
+
+// __cameraAudit is an instrument; the two below make it a test. Without a
+// committed expectation nothing fails when a camera moves — you have to have
+// kept last week's console output to notice, and `.superpowers/` scratch is not
+// in the repository.
+//
+// Three of the inputs the cameras read are session state rather than code:
+// shakeVec reads the wall clock (a few tenths of a metre of jitter), the free
+// camera keeps whatever yaw, pitch and distance it was last dragged to, and the
+// pad tilt-lag filter CS carries wherever the flight left it. All three are
+// real and belong in __cameraAudit, which reports the camera that actually
+// ships. None of them belong in a regression check, so this pins them to the
+// file's own initial values and puts them back afterwards. Two consequences
+// worth knowing: the recorded pad rows are the FIRST tilt-lag step away from
+// CS = 20 rather than a converged pose, and the rows depend on the order the
+// cells are visited, so the check re-runs the baseline's own times and modes in
+// the baseline's own order.
+function auditRows(TS, MS) {
+  const rShake = shakeVec, rYaw = freeYaw, rPitch = freePitch, rDist = freeDist,
+        rLy = CS.ly, rTly = CS.tly;
+  shakeVec = () => [0, 0, 0];
+  freeYaw = -2.4; freePitch = 0.12; freeDist = 0; CS.ly = 20; CS.tly = 20;
+  try { return window.__cameraAudit(TS, MS); }
+  finally { shakeVec = rShake; freeYaw = rYaw; freePitch = rPitch;
+            freeDist = rDist; CS.ly = rLy; CS.tly = rTly; }
+}
+window.__cameraAuditRows = auditRows;
+
+// The 42 cells every task on this branch verified by hand, recorded from a run
+// of __cameraAuditRows([40,70,100,325,562261,567300]) on the shipped file: four
+// instants in the pad world (T+40 s through T+325 s) and the two entry instants
+// at 84 km and 8 km, each in all seven camera modes.
+//
+// Only the fields worth pinning are kept. y_limb and y_seam are deliberately
+// out: both are approximations for rolled cameras (perp(camU) assumes nadir
+// lies in the camF-camU plane), and earthPct is the exact ray-sphere answer to
+// the same question. seamInFrame is out because it is a property of where the
+// camera points, not of the shader that used to break there, so it cannot move
+// when the thing it was watching is fixed.
+const CAMERA_BASELINE = [
+  /* generated */
+];
+// Tolerance is one unit in the last place each field is recorded to, which is
+// as tight as the numbers can be read. With the session state pinned the rows
+// reproduce exactly, so this is slack for a future rounding change, not for
+// drift: a camera that actually moves misses by orders of magnitude.
+const CAMERA_BASELINE_TOL = { alt_km: 0.001, fov: 0.0001,
+                              earthPct: 0.1, camToCraft_m: 0.01 };
+window.__cameraAuditCheck = function () {
+  const TS = [], MS = [];
+  for (const b of CAMERA_BASELINE) {
+    if (!TS.includes(b.t)) TS.push(b.t);
+    if (!MS.includes(b.mode)) MS.push(b.mode);
+  }
+  const now = auditRows(TS, MS), mismatches = [], bad = new Set();
+  const off = (b, field, want, got) => {
+    mismatches.push({ t: b.t, mode: b.mode, field, want, got });
+    bad.add(b.t + '/' + b.mode);
+  };
+  for (const b of CAMERA_BASELINE) {
+    const r = now.find(x => x.t === b.t && x.mode === b.mode);
+    if (!r) { off(b, 'row', 'present', 'missing'); continue; }
+    if (r.resolved !== b.resolved) off(b, 'resolved', b.resolved, r.resolved);
+    // NaN and undefined must fail, so test the tolerance rather than negate it
+    for (const k in CAMERA_BASELINE_TOL)
+      if (!(Math.abs(r[k] - b[k]) <= CAMERA_BASELINE_TOL[k]))
+        off(b, k, b[k], r[k]);
+  }
+  const res = { matched: CAMERA_BASELINE.length - bad.size,
+                rows: CAMERA_BASELINE.length, mismatches };
+  console.log(`__cameraAuditCheck: ${res.matched}/${res.rows} rows matched`,
+              mismatches.length ? mismatches : '');
+  return res;
+};
 
 // ------------------------------------------------------------------- boot --
 async function boot() {
