@@ -882,6 +882,7 @@ function handle(sock)
         try
             payload = json(Dict{String,Any}("ok" => false,
                                             "error" => sprint(showerror, err)))
+            status = "500"
             nbytes = sizeof(payload)
             write_response(sock, "500 Internal Server Error",
                            "application/json", payload)
