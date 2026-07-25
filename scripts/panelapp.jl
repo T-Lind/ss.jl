@@ -740,88 +740,136 @@ function run_sweep(p)::Dict{String,Any}
     Dict{String,Any}("ok" => true, "param" => param, "values" => vals, "runs" => runs)
 end
 
-function respond(sock, status, ctype, body)
-    write(sock, "HTTP/1.1 $status\r\nContent-Type: $ctype\r\n" *
-                "Content-Length: $(sizeof(body))\r\nConnection: close\r\n\r\n")
-    write(sock, body)
+# -------------------------------------------------------------- http loop --
+
+"""
+What the page builds its dropdowns from, so the UI can never offer a
+propellant or an engine the simulator does not have.
+"""
+catalogue_payload() = Dict{String,Any}(
+    "propellants" => [Dict("name" => string(k), "bulk" => bulk_density(v))
+                      for (k, v) in sort(collect(PROPELLANTS), by = first)],
+    "engines" => [Dict("name" => string(k),
+                       "thrust_kn" => v.thrust_vac / 1e3,
+                       "isp_vac" => v.isp_vac, "isp_sl" => v.isp_sl,
+                       "mass_kg" => v.mass,
+                       "propellant" => string(v.prop.name))
+                  for (k, v) in sort(collect(ENGINES), by = first)],
+    "solve_metrics" => SOLVE_METRICS,
+    "landing_metrics" => LANDING_METRICS,
+    "max_stages" => 5)
+
+"""
+Read one request. Returns `(method, path, body)`, or `nothing` if the peer
+closed before sending anything — a browser opening and dropping a speculative
+connection is not an error worth answering.
+
+Every parse here is total: a `Content-Length` that is not a number is treated
+as absent rather than thrown, because throwing at this point is what leaves a
+socket unanswered.
+"""
+function read_request(sock)
+    reqline = readline(sock)
+    isempty(reqline) && return nothing
+    parts = split(reqline, ' ')
+    length(parts) < 2 && return ("BAD", "/", "")
+    method, path = String(parts[1]), String(parts[2])
+    clen = 0
+    while true
+        h = readline(sock)
+        (isempty(h) || h == "\r") && break
+        if startswith(lowercase(h), "content-length:")
+            kv = split(h, ':'; limit = 2)
+            clen = something(tryparse(Int, strip(kv[2])), 0)
+        end
+    end
+    body = clen > 0 ? String(read(sock, clen)) : ""
+    (method, path, body)
 end
 
+"Write a complete response. `head` suppresses the body but keeps the headers."
+function write_response(sock, status::AbstractString, ctype::AbstractString,
+                        body::AbstractString; head::Bool = false)
+    write(sock, "HTTP/1.1 $status\r\nContent-Type: $ctype\r\n" *
+                "Content-Length: $(sizeof(body))\r\nConnection: close\r\n\r\n")
+    head || write(sock, body)
+    nothing
+end
+
+"""
+Parse the form and call `f` on it, turning any failure into a result.
+
+This is where the panel's error contract lives: a mission that cannot be
+designed, or a field the user mistyped, is a *200 with `ok: false`* — the
+pages read `j.ok` from a parsed body, so an HTTP error code would give them
+nothing to show. Genuine server faults are the 500 in `handle`.
+"""
+function safe_call(f, body::AbstractString)
+    try
+        f(parse_form(body))
+    catch err
+        Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
+    end
+end
+
+"""
+    route(method, path, body) -> (status, content_type, payload)
+
+Total function: every input produces a response, including an unknown route
+and an unreadable page file.
+"""
+function route(method::AbstractString, path::AbstractString,
+               body::AbstractString)
+    try
+        if method in ("GET", "HEAD") && (path == "/" || startswith(path, "/?"))
+            # re-read per request so page edits show on refresh (dev-friendly)
+            return ("200 OK", "text/html; charset=utf-8", read(PAGE_PATH, String))
+        elseif method in ("GET", "HEAD") &&
+               (path == "/launch" || startswith(path, "/launch?"))
+            return ("200 OK", "text/html; charset=utf-8", read(LAUNCH_PATH, String))
+        elseif method in ("GET", "HEAD") && path == "/api/catalogue"
+            return ("200 OK", "application/json", json(catalogue_payload()))
+        elseif method == "POST" && path == "/api/run"
+            return ("200 OK", "application/json", json(safe_call(panel_mission, body)))
+        elseif method == "POST" && path == "/api/sweep"
+            return ("200 OK", "application/json", json(safe_call(run_sweep, body)))
+        elseif method == "POST" && path == "/api/geometry"
+            return ("200 OK", "application/json", json(safe_call(rocket_geometry, body)))
+        elseif method == "POST" && path == "/api/solve"
+            return ("200 OK", "application/json", json(safe_call(run_solve, body)))
+        end
+        return ("404 Not Found", "application/json",
+                json(Dict{String,Any}("ok" => false,
+                                      "error" => "no route for $method $path")))
+    catch err
+        return ("500 Internal Server Error", "application/json",
+                json(Dict{String,Any}("ok" => false,
+                                      "error" => sprint(showerror, err))))
+    end
+end
+
+"""
+Serve one connection, and answer it whatever happens.
+
+Two layers, because one is not enough: `route` turns any error below it into a
+response, and the `catch` here is the last resort for a failure in `route`'s
+own serialization or in the socket write.
+"""
 function handle(sock)
     try
-        reqline = readline(sock)
-        isempty(reqline) && return
-        parts = split(reqline, ' ')
-        length(parts) < 2 && return
-        method, path = parts[1], parts[2]
-        clen = 0
-        while true
-            h = readline(sock)
-            (isempty(h) || h == "\r") && break
-            if startswith(lowercase(h), "content-length:")
-                clen = parse(Int, strip(split(h, ':')[2]))
-            end
+        req = read_request(sock)
+        req === nothing && return
+        method, path, body = req
+        status, ctype, payload = route(method, path, body)
+        write_response(sock, status, ctype, payload; head = method == "HEAD")
+    catch err
+        try
+            write_response(sock, "500 Internal Server Error", "application/json",
+                           json(Dict{String,Any}("ok" => false,
+                                                 "error" => sprint(showerror, err))))
+        catch
+            # the socket itself is gone; nothing left to say
         end
-        body = clen > 0 ? String(read(sock, clen)) : ""
-
-        if method == "GET" && (path == "/" || startswith(path, "/?"))
-            # re-read per request so page edits show on refresh (dev-friendly)
-            respond(sock, "200 OK", "text/html; charset=utf-8", read(PAGE_PATH, String))
-        elseif method == "GET" && (path == "/launch" || startswith(path, "/launch?"))
-            respond(sock, "200 OK", "text/html; charset=utf-8", read(LAUNCH_PATH, String))
-        elseif method == "POST" && path == "/api/run"
-            p = parse_form(body)
-            out = try
-                panel_mission(p)
-            catch err
-                Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
-            end
-            respond(sock, "200 OK", "application/json", json(out))
-        elseif method == "POST" && path == "/api/sweep"
-            p = parse_form(body)
-            out = try
-                run_sweep(p)
-            catch err
-                Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
-            end
-            respond(sock, "200 OK", "application/json", json(out))
-        elseif method == "POST" && path == "/api/geometry"
-            p = parse_form(body)
-            out = try
-                rocket_geometry(p)
-            catch err
-                Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
-            end
-            respond(sock, "200 OK", "application/json", json(out))
-        elseif method == "POST" && path == "/api/solve"
-            p = parse_form(body)
-            out = try
-                run_solve(p)
-            catch err
-                Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
-            end
-            respond(sock, "200 OK", "application/json", json(out))
-        elseif method == "GET" && path == "/api/catalogue"
-            # the page builds its dropdowns from this, so the UI can never
-            # offer a propellant or engine the simulator does not have
-            out = Dict{String,Any}(
-                "propellants" => [Dict("name" => string(k),
-                                       "bulk" => bulk_density(v))
-                                  for (k, v) in sort(collect(PROPELLANTS), by = first)],
-                "engines" => [Dict("name" => string(k),
-                                   "thrust_kn" => v.thrust_vac / 1e3,
-                                   "isp_vac" => v.isp_vac, "isp_sl" => v.isp_sl,
-                                   "mass_kg" => v.mass,
-                                   "propellant" => string(v.prop.name))
-                              for (k, v) in sort(collect(ENGINES), by = first)],
-                "solve_metrics" => SOLVE_METRICS,
-                "landing_metrics" => LANDING_METRICS,
-                "max_stages" => 5)
-            respond(sock, "200 OK", "application/json", json(out))
-        else
-            respond(sock, "404 Not Found", "text/plain", "not found")
-        end
-    catch
-        # client went away mid-request; nothing to do
     finally
         close(sock)
     end

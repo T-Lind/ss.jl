@@ -76,6 +76,34 @@ end
         @test occursin("propellants", bod)
         @test occursin("engines", bod)
         @test occursin("kerolox", bod)
+
+        # --- a request must always be answered ------------------------------
+        # A malformed percent-escape makes urldecode throw. That used to
+        # happen outside the handler's try block, so the socket closed with
+        # no response at all.
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port, body = "pod_mass=35%ZZ")
+        @test st == 200
+        @test !isempty(bod)
+        @test occursin("\"ok\":false", bod)
+
+        # A field the user typed wrong is a result, not a crash
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port, body = "diameter=not-a-number")
+        @test st == 200
+        @test occursin("\"ok\":false", bod)
+
+        # A request line the server cannot parse still gets an answer
+        st, hdrs, bod = http("BOGUS", "/api/run"; port = port, body = "x=1")
+        @test st == 404
+        @test !isempty(bod)
+
+        # A valid geometry request still works
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port,
+                             body = "nstages=3&nboost=0&diameter=1.8")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
     finally
         PanelApp.stop_panel(srv)
     end
