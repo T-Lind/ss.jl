@@ -97,7 +97,7 @@
 <div class="hud" id="toast"></div>
 <div class="hud" id="backlink"><a href="/">&#8617; mission control</a></div>
 <div id="keys" class="show">
-  <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>m</b> mute</div>
+  <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>m</b> mute · <b>p</b> frame time</div>
   <div>drag to look around in free and cabin views</div>
 </div>
 <div class="hud" id="cams"></div>
@@ -2804,14 +2804,44 @@ const quadBuf = () => buffer(new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,
 let skyBuf, partDyn;
 
 // ------------------------------------------- scaled background target --
-// Measured on an Intel UHD 630 at 2560x1263: the planet/sky pass costs ~84 ms
-// and the cloud deck ~52 ms of a 136.8 ms frame, and everything else in this
-// page — meshes, particles, decals, HUD, the JS integration — costs 0.1 ms
-// together. So the only knob worth turning is how many pixels those two cover.
-// They are also both low-frequency, which is what makes upscaling them cheap in
-// quality terms; the vehicle and its plume, which carry the edges the eye
-// tracks, never leave native resolution.
+// The background passes are the whole frame budget — measured at 84 ms (planet)
+// and 52 ms (cloud deck) of a 136.8 ms frame on an integrated Intel UHD 630,
+// against 0.1 ms for every mesh, particle and HUD draw combined. So the one
+// knob that matters is how many pixels they cover, and the right value is
+// whatever this machine can afford rather than a number hard-coded for one GPU.
+//
+// Starts at 0.5, the value Task 3 shipped and measured as safe, and ramps both
+// ways. Deliberately not starting at 1.0: at full resolution these two passes
+// cost ~136 ms here and forcing that value crashed the renderer during testing.
 let bgScale = 0.5;
+let perfMed = 0, perfShow = false;
+// 13 and 20 ms bracket the 16.7 ms vsync interval, so a frame comfortably making
+// rate is left alone instead of being hunted around it.
+const FRAME_HI = 20, FRAME_LO = 13, BG_MIN = 0.35, BG_MAX = 1.0;
+// Pure, so it can be tested without a GPU: given the current scale and a median
+// frame time, what should the scale become?
+function bgScaleFor(scale, med) {
+  if (med > FRAME_HI) return Math.max(BG_MIN, +(scale - 0.05).toFixed(2));
+  if (med < FRAME_LO) return Math.min(BG_MAX, +(scale + 0.05).toFixed(2));
+  return scale;
+}
+const fWin = [];
+let fHold = 0;
+function perfPush(ms) {
+  // A tab switch, a breakpoint or a GC pause is not a slow frame, and letting
+  // one drive the scale would drop resolution for the rest of the flight.
+  if (!(ms > 0) || ms > 500) return;
+  if (fHold > 0) { fHold--; return; }
+  fWin.push(ms);
+  if (fWin.length < 30) return;
+  const s = fWin.slice().sort((a, b) => a - b);
+  perfMed = s[Math.floor(s.length/2)];
+  fWin.length = 0;
+  const next = bgScaleFor(bgScale, perfMed);
+  // After a change, ignore 30 frames: the new resolution has to be in effect
+  // before it is judged, or the scale chases its own last decision.
+  if (next !== bgScale) { bgScale = next; fHold = 30; }
+}
 let bgFB = null, bgTex = null, bgDepth = null, bgW = 0, bgH = 0;
 function bgTarget(w, h) {
   if (bgFB && bgW === w && bgH === h) return;
@@ -3620,9 +3650,11 @@ function buildToasts() {
 
 function frame(now) {
   requestAnimationFrame(frame);
-  const dtReal = Math.min(0.05, (now - lastNow)/1000 || 0.016);
+  const raw = now - lastNow;
+  const dtReal = Math.min(0.05, raw/1000 || 0.016);
   lastNow = now;
   if (!started) return;
+  perfPush(raw);
 
   const ph = phaseAt(simT);
   if (frame._ph !== ph.n) {
@@ -4268,6 +4300,9 @@ function drawHUD(sc, ph) {
             ['HEATING', es.q.toFixed(0) + ' W/cm²'],
             ['CAMERA', sc.cam.mode.toUpperCase()]];
   }
+  if (perfShow)
+    rows = rows.concat([['FRAME', perfMed ? perfMed.toFixed(1) + ' ms' : '—'],
+                        ['BG SCALE', bgScale.toFixed(2)]]);
   $('stats').innerHTML = rows.map(r => `<b>${r[0]}</b><span>${r[1]}</span>`).join('<br>');
 }
 // phase-segmented timeline (equal width per phase — a broken time axis)
@@ -4385,6 +4420,7 @@ function initControls() {
       chipRow($('cams'), CAMS, camMode, m => camMode = m);
     }
     if (e.key === 'm') muted = !muted;
+    if (e.key === 'p') perfShow = !perfShow;
   });
 }
 
@@ -4492,6 +4528,19 @@ window.__selftest = function () {
      () => deckFade(7000, 7000, 100000), 0);
   eq('range gate still fires regardless of the two heights',
      () => deckFade(7000, 5234, 150001), 0);
+
+  // --- the adaptive scaler. Pure by design, so its behaviour is testable
+  // without a GPU — which matters because GPU timings are invalid in a
+  // background tab, where the null render times slower than the full frame.
+  eq('slow frame lowers the scale', () => bgScaleFor(0.50, 40), 0.45);
+  eq('fast frame raises the scale', () => bgScaleFor(0.50, 8), 0.55);
+  eq('a frame making rate is left alone', () => bgScaleFor(0.50, 16), 0.50);
+  eq('the dead band brackets vsync at the top', () => bgScaleFor(0.50, 20), 0.50);
+  eq('and at the bottom', () => bgScaleFor(0.50, 13), 0.50);
+  eq('clamped at the floor', () => bgScaleFor(0.35, 100), 0.35);
+  eq('clamped at the ceiling', () => bgScaleFor(1.00, 1), 1.00);
+  // no float drift: 0.05 steps must land on clean values or equality breaks
+  eq('steps stay clean', () => bgScaleFor(bgScaleFor(0.50, 8), 8), 0.60);
 
   console.log(`__selftest: ${out.pass} passed, ${out.fail} failed`,
               out.failures.length ? out.failures : '');
