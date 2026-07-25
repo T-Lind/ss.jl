@@ -810,6 +810,16 @@ cover exterior, onboard and in-cabin views:
   The director cuts inside when the fairing splits and daylight first
   reaches the cabin, and again through peak heating.
 
+Press `p` in the launch view to show the frame time and the background
+render scale. The planet/sky and cloud-deck shaders are the entire frame
+budget — measured at 84 ms and 52 ms of a 136.8 ms frame on an integrated
+Intel UHD 630, against 0.1 ms for every mesh, particle and HUD draw combined
+— so those two passes render into an offscreen target at a fraction of
+native resolution while the vehicle stays sharp at full resolution. The
+scale adapts to hold ~60 fps: on the machine this was developed against it
+settles at 0.35 and the frame comes in at 17.5 ms, down from 136.8 ms. Lower
+means a softer sky, never a softer vehicle.
+
 The **sky** is a procedural star catalogue rather than a texture. Stars sit
 at hashed positions inside a cube-face cell grid and are drawn as smooth
 points whose angular radius is tied to the *pixel* solid angle, which is the

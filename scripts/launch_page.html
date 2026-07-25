@@ -297,6 +297,16 @@ float fbmL(vec3 p, float f, float lod, int oct){
 // is stable in inertial space and identical on every machine.
 const STARS_GLSL = `
 uniform float uPxA;                        // angular size of one pixel [rad]
+// Stars are the one thing in here that must NOT band-limit against uPxA. Every
+// other reader of uPxA is a fractal whose sampling density genuinely tracks the
+// render target — coarser buffer, coarser noise, cheaper pass, correct. A star
+// is a point feature with a fixed on-screen size; when the adaptive scaler
+// moves the target resolution, uPxA moves with it, and the cull below would
+// pop stars in and out every time bgScale steps, worst during a coast where
+// the whole frame is the upscaled blit. uPxN is fed from the NATIVE canvas
+// height instead, so the star population and their pixel size stay fixed no
+// matter what the scaler is doing to the render target underneath them.
+uniform float uPxN;                        // angular size of one pixel [rad], NATIVE height
 uniform float uT;                          // seconds, for scintillation
 vec3 h33(vec3 p){
   p = vec3(dot(p, vec3(127.1, 311.7,  74.7)),
@@ -369,7 +379,7 @@ vec3 starField(vec3 d, float air, out float mw){
   // the pixels get smaller, the way a longer lens reaches deeper. Brightness
   // is then measured FROM that limit, so the visible population always spans
   // the full range instead of collapsing to a handful of equally bright dots.
-  float lim = 0.90*smoothstep(0.00016, 0.0013, uPxA);
+  float lim = 0.90*smoothstep(0.00016, 0.0013, uPxN);
   for (int i = -1; i <= 1; i++) {
     for (int j = -1; j <= 1; j++) {
       vec2 c = gi + vec2(float(i), float(j));
@@ -393,7 +403,7 @@ vec3 starField(vec3 d, float air, out float mw){
       // at the search boundary is what turns a halo into a square block. Past
       // that cap the disc holds still and brightness carries the extra flux,
       // which is what an unresolved point source does anyway.
-      float want = uPxA*(0.80 + 0.70*mag);
+      float want = uPxN*(0.80 + 0.70*mag);
       float rad = min(want, CELL*0.22);
       float bright = (0.05 + 1.90*mag)*min(4.0, (want*want)/(rad*rad));
       float core = exp(-(ang*ang)/(rad*rad));
@@ -2847,7 +2857,6 @@ function bgTarget(w, h) {
   if (bgFB && bgW === w && bgH === h) return;
   if (!bgFB) { bgFB = gl.createFramebuffer(); bgTex = gl.createTexture();
                bgDepth = gl.createRenderbuffer(); }
-  bgW = w; bgH = h;
   gl.bindTexture(gl.TEXTURE_2D, bgTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   // LINEAR, because this texture exists to be magnified
@@ -2863,8 +2872,15 @@ function bgTarget(w, h) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, bgFB);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bgTex, 0);
   gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, bgDepth);
+  // bgW/bgH are the early-return guard above, so they must only become true
+  // once the framebuffer actually IS w x h. Set them before this check passed
+  // and a throw here (caught by some outer frame loop, so the page keeps
+  // running) leaves bgFB non-null with the guard already satisfied — every
+  // later call for the same size returns immediately, never rechecks status,
+  // and the incomplete FBO renders silently forever. Only claim victory here.
   if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
     throw new Error('background framebuffer incomplete at ' + w + 'x' + h);
+  bgW = w; bgH = h;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 const BLIT = program(`
@@ -3949,8 +3965,9 @@ function spawnEntry(dt, es) {
 // The planet pass (Earth + Moon + sky + stars), camera-relative in f64. Its own
 // function because it no longer draws where everything else does: it goes into
 // the scaled background target, so it needs to be told which height to
-// band-limit against.
-function drawPlanet(sc, cam, sun, asp, pxH, deck) {
+// band-limit against — and, separately, the native height the starfield uses
+// instead (see uPxN above).
+function drawPlanet(sc, cam, sun, asp, pxH, pxN, deck) {
   gl.useProgram(SPACE.p);
   gl.depthMask(false);
   const camF = V.norm(V.sub(cam.look, cam.eye));
@@ -3968,6 +3985,10 @@ function drawPlanet(sc, cam, sun, asp, pxH, deck) {
   // drops those octaves, which is why the smaller target comes out cheaper than
   // its pixel count alone predicts.
   gl.uniform1f(SPACE.u.uPxA, 2*Math.tan(cam.fov/2)/pxH);
+  // Same angular-size-of-a-pixel formula, but off the native canvas height, so
+  // the starfield's cull and sizing hold still while uPxA above rides the
+  // scaler up and down with the render target.
+  gl.uniform1f(SPACE.u.uPxN, 2*Math.tan(cam.fov/2)/pxN);
   // scintillation runs on the wall clock, not the (warpable) mission clock
   gl.uniform1f(SPACE.u.uT, performance.now()/1000);
   gl.uniform3fv(SPACE.u.uEc, V.sub(sc.earthC, cam.eye));
@@ -4149,7 +4170,7 @@ function drawScene(sc) {
   // more visible than it sounds. The sky is behind everything by construction,
   // so it has no business consulting depth at all.
   gl.disable(gl.DEPTH_TEST);
-  drawPlanet(sc, cam, sun, asp, sh, deck);
+  drawPlanet(sc, cam, sun, asp, sh, h, deck);
   gl.enable(gl.DEPTH_TEST);
   if (deck > 0) drawClouds(sc, view, proj, fogCol, fogDen, deck);
 
@@ -4581,81 +4602,100 @@ window.__cameraAudit = function (times, modes) {
   const MS = modes || ['auto','wide','chase','onboard','cabin','window','free'];
   const saveMode = camMode, saveT = simT, saveRun = running;
   const out = [];
-  for (const t of TS) for (const m of MS) {
-    camMode = m; simT = t; running = false;
-    let sc;
-    try { sc = buildScene(phaseAt(t)); }
-    catch (e) { out.push({ t, mode: m, error: String(e.message || e) }); continue; }
-    const cam = sc.cam;
-    const uEc = V.sub(sc.earthC, cam.eye);
-    const R = Math.hypot(uEc[0], uEc[1], uEc[2]);
-    const nadir = [uEc[0]/R, uEc[1]/R, uEc[2]/R];
-    const camF = V.norm(V.sub(cam.look, cam.eye));
-    const camR = V.norm(V.cross(camF, cam.up));
-    const camU = V.cross(camR, camF);
-    const uTan = Math.tan(cam.fov/2), asp = (cv.width || 1)/(cv.height || 1);
-    // NDC of a view direction, matching the SPACE program's own ray build:
-    //   d = uF + uR*x*uTan*uAsp + uU*y*uTan
-    const ndc = d => { const f = V.dot(d, camF);
-      return { x: V.dot(d, camR)/(f*uTan*asp), y: V.dot(d, camU)/(f*uTan), behind: f <= 0 }; };
-    // The limb ray, in the vertical plane containing nadir and camU. Take the
-    // component of camU perpendicular to nadir — but if camU is nearly parallel
-    // to nadir that component is a near-null vector and normalising it flips
-    // the sign, which is exactly the trap that once reported +0.966 for a frame
-    // with zero Earth pixels. Fall back to camF's perpendicular component.
-    const perp = (v) => { const p = V.sub(v, V.scale(nadir, V.dot(v, nadir)));
-      return V.dot(p, p) > 1e-6 ? V.norm(p) : null; };
-    const tvec0 = perp(camU) || perp(camF) || perp([0,0,1]) || [1,0,0];
-    // perp()'s guard only catches an exactly-degenerate camU (squared length
-    // under 1e-6, i.e. camU within ~0.06 deg of dead vertical); `chase` at
-    // 84 km is 0.97 deg off — past the guard, but still close enough that the
-    // leftover component's SIGN is arbitrary, not just its magnitude small.
-    // dot(tvec0,camF) there measures -0.9999: the vector survives the guard
-    // but points dead backward, so dLimb/tvec0 land behind the camera and the
-    // NDC divide's negative depth would flip the sign right back into the
-    // +0.966-for-zero-Earth-pixels trap the guard exists for. ndc()'s x and y
-    // are unchanged by negating d (both terms of the ratio flip together), so
-    // reorienting into the forward hemisphere costs nothing where tvec0 was
-    // already forward and fixes it where it was not.
-    const tvec = V.dot(tvec0, camF) < 0 ? V.scale(tvec0, -1) : tvec0;
-    const limb = Math.asin(Math.min(1, RE/R));
-    const dLimb = V.add(V.scale(nadir, Math.cos(limb)), V.scale(tvec, Math.sin(limb)));
-    const nl = ndc(dLimb), ns = ndc(tvec);       // tvec IS the dot(uEc,d)==0 locus
-    // earthPct: exact ray-sphere test on a coarse grid. No GPU, no readPixels,
-    // valid in a hidden tab. 41x41 is plenty to separate "gone" from "fills it".
-    // The same grid also answers whether the seam (dot(uEc,d) == 0) crosses the
-    // frame at all: y_seam alone is the x=0 column's crossing, but a rolled
-    // camera's seam line can be steep enough (cabin at 84 km runs -83 NDC per
-    // NDC) to cut the frame well away from centre while the column's own
-    // crossing sits far outside [-1,1]. Sampling the sign of b across the whole
-    // grid catches that; a single column sample does not.
-    const N = 41; let hit = 0, tot = 0, seamPos = false, seamNeg = false;
-    for (let iy = 0; iy < N; iy++) for (let ix = 0; ix < N; ix++) {
-      const px = -1 + 2*ix/(N-1), py = -1 + 2*iy/(N-1);
-      const d = V.norm(V.add(V.add(camF, V.scale(camR, px*uTan*asp)),
-                             V.scale(camU, py*uTan)));
-      tot++;
-      const b = V.dot(uEc, d);
-      if (b > 0) seamPos = true; else if (b < 0) seamNeg = true;
-      if (b <= 0) continue;
-      const h2 = V.dot(uEc, uEc) - b*b;
-      if (h2 <= RE*RE) hit++;
+  // Only buildScene() used to be guarded. Everything below it — the basis
+  // vectors, the NDC helper, the 41x41 grid — can throw too (a bad V.* call,
+  // a NaN from a degenerate camera), and a throw there used to skip the
+  // restore below entirely, leaving camMode/simT/running pointed at whatever
+  // cell was probed last and silently poisoning the next caller's
+  // measurements. The try/finally makes the restore unconditional: it runs
+  // whether the loop finishes normally or something inside it throws, and in
+  // the throw case the exception still propagates after the restore runs.
+  try {
+    for (const t of TS) for (const m of MS) {
+      camMode = m; simT = t; running = false;
+      let sc;
+      try { sc = buildScene(phaseAt(t)); }
+      catch (e) { out.push({ t, mode: m, error: String(e.message || e) }); continue; }
+      const cam = sc.cam;
+      const uEc = V.sub(sc.earthC, cam.eye);
+      const R = Math.hypot(uEc[0], uEc[1], uEc[2]);
+      const nadir = [uEc[0]/R, uEc[1]/R, uEc[2]/R];
+      const camF = V.norm(V.sub(cam.look, cam.eye));
+      const camR = V.norm(V.cross(camF, cam.up));
+      const camU = V.cross(camR, camF);
+      const uTan = Math.tan(cam.fov/2), asp = (cv.width || 1)/(cv.height || 1);
+      // NDC of a view direction, matching the SPACE program's own ray build:
+      //   d = uF + uR*x*uTan*uAsp + uU*y*uTan
+      const ndc = d => { const f = V.dot(d, camF);
+        return { x: V.dot(d, camR)/(f*uTan*asp), y: V.dot(d, camU)/(f*uTan), behind: f <= 0 }; };
+      // The limb ray, in the vertical plane containing nadir and camU. Take the
+      // component of camU perpendicular to nadir — but if camU is nearly parallel
+      // to nadir that component is a near-null vector and normalising it flips
+      // the sign, which is exactly the trap that once reported +0.966 for a frame
+      // with zero Earth pixels. Fall back to camF's perpendicular component.
+      const perp = (v) => { const p = V.sub(v, V.scale(nadir, V.dot(v, nadir)));
+        return V.dot(p, p) > 1e-6 ? V.norm(p) : null; };
+      const tvec0 = perp(camU) || perp(camF) || perp([0,0,1]) || [1,0,0];
+      // perp()'s guard only catches an exactly-degenerate camU (squared length
+      // under 1e-6, i.e. camU within ~0.06 deg of dead vertical); `chase` at
+      // 84 km is 0.97 deg off — past the guard, but still close enough that the
+      // leftover component's SIGN is arbitrary, not just its magnitude small.
+      // dot(tvec0,camF) there measures -0.9999: the vector survives the guard
+      // but points dead backward, so dLimb/tvec0 land behind the camera and the
+      // NDC divide's negative depth would flip the sign right back into the
+      // +0.966-for-zero-Earth-pixels trap the guard exists for. For y_seam that
+      // is the whole fix: ns = ndc(tvec) directly, and ndc(d) == ndc(-d) (both
+      // terms of the ratio flip together), so choosing the forward-facing sign
+      // of tvec0 costs nothing where it was already forward and fixes it where
+      // it was not. y_limb needs a different argument, because dLimb is not
+      // tvec with a sign choice — it is nadir*cos(limb) + tvec*sin(limb), a
+      // genuine sum, and ndc(d) == ndc(-d) says nothing about a sum of two
+      // vectors each reoriented on its own. What makes dLimb forward-facing
+      // here is that cos(limb) >= 0 always, and both dot(nadir, camF) and
+      // dot(tvec, camF) are >= 0 for these camera modes once tvec is
+      // reoriented — a nonnegative combination of two forward-facing vectors
+      // is itself forward-facing.
+      const tvec = V.dot(tvec0, camF) < 0 ? V.scale(tvec0, -1) : tvec0;
+      const limb = Math.asin(Math.min(1, RE/R));
+      const dLimb = V.add(V.scale(nadir, Math.cos(limb)), V.scale(tvec, Math.sin(limb)));
+      const nl = ndc(dLimb), ns = ndc(tvec);       // tvec IS the dot(uEc,d)==0 locus
+      // earthPct: exact ray-sphere test on a coarse grid. No GPU, no readPixels,
+      // valid in a hidden tab. 41x41 is plenty to separate "gone" from "fills it".
+      // The same grid also answers whether the seam (dot(uEc,d) == 0) crosses the
+      // frame at all: y_seam alone is the x=0 column's crossing, but a rolled
+      // camera's seam line can be steep enough (cabin at 84 km runs -83 NDC per
+      // NDC) to cut the frame well away from centre while the column's own
+      // crossing sits far outside [-1,1]. Sampling the sign of b across the whole
+      // grid catches that; a single column sample does not.
+      const N = 41; let hit = 0, tot = 0, seamPos = false, seamNeg = false;
+      for (let iy = 0; iy < N; iy++) for (let ix = 0; ix < N; ix++) {
+        const px = -1 + 2*ix/(N-1), py = -1 + 2*iy/(N-1);
+        const d = V.norm(V.add(V.add(camF, V.scale(camR, px*uTan*asp)),
+                               V.scale(camU, py*uTan)));
+        tot++;
+        const b = V.dot(uEc, d);
+        if (b > 0) seamPos = true; else if (b < 0) seamNeg = true;
+        if (b <= 0) continue;
+        const h2 = V.dot(uEc, uEc) - b*b;
+        if (h2 <= RE*RE) hit++;
+      }
+      out.push({ t, mode: m, resolved: cam.mode,
+        // R and RE are metres, like every other position in this file — divide
+        // before the field named _km claims otherwise. Left as metres this once
+        // read 265,695,952 for a translunar coast camera 265,696 km out: a
+        // 1000x unit mislabel, the exact bug class this harness exists to catch.
+        alt_km: +((R - RE)/1000).toFixed(3), fov: +cam.fov.toFixed(4),
+        y_limb: nl.behind ? null : +nl.y.toFixed(3),
+        y_seam: ns.behind ? null : +ns.y.toFixed(3),
+        seamInFrame: seamPos && seamNeg,
+        earthPct: +(100*hit/tot).toFixed(1),
+        camToCraft_m: +Math.hypot(cam.eye[0]-sc.craftPos[0], cam.eye[1]-sc.craftPos[1],
+                                  cam.eye[2]-sc.craftPos[2]).toFixed(2) });
     }
-    out.push({ t, mode: m, resolved: cam.mode,
-      // R and RE are metres, like every other position in this file — divide
-      // before the field named _km claims otherwise. Left as metres this once
-      // read 265,695,952 for a translunar coast camera 265,696 km out: a
-      // 1000x unit mislabel, the exact bug class this harness exists to catch.
-      alt_km: +((R - RE)/1000).toFixed(3), fov: +cam.fov.toFixed(4),
-      y_limb: nl.behind ? null : +nl.y.toFixed(3),
-      y_seam: ns.behind ? null : +ns.y.toFixed(3),
-      seamInFrame: seamPos && seamNeg,
-      earthPct: +(100*hit/tot).toFixed(1),
-      camToCraft_m: +Math.hypot(cam.eye[0]-sc.craftPos[0], cam.eye[1]-sc.craftPos[1],
-                                cam.eye[2]-sc.craftPos[2]).toFixed(2) });
+    return out;
+  } finally {
+    camMode = saveMode; simT = saveT; running = saveRun;
   }
-  camMode = saveMode; simT = saveT; running = saveRun;
-  return out;
 };
 
 // ------------------------------------------------------------------- boot --
