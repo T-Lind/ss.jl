@@ -188,7 +188,9 @@
     </div>
 
     <div class="card" id="card_launcher">
-      <h2 class="fold">Launcher <span class="count" id="lv_count"></span></h2>
+      <h2 class="fold">Launcher <span class="count" id="lv_count"></span>
+        <span class="chip" id="buildbtn" style="float:right;font-weight:normal"
+              title="open the vehicle builder — key B">&#128736; vehicle builder</span></h2>
       <div class="row">
         <div><label for="nstages">stages</label>
           <select id="nstages">
@@ -241,6 +243,7 @@
         <span><span class="kbd">F</span></span><span>inertial ⇄ rotating frame</span>
         <span><span class="kbd">E</span> <span class="kbd">Z</span></span><span>zoom to Earth / fit the whole trajectory</span>
         <span><span class="kbd">L</span></span><span>open the cinematic launch view</span>
+        <span><span class="kbd">B</span></span><span>open the vehicle builder</span>
       </div>
       <div class="sub" style="margin:8px 0 0">drag the 3D views to orbit the
         camera, scroll to zoom. Everything on this page is a live run of the
@@ -424,6 +427,20 @@ function syncSizeBy() {
       auto.parentElement.style.opacity = eng ? 1 : 0.45;
       $(p + 'dry').disabled = eng && auto.checked;
       $(p + 'dry').style.opacity = eng && auto.checked ? 0.45 : 1;
+    }
+    // A named engine owns its mixture — the server now rejects a form that
+    // says otherwise — so the mixture select follows the engine and locks.
+    // This is what keeps every preset and every stale dropdown honest: the
+    // form can no longer show a propellant the server is not flying.
+    const mix = $(p + 'propellant');
+    if (mix) {
+      if (eng) {
+        const cat = (CATALOGUE.engines || []).find(e => e.name === $(p + 'engine').value);
+        if (cat) mix.value = cat.propellant;
+      }
+      mix.disabled = eng;
+      mix.style.opacity = eng ? 0.45 : 1;
+      mix.title = eng ? 'set by the engine — a named engine owns its mixture' : '';
     }
   }
 }
@@ -715,7 +732,8 @@ const VEHICLES = {
   },
   'hydrolox upper': {
     nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
-    s2_engine: 'rl10b2', s2_engines: 1, s2_prop: 9500, s2_dry_auto: true,
+    s2_engine: 'rl10b2', s2_propellant: 'hydrolox', s2_engines: 1, s2_prop: 9500,
+    s2_dry_auto: true,
   },
 };
 let DEFAULTS = null;         // captured from the page's initial values
@@ -1869,6 +1887,12 @@ $('launchbtn').onclick = () => {
   u.set('mode', 'flyby');
   window.open('/launch?' + u, '_blank');
 };
+// the builder opens on this form's exact configuration; stopPropagation
+// because the chip lives inside a fold header that would otherwise collapse
+$('buildbtn').onclick = e => {
+  e.stopPropagation();
+  window.open('/build?' + params(), '_blank');
+};
 for (const f of ['l_dry','l_prop','l_isp','l_thrust_kn'])
   $(f).addEventListener('input', updateLanderNote);
 // keyboard: the timeline and the camera are things you drive, not click
@@ -1883,6 +1907,7 @@ window.addEventListener('keydown', e => {
   else if (k === 'e') { moonView = false; autoFit = false; camDist = 30; }
   else if (k === 'z') { moonView = false; autoFit = true; fitCamera(); }
   else if (k === 'l') $('launchbtn').click();
+  else if (k === 'b') $('buildbtn').click();
   else if (k === 'm' && landing()) $('moonview').click();
 });
 const scene = $('scene');
@@ -1958,6 +1983,23 @@ fillCatalogues().then(() => {
   if (landing()) {
     VNAME = 'Starship';
     applyPreset(VEHICLES['Starship (expendable)'], { reset: true });
+  }
+  // Rehydrate the whole form from an inbound query — this is how a vehicle
+  // configured on /build comes back to mission control. Stack shape first,
+  // because nstages/nboost decide which stage fields exist to fill, and only
+  // AFTER the landing preset above, which this deliberately overrides: an
+  // explicit configuration in the URL outranks a mode default.
+  const q = new URLSearchParams(location.search);
+  if ([...q.keys()].some(k => k !== 'mode' && k !== 'zoom')) {
+    if (q.has('nstages')) setField('nstages', q.get('nstages'));
+    if (q.has('nboost')) setField('nboost', q.get('nboost'));
+    buildStages();
+    for (const [k, v] of q) {
+      if (['mode', 'zoom', 'nstages', 'nboost'].includes(k)) continue;
+      if (k === 'vname') { VNAME = v; continue; }
+      setField(k, v);
+    }
+    syncSizeBy();
   }
   fetchGeo();
   doRun();

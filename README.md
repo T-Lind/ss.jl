@@ -739,6 +739,21 @@ stage 2, and finally the spent kick stage drop away at their actual event
 times, with an engine flame while a stage burns and the view recentering
 on whatever is still flying (down to the bare pod on the return leg).
 
+### Vehicle builder
+
+The **🛠 vehicle builder** chip in the Launcher card (key `B`, or
+`http://localhost:8137/build`) opens the vehicle in its own configuration
+window: the 3D model in the centre — the very mesh `/api/geometry` builds
+from the `LaunchVehicle` the mission flies — with the configuration on the
+left and the derived statistics on the right. Stages can be added and
+removed (2–5, roles relabel as the stack changes), strap-on boosters
+attached 0–8 at a time, and any diameter edited with the model and every
+number updating live. A named engine owns its propellant: picking one
+locks the mixture select to it, and the server rejects a form that names
+both an engine and a different mixture — a Raptor does not burn kerolox.
+The builder opens on the panel's current form, and its **↩ mission
+control** and **🚀 launch view** links carry the configuration back out.
+
 ### Mission experience
 
 The **🚀 launch view** chip (or `http://localhost:8137/launch`) opens a
