@@ -135,6 +135,35 @@ end
         @test st == 200
         st, hdrs, bod = http("GET", "/api/health"; port = port, host = ip"::1")
         @test st == 200
+
+        # --- a slow request must not block the whole server -----------------
+        # Guarded: with one thread there is nothing to interleave with, and
+        # CI runs the suite single-threaded.
+        if Threads.nthreads() > 1
+            slow = @async http("POST", "/api/run"; port = port,
+                               body = "mode=flyby&pod_mass=350", timeout = 180.0)
+            yield()
+            t0 = time()
+            st, hdrs, bod = http("GET", "/api/health"; port = port, timeout = 30.0)
+            dt = time() - t0
+            @test st == 200
+            @test dt < 3.0        # answered while the mission is still flying
+            st_slow, _, bod_slow = fetch(slow)
+            @test st_slow == 200
+            @test occursin("\"ok\":true", bod_slow)
+        end
+
+        # --- concurrent runs agree ------------------------------------------
+        # panel_mission is called from several threads at once by run_sweep
+        # and now by the server too; two identical requests must agree.
+        a = @async http("POST", "/api/run"; port = port,
+                        body = "mode=flyby&pod_mass=350", timeout = 180.0)
+        b = @async http("POST", "/api/run"; port = port,
+                        body = "mode=flyby&pod_mass=350", timeout = 180.0)
+        (_, _, ba) = fetch(a)
+        (_, _, bb) = fetch(b)
+        @test occursin("\"ok\":true", ba)
+        @test ba == bb
     finally
         PanelApp.stop_panel(srv)
     end

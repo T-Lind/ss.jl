@@ -933,7 +933,10 @@ function start_panel(port::Int)
                 catch
                     break          # listener closed: the loop is done
                 end
-                @async handle(sock)
+                # @async would schedule on this thread, and panel_mission
+                # never yields — so a mission in flight stopped `accept` from
+                # running at all. Six concurrent runs took 11.9 s, serialized.
+                Threads.@spawn handle(sock)
             end
         end)
     end
