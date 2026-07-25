@@ -223,6 +223,62 @@ float vnoise3(vec3 p){
   float c = mix(h3(i+vec3(0,0,1)), h3(i+vec3(1,0,1)), f.x);
   float d = mix(h3(i+vec3(0,1,1)), h3(i+vec3(1,1,1)), f.x);
   return mix(mix(a,b,f.y), mix(c,d,f.y), f.z);
+}
+// Gradient noise: zero at the lattice points instead of extremal there, so
+// thresholding it does not print the lattice. Value noise thresholded near its
+// peak is exactly what the old cloud deck did, and the grid it drew across the
+// planet was the lattice showing through.
+// sin-free: the fbm below runs up to ten octaves close in, and eight lattice
+// corners times three sines an octave is not a bill a fullscreen pass can pay
+vec3 grad33(vec3 p){
+  p = fract(p*vec3(0.1031, 0.1030, 0.0973));
+  p += dot(p, p.yxz + 33.33);
+  return fract((p.xxy + p.yxx)*p.zyx)*2.0 - 1.0;
+}
+float gnoise(vec3 p){
+  vec3 i = floor(p), f = fract(p);
+  vec3 u = f*f*f*(f*(f*6.0 - 15.0) + 10.0);
+  return mix(mix(mix(dot(grad33(i),               f),
+                     dot(grad33(i+vec3(1,0,0)), f-vec3(1,0,0)), u.x),
+                 mix(dot(grad33(i+vec3(0,1,0)), f-vec3(0,1,0)),
+                     dot(grad33(i+vec3(1,1,0)), f-vec3(1,1,0)), u.x), u.y),
+             mix(mix(dot(grad33(i+vec3(0,0,1)), f-vec3(0,0,1)),
+                     dot(grad33(i+vec3(1,0,1)), f-vec3(1,0,1)), u.x),
+                 mix(dot(grad33(i+vec3(0,1,1)), f-vec3(0,1,1)),
+                     dot(grad33(i+vec3(1,1,1)), f-vec3(1,1,1)), u.x), u.y), u.z);
+}
+// Octaves are rotated as well as scaled: stacked on the same axes even a
+// gradient field leaves faint diamonds along the lattice diagonals.
+const mat3 ROT = mat3(0.00, 0.80, 0.60, -0.80, 0.36, -0.48, -0.60, -0.48, 0.64);
+// Band-limited fbm, roughly unit variance, mean zero. lod is the angular
+// size of one pixel measured ON the surface being shaded [rad]: octaves finer
+// than that are faded out rather than point-sampled, because undersampled
+// noise does not average to its mean, it aliases into a moire pattern that
+// crawls whenever the camera moves. Fading them leaves the local mean, which
+// is what a correctly filtered texture would have given.
+// gain is the per-octave amplitude falloff. The textbook 0.5 makes the tenth
+// octave a thousandth of the first — paid for and invisible. Clouds want
+// something closer to 1/f so the fine scales still move the density where it
+// matters, at the edges.
+float fbmG(vec3 p, float f, float lod, int oct, float gain){
+  float a = 0.5, sum = 0.0, nrm = 0.0;
+  vec3 q = p*f;
+  for (int i = 0; i < 11; i++) {
+    if (i >= oct) break;
+    float w = a*(1.0 - smoothstep(0.30, 0.85, lod*f));
+    if (w < 0.004) break;              // and every finer octave is finer still
+    sum += w*gnoise(q);
+    nrm += w*w;                        // octaves are independent: add in
+    q = ROT*q*2.07; f *= 2.07; a *= gain;   // quadrature, not linearly
+  }
+  // Normalising by the amplitude that actually SURVIVED the band limit keeps
+  // the variance fixed as octaves drop out. Divide by the nominal sum instead
+  // and the field flattens toward its mean as the camera pulls back, which
+  // would make the planet's cloud cover a function of how far away you are.
+  return sum/sqrt(max(nrm, 1e-6))*1.40;
+}
+float fbmL(vec3 p, float f, float lod, int oct){
+  return fbmG(p, f, lod, oct, 0.5);
 }`;
 
 // --------------------------------------------------------------- starfield --
@@ -356,6 +412,188 @@ vec3 starField(vec3 d, float air, out float mw){
   sum += vec3(0.62, 0.66, 0.80)*mw*0.055;
   return sum;
 }`;
+// ------------------------------------------------------------------ clouds --
+// ONE cloud field, shared by the planet pass and by the low-altitude deck, so
+// the hole you fall through on entry is the hole you saw from orbit. It is a
+// pure function of the earth-fixed direction — no time term — so it also
+// survives a 10000x time warp and a camera cut without reshuffling itself.
+//
+// Coarse to fine: a zonal climatology (the ITCZ, the clear subtropical belts,
+// the mid-latitude storm tracks, solid polar cover), a slow weather field that
+// decides which parts of each belt are active, a domain warp that shears
+// systems along the flow and bends them into fronts, and a band-limited fbm
+// for the deck itself. That layering is what makes it read as Earth rather
+// than as noise on a ball: real cloud is banded by latitude, and a field that
+// is statistically uniform over the sphere never looks right however pretty
+// the individual puffs are.
+const CLOUDS_GLSL = `
+// undo the planet's rotation: the field is painted on the ground and turns
+// with it, so clouds do not slide over the continents
+vec3 spinFrame(vec3 de, float spin){
+  float c = cos(spin), s = sin(spin);
+  return vec3(c*de.x + s*de.y, c*de.y - s*de.x, de.z);
+}
+// Mean cloud FRACTION by latitude — Hadley cell in, Hadley cell out. These
+// are the numbers the field is calibrated to reproduce as an actual area
+// fraction, not knobs: see the quantile map in cloudCover.
+float cloudBands(float lat){
+  float a = abs(lat);
+  return 0.47
+       + 0.17*exp(-25.0*(a - 0.02)*(a - 0.02))    // ITCZ, +-11 deg
+       - 0.18*exp(-30.0*(a - 0.46)*(a - 0.46))    // subtropical highs, 26 deg
+       + 0.20*exp(-11.0*(a - 0.98)*(a - 0.98))    // storm tracks, 56 deg
+       + 0.10*smoothstep(1.05, 1.40, a);          // polar cover
+}
+// Which weather pattern the planet is wearing. The climatology above is
+// fixed; this only reshuffles where the systems sit inside it.
+//
+// It is a ROTATION of the noise domain rather than a translation. Translating
+// pushes the eleventh octave's lattice coordinates into the millions, where a
+// 32-bit hash runs out of mantissa and starts printing its own grid across
+// the sky — the same class of failure this whole pass exists to remove.
+// A rotation leaves the coordinates bounded by the frequency alone, and since
+// the latitude bands are read off the unrotated direction, the climatology
+// does not move with it.
+uniform mat3 uCRot;
+mat3 seedRot(vec3 s){
+  float c1 = cos(s.x), s1 = sin(s.x), c2 = cos(s.y),
+        s2 = sin(s.y), c3 = cos(s.z), s3 = sin(s.z);
+  mat3 rx = mat3(1.0, 0.0, 0.0,  0.0,  c1,  s1,  0.0, -s1,  c1);
+  mat3 ry = mat3( c2, 0.0, -s2,  0.0, 1.0, 0.0,   s2, 0.0,  c2);
+  mat3 rz = mat3( c3,  s3, 0.0,  -s3,  c3, 0.0,  0.0, 0.0, 1.0);
+  return rz*ry*rx;
+}
+// 0 = clear, 1 = solid — but deliberately NOT clamped at the top. Inside a
+// solid overcast the excess is how deep into the system a point is, and that
+// is the only thing left to shade with once opacity has saturated; clip it
+// here and a frontal deck renders as one flat white sheet.
+// pw is a unit earth-fixed direction, lod the angular size of a pixel.
+float cloudCover(vec3 pw, float lod, mat3 rot){
+  vec3 rw = rot*pw;                             // the field's own frame
+  vec3 e = vec3(-pw.y, pw.x, 0.0);
+  e = dot(e, e) > 1e-8 ? normalize(e) : vec3(1.0, 0.0, 0.0);   // local east
+  vec3 nn = cross(pw, e);                                      // local north
+  // Warp: stretched several times harder east-west than north-south, which is
+  // the zonal flow, and enough of it to drag the deck into comma-shaped
+  // systems instead of leaving isotropic blobs.
+  float w1 = gnoise(rw*1.9 + vec3(0.0, 0.0, 4.0));
+  float w2 = gnoise(ROT*rw*2.6 + vec3(5.2, 1.3, 9.1));
+  vec3 q = normalize(pw + e*(0.22*w1 + 0.11*w2) + nn*(0.07*w2));
+  // Two fields with a deliberate split of scales. The weather field decides
+  // how much cloud there is, over 4000 km down to 250 km — that is where
+  // fronts and highs live. The shape field decides where the individual cloud
+  // is, from 600 km down to under a kilometre. Run one fbm for both and the
+  // deck has a 1700 km dominant scale, which is invisible from 12 km up: the
+  // whole sky ends up one flat sheet because you are inside a single lobe.
+  float weather = fbmL(rw + vec3(17.0, 3.0, 11.0), 1.35, lod, 5);
+  float cov = clamp(cloudBands(asin(clamp(q.z, -1.0, 1.0))) + 1.2*weather,
+                    0.0, 1.0);
+  // Everything finer than the pixel is dropped inside fbmG, so the deep end
+  // of this only costs anything when the camera is close enough to see it.
+  float f = fbmG(rot*q, 10.0, lod, 10, 0.65)*0.5 + 0.5;
+  // Threshold at the coverage QUANTILE, not at (1 - coverage). f is very
+  // nearly gaussian with sigma 0.127, so cutting it at 1-cov would turn a
+  // wanted fraction of 0.3 into a realised fraction of about 0.05 — the
+  // difference between scattered cloud and a clear planet. The cubic is a
+  // cheap inverse normal CDF, which makes cov mean what it says.
+  float z = cov - 0.5;
+  float thr = 0.5 - 0.127*(2.6*z + 5.0*z*z*z);
+  // the transition is never narrower than a pixel: a hard edge on a field
+  // this fine is a sparkle generator
+  float edge = clamp(0.045 + lod*5.0, 0.045, 0.40);
+  // linear past the far edge, so the interior keeps a gradient to shade with
+  float dens = f < thr + edge ? smoothstep(thr - edge, thr + edge, f)
+                              : 1.0 + (f - thr - edge)/0.11;
+  return max(dens, 0.0);
+}
+float cloudCover(vec3 pw, float lod){ return cloudCover(pw, lod, uCRot); }`;
+// -------------------------------------------------------------------- moon --
+// The Moon is a cratered body with two albedo units, and rendering it as
+// smoothed noise throws away everything that identifies it. Craters are hashed
+// one per cell into the same cube-face grid the star field uses, and their
+// profile is evaluated against the true angular distance to the crater centre
+// — rebuilt from the cell's own uv — so they stay round out to the face
+// corners instead of shearing with the gnomonic projection.
+//
+// The loop accumulates the height field AND its surface gradient analytically,
+// so relief comes out of one pass rather than three finite-difference passes.
+const MOON_GLSL = `
+// one octave of craters. G cells per half-face, so 1/G is the cell angle.
+// mare suppresses the count: the maria are young lava floods and are
+// visibly less battered than the highlands around them.
+void craterOct(vec3 n, float G, float lod, float seed, float mare,
+               inout float h, inout vec3 gr, inout float alb) {
+  float cell = 1.0/G;
+  // faded out over a range, not cut at a threshold: a hard cutoff on the
+  // pixel footprint draws a ring across the disc where the octave stops
+  float w = smoothstep(cell*0.85, cell*0.40, lod);
+  if (w < 0.01) return;                     // finer than a pixel: leave it out
+  float face; vec2 uv; vec3 ax0, ax1, axn;
+  cubeFace(n, face, uv, ax0, ax1, axn);
+  vec2 g = uv*G, gi = floor(g);
+  for (int i = -1; i <= 1; i++) {
+    for (int j = -1; j <= 1; j++) {
+      vec2 c = gi + vec2(float(i), float(j));
+      vec3 hh = h33(vec3(c, face*13.0 + seed));
+      if (hh.z > 0.40 - 0.26*mare) continue;         // not every cell impacts
+      vec2 suv = (c + vec2(hh.x, hh.y))/G;
+      if (abs(suv.x) > 1.0 || abs(suv.y) > 1.0) continue;
+      vec3 cd = normalize(axn + ax0*suv.x + ax1*suv.y);
+      // sizes follow a steep power law: a great many small, a few large
+      float u = fract(hh.z*61.7);
+      float R = cell*(0.10 + 0.52*u*u);
+      vec3 dv = n - cd;
+      float L = length(dv);                          // chord ~ angle here
+      float r = L/R;
+      if (r > 2.4) continue;
+      float age = fract(hh.z*23.1);                  // 0 fresh, 1 ancient
+      // profile: parabolic bowl, raised rim at r=1, ejecta blanket outside
+      float p, dp;
+      if (r < 1.0) { p = r*r - 0.62;      dp = 2.0*r; }
+      else         { float k = exp(-(r - 1.0)*3.2);
+                     p = 0.38*k;          dp = -1.216*k; }
+      // depth/diameter runs about 0.2 for a fresh small bowl and much less
+      // for an old flooded one
+      float depth = R*(0.055 + 0.130*(1.0 - age)*(1.0 - age))*w;
+      h  += p*depth;
+      gr += (dp*depth/max(L*R, 1e-7))*dv;
+      // fresh craters are bright: excavated, unweathered regolith on the rim
+      // and an ejecta halo, and for the very freshest, rays
+      float fresh = (1.0 - age)*(1.0 - age);
+      alb += w*fresh*0.30*exp(-(r - 1.0)*(r - 1.0)*6.0);
+      if (fresh > 0.55) {
+        vec3 t0 = normalize(cross(cd, axn) + vec3(1e-5));
+        float th = atan(dot(dv, cross(cd, t0)), dot(dv, t0));
+        float ray = smoothstep(0.30, 0.85, 0.5 + 0.5*sin(th*7.0 + hh.x*31.0))
+                  * smoothstep(0.35, 0.75, 0.5 + 0.5*sin(th*17.0 - hh.y*19.0));
+        alb += w*fresh*0.34*ray*smoothstep(2.4, 1.1, r)*step(1.0, r);
+      }
+    }
+  }
+}
+// surface albedo + shading normal for a point on the Moon
+vec3 moonSurface(vec3 n, float lod, out vec3 sn) {
+  // maria: broad, smooth, dark basalt basins with soft margins
+  float m = fbmL(n + vec3(4.0, 1.5, 8.0), 1.25, lod, 4);
+  float mare = smoothstep(0.16, 0.52, m);
+  float h = 0.0, alb = 0.0; vec3 gr = vec3(0.0);
+  craterOct(n,  14.0, lod,  3.0, mare, h, gr, alb);
+  craterOct(n,  38.0, lod, 17.0, mare, h, gr, alb);
+  craterOct(n, 105.0, lod, 41.0, mare, h, gr, alb);
+  craterOct(n, 290.0, lod, 77.0, mare, h, gr, alb);
+  // regolith roughness under the craters, band-limited like everything else
+  float rough = fbmL(n + vec3(21.0, 7.0, 2.0), 22.0, lod, 4);
+  // Relief: tilt the normal by the tangential gradient of the height field.
+  // The height is carried in units of the Moon's radius and the gradient is
+  // taken per radian of arc, so gr is already the tangent of the true slope
+  // — no free exaggeration factor, which is what keeps the terminator honest.
+  vec3 tg = gr - n*dot(gr, n);
+  sn = normalize(n - tg*1.35);
+  // 0.11 highland / 0.06 mare is close to the real geometric albedo split,
+  // and that split is the Moon's whole face
+  float a = mix(0.113, 0.058, mare)*(1.0 + 0.09*rough) + alb*0.030;
+  return vec3(a*1.00, a*0.985, a*0.945);
+}`;
 const SPACE = program(`
 attribute vec2 aP; varying vec2 vP;
 void main(){ vP = aP; gl_Position = vec4(aP, 0.9999, 1.0); }`, `
@@ -368,9 +606,13 @@ uniform vec3 uMc; uniform float uMR, uHasMoon;
 uniform mat3 uEMat; uniform float uSpin;
 uniform sampler2D uLand;
 uniform float uNear, uScorch;             // 1 = pad-world near-field detail
+uniform float uDeck;                      // weight of the low-altitude deck
 uniform vec3 uCamW;
 ${NOISE_GLSL}
 ${STARS_GLSL}
+${CLOUDS_GLSL}
+${MOON_GLSL}
+const float CLOUD_H = 7000.0;             // cloud shell altitude [m]
 float raySphere(vec3 c, float R, vec3 d){
   float b = dot(c, d);
   float disc = b*b - dot(c,c) + R*R;
@@ -380,111 +622,288 @@ float raySphere(vec3 c, float R, vec3 d){
   if (t < 0.0) t = b + s;
   return t < 0.0 ? -1.0 : t;
 }
+// Hit distance, clamped to the tangent point so a ray that passes a fraction
+// of a pixel OUTSIDE the limb still has a surface point to shade. ins is how
+// far inside the silhouette the ray passes, in metres of impact parameter —
+// that is what the edge filter needs.
+float sphereHit(vec3 c, float R, vec3 d, out float ins){
+  float b = dot(c, d);
+  float h2 = max(dot(c,c) - b*b, 0.0);
+  ins = R - sqrt(h2);
+  float t = b - sqrt(max(R*R - h2, 0.0));
+  return (b > 0.0 && t > 0.0) ? t : -1.0;
+}
+// silhouette coverage of one pixel: a ray-traced sphere edge is a hard
+// staircase at every range otherwise, and at lunar distance the Earth is a
+// 150 px disc whose staircase is the first thing the eye finds
+float limbCov(vec3 c, float t, float ins, vec3 d){
+  if (t <= 0.0) return 0.0;
+  return clamp(ins/max(uPxA*dot(c, d), 1.0) + 0.5, 0.0, 1.0);
+}
+// --------------------------------------------------------------- the Earth --
+// cloudA is the opacity of the deck already computed for this pixel: the
+// ground under an opaque cloud is about to be thrown away, so it is not worth
+// tracing its shadow
+vec3 earthCol(vec3 d, float tE, float cloudA){
+  vec3 p = d*tE;
+  vec3 n = normalize(p - uEc);
+  float mus = max(-dot(d, n), 0.02);
+  // angular size of one pixel measured on the ground: the band limit for
+  // every fractal below
+  float lodS = min(uPxA*tE/(uER*mus), 0.05);
+  vec3 pw = spinFrame(uEMat*n, uSpin);
+  // Fractal warp on the mask lookup. The mask is 256x128 — 150 km a texel —
+  // and a straight bilinear read of it draws every coastline as a staircase.
+  float wx = fbmL(pw + vec3(3.0, 9.0, 1.0), 16.0, lodS, 3);
+  float wy = fbmL(pw + vec3(8.0, 2.0, 7.0), 16.0, lodS, 3);
+  float lat = asin(clamp(pw.z, -1.0, 1.0)) + wy*0.016;
+  float alat = abs(lat);
+  float lon = atan(pw.y, pw.x) + wx*0.016/max(cos(lat), 0.25);
+  float land = texture2D(uLand,
+    vec2(fract((lon + 3.14159265)/6.2831853), (1.5707963 - lat)/3.14159265)).r;
+  // The mask crosses from sea to land over a single bilinear texel, so its
+  // 0.5 contour is a straight line 150 km long — the staircase you can read
+  // off any coastline. Perturbing the VALUE (not just the lookup) moves that
+  // contour by a fractal amount and gives it an actual coastline's roughness.
+  float coast = fbmL(pw + vec3(2.0, 6.0, 4.0), 70.0, lodS, 6);
+  float lm = smoothstep(0.30, 0.62, land + 0.16*coast);
+  // biome: an aridity field with a subtropical bias, so the Sahara and the
+  // Congo are not the same green
+  float nz = fbmL(pw + vec3(11.0, 5.0, 3.0), 5.5, lodS, 4)*0.5 + 0.5;
+  float arid = nz + 0.34*exp(-16.0*(alat - 0.44)*(alat - 0.44)) - 0.20;
+  vec3 landC = mix(vec3(0.115, 0.170, 0.078), vec3(0.455, 0.385, 0.245),
+                   smoothstep(0.30, 0.80, arid));
+  landC = mix(landC, vec3(0.19, 0.20, 0.155), smoothstep(0.88, 1.12, alat));
+  float ice = smoothstep(1.16, 1.31, alat + 0.05*nz);
+  landC = mix(landC, vec3(0.86, 0.89, 0.93), ice);
+  // ocean: deep offshore, lighter over the shelf where the mask is fading out
+  vec3 seaC = mix(vec3(0.024, 0.062, 0.150), vec3(0.055, 0.150, 0.262),
+                  clamp(smoothstep(0.02, 0.32, land) + 0.30*nz, 0.0, 1.0));
+  float seaIce = smoothstep(1.22, 1.38, alat);
+  seaC = mix(seaC, vec3(0.74, 0.80, 0.87), seaIce);
+  vec3 base = mix(seaC, landC, lm);
+  // sub-texel detail so low orbit doesn't read as one flat texel; the sea
+  // gets a fraction of it, because open ocean really is that featureless
+  base *= 1.0 + 0.11*fbmL(pw + vec3(31.0, 13.0, 5.0), 90.0, lodS, 4)
+                    *mix(0.22, 1.0, lm);
+  vec3 rf = reflect(d, n);
+  base += vec3(1.0, 0.94, 0.80)
+        * pow(max(dot(rf, uSun), 0.0), 90.0)*0.55*(1.0 - lm)*(1.0 - seaIce);
+  if (uNear > 0.5 && tE < 250000.0) {
+    // pad-world near field: concrete apron, scrubland, the Atlantic coast
+    vec3 w = p + uCamW;
+    float dxy = length(w.xz);
+    float n1 = vnoise(w.xz*0.004), n2 = vnoise(w.xz*0.05);
+    float coast = 650.0 + 260.0*vnoise(vec2(w.z*0.0012, 7.3));
+    vec3 nearC;
+    if (w.x > coast) {
+      nearC = mix(vec3(0.10,0.22,0.33), vec3(0.05,0.14,0.24), n1);
+      nearC += vec3(1.0,0.9,0.7)*pow(max(dot(rf, uSun), 0.0), 90.0)*0.55;
+    } else if (dxy < 128.0) {
+      float g = 0.60 - 0.06*n2;
+      g -= (step(fract(w.x/12.0), 0.014) + step(fract(w.z/12.0), 0.014))*0.10;
+      g *= 1.0 - uScorch*exp(-dxy*dxy/900.0)*0.75;
+      nearC = vec3(g*1.02, g, g*0.95);
+    } else {
+      vec3 scrub = mix(vec3(0.24,0.28,0.16), vec3(0.34,0.31,0.20), n1);
+      scrub = mix(scrub, vec3(0.42,0.40,0.30), smoothstep(0.55,0.8,n2)*0.5);
+      nearC = mix(scrub, vec3(0.65,0.60,0.45),
+                  smoothstep(coast-70.0, coast, w.x));
+    }
+    base = mix(nearC, base, smoothstep(60000.0, 250000.0, tE));
+  }
+  float dif = dot(n, uSun);
+  // Clouds cast. The shadow point is the deck crossing of the sun ray through
+  // this piece of ground, so the shadows lengthen and slide off to the side
+  // as the terminator comes on — only worth tracing close in, where the deck
+  // is resolved enough for a shadow to be more than a shade of grey.
+  // Faded in over a range rather than switched on at a threshold: a hard LOD
+  // gate on a whole-planet view draws a circle across the disc, because the
+  // pixel footprint is a smooth function of position and the feature is not.
+  float shw = smoothstep(0.0016, 0.0007, lodS)*(1.0 - smoothstep(0.5, 0.92, cloudA));
+  if (shw > 0.01 && dif > 0.0) {
+    vec3 sd = normalize(n + uSun*(CLOUD_H/uER)/max(dif, 0.12));
+    // a shadow does not need the fine octaves, and this lookup is the second
+    // full evaluation of the field on every daylit pixel
+    float sc = cloudCover(spinFrame(uEMat*sd, uSpin), max(lodS, 0.0009));
+    base *= 1.0 - 0.55*shw*smoothstep(0.12, 0.70, sc);
+  }
+  // Terminator. Sunlight reddens and the edge softens over a couple of
+  // degrees, because the last light to reach the ground has come the long way
+  // through the air.
+  float shade = clamp(dif*1.06 + 0.05, 0.0, 1.0);
+  vec3 sunC = mix(vec3(1.00, 0.54, 0.28), vec3(1.0, 0.99, 0.96),
+                  smoothstep(-0.02, 0.26, dif));
+  vec3 lit = base*(sunC*shade + vec3(0.010, 0.016, 0.028));
+  // Settlement light on the night side. Clustered, not spread: on the real
+  // night side almost everything is black and a few coastal strips are very
+  // bright, so the field is thresholded hard and biased toward the coast
+  // rather than dimmed evenly across every continent.
+  float night = smoothstep(0.06, -0.12, dif);
+  if (night > 0.004 && lm > 0.10) {
+    float pop = fbmG(pw + vec3(53.0, 17.0, 29.0), 12.0, lodS, 7, 0.62)*0.5 + 0.5;
+    float coastal = 0.35 + 0.65*(1.0 - smoothstep(0.0, 0.24, abs(land - 0.55)));
+    float city = smoothstep(0.63, 0.80, pop);
+    lit += vec3(1.00, 0.80, 0.48)*3.0*night*lm*(1.0 - ice)
+         * city*city*coastal*smoothstep(1.15, 0.88, alat);
+  }
+  // The air between camera and surface. Rayleigh scattering is ~1/lambda^4,
+  // so red comes through a slant path that blue does not — which is why the
+  // ground goes blue-white toward the limb instead of merely dimmer, and why
+  // a single grey "haze" factor never looked right here.
+  float X = (1.0 - exp(-tE/70000.0))/mus;
+  vec3 tr = exp(-vec3(0.040, 0.092, 0.205)*X);
+  vec3 air = vec3(0.30, 0.44, 0.68)*clamp(dif + 0.22, 0.04, 1.0);
+  return lit*tr + air*(1.0 - tr);
+}
+// ---------------------------------------------------------------- the Moon --
+vec3 moonCol(vec3 d, float tM){
+  vec3 n = normalize(d*tM - uMc);
+  float mu = max(-dot(d, n), 0.02);
+  float lod = min(uPxA*tM/(uMR*max(mu, 0.18)), 0.05);
+  vec3 sn;
+  vec3 alb = moonSurface(n, lod, sn);
+  float geo = dot(n, uSun);                      // the terminator
+  float loc = dot(sn, uSun);                     // local slope, i.e. relief
+  float m0 = max(loc, 0.0)*smoothstep(-0.015, 0.025, geo);
+  // The Moon is not Lambertian. A full moon is a flat bright disc, not a
+  // shaded ball, because the regolith backscatters — Lommel-Seeliger with an
+  // opposition surge gets that, and cosine shading does not.
+  float ls = m0/(m0 + mu + 0.02);
+  float opp = 1.0 + 0.60*pow(max(dot(-d, uSun), 0.0), 20.0);
+  // no air, so the terminator is a knife edge; earthshine keeps the night
+  // side from being a hole in the sky
+  return alb*(ls*opp*6.6 + 0.030*smoothstep(0.04, -0.05, geo));
+}
+// ----------------------------------------------------------- sky and stars --
+vec3 skyCol(vec3 d, vec3 up, float dens){
+  float dip = sqrt(max(length(uEc) - uER, 1.0)*2.0/uER);
+  float e = dot(d, up) + dip;
+  vec3 zen = vec3(0.09,0.30,0.70), hor = vec3(0.62,0.78,0.95);
+  vec3 day = mix(hor, zen, clamp(pow(max(e, 0.0), 0.42), 0.0, 1.0));
+  vec3 col = day * clamp(dens*1.25, 0.0, 1.0);
+  // atmosphere shell glow hugging the limb (exact: ray's closest approach)
+  float b = dot(uEc, d);
+  if (b > 0.0) {
+    float dmin = sqrt(max(dot(uEc,uEc) - b*b, 0.0)) - uER;
+    float g1 = exp(-max(dmin, 0.0)/55000.0);
+    col += (vec3(0.30,0.52,0.92)*g1 + vec3(0.9,0.5,0.3)*exp(-max(dmin,0.0)/16000.0)*0.35)
+           * (1.0 - dens) * 1.05;
+  }
+  float s = max(dot(d, uSun), 0.0);
+  col += vec3(1.0,0.97,0.9) * pow(s, 1500.0) * 5.0;
+  col += vec3(1.0,0.9,0.72) * pow(s, 9.0) * 0.34 * max(dens, 0.10);
+  // stars: fade in as the sky goes out (~8 km up), full dark above ~35 km,
+  // and never survive being looked at through the sun's glare
+  float night = smoothstep(0.42, 0.02, dens);
+  if (night > 0.002) {
+    float mw;
+    // extinction rises toward the horizon while there is still air to look
+    // through: airmass ~ 1/cos(zenith), clamped for the grazing case
+    float zc = max(dot(d, up), 0.0);
+    float air = dens*min(1.0/(zc + 0.10), 6.0)*0.55;
+    vec3 st = starField(d, air, mw);
+    st *= exp(-air*0.9);                       // dimmed by the air column
+    col += st * night * (1.0 - pow(s, 6.0)*0.85);
+  }
+  return col;
+}
+// -------------------------------------------------------------- cloud deck --
+// The deck is a shell 9 km up, traced separately from the ground, so it has
+// real parallax against the surface, it casts shadows onto it, and at the limb
+// you see it edge-on as the bright rim of cloud that stands off the horizon.
+void cloudLayer(vec3 d, float tE, out vec3 c, out float a){
+  c = vec3(0.0); a = 0.0;
+  float RC = uER + CLOUD_H;
+  float tC = raySphere(uEc, RC, d);
+  // From outside the shell, re-solve against the tangent point and filter the
+  // rim over a pixel. Without this the deck's own silhouette is a hard step,
+  // and since that silhouette IS the horizon from 40 km up, it is the one
+  // edge in the frame nobody can miss.
+  float rim = 1.0;
+  if (dot(uEc, uEc) > RC*RC) {
+    float ins;
+    tC = sphereHit(uEc, RC, d, ins);
+    rim = clamp(ins/max(uPxA*dot(uEc, d), 1.0) + 0.5, 0.0, 1.0);
+  }
+  if (tC <= 0.0 || rim < 0.002 || (tE > 0.0 && tC > tE)) return;
+  // hand over to the drawn deck near the world origin, on exactly the radial
+  // profile that plane fades in on, so the two never stack
+  float deck = uDeck > 0.001
+             ? uDeck*exp(-length((d*tC + uCamW).xz)/45000.0) : 0.0;
+  if (deck > 0.998) return;
+  vec3 nc = normalize(d*tC - uEc);
+  float mu = abs(dot(d, nc));
+  // Slant path. A ray that reaches the ground crosses the deck once and only
+  // sees a little more of it edge-on — the deck is 3 km thick and its holes
+  // are tens of km across, so obliquity fills them in slowly. A ray that
+  // misses the ground is travelling ALONG the deck for hundreds of km, and
+  // that is the bright rim of cloud standing off the horizon.
+  float slant = min(1.0/max(mu, 0.08), 6.0);
+  if (tE > 0.0) slant = 1.0 + (slant - 1.0)*0.30;
+  float lod = min(uPxA*tC/RC*min(slant, 3.0), 0.05);
+  vec3 pw = spinFrame(uEMat*nc, uSpin);
+  float dens = cloudCover(pw, lod);
+  if (dens < 0.004) return;
+  float cd = min(dens, 1.0);
+  // cd is already a coverage fraction, so at nadir the opacity IS the
+  // coverage; the slant only stacks more of the deck into the same pixel
+  a = (1.0 - pow(1.0 - cd, slant))*(1.0 - deck)*rim;
+  float dif = dot(nc, uSun);
+  // cloud tops are 7 km up: they hold the sun a little past the ground
+  // terminator, and they go orange while they do it
+  float litf = clamp(dif*1.10 + 0.07, 0.0, 1.0);
+  vec3 sunC = mix(vec3(1.00, 0.60, 0.34), vec3(1.0, 0.995, 0.99),
+                  smoothstep(0.0, 0.28, dif));
+  // brightness keeps tracking depth well past where opacity saturated
+  float thick = smoothstep(0.04, 1.9, dens);
+  // The unlit term has to be small AND neutral. Leaving 5% of the warm sunlit
+  // colour on the night side put a brown wash over every cloud on the dark
+  // half of the planet, which reads as haze rather than as night.
+  c = sunC*(0.62 + 0.38*thick)*(0.015 + 0.985*litf)
+    + vec3(0.016, 0.021, 0.032)*(1.0 - litf)          // moonlight, near enough
+    + vec3(0.008, 0.006, 0.004)*(1.0 - litf)*thick;   // and lit from below
+  // Relief: shade against the slope of the deck toward the sun, so tops read
+  // as tops and a solid overcast still shows its cell structure. Only close
+  // in — further out the relief is finer than a pixel.
+  float rw = smoothstep(0.00075, 0.00030, lod);
+  if (rw > 0.01 && dif > 0.02) {
+    vec3 sw = spinFrame(uEMat*uSun, uSpin);
+    vec3 st = sw - pw*dot(sw, pw);
+    if (dot(st, st) > 1e-8) {
+      float up1 = cloudCover(normalize(pw + normalize(st)*0.00055), lod*5.0);
+      c *= clamp(1.0 + 0.50*rw*(dens - up1), 0.42, 1.55);
+    }
+  }
+  // most of the air is BELOW the deck, so cloud tops haze over far more
+  // slowly than the ground does
+  float X = (1.0 - exp(-tC/70000.0))/max(mu, 0.08);
+  vec3 tr = exp(-vec3(0.014, 0.033, 0.078)*X);
+  c = c*tr + vec3(0.42, 0.58, 0.85)*clamp(dif + 0.22, 0.04, 1.0)*(1.0 - tr);
+}
 void main(){
   vec3 d = normalize(uF + uR*vP.x*uTan*uAsp + uU*vP.y*uTan);
   float camAlt = max(length(uEc) - uER, 2.0);
   vec3 up = -normalize(uEc);
-  float tE = raySphere(uEc, uER, d);
-  float tM = uHasMoon > 0.5 ? raySphere(uMc, uMR, d) : -1.0;
-  bool hitM = tM > 0.0 && (tE < 0.0 || tM < tE);
-  bool hitE = tE > 0.0 && !hitM;
-  vec3 col;
-  if (hitE) {
-    vec3 p = d*tE;
-    vec3 n = normalize(p - uEc);
-    vec3 de = uEMat * n;
-    float lat = asin(clamp(de.z, -1.0, 1.0));
-    float lon = atan(de.y, de.x) - uSpin;
-    float land = texture2D(uLand,
-      vec2(fract((lon + 3.14159265)/6.2831853), (1.5707963 - lat)/3.14159265)).r;
-    float nz1 = vnoise(vec2(lon*38.0, lat*38.0));
-    vec3 landC = mix(vec3(0.19,0.25,0.13), vec3(0.42,0.37,0.23), nz1);
-    if (abs(lat) > 1.13)
-      landC = mix(landC, vec3(0.84,0.86,0.90), min(1.0, (abs(lat)-1.13)*4.0));
-    vec3 seaC = mix(vec3(0.045,0.115,0.23), vec3(0.085,0.19,0.31), nz1);
-    float lm = smoothstep(0.35, 0.65, land);
-    vec3 base = mix(seaC, landC, lm);
-    // sub-texel surface detail so low orbit doesn't read as one flat texel
-    float det = vnoise(vec2(lon*620.0, lat*620.0))*0.6
-              + vnoise(vec2(lon*3400.0, lat*3400.0))*0.4;
-    base *= 0.90 + 0.20*det;
-    // planetary cloud fields
-    float cl = vnoise(vec2(lon*55.0 + 3.7, lat*55.0))*0.6
-             + vnoise(vec2(lon*160.0, lat*160.0 + 9.1))*0.4;
-    base = mix(base, vec3(0.90,0.91,0.93), smoothstep(0.58, 0.78, cl)*0.85);
-    vec3 rf = reflect(d, n);
-    base += vec3(1.0,0.9,0.7)*pow(max(dot(rf, uSun), 0.0), 130.0)*0.5*(1.0-lm);
-    if (uNear > 0.5 && tE < 250000.0) {
-      // pad-world near field: concrete apron, scrubland, the Atlantic coast
-      vec3 w = p + uCamW;
-      float dxy = length(w.xz);
-      float n1 = vnoise(w.xz*0.004), n2 = vnoise(w.xz*0.05);
-      float coast = 650.0 + 260.0*vnoise(vec2(w.z*0.0012, 7.3));
-      vec3 nearC;
-      if (w.x > coast) {
-        nearC = mix(vec3(0.10,0.22,0.33), vec3(0.05,0.14,0.24), n1);
-        nearC += vec3(1.0,0.9,0.7)*pow(max(dot(rf, uSun), 0.0), 90.0)*0.55;
-      } else if (dxy < 128.0) {
-        float g = 0.60 - 0.06*n2;
-        g -= (step(fract(w.x/12.0), 0.014) + step(fract(w.z/12.0), 0.014))*0.10;
-        g *= 1.0 - uScorch*exp(-dxy*dxy/900.0)*0.75;
-        nearC = vec3(g*1.02, g, g*0.95);
-      } else {
-        vec3 scrub = mix(vec3(0.24,0.28,0.16), vec3(0.34,0.31,0.20), n1);
-        scrub = mix(scrub, vec3(0.42,0.40,0.30), smoothstep(0.55,0.8,n2)*0.5);
-        nearC = mix(scrub, vec3(0.65,0.60,0.45),
-                    smoothstep(coast-70.0, coast, w.x));
-      }
-      base = mix(nearC, base, smoothstep(60000.0, 250000.0, tE));
-    }
-    float dif = dot(n, uSun);
-    base *= clamp(dif*1.08 + 0.05, 0.006, 1.0);
-    // the air between camera and surface: blue haze, saturating at grazing
-    float mu = max(-dot(d, n), 0.02);
-    float X = 0.20/mu * (1.0 - exp(-tE/70000.0));
-    float haze = min(0.75, (1.0 - exp(-X)) * clamp(dif+0.25, 0.05, 1.0));
-    col = mix(base, vec3(0.42,0.58,0.85), haze);
-  } else if (hitM) {
-    vec3 n = normalize(d*tM - uMc);
-    float mare = smoothstep(0.55, 0.75, vnoise3(n*2.6));
-    float cr = 0.72 + 0.28*vnoise3(n*9.0);
-    float cr2 = 0.85 + 0.15*vnoise3(n*33.0);
-    vec3 base = mix(vec3(0.60,0.585,0.56), vec3(0.36,0.355,0.35), mare)*cr*cr2;
-    float dif = max(dot(n, uSun), 0.0);
-    col = base * (0.012 + 0.988*dif);
-  } else {
-    // sky / space
-    float dens = exp(-camAlt/9000.0);
-    float dip = sqrt(max(camAlt, 1.0)*2.0/uER);
-    float e = dot(d, up) + dip;
-    vec3 zen = vec3(0.09,0.30,0.70), hor = vec3(0.62,0.78,0.95);
-    vec3 day = mix(hor, zen, clamp(pow(max(e, 0.0), 0.42), 0.0, 1.0));
-    col = day * clamp(dens*1.25, 0.0, 1.0);
-    // atmosphere shell glow hugging the limb (exact: ray's closest approach)
-    float b = dot(uEc, d);
-    if (b > 0.0) {
-      float dmin = sqrt(max(dot(uEc,uEc) - b*b, 0.0)) - uER;
-      float g1 = exp(-max(dmin, 0.0)/55000.0);
-      col += (vec3(0.30,0.52,0.92)*g1 + vec3(0.9,0.5,0.3)*exp(-max(dmin,0.0)/16000.0)*0.35)
-             * (1.0 - dens) * 1.05;
-    }
-    float s = max(dot(d, uSun), 0.0);
-    col += vec3(1.0,0.97,0.9) * pow(s, 1500.0) * 5.0;
-    col += vec3(1.0,0.9,0.72) * pow(s, 9.0) * 0.34 * max(dens, 0.10);
-    // stars: fade in as the sky goes out (~8 km up), full dark above ~35 km,
-    // and never survive being looked at through the sun's glare
-    float night = smoothstep(0.42, 0.02, dens);
-    if (night > 0.002) {
-      float mw;
-      // extinction rises toward the horizon while there is still air to look
-      // through: airmass ~ 1/cos(zenith), clamped for the grazing case
-      float zc = max(dot(d, up), 0.0);
-      float air = dens*min(1.0/(zc + 0.10), 6.0)*0.55;
-      vec3 st = starField(d, air, mw);
-      st *= exp(-air*0.9);                       // dimmed by the air column
-      col += st * night * (1.0 - pow(s, 6.0)*0.85);
-    }
-  }
+  float dens = exp(-camAlt/9000.0);
+  float insE = -1.0, insM = -1.0;
+  float tE = sphereHit(uEc, uER, d, insE);
+  float tM = uHasMoon > 0.5 ? sphereHit(uMc, uMR, d, insM) : -1.0;
+  float covE = limbCov(uEc, tE, insE, d);
+  float covM = uHasMoon > 0.5 ? limbCov(uMc, tM, insM, d) : 0.0;
+  bool moonFront = tM > 0.0 && (tE < 0.0 || tM < tE);
+  // The deck comes first even though it composites last: knowing how much of
+  // this pixel it covers is what lets the ground and the sky under it be
+  // skipped, and under an overcast that is most of the frame's work.
+  vec3 cc = vec3(0.0); float ca = 0.0;
+  cloudLayer(d, tE, cc, ca);
+  float opaque = max(ca, max(covE, covM));
+  vec3 col = opaque > 0.997 ? vec3(0.0) : skyCol(d, up, dens);
+  // Earth, then its own deck, then the Moon: far to near
+  if (!moonFront && covM > 0.002) col = mix(col, moonCol(d, tM), covM);
+  if (covE > 0.002 && ca < 0.997) col = mix(col, earthCol(d, tE, ca), covE);
+  if (ca > 0.002) col = mix(col, cc, ca);
+  if (moonFront && covM > 0.002) col = mix(col, moonCol(d, tM), covM);
   gl_FragColor = vec4(pow(col, vec3(0.9)), 1.0);
 }`);
 
@@ -527,7 +946,13 @@ void main(){
   gl_FragColor = vec4(mix(lit, uFogCol, fog), 1.0);
 }`);
 
-// broken cloud deck (pad + entry worlds)
+// Broken cloud deck (pad + entry worlds): the same field the planet pass
+// paints on its 9 km shell, read here on a flat plane at the same altitude in
+// pad/splashdown coordinates. Both passes map a world point to the same
+// earth-fixed direction, so a hole in the deck is in the same place whether
+// you are looking at it from 300,000 km or falling through it — and the
+// planet pass cross-fades its own shell out over exactly the radius this
+// plane covers, so nothing is ever drawn twice.
 const CLOUD = program(`
 attribute vec2 aP;
 uniform mat4 uMV, uPr; uniform float uY;
@@ -539,16 +964,48 @@ void main(){
 }`, `
 precision highp float;
 varying vec3 vW, vVP;
-uniform vec3 uFogCol; uniform float uFogDen, uT, uCamY, uY;
+uniform vec3 uFogCol, uSun; uniform float uFogDen, uCamY, uY, uER, uFade;
+uniform mat3 uEMat; uniform float uSpin;
 ${NOISE_GLSL}
+${CLOUDS_GLSL}
 void main(){
-  vec2 p = vW.xz*0.00022 + vec2(uT*0.002, 0.0);
-  float n = vnoise(p)*0.55 + vnoise(p*2.7)*0.3 + vnoise(p*7.1)*0.15;
-  float a = smoothstep(0.52, 0.74, n) * 0.88;
-  a *= clamp(abs(uCamY - uY)/140.0, 0.0, 1.0);
-  a *= exp(-length(vW.xz)/45000.0);
+  // pad/entry worlds put the earth centre at (0, -Re, 0)
+  vec3 n = normalize(vW + vec3(0.0, uER, 0.0));
+  float r = length(vW.xz);
+  // one pixel is a small fraction of a degree at these ranges, but the plane
+  // runs to the horizon, so band-limit off the slant range all the same
+  float lod = clamp(length(vVP)*3.0e-9, 2.0e-7, 0.002);
+  vec3 pw = spinFrame(uEMat*n, uSpin);
+  float dens = cloudCover(pw, lod);
+  // Same slant-opacity law the shell uses, off the incidence angle on the
+  // plane — without it the deck thins out toward the horizon exactly where
+  // the shell it is handing over to is thickening.
+  float dh = abs(uCamY - uY);
+  float mu = dh/max(length(vec3(vW.x, dh, vW.z)), 1.0);
+  float slant = 1.0 + (min(1.0/max(mu, 0.08), 6.0) - 1.0)*0.30;
+  float a = (1.0 - pow(1.0 - min(dens, 1.0), slant))*0.96*uFade*exp(-r/45000.0);
+  float dif = clamp(dot(n, uSun)*1.10 + 0.07, 0.0, 1.0);
+  vec3 sunC = mix(vec3(1.00, 0.60, 0.34), vec3(1.0, 0.995, 0.99),
+                  smoothstep(0.0, 0.28, dot(n, uSun)));
+  // seen from below the deck is its own shadow; from above it is sunlit
+  float under = step(uCamY, uY);
+  vec3 col = sunC*(0.05 + 0.95*dif)*mix(0.97, 0.58, under)
+           * (0.62 + 0.38*smoothstep(0.04, 1.9, dens));
+  // same sun-slope relief as the planet pass, so tops read as tops here too
+  vec3 sw = spinFrame(uEMat*uSun, uSpin);
+  vec3 st = sw - pw*dot(sw, pw);
+  if (dot(st, st) > 1e-8 && under < 0.5) {
+    float up1 = cloudCover(normalize(pw + normalize(st)*0.00055), lod);
+    col *= clamp(1.0 + 0.50*(dens - up1), 0.42, 1.55);
+  }
+  // and the same Rayleigh column the shell gets, so the two agree on colour
+  // as well as on shape all the way out to the handover radius
+  float X = (1.0 - exp(-length(vVP)/70000.0))/max(mu, 0.08);
+  vec3 tr = exp(-vec3(0.014, 0.033, 0.078)*X);
+  col = col*tr + vec3(0.42, 0.58, 0.85)*clamp(dot(n, uSun) + 0.22, 0.04, 1.0)
+                 *(1.0 - tr);
   float fog = 1.0 - exp(-length(vVP)*uFogDen);
-  vec3 col = mix(vec3(0.93,0.94,0.96), uFogCol, fog);
+  col = mix(col, uFogCol, fog);
   gl_FragColor = vec4(col, a*(1.0 - fog*0.7));
 }`);
 
@@ -2230,7 +2687,9 @@ function buildStatics() {
   }
   padBuf = buffer(new Float32Array(pad)); padN = pad.length/VST;
 
-  const c = [], EX = 60000;
+  // the deck's own alpha dies off over 45 km, so the quad has to reach well
+  // past that or its edge shows up as a straight line across the sky
+  const c = [], EX = 240000;
   c.push(-EX,-EX, EX,-EX, EX,EX, -EX,-EX, EX,EX, -EX,EX);
   cloudBuf = buffer(new Float32Array(c));
 
@@ -2275,6 +2734,78 @@ function buildLandTex() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 }
+// ------------------------------------------------------------ launch day --
+// The cloud climatology is fixed physics, but WHICH weather pattern the
+// planet is wearing is a draw, and a draw can put a solid overcast over the
+// pad — the field has no idea a launch complex is down there. Real launches
+// are scheduled around the weather rather than into it, so do the same:
+// evaluate a set of patterns over the site on the GPU and fly the one that
+// gives the best sky. One seed for the whole planet, so the map stays
+// globally consistent; it just isn't the pattern that scrubbed the launch.
+const CSEEDP = program(`
+attribute vec2 aP; void main(){ gl_Position = vec4(aP, 0.0, 1.0); }`, `
+precision highp float;
+uniform vec3 uDir;
+${NOISE_GLSL}
+${CLOUDS_GLSL}
+vec3 seedOf(float k){ return vec3(k*1.107, k*2.399, k*0.7853); }
+void main(){
+  // x indexes the candidate pattern, y walks a ring of sample points out to
+  // ~90 km, so a seed is judged on the sky over the whole complex and not on
+  // whichever side of one cumulus the pad happens to be under
+  mat3 seed = seedRot(seedOf(floor(gl_FragCoord.x)));
+  float a = floor(gl_FragCoord.y)*0.7853982;
+  vec3 e = normalize(cross(uDir, abs(uDir.z) > 0.9 ? vec3(1.0, 0.0, 0.0)
+                                                   : vec3(0.0, 0.0, 1.0)));
+  vec3 nn = cross(uDir, e);
+  float rad = 0.0035 + 0.0035*floor(gl_FragCoord.y/8.0);
+  vec3 p = normalize(uDir + (e*cos(a) + nn*sin(a))*rad);
+  gl_FragColor = vec4(clamp(cloudCover(p, 0.0002, seed), 0.0, 1.0), 0.0, 0.0, 1.0);
+}`);
+// the same mapping in JS, so the chosen index turns back into the same matrix
+const seedOf = k => [k*1.107, k*2.399, k*0.7853];
+// column-major 3x3, matching GLSL's mat3 layout and multiply order
+const mul3 = (a, b) => {
+  const o = new Array(9);
+  for (let c = 0; c < 3; c++)
+    for (let r = 0; r < 3; r++)
+      o[c*3+r] = a[r]*b[c*3] + a[3+r]*b[c*3+1] + a[6+r]*b[c*3+2];
+  return o;
+};
+function seedRot(s) {
+  const c1 = Math.cos(s[0]), s1 = Math.sin(s[0]), c2 = Math.cos(s[1]),
+        s2 = Math.sin(s[1]), c3 = Math.cos(s[2]), s3 = Math.sin(s[2]);
+  return mul3([c3, s3, 0, -s3, c3, 0, 0, 0, 1],
+              mul3([c2, 0, -s2, 0, 1, 0, s2, 0, c2],
+                   [1, 0, 0, 0, c1, s1, 0, -s1, c1]));
+}
+let CSEED = seedRot(seedOf(0));
+function pickWeather(latD, lonD) {
+  const la = latD*Math.PI/180, lo = lonD*Math.PI/180;
+  const dir = [Math.cos(la)*Math.cos(lo), Math.cos(la)*Math.sin(lo), Math.sin(la)];
+  const N = 24, R = 16;                       // candidates x ring samples
+  gl.viewport(0, 0, N, R);
+  gl.useProgram(CSEEDP.p);
+  gl.uniform3fv(CSEEDP.u.uDir, dir);
+  gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
+  gl.enableVertexAttribArray(CSEEDP.a.aP);
+  gl.vertexAttribPointer(CSEEDP.a.aP, 2, gl.FLOAT, false, 0, 0);
+  gl.disable(gl.DEPTH_TEST);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  const px = new Uint8Array(N*R*4);
+  gl.readPixels(0, 0, N, R, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  // scattered cloud is the target: enough deck to fly through, enough gap to
+  // see the ground on the way up
+  let best = 0, bestErr = 1e9;
+  for (let k = 0; k < N; k++) {
+    let s = 0;
+    for (let j = 0; j < R; j++) s += px[(j*N + k)*4]/255;
+    const err = Math.abs(s/R - 0.34);
+    if (err < bestErr) { bestErr = err; best = k; }
+  }
+  CSEED = seedRot(seedOf(best));
+}
+
 // world direction-from-Earth-center -> "ECEF" columns for lat/lon anchoring
 function anchorMat(latD, lonD) {
   const la = latD*Math.PI/180, lo = lonD*Math.PI/180;
@@ -3111,6 +3642,11 @@ function drawScene(sc) {
   gl.uniform1f(SPACE.u.uSpin, sc.spin);
   gl.uniform1f(SPACE.u.uNear, sc.near);
   gl.uniform1f(SPACE.u.uScorch, scorch);
+  // how much of the cloud deck the drawn plane is taking care of; the planet
+  // pass stands its own shell down by the same amount
+  gl.uniform1f(SPACE.u.uDeck,
+               sc.world === 'pad' || sc.world === 'entry' ? deckFade(cam.eye[1]) : 0);
+  gl.uniformMatrix3fv(SPACE.u.uCRot, false, CSEED);
   gl.uniform3fv(SPACE.u.uCamW, cam.eye);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, landTex);
@@ -3156,7 +3692,7 @@ function drawScene(sc) {
       const m = mMul(mBasis(d.bx, dby, dbz, d.p), mRotAxis(d.ax, d.a));
       drawRange(m, proj, d.draw.first, d.draw.count);
     }
-    drawClouds(view, proj, fogCol, fogDen, cam.eye[1]);
+    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1]);
   } else if (sc.world === 'eci') {
     const cs = sc.cs;
     const stackM = sc.craftM;
@@ -3201,21 +3737,36 @@ function drawScene(sc) {
     };
     if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2);
     else drawChute(mainBuf, mainN, tMain, 8.5);
-    drawClouds(view, proj, fogCol, fogDen, cam.eye[1]);
+    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1]);
   }
 
   drawParticles(view, proj, cam.fov,
                 sc.world === 'entry' ? [0.60, 0.50, 0.45] :
                 sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined);
 }
-function drawClouds(view, proj, fogCol, fogDen, camY) {
-  if (camY > 45000) return;
+// The drawn deck and the planet pass's own cloud shell are the same clouds at
+// the same altitude. The plane has the resolution near the world origin and
+// runs out of it at range; the shell is the other way round. deckFade is the
+// weight of the handover — one number, used by both, so it always sums to one.
+const DECK_H = 7000;
+function deckFade(camY) {
+  if (camY > 45000) return 0;
+  return Math.min(1, (45000 - camY)/15000)
+       * Math.min(1, Math.abs(camY - DECK_H)/140);
+}
+function drawClouds(sc, view, proj, fogCol, fogDen, camY) {
+  if (deckFade(camY) <= 0) return;
   gl.useProgram(CLOUD.p);
   gl.uniformMatrix4fv(CLOUD.u.uMV, false, view);
   gl.uniformMatrix4fv(CLOUD.u.uPr, false, proj);
-  gl.uniform1f(CLOUD.u.uY, 1900);
-  gl.uniform1f(CLOUD.u.uT, simT % 86400);
+  gl.uniform1f(CLOUD.u.uY, DECK_H);
   gl.uniform1f(CLOUD.u.uCamY, camY);
+  gl.uniform1f(CLOUD.u.uER, RE);
+  gl.uniform1f(CLOUD.u.uFade, deckFade(camY));
+  gl.uniformMatrix3fv(CLOUD.u.uEMat, false, sc.eMat);
+  gl.uniform1f(CLOUD.u.uSpin, sc.spin);
+  gl.uniformMatrix3fv(CLOUD.u.uCRot, false, CSEED);
+  gl.uniform3fv(CLOUD.u.uSun, sc.sun || SUN);
   gl.uniform3fv(CLOUD.u.uFogCol, fogCol);
   gl.uniform1f(CLOUD.u.uFogDen, fogDen);
   gl.bindBuffer(gl.ARRAY_BUFFER, cloudBuf);
@@ -3454,6 +4005,7 @@ async function boot() {
     }
     buildToasts();
     skyBuf = quadBuf();
+    pickWeather(run.sites.launch_lat, run.sites.launch_lon);
     partDyn = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, partDyn);
     gl.bufferData(gl.ARRAY_BUFFER, partArr.byteLength, gl.DYNAMIC_DRAW);
