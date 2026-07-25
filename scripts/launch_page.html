@@ -923,6 +923,10 @@ varying vec3 vVP, vN, vC; varying vec2 vUV; varying float vPw;
 uniform vec3 uSunV, uFogCol, uEngV, uEngC;
 uniform float uFogDen, uEngI, uAmb;
 uniform sampler2D uLiv;
+uniform float uHeat;          // 0..1 stagnation heating, off outside entry
+uniform vec3 uHeatV;          // flow direction, VIEW space, pointing upstream
+uniform vec3 uHeatC;          // pod centre, VIEW space
+uniform float uHeatR;         // pod radius, for the radial falloff scale
 void main(){
   vec3 n = normalize(vN);
   // livery decal wrapped cylindrically over the painted skin
@@ -941,6 +945,36 @@ void main(){
     vec3 dd = uEngV - vVP; float r2 = dot(dd, dd);
     lit += base * uEngC * uEngI * 90.0/(r2 + 18.0)
            * max(dot(n, dd/sqrt(r2 + 0.001)), 0.0);
+  }
+  // Stagnation heating. The shock stands on the windward face and the wake
+  // side stays dark, so this is an angular term, not a switch that turns the
+  // whole capsule orange — that difference is the entire read of the effect.
+  if (uHeat > 0.0) {
+    float w = max(dot(n, uHeatV), 0.0);
+    // Take the centre-to-shoulder falloff from POSITION, not from the facet
+    // normal. Driving it off the normal meant a low-poly shield rendered its
+    // own tessellation as concentric bands, because each ring of facets is a
+    // discrete step in w. Distance off the flow axis is smooth, and it is
+    // also the real shape of stagnation-point heating.
+    vec3 rel = vVP - uHeatC;
+    float rad = length(rel - uHeatV*dot(rel, uHeatV));
+    float stag = exp(-(rad*rad)/(uHeatR*uHeatR*0.80));
+    // the windward gate stays on the normal, but soft and saturated across
+    // the whole shield, so it never bands
+    float face = smoothstep(0.0, 0.35, w);
+    // and the silhouette: from a chase camera the shield faces away, so what
+    // has to carry the effect is the shoulder burning at grazing incidence
+    float rim = pow(1.0 - abs(dot(n, normalize(-vVP))), 3.0)*pow(w, 0.6);
+    // the constant is the capsule sitting inside luminous gas: at these speeds
+    // the whole body is wrapped in it, so even the leeward afterbody carries a
+    // dull red rather than staying the grey it is on the pad
+    float g = uHeat*(stag*face + 0.5*rim + 0.14);
+    // a blackbody walk: deep red out at the shoulder, through orange and
+    // yellow, to white only at the stagnation point itself
+    vec3 bb = vec3(smoothstep(0.02, 0.22, g),
+                   smoothstep(0.25, 0.80, g)*0.85,
+                   smoothstep(0.70, 1.15, g)*0.72);
+    lit += bb*g*1.45;
   }
   float fog = 1.0 - exp(-length(vVP)*uFogDen);
   gl_FragColor = vec4(mix(lit, uFogCol, fog), 1.0);
@@ -1021,7 +1055,7 @@ void main(){
 }`, `
 precision mediump float;
 varying float vF, vK;
-uniform vec3 uSm;
+uniform vec3 uSm; uniform float uHot;
 void main(){
   vec2 q = gl_PointCoord*2.0 - 1.0;
   float r2 = dot(q, q);
@@ -1032,8 +1066,22 @@ void main(){
     gl_FragColor = vec4(c * sh * vF, sh*vF);
   } else if (vK < 1.5) {
     gl_FragColor = vec4(uSm * (0.55 + 0.45*vF), sh * 0.32 * vF);
-  } else {
+  } else if (vK < 2.5) {
     gl_FragColor = vec4(1.0, 1.0, 1.0, sh * 0.22 * vF);
+  } else {
+    // Plasma. vF runs 1 at birth to 0 at death, so a puff cools along the
+    // trail exactly as it ages: white at the shock, then yellow, orange, and a
+    // deep red that fades out. uHot lifts the whole ramp with the heat rate,
+    // so a 40 W/cm2 graze glows dull red and a 180 W/cm2 peak runs white.
+    float h = pow(vF, 2.6)*(0.35 + 0.65*uHot);
+    vec3 c = mix(vec3(0.90, 0.13, 0.02), vec3(1.0, 0.62, 0.22),
+                 smoothstep(0.0, 0.45, h));
+    c = mix(c, vec3(1.0, 0.97, 0.90), smoothstep(0.45, 0.95, h));
+    // a tighter core than the plain gaussian, so the trail keeps structure
+    // instead of dissolving into the soft round blobs it used to be
+    float core = sh*sh;
+    gl_FragColor = vec4(c*(sh*0.55 + core*0.85)*(0.30 + 0.70*vF),
+                        (sh*0.5 + core*0.5)*vF*0.9);
   }
 }`);
 
@@ -1389,6 +1437,30 @@ function sphereMap(dr, h) {
   return { pos: [R*Math.sin(th), R*Math.cos(th) - RE, 0],
            up: [Math.sin(th), Math.cos(th), 0],
            tg: [Math.cos(th), -Math.sin(th), 0] };
+}
+// Which means: in the pad and splash frames, y is altitude ONLY directly over
+// the anchor site. sphereMap curves the ground away beneath the trajectory, so
+// a capsule 5000 km downrange sits at y = -2.4e6 while flying at 134 km. Any
+// test of the form `y < something` is a test against the anchor's tangent
+// plane, not against the ground, and is wrong everywhere else. These two are
+// the honest versions — the sphere centre is at (0, -RE, 0) in both frames.
+const altAt = p => Math.hypot(p[0], p[1] + RE, p[2]) - RE;
+// raise a point to a minimum altitude by pushing it radially out, never down
+function liftToAlt(p, minA) {
+  const c = [p[0], p[1] + RE, p[2]], r = Math.hypot(c[0], c[1], c[2]);
+  if (r - RE >= minA || r < 1) return p;
+  const s = (RE + minA)/r;
+  return [c[0]*s, c[1]*s - RE, c[2]*s];
+}
+// an orthonormal frame that follows the local horizon: up is the true local
+// vertical, fwd the flight tangent projected flat, rt across the track. The
+// free camera orbits in this, so "drag up" means up wherever you are.
+function localFrame(pos, tangent) {
+  const up = V.norm([pos[0], pos[1] + RE, pos[2]]);
+  let f = V.sub(tangent, V.scale(up, V.dot(tangent, up)));
+  if (V.dot(f, f) < 1e-12) f = V.sub([0,0,1], V.scale(up, up[2]));
+  const fwd = V.norm(f);
+  return { up, fwd, rt: V.cross(fwd, up) };
 }
 function state(t) {
   const tc = Math.max(0, t);
@@ -2873,7 +2945,7 @@ function stepParticles(dt) {
     }
   }
 }
-function drawParticles(view, proj, fov, smoke) {
+function drawParticles(view, proj, fov, smoke, hot) {
   if (!parts.length) return;
   // The two blend modes need their particles contiguous, so this walks the
   // list twice — smoke (kinds 1 and 3) then glow — writing straight into the
@@ -2896,7 +2968,8 @@ function drawParticles(view, proj, fov, smoke) {
       partArr[o+2] = vz;
       partArr[o+3] = q.size;
       partArr[o+4] = 1 - q.age/q.life;
-      partArr[o+5] = q.kind === 3 ? 1 : q.kind;
+      // 3 (wake smoke) draws as smoke; 4 (plasma) gets the shader's 4th branch
+      partArr[o+5] = q.kind === 3 ? 1 : q.kind === 4 ? 3 : q.kind;
       k++;
     }
     return k - from;
@@ -2913,6 +2986,7 @@ function drawParticles(view, proj, fov, smoke) {
   gl.uniformMatrix4fv(PART.u.uPr, false, proj);
   gl.uniform1f(PART.u.uH, cv.height/(2*Math.tan(fov/2)));
   gl.uniform3fv(PART.u.uSm, smoke || [0.82, 0.80, 0.77]);
+  gl.uniform1f(PART.u.uHot, hot || 0);
   gl.depthMask(false);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -3064,12 +3138,12 @@ function pickWindow(M, targetW) {
   return best;
 }
 // place a model-space pose into the world using the craft's model matrix
-function poseToWorld(pose, M, mode) {
+function poseToWorld(pose, M, mode, noHead) {
   let eye = mApply(M, pose.eye), look = mApply(M, pose.look);
   const up = V.sub(mApply(M, V.add(pose.eye, pose.up)), eye);
   // free head-look from the seat: drag turns the view about the eye point,
   // it does not move the camera out of the capsule
-  if (headYaw || headPitch) {
+  if ((headYaw || headPitch) && !noHead) {
     const f = V.sub(look, eye), d = V.len(f), fw = V.scale(f, 1/d);
     const rt = V.norm(V.cross(fw, up)), uu = V.cross(rt, fw);
     const cy = Math.cos(headYaw), sy = Math.sin(headYaw);
@@ -3097,6 +3171,37 @@ function cabinCam(M, aim, targetW) {
   const p = cabinPose(aim, aim === 'window' ? pickWindow(M, targetW) : 0);
   return p ? poseToWorld(p, M, aim === 'window' ? 'window' : 'cabin') : null;
 }
+// An exterior camera bolted to the pod's flank — the shot every crewed vehicle
+// carries, and the one that used to vanish at second-stage jettison because
+// only the pad world ever had an onboard camera at all. Same trick as
+// cabinCam: a pose in the geometry's own coordinates, carried into the world
+// by whichever craft matrix the current phase uses. Each world's craftM
+// already applies its own x offset (stack base on the pad, kick-stage base in
+// ECI, heat-shield anchor in entry), so one pose rides the hull through
+// staging, coast and entry without knowing which phase it is in.
+function hullPose() {
+  const pr = podRange();
+  if (!pr) return null;
+  const K = capStations(pr.x0), rp = K.rp;
+  return {
+    // On a boom aft of the apex and outboard, far enough that the capsule
+    // reads as a capsule — mounted tight to the skin it filled a sliver of
+    // frame and sat inside the shock layer, which renders as blobs at 2 m.
+    eye:  [K.xb + K.xtop + 1.30*rp, 1.85*rp, 0.80*rp],
+    // aimed forward past the shoulder, so the heat shield's burning rim and
+    // the wake behind it both sit in frame rather than under the bottom edge
+    look: [K.xb + K.xb0 - 1.9*rp, 0.30*rp, 0.05*rp],
+    // "up" is radially off the hull, which is what puts the body along the
+    // bottom of frame and the world above it
+    up: [0, 1, 0], fov: 1.30 };
+}
+function hullCam(M) {
+  if (!M) return null;
+  const p = hullPose();
+  // noHead: this is a bolted-on camera, not a head on a neck — it must not
+  // inherit whatever the cabin view was last left pointing at
+  return p ? poseToWorld(p, M, 'onboard', true) : null;
+}
 const CS = { ly: 20, tly: 20 };   // tilt-lag state for the pad cameras
 function autoPickPad(t) {
   const sep1 = SEPS.length ? SEPS[0].t : Infinity;
@@ -3115,6 +3220,24 @@ function autoPickPad(t) {
 }
 function fitFov(dist, span) {
   return Math.min(0.9, Math.max(0.02, 2*Math.atan(span/(2*dist))));
+}
+// A wide shot that survives the vehicle outrunning it. The tripod is a real
+// camera on the ground and it *is* the shot while the vehicle is close — that
+// is the launch framing worth keeping. Past a few km it is a sea-level lens
+// aimed at a dot through the whole atmosphere, and fitFov pins to its 0.02
+// floor trying to rescue it. So the eye lifts off the ground and stands off
+// the vehicle instead, holding it against the limb. Blended, not cut, because
+// a hard swap mid-ascent reads as a glitch.
+function wideCam(target, dirV, span, tripod, near, far) {
+  const d = V.len(V.sub(target, tripod));
+  const u = Math.min(1, Math.max(0, (d - near)/(far - near)));
+  const w = u*u*(3 - 2*u);                       // smoothstep, no pop
+  const L = localFrame(target, dirV);
+  const D = span*2.6;                            // stand-off ~0.38 rad wide
+  const stand = V.add(target,
+    V.add(V.add(V.scale(L.rt, D*0.82), V.scale(L.up, D*0.34)),
+          V.scale(L.fwd, -D*0.30)));
+  return { eye: V.lerp(tripod, stand, w), up: L.up, w };
 }
 function shakeVec(amp) {
   const w = performance.now()/1000;
@@ -3153,9 +3276,17 @@ function cameraPad(t, st, M) {
     look = [mid[0]*0.9, CS.ly, 0];
     shake = tn*1.1;
   } else if (mode === 'wide') {
-    eye = [-30*CD, 3, 1450*CD];
-    fov = fitFov(V.len(V.sub(mid, eye)), LEN*3.4);
-    shake = 0.10;
+    const span = LEN*3.4;
+    // Hand over early. Drawn out, the blend parks the eye a few km back with
+    // the vehicle's own span, which is a 1.6 deg lens — the fov dips and then
+    // snaps wide, and that reads as a zoom glitch. Starting the lift sooner
+    // closes the distance faster than the span shrinks, so the shot only ever
+    // opens up.
+    const W = wideCam(mid, st.dir, span, [-30*CD, 3, 1450*CD],
+                      1200*CD, 5000*CD);
+    eye = W.eye; up = W.up;
+    fov = fitFov(V.len(V.sub(mid, eye)), span);
+    shake = 0.10*(1 - W.w);          // the ground rig shakes; the stand-off does not
   } else if (mode === 'chase') {
     const side = [0, 0, 1], upb = V.cross(side, st.dir);
     eye = V.add(V.add(mid, V.scale(side, LEN*2.4)),
@@ -3168,10 +3299,17 @@ function cameraPad(t, st, M) {
     up = st.dir;
     fov = 1.15; shake = tn*0.5 + st.q/45*0.35;
   } else {
+    // same local-horizon orbit as the entry free camera: on the pad the local
+    // vertical is world +y, so the launch framing is unchanged, but by SECO
+    // the stack is far enough downrange for the two to diverge
     const R = freeDist || LEN*3.6;
     const cp = Math.cos(freePitch), sp = Math.sin(freePitch);
-    eye = V.add(mid, [R*cp*Math.cos(freeYaw), R*sp, R*cp*Math.sin(freeYaw)]);
-    if (eye[1] < 1.2 && st.h < 100) eye[1] = 1.2;
+    const L = localFrame(mid, st.dir);
+    eye = liftToAlt(
+      V.add(mid, V.add(V.add(V.scale(L.fwd, R*cp*Math.cos(freeYaw)),
+                             V.scale(L.rt,  R*cp*Math.sin(freeYaw))),
+                       V.scale(L.up, R*sp))), 1.2);
+    up = L.up;
     fov = 0.42; shake = tn*0.12;
   }
   if (shake > 0) eye = V.add(eye, shakeVec(shake));
@@ -3188,6 +3326,10 @@ function cameraEci(t, cs, ph, M) {
     const tgt = ph.n === 'FLYBY' ? cs.moon : [0, 0, 0];
     const c = cabinCam(M, mode === 'window' ? 'window' : 'wide', tgt);
     if (c) return cabinShake(c, cs.burning ? 0.5 : 0);
+  }
+  if (mode === 'onboard') {
+    const c = hullCam(M);
+    if (c) return cabinShake(c, cs.burning ? 0.35 : 0);
   }
   const p = cs.pos;
   let eye, look = p, up = cs.bz, fov = 0.42;
@@ -3236,6 +3378,10 @@ function cameraEntry(t, es, M) {
     const c = cabinCam(M, mode === 'window' ? 'window' : 'wide');
     if (c) return cabinShake(c, shake);
   }
+  if (mode === 'onboard') {
+    const c = hullCam(M);
+    if (c) return cabinShake(c, shake);
+  }
   if (mode === 'chase') {
     eye = V.add(p, V.add(V.scale(side, 34), V.scale(es.vdir, -10)));
     fov = 0.30;
@@ -3244,14 +3390,30 @@ function cameraEntry(t, es, M) {
     look = V.add(p, V.scale(es.vdir, -60));    // looking back up the wake
     fov = 0.9;
   } else if (mode === 'wide') {
-    eye = V.add([es.pos[0], 4, 0], V.scale(side, 120));
-    look = V.lerp(p, [0, 2, 0], 0.35);
-    fov = fitFov(V.len(V.sub(p, eye)), Math.max(30, es.h*0.4));
+    // The tripod belongs at the splash point, not under the capsule: it is the
+    // recovery shot, and it only means anything for the last few hundred
+    // metres. Chasing the pod's ground track with it put a sea-level camera
+    // 2400 km from a capsule 140 km up, framing cloud tops at the fov floor.
+    const span = Math.max(28, POD_RP*26);
+    // a tight handover band: anywhere in the middle is a long lens on a small
+    // target, so the tripod only takes the shot for the last few hundred
+    // metres, which is the only part it is actually good for
+    const W = wideCam(p, es.vdir, span, [0, 4, 120], 260, 1500);
+    eye = W.eye; up = W.up;
+    fov = fitFov(V.len(V.sub(p, eye)), span);
   } else {
+    // Orbit in the capsule's own local horizon rather than on world axes: at
+    // entry interface the pod is 53 deg of arc downrange, where the world y
+    // axis is 53 deg away from "up" and dragging skews the view instead of
+    // raising it. The floor is an altitude, not a y — as a y it fired every
+    // frame of the entry and parked the eye 2400 km from its target.
     const R = freeDist || 28;
     const cp = Math.cos(freePitch), sp = Math.sin(freePitch);
-    eye = V.add(p, [R*cp*Math.cos(freeYaw), R*sp, R*cp*Math.sin(freeYaw)]);
-    if (eye[1] < 2) eye[1] = 2;
+    const L = localFrame(p, es.vdir);
+    eye = liftToAlt(
+      V.add(p, V.add(V.add(V.scale(L.fwd, R*cp*Math.cos(freeYaw)),
+                           V.scale(L.rt,  R*cp*Math.sin(freeYaw))),
+                     V.scale(L.up, R*sp))), 2);
   }
   if (shake > 0.04 && mode !== 'wide') eye = V.add(eye, shakeVec(shake));
   return { eye, look, up, fov, mode };
@@ -3265,6 +3427,29 @@ function attachedTailX(gone) {
 }
 let secGone = {};
 let meshCommon = null;
+// How hot the shield is, as the shader wants it. Peak heating on a lunar
+// return runs a little under 200 W/cm2; the exponent keeps the middle of the
+// entry visibly warm instead of saving everything for a two-second peak.
+const heatOf = q => Math.min(1, Math.pow(Math.max(0, q)/165, 0.72));
+function setMeshHeat(sc, view) {
+  const h = sc.world === 'entry' && sc.es ? heatOf(sc.es.q) : 0;
+  gl.uniform1f(MESH.u.uHeat, h);
+  if (h <= 0) return;
+  // the flow arrives along the velocity vector, so the windward normal is
+  // +vdir; rotate it into view space with the view matrix's 3x3 (column-major)
+  const d = sc.es.vdir;
+  gl.uniform3fv(MESH.u.uHeatV, V.norm([
+    view[0]*d[0] + view[4]*d[1] + view[8]*d[2],
+    view[1]*d[0] + view[5]*d[1] + view[9]*d[2],
+    view[2]*d[0] + view[6]*d[1] + view[10]*d[2]]));
+  // the pod's centre, full transform this time — it is a point, not a direction
+  const c = sc.craftPos;
+  gl.uniform3fv(MESH.u.uHeatC, [
+    view[0]*c[0] + view[4]*c[1] + view[8]*c[2]  + view[12],
+    view[1]*c[0] + view[5]*c[1] + view[9]*c[2]  + view[13],
+    view[2]*c[0] + view[6]*c[1] + view[10]*c[2] + view[14]]);
+  gl.uniform1f(MESH.u.uHeatR, POD_RP || 0.75);
+}
 function beginMeshes(view, sunV, fogDen, fogCol, amb, engI, engV, engC) {
   gl.useProgram(MESH.p);
   gl.uniform3fv(MESH.u.uSunV, sunV);
@@ -3569,19 +3754,40 @@ function spawnEntry(dt, es) {
     // few hundred m/s *relative to the pod*, which is what you actually see.
     const vC = V.scale(es.vdir, es.v);
     const rel = r => V.sub(vC, V.scale(es.vdir, r));
-    // shock layer: stands just ahead of the blunt face, co-moving with it
-    for (let i = 0; i < Math.min(3, Math.round(60*dt*(1 + 4*I))); i++)
-      spawn(V.add(V.add(es.pos, V.scale(es.vdir, 0.9)), jit(0.55)),
-            V.add(rel(20 + 60*I), jit(5*I + 2)),
-            rnd(0.22, 0.09), (0.34 + 0.55*I)*rnd(1.2, 0.7), 1.1*I + 0.4, 0);
-    // additive sprites saturate fast, so the wake is many small short-lived
-    // puffs rather than a few big ones
-    const n = Math.min(11, Math.round(60*dt*(4 + 22*I)));
+    const rp = POD_RP || 0.75;
+    // a frame across the flow, so the shock and the wake can be built as rings
+    // about the velocity vector rather than as isotropic jitter — jitter is
+    // what made the old trail a cloud of loose balls instead of a column
+    const t0 = Math.abs(es.vdir[1]) > 0.9 ? [1,0,0] : [0,1,0];
+    const e1 = V.norm(V.cross(es.vdir, t0)), e2 = V.cross(es.vdir, e1);
+    const ring = (r, th) =>
+      V.add(V.scale(e1, r*Math.cos(th)), V.scale(e2, r*Math.sin(th)));
+
+    // Shock layer: a thin bright sheet standing off the blunt face, domed so
+    // the middle sits furthest forward. Many small sprites read as a surface;
+    // the three big ones this replaced read as three balls.
+    const nS = Math.min(24, Math.round(60*dt*(10 + 44*I)));
+    for (let i = 0; i < nS; i++) {
+      const th = Math.random()*6.2832, u = Math.sqrt(Math.random());
+      const r = rp*1.10*u;
+      spawn(V.add(V.add(es.pos, V.scale(es.vdir, 0.45 + 0.42*(1 - u*u))),
+                  ring(r, th)),
+            V.add(rel(8 + 34*I), V.scale(ring(1, th), 5*I)),
+            rnd(0.15, 0.07), (0.16 + 0.24*I)*rnd(1.25, 0.8), 0.5*I + 0.18, 4);
+    }
+    // Near wake: shed from the shoulder where the flow separates, entrained
+    // aft, spreading with distance. Small and dense — a sprite 2.4 m across at
+    // 34 m fills 290 px, which is why the trail used to be bokeh.
+    const n = Math.min(44, Math.round(60*dt*(18 + 76*I)));
     for (let i = 0; i < n; i++) {
-      const back = rnd(14*I + 2);
-      spawn(V.add(V.sub(es.pos, V.scale(es.vdir, back)), jit(0.5 + back*0.05)),
-            V.add(rel((40 + 220*I)*(0.7 + rnd(0.6))), jit(18*I + 4)),
-            rnd(0.55, 0.20), (0.36 + 0.85*I)*rnd(1.3, 0.8), 2.2*I + 0.6, 0);
+      const back = Math.pow(Math.random(), 0.65)*(16*I + 2.5);
+      const spread = rp*(1.0 + back*0.13);
+      const th = Math.random()*6.2832;
+      spawn(V.add(V.sub(es.pos, V.scale(es.vdir, back)),
+                  V.add(ring(spread*Math.sqrt(Math.random()), th), jit(0.08))),
+            V.add(rel((55 + 250*I)*(0.75 + rnd(0.5))),
+                  V.add(V.scale(ring(1, th), (2 + 8*I)*Math.random()), jit(2.5))),
+            rnd(0.40, 0.16), (0.16 + 0.34*I)*rnd(1.3, 0.7), 0.9*I + 0.3, 4);
     }
     // wake smoke: non-buoyant while hypersonic, otherwise it climbs away
     // from the trail instead of following it
@@ -3645,7 +3851,8 @@ function drawScene(sc) {
   // how much of the cloud deck the drawn plane is taking care of; the planet
   // pass stands its own shell down by the same amount
   gl.uniform1f(SPACE.u.uDeck,
-               sc.world === 'pad' || sc.world === 'entry' ? deckFade(cam.eye[1]) : 0);
+               sc.world === 'pad' || sc.world === 'entry'
+                 ? deckFade(cam.eye[1], camAlt) : 0);
   gl.uniformMatrix3fv(SPACE.u.uCRot, false, CSEED);
   gl.uniform3fv(SPACE.u.uCamW, cam.eye);
   gl.activeTexture(gl.TEXTURE0);
@@ -3666,6 +3873,7 @@ function drawScene(sc) {
   const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 :
               sc.world === 'moon' ? 0.22 : 0.30 + 0.16*dens;
   beginMeshes(view, V.norm(rotSun), fogDen, fogCol, amb, sc.engI, engV, sc.engC);
+  setMeshHeat(sc, view);
   // from inside, the cabin is drawn and the window panes are dropped, so the
   // apertures in the pressure shell become real openings onto the world
   const skip = s => secGone[s.name] ||
@@ -3692,7 +3900,7 @@ function drawScene(sc) {
       const m = mMul(mBasis(d.bx, dby, dbz, d.p), mRotAxis(d.ax, d.a));
       drawRange(m, proj, d.draw.first, d.draw.count);
     }
-    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1]);
+    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1], camAlt);
   } else if (sc.world === 'eci') {
     const cs = sc.cs;
     const stackM = sc.craftM;
@@ -3737,32 +3945,40 @@ function drawScene(sc) {
     };
     if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2);
     else drawChute(mainBuf, mainN, tMain, 8.5);
-    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1]);
+    drawClouds(sc, view, proj, fogCol, fogDen, cam.eye[1], camAlt);
   }
 
   drawParticles(view, proj, cam.fov,
                 sc.world === 'entry' ? [0.60, 0.50, 0.45] :
-                sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined);
+                sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined,
+                sc.world === 'entry' && sc.es ? heatOf(sc.es.q) : 0);
 }
 // The drawn deck and the planet pass's own cloud shell are the same clouds at
 // the same altitude. The plane has the resolution near the world origin and
 // runs out of it at range; the shell is the other way round. deckFade is the
 // weight of the handover — one number, used by both, so it always sums to one.
 const DECK_H = 7000;
-function deckFade(camY) {
-  if (camY > 45000) return 0;
-  return Math.min(1, (45000 - camY)/15000)
+// Two different questions, two different heights. How high the camera is, for
+// standing the deck down as the shell takes over, is an ALTITUDE — asking it
+// of y said "3 m" for an entry camera 1833 km up, because y is only altitude
+// over the anchor site. How close the camera is to the plane, for hiding it
+// edge-on as you fly through, is a distance to a plane that really does sit at
+// world y = DECK_H, so that one stays in y.
+function deckFade(camY, camAlt) {
+  const a = camAlt === undefined ? camY : camAlt;
+  if (a > 45000) return 0;
+  return Math.min(1, (45000 - a)/15000)
        * Math.min(1, Math.abs(camY - DECK_H)/140);
 }
-function drawClouds(sc, view, proj, fogCol, fogDen, camY) {
-  if (deckFade(camY) <= 0) return;
+function drawClouds(sc, view, proj, fogCol, fogDen, camY, camAlt) {
+  if (deckFade(camY, camAlt) <= 0) return;
   gl.useProgram(CLOUD.p);
   gl.uniformMatrix4fv(CLOUD.u.uMV, false, view);
   gl.uniformMatrix4fv(CLOUD.u.uPr, false, proj);
   gl.uniform1f(CLOUD.u.uY, DECK_H);
   gl.uniform1f(CLOUD.u.uCamY, camY);
   gl.uniform1f(CLOUD.u.uER, RE);
-  gl.uniform1f(CLOUD.u.uFade, deckFade(camY));
+  gl.uniform1f(CLOUD.u.uFade, deckFade(camY, camAlt));
   gl.uniformMatrix3fv(CLOUD.u.uEMat, false, sc.eMat);
   gl.uniform1f(CLOUD.u.uSpin, sc.spin);
   gl.uniformMatrix3fv(CLOUD.u.uCRot, false, CSEED);
