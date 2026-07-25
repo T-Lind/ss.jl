@@ -1,0 +1,736 @@
+<!doctype html>
+<!-- Vehicle builder. Served at /build by panelapp.jl, which re-reads this
+     file per request. The page is a pure client of two endpoints the panel
+     already exposes: /api/catalogue (engines and mixtures) and /api/geometry
+     (the authoritative vehicle: stats and the very mesh the mission flies).
+     It holds no vehicle model of its own — every number and every triangle
+     on screen came back from the server, so what you see here is what
+     /api/run will fly.
+
+     The form speaks the panel's exact field encoding (nstages, nboost,
+     diameter, fairing, pod_mass, s<k>_*, b_*), so the query string is
+     interchangeable: /build?... rehydrates from the panel's params(), and
+     the back/launch links replay this form into / and /launch. Query keys
+     this page does not own (mission fields, kick, lander) pass through
+     untouched. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ss.jl vehicle builder</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0d0d0d; color: #c3c2b7;
+         font: 13.5px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .app { display: grid; grid-template-columns: 340px minmax(0, 1fr) 340px;
+         gap: 16px; max-width: 1560px; margin: 0 auto; padding: 16px; }
+  @media (max-width: 1100px) { .app { grid-template-columns: 1fr 1fr; }
+    .mid { grid-column: 1 / -1; order: -1; } }
+  h1 { color: #fff; font-size: 17px; margin: 0 0 2px; }
+  h2 { color: #fff; font-size: 13px; margin: 0; letter-spacing: .04em;
+       text-transform: uppercase; font-weight: 600; }
+  h2 + * { margin-top: 8px; }
+  .sub { color: #898781; font-size: 12px; margin-bottom: 10px; }
+  .card { background: #1a1a19; border: 1px solid rgba(255,255,255,.1);
+          border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  label { display: block; color: #898781; font-size: 11px; margin: 7px 0 2px;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stagehdr { color: #c3c2b7; font-size: 11.5px; font-weight: 600;
+              letter-spacing: .03em; margin: 12px 0 0; display: flex;
+              align-items: baseline; gap: 8px;
+              border-top: 1px solid #2c2c2a; padding-top: 8px; }
+  .stagehdr:first-of-type { border-top: 0; margin-top: 2px; padding-top: 0; }
+  .stagehdr .rm { margin-left: auto; color: #898781; cursor: pointer;
+                  font-weight: 400; font-size: 11px; }
+  .stagehdr .rm:hover { color: #e66767; }
+  .derived { display: block; color: #898781; font-size: 10.5px;
+             font-weight: 400; letter-spacing: 0; margin: 2px 0 0;
+             font-variant-numeric: tabular-nums; }
+  input, select { width: 100%; background: #0d0d0d; color: #fff;
+    border: 1px solid rgba(255,255,255,.15); border-radius: 6px;
+    padding: 5px 8px; font: inherit; font-variant-numeric: tabular-nums; }
+  input:focus, select:focus, button:focus { outline: 2px solid #3987e5; outline-offset: 1px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  button { background: #2a2a28; color: #fff; border: 1px solid rgba(255,255,255,.15);
+           border-radius: 7px; padding: 7px 12px; font: inherit; font-weight: 600;
+           cursor: pointer; width: 100%; }
+  button:hover { background: #383835; }
+  button:disabled { opacity: .4; cursor: default; }
+  .good { color: #8fbf7f; } .warn { color: #d9a95c; } .bad { color: #e66767; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tile { background: #131312; border: 1px solid rgba(255,255,255,.08);
+          border-radius: 8px; padding: 7px 11px; }
+  .tile .v { color: #fff; font-size: 16px; font-weight: 650;
+             font-variant-numeric: tabular-nums; }
+  .tile .k { color: #898781; font-size: 10.5px; }
+  #view { width: 100%; height: calc(100vh - 150px); min-height: 420px;
+          display: block; cursor: grab; touch-action: none;
+          border-radius: 8px; background: #131312; }
+  .chip { display: inline-block; background: #2a2a28; border: 1px solid rgba(255,255,255,.12);
+          border-radius: 6px; padding: 4px 9px; margin: 0 6px 6px 0; font-size: 11.5px;
+          cursor: pointer; font-variant-numeric: tabular-nums; text-decoration: none;
+          color: #c3c2b7; }
+  .chip:hover { background: #383835; }
+  .status { font-size: 12px; color: #898781; margin-top: 8px; min-height: 17px;
+            font-variant-numeric: tabular-nums; }
+  .status.err { color: #e66767; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px;
+          font-variant-numeric: tabular-nums; }
+  td, th { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid #2c2c2a; }
+  th { color: #898781; font-weight: 500; font-size: 11px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div><!-- ---------------------------------------------- left: configure -->
+    <h1>vehicle builder</h1>
+    <div class="sub">the model and every number come from the same
+      LaunchVehicle the mission flies</div>
+    <div style="margin-bottom:10px">
+      <a class="chip" id="backlink" href="/">&#8617; mission control</a>
+      <a class="chip" id="flylink" href="/launch" target="_blank">&#128640; launch view</a>
+    </div>
+
+    <div class="card">
+      <h2>Vehicle</h2>
+      <div class="row">
+        <div><label for="vname">name</label><input id="vname" value="Sable (builder)"></div>
+        <div><label for="diameter">core diameter [m]</label><input id="diameter" value="1.8"></div>
+      </div>
+      <div class="row">
+        <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
+        <div><label for="pod_mass">payload [kg]</label><input id="pod_mass" value="350"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Stages <span class="derived" style="display:inline" id="nstages_note"></span></h2>
+      <div id="stagebox"></div>
+      <div style="margin-top:10px"><button id="addstage">+ add stage</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Strap-on boosters</h2>
+      <label for="nboost">count (0 = none)</label>
+      <select id="nboost"><option value="0" selected>0</option><option>2</option>
+        <option>3</option><option>4</option><option>5</option><option>6</option>
+        <option>7</option><option>8</option></select>
+      <div id="boostbox"></div>
+    </div>
+  </div>
+
+  <div class="mid"><!-- ------------------------------------ center: the model -->
+    <canvas id="view"></canvas>
+    <div class="status" id="state">requesting geometry&hellip;</div>
+  </div>
+
+  <div><!-- ------------------------------------------------- right: numbers -->
+    <div class="card">
+      <h2>Totals</h2>
+      <div class="tiles" id="totals"></div>
+      <div class="status" id="verdict"></div>
+    </div>
+    <div class="card">
+      <h2>Stages</h2>
+      <div id="stagestats"></div>
+    </div>
+    <div class="card hidden" id="booststats_card">
+      <h2>Strap-on set</h2>
+      <div id="booststats"></div>
+    </div>
+    <div class="card">
+      <h2>Notes</h2>
+      <div class="sub" style="margin:0">
+        A named engine owns its mixture &mdash; pick one and the mixture
+        locks to it; the server rejects a mismatch outright. Drag the model
+        to orbit, scroll to zoom; it spins on its own until you take it.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+
+// ------------------------------------------------------------ form model --
+// The panel's exact role table, so a stage added here matches a stage the
+// panel would have generated at the same position (panelapp.jl STAGE_ROLE /
+// stage_scale mirror).
+const ROLE = {
+  booster: { label: 'booster', prop: 42000, dry: 3800, thrust: 950,
+             isp: 305, mix: 'kerolox', engines: 5 },
+  upper:   { label: 'upper', prop: 9500, dry: 900, thrust: 95,
+             isp: 345, mix: 'kerolox', engines: 1 },
+  kick:    { label: 'kick stage', prop: 950, dry: 140, thrust: 15,
+             isp: 315, mix: 'hypergolic', engines: 1 },
+  strap:   { label: 'strap-on set', prop: 12000, dry: 900, thrust: 380,
+             isp: 285, mix: 'kerolox', engines: 2 },
+};
+const roleOf = (k, n) => k === 1 ? ROLE.booster : k === n ? ROLE.kick : ROLE.upper;
+// upper stages shrink geometrically with height, as the panel's do
+const roleAt = (k, n) => {
+  const r = roleOf(k, n), f = r === ROLE.upper ? Math.pow(0.25, k - 2) : 1;
+  return { label: r.label, mix: r.mix, engines: r.engines,
+           prop: Math.round(r.prop*f), dry: Math.round(r.dry*f),
+           thrust: +(r.thrust*f).toFixed(1), isp: r.isp };
+};
+
+const STAGE_FIELDS = ['prop','dry','thrust_kn','isp','propellant','engines','engine',
+                      'diameter','size_by','len','dry_auto'];
+const BOOST_FIELDS = STAGE_FIELDS.concat(['throttle','ign_delay','sep_delay']);
+
+let CATALOGUE = { engines: [], propellants: [] };
+let NSTAGES = 3;
+const nBoost = () => +($('nboost').value || 0);
+// query keys this page does not own (mission, kick, lander fields) ride
+// along untouched, so the round trip to mission control loses nothing
+let PASSTHRU = new URLSearchParams();
+
+// ------------------------------------------------- pure, selftestable bits --
+function payloadFrac(pod, liftoff) {
+  return liftoff > 0 ? pod/liftoff : 0;
+}
+function stageMassRatio(dry, prop) {
+  return dry > 0 ? (dry + prop)/dry : 0;
+}
+// remove stage k of n from a {s1_..sn_} value map: everything above slides down
+function removeStageVals(vals, k, n) {
+  const out = {};
+  for (let i = 1; i <= n; i++) {
+    const from = i < k ? i : i + 1;
+    if (from > n) continue;
+    for (const f of STAGE_FIELDS)
+      if (vals[`s${from}_${f}`] !== undefined) out[`s${i}_${f}`] = vals[`s${from}_${f}`];
+  }
+  return out;
+}
+// insert a fresh stage before the kick stage: the kick's values slide up
+function insertStageVals(vals, n) {
+  const out = {};
+  for (let i = 1; i <= n + 1; i++) {
+    const from = i <= n - 1 ? i : i === n ? undefined : n;  // n -> new, n+1 <- old n
+    if (from === undefined) continue;
+    for (const f of STAGE_FIELDS)
+      if (vals[`s${from}_${f}`] !== undefined) out[`s${i}_${f}`] = vals[`s${from}_${f}`];
+  }
+  return out;
+}
+function faceNormal(ax, ay, az, bx, by, bz, cx, cy, cz) {
+  const ux = bx-ax, uy = by-ay, uz = bz-az, vx = cx-ax, vy = cy-ay, vz = cz-az;
+  let nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
+  const l = Math.hypot(nx, ny, nz) || 1;
+  return [nx/l, ny/l, nz/l];
+}
+
+// ------------------------------------------------------------- form build --
+function stageBlock(pre, title, r, dia) {
+  const mixOpts = CATALOGUE.propellants
+    .map(p => `<option value="${p.name}">${p.name} &middot; ${Math.round(p.bulk)} kg/m&sup3;</option>`).join('');
+  // engines grouped by their mixture, so the coupling is visible before you pick
+  const byMix = {};
+  for (const e of CATALOGUE.engines) (byMix[e.propellant] = byMix[e.propellant] || []).push(e);
+  const engOpts = '<option value="manual">manual (use the fields above)</option>' +
+    Object.keys(byMix).map(m => `<optgroup label="${m}">` +
+      byMix[m].map(e => `<option value="${e.name}">${e.name} &middot; ${Math.round(e.thrust_kn)} kN &middot; Isp ${Math.round(e.isp_vac)} s</option>`).join('') +
+      '</optgroup>').join('');
+  return `<div class="stagehdr" id="${pre}hdr">${title}
+      <span class="rm" id="${pre}rm" title="remove this stage">&#10005; remove</span></div>
+    <span class="derived" id="${pre}derived"></span>
+    <div class="row">
+      <div><label for="${pre}size_by">size by</label>
+        <select id="${pre}size_by">
+          <option value="prop">propellant mass</option>
+          <option value="length">tank length</option></select></div>
+      <div><label for="${pre}diameter">diameter [m]</label><input id="${pre}diameter" value="${dia}"></div>
+    </div>
+    <div class="row">
+      <div><label for="${pre}prop">propellant [kg]</label><input id="${pre}prop" value="${r.prop}"></div>
+      <div><label for="${pre}len">tank length [m]</label><input id="${pre}len" value="10"></div>
+    </div>
+    <div class="row">
+      <div><label for="${pre}dry">dry mass [kg]</label><input id="${pre}dry" value="${r.dry}"></div>
+      <div><label for="${pre}engines">engines</label><input id="${pre}engines" value="${r.engines}"></div>
+    </div>
+    <label style="display:flex;gap:6px;align-items:center;margin:6px 0 0">
+      <input type="checkbox" id="${pre}dry_auto" style="width:auto;margin:0">
+      estimate dry mass from the design</label>
+    <div class="row">
+      <div><label for="${pre}thrust_kn">vac thrust [kN]</label><input id="${pre}thrust_kn" value="${r.thrust}"></div>
+      <div><label for="${pre}isp">vac Isp [s]</label><input id="${pre}isp" value="${r.isp}"></div>
+    </div>
+    <div class="row">
+      <div style="grid-column:1/-1"><label for="${pre}propellant">mixture</label>
+        <select id="${pre}propellant">${mixOpts}</select></div>
+    </div>
+    <div class="row">
+      <div style="grid-column:1/-1"><label for="${pre}engine">engine (overrides thrust/Isp; sets the mixture)</label>
+        <select id="${pre}engine">${engOpts}</select></div>
+    </div>`;
+}
+
+function grabVals(box) {
+  const vals = {};
+  for (const el of box.querySelectorAll('input,select'))
+    vals[el.id] = el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
+  return vals;
+}
+function setVals(vals) {
+  for (const id in vals) {
+    const el = $(id);
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = vals[id] === '1' || vals[id] === 'true' || vals[id] === true;
+    else el.value = vals[id];
+  }
+}
+
+function buildStages(keep) {
+  const box = $('stagebox');
+  const vals = keep || grabVals(box);
+  const dia = $('diameter').value || 1.8;
+  let html = '';
+  for (let k = 1; k <= NSTAGES; k++)
+    html += stageBlock(`s${k}_`, `stage ${k} &mdash; ${roleAt(k, NSTAGES).label}`, roleAt(k, NSTAGES), dia);
+  box.innerHTML = html;
+  // a select with no kept value falls to the catalogue's first option, which
+  // is whatever order the server sent — the role's own mixture is the default
+  for (let k = 1; k <= NSTAGES; k++)
+    if (vals[`s${k}_propellant`] === undefined)
+      $(`s${k}_propellant`).value = roleAt(k, NSTAGES).mix;
+  setVals(vals);
+  for (let k = 1; k <= NSTAGES; k++) {
+    const kk = k;
+    $(`s${k}_rm`).onclick = () => removeStage(kk);
+    $(`s${k}_rm`).style.display = NSTAGES > 2 ? '' : 'none';
+  }
+  $('addstage').disabled = NSTAGES >= 5;
+  $('nstages_note').textContent = ` ${NSTAGES} of 5`;
+  wire(box);
+  syncLocks();
+}
+function buildBoost(keep) {
+  const box = $('boostbox');
+  const vals = keep || grabVals(box);
+  if (nBoost() === 0) { box.innerHTML = ''; return; }
+  const dia = +($('diameter').value || 1.8);
+  box.innerHTML =
+    stageBlock('b_', `${nBoost()} &times; ${ROLE.strap.label}`, ROLE.strap, +(dia*0.85).toFixed(2)) +
+    `<div class="row3">
+      <div><label for="b_throttle">core throttle [%]</label><input id="b_throttle" value="100"></div>
+      <div><label for="b_ign_delay">ignition delay [s]</label><input id="b_ign_delay" value="0"></div>
+      <div><label for="b_sep_delay">sep delay [s]</label><input id="b_sep_delay" value="0"></div>
+    </div>`;
+  $('b_rm').style.display = 'none';
+  if (vals['b_propellant'] === undefined) $('b_propellant').value = ROLE.strap.mix;
+  setVals(vals);
+  wire(box);
+  syncLocks();
+}
+function removeStage(k) {
+  const vals = removeStageVals(grabVals($('stagebox')), k, NSTAGES);
+  NSTAGES--;
+  buildStages(vals);
+  fetchGeo();
+}
+$('addstage').onclick = () => {
+  if (NSTAGES >= 5) return;
+  const vals = insertStageVals(grabVals($('stagebox')), NSTAGES);
+  NSTAGES++;
+  buildStages(vals);
+  fetchGeo();
+};
+$('nboost').addEventListener('change', () => { buildBoost(); fetchGeo(); });
+function wire(box) {
+  for (const el of box.querySelectorAll('input,select'))
+    el.addEventListener('change', () => { syncLocks(); fetchGeo(); });
+}
+
+// the size-by switch and the engine&harr;mixture lock, as on the panel: a
+// named engine owns its mixture, and the form must never show one the server
+// would not fly
+function syncLocks() {
+  const pres = Array.from({length: NSTAGES}, (_, i) => `s${i+1}_`);
+  if (nBoost()) pres.push('b_');
+  for (const p of pres) {
+    if (!$(p + 'prop')) continue;
+    const byLen = $(p + 'size_by').value === 'length';
+    $(p + 'prop').disabled = byLen;   $(p + 'prop').style.opacity = byLen ? .45 : 1;
+    $(p + 'len').disabled = !byLen;   $(p + 'len').style.opacity = byLen ? 1 : .45;
+    const engSel = $(p + 'engine'), eng = engSel.value !== 'manual';
+    const auto = $(p + 'dry_auto');
+    auto.disabled = !eng;
+    auto.parentElement.style.opacity = eng ? 1 : .45;
+    $(p + 'dry').disabled = eng && auto.checked;
+    $(p + 'dry').style.opacity = eng && auto.checked ? .45 : 1;
+    for (const f of ['thrust_kn', 'isp']) {
+      $(p + f).disabled = eng;
+      $(p + f).style.opacity = eng ? .45 : 1;
+    }
+    const mix = $(p + 'propellant');
+    if (eng) {
+      const cat = CATALOGUE.engines.find(e => e.name === engSel.value);
+      if (cat) mix.value = cat.propellant;
+    }
+    mix.disabled = eng;
+    mix.style.opacity = eng ? .45 : 1;
+    mix.title = eng ? 'set by the engine — a named engine owns its mixture' : '';
+  }
+}
+
+// ------------------------------------------------------------- encoding --
+function params() {
+  const u = new URLSearchParams(PASSTHRU);
+  u.set('vname', $('vname').value);
+  u.set('nstages', NSTAGES);
+  u.set('nboost', nBoost());
+  for (const id of ['diameter', 'fairing', 'pod_mass']) u.set(id, $(id).value);
+  const fields = [];
+  for (let k = 1; k <= NSTAGES; k++) fields.push(...STAGE_FIELDS.map(f => `s${k}_${f}`));
+  if (nBoost()) fields.push(...BOOST_FIELDS.map(f => `b_${f}`));
+  for (const f of fields) {
+    const el = $(f);
+    if (el) u.set(f, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
+  }
+  return u;
+}
+function refreshLinks() {
+  const u = params();
+  $('backlink').href = '/?' + u;
+  const v = new URLSearchParams(u);
+  v.set('mode', 'flyby');
+  $('flylink').href = '/launch?' + v;
+}
+
+// ------------------------------------------------------------- geometry --
+let geo = null, fetchTimer = 0, inflight = 0;
+function fetchGeo() {
+  clearTimeout(fetchTimer);
+  fetchTimer = setTimeout(doFetchGeo, 150);   // one request per burst of edits
+}
+async function doFetchGeo() {
+  refreshLinks();
+  const my = ++inflight;
+  try {
+    const r = await fetch('/api/geometry', { method: 'POST', body: params() });
+    const j = await r.json();
+    if (my !== inflight) return;               // a newer edit superseded this
+    if (!j.ok) {
+      $('state').className = 'status err';
+      $('state').textContent = j.error || 'geometry failed';
+      return;
+    }
+    geo = j;
+    $('state').className = 'status';
+    $('state').textContent =
+      `${(j.stages || []).length} stages` +
+      (j.boosters && j.boosters.length ? ` + ${j.boosters[0].count} strap-ons` : '') +
+      ` · ${(+j.length).toFixed(1)} m · ${(j.liftoff_mass_kg/1000).toFixed(1)} t`;
+    renderStats(j);
+    buildMesh(j);
+  } catch (e) {
+    if (my !== inflight) return;
+    $('state').className = 'status err';
+    $('state').textContent = 'no answer from the server: ' + e.message;
+  }
+}
+
+// ---------------------------------------------------------------- stats --
+const fmt = (x, d) => (+x).toFixed(d === undefined ? 1 : d);
+function renderStats(j) {
+  const pod = +$('pod_mass').value || 0;
+  const twr = +j.liftoff_twr, dvt = +j.total_dv_mps;
+  const pf = payloadFrac(pod, +j.liftoff_mass_kg);
+  $('totals').innerHTML = [
+    ['stack height', fmt(j.length) + ' m'],
+    ['liftoff mass', fmt(j.liftoff_mass_kg/1000) + ' t'],
+    ['pad T/W', `<span class="${twr < 1.15 ? 'bad' : twr < 1.25 ? 'warn' : 'good'}">${fmt(twr, 2)}</span>`],
+    ['total &Delta;v', `<span class="${dvt < 11500 ? 'warn' : 'good'}">${fmt(dvt/1000, 2)} km/s</span>`],
+    ['payload fraction', fmt(pf*100, 2) + ' %'],
+    ['core diameter', fmt(j.diameter, 2) + ' m'],
+  ].map(t => `<div class="tile"><div class="v">${t[1]}</div><div class="k">${t[0]}</div></div>`).join('');
+  $('verdict').innerHTML =
+    (twr < 1.15 ? '<span class="bad">will not lift off</span> — more first-stage thrust or strap-ons' :
+     twr < 1.25 ? '<span class="warn">sluggish off the pad</span>' :
+     '<span class="good">lifts off cleanly</span>') +
+    (dvt < 11500 ? ' · <span class="warn">&Delta;v is thin for a Moon shot</span>' : '');
+
+  $('stagestats').innerHTML = '<table><tr><th></th><th>prop</th><th>dry</th>' +
+    '<th>len</th><th>&Delta;v</th><th>T/W</th><th>burn</th><th>MR</th></tr>' +
+    (j.stages || []).map((s, i) => `<tr>
+      <td>S${i+1}</td>
+      <td>${fmt(s.prop_kg/1000)} t</td>
+      <td>${fmt(s.dry_kg/1000)} t</td>
+      <td>${fmt(s.length_m)} m</td>
+      <td>${Math.round(s.dv_mps)}</td>
+      <td class="${i === 0 && s.twr < 1.15 ? 'bad' : ''}">${fmt(s.twr, 2)}</td>
+      <td>${Math.round(s.burn_s)} s</td>
+      <td>${fmt(stageMassRatio(+s.dry_kg, +s.prop_kg), 1)}</td></tr>`).join('') + '</table>';
+  for (let k = 1; k <= NSTAGES; k++) {
+    const el = $(`s${k}_derived`), s = (j.stages || [])[k-1];
+    if (el && s) el.innerHTML =
+      `${fmt(s.length_m)} m &middot; ${Math.round(s.dv_mps)} m/s &middot; ` +
+      `${s.propellant}${s.interstage_m > 0.01 ? ` &middot; +${fmt(s.interstage_m)} m adapter` : ''}`;
+  }
+  const bs = (j.boosters || [])[0];
+  $('booststats_card').classList.toggle('hidden', !bs);
+  if (bs) {
+    $('booststats').innerHTML =
+      `${bs.count} &times; ${fmt(bs.prop_kg/1000)} t prop &middot; ` +
+      `${fmt(bs.length_m)} m &times; ${fmt(bs.diameter_m, 2)} m<br>` +
+      `set ${fmt(bs.set_mass_kg/1000)} t &middot; adds ${Math.round(bs.dv_mps)} m/s &middot; ` +
+      `burn ${Math.round(bs.burn_s)} s &middot; core at ${Math.round(bs.core_throttle*100)}%`;
+    const el = $('b_derived');
+    if (el) el.innerHTML = `${fmt(bs.length_m)} m each &middot; set ${fmt(bs.set_mass_kg/1000)} t`;
+  }
+}
+
+// ------------------------------------------------------------ the model --
+// Flat-shaded WebGL over the server's triangles. tris is 9 floats per
+// triangle, +x = nose axis, metres; sections name 1-based inclusive
+// triangle ranges. Winding is not guaranteed, so faces are lit two-sided
+// and culling stays off.
+const cv = $('view');
+const gl = cv.getContext('webgl', { antialias: true });
+function compile(vs, fs) {
+  const mk = (t, src) => {
+    const s = gl.createShader(t);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, mk(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+let prog = null, aP, aN, aC, uMVP, uRot, nVerts = 0, vbuf = null;
+if (gl) {
+  prog = compile(`
+    attribute vec3 aP, aN, aC;
+    uniform mat4 uMVP; uniform mat3 uRot;
+    varying vec3 vN, vC;
+    void main(){ vN = uRot*aN; vC = aC; gl_Position = uMVP*vec4(aP, 1.0); }`, `
+    precision mediump float;
+    varying vec3 vN, vC;
+    void main(){
+      vec3 n = normalize(vN);
+      vec3 key = normalize(vec3(0.55, 0.65, 0.52));
+      vec3 fil = normalize(vec3(-0.6, -0.2, -0.75));
+      float d = abs(dot(n, key))*0.85 + abs(dot(n, fil))*0.25 + 0.16;
+      gl_FragColor = vec4(pow(vC*d, vec3(0.9)), 1.0);
+    }`);
+  aP = gl.getAttribLocation(prog, 'aP');
+  aN = gl.getAttribLocation(prog, 'aN');
+  aC = gl.getAttribLocation(prog, 'aC');
+  uMVP = gl.getUniformLocation(prog, 'uMVP');
+  uRot = gl.getUniformLocation(prog, 'uRot');
+  vbuf = gl.createBuffer();
+} else {
+  $('state').className = 'status err';
+  $('state').textContent = 'WebGL is unavailable — the numbers still work, the picture does not';
+}
+// hull tones per section kind; interior sections are not part of a silhouette
+function styleOf(name) {
+  if (/^booster/.test(name)) return [0.78, 0.74, 0.70];
+  if (name === 'fairing')    return [0.92, 0.90, 0.86];
+  if (name === 'pod')        return [0.80, 0.63, 0.48];
+  if (/^stage(\d+)/.test(name))
+    return +name.slice(5) % 2 ? [0.90, 0.89, 0.86] : [0.72, 0.73, 0.76];
+  return [0.8, 0.8, 0.8];
+}
+let vLen = 10;                    // stack height, for framing
+let userZoomed = false;
+function buildMesh(j) {
+  if (!gl) return;
+  const skip = { cabin: 1, glass: 1 };
+  const out = [];
+  vLen = Math.max(4, +j.length || 10);
+  // hold the whole stack in frame as it grows or shrinks — until the user
+  // takes the wheel, at which point their distance is theirs
+  if (!userZoomed) dist = vLen*2.1;
+  for (const s of (j.sections || [])) {
+    if (skip[s.name]) continue;
+    const col = styleOf(s.name);
+    for (let t = s.t0 - 1; t < s.t1; t++) {
+      const T = j.tris[t];
+      if (!T) continue;
+      const n = faceNormal(...T);
+      for (let v = 0; v < 3; v++)
+        out.push(T[v*3], T[v*3+1], T[v*3+2], n[0], n[1], n[2], col[0], col[1], col[2]);
+    }
+  }
+  nVerts = out.length/9;
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(out), gl.STATIC_DRAW);
+}
+// mat4 helpers, column-major, just enough for one model on one camera
+function mMul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+    o[c*4+r] = a[r]*b[c*4] + a[4+r]*b[c*4+1] + a[8+r]*b[c*4+2] + a[12+r]*b[c*4+3];
+  return o;
+}
+const mPersp = (fov, asp, n, f) => {
+  const t = 1/Math.tan(fov/2), d = 1/(n - f);
+  return new Float32Array([t/asp,0,0,0, 0,t,0,0, 0,0,(n+f)*d,-1, 0,0,2*n*f*d,0]);
+};
+let yaw = 0.6, pitch = 0.12, dist = 0, lastDrag = 0;
+function draw(now) {
+  requestAnimationFrame(draw);
+  if (!gl || !nVerts) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth*dpr | 0, h = cv.clientHeight*dpr | 0;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0.075, 0.075, 0.07, 1);
+  gl.enable(gl.DEPTH_TEST);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (now - lastDrag > 2500) yaw += 0.004;          // idle: a slow turntable
+  // model: nose (+x) up, spun by yaw about the vertical, tipped by pitch,
+  // centred on the stack's middle, backed off far enough to hold it all
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  // the 3x3 model rotation: M = Rx(pitch) * Ry(yaw) * (x->y,y->z,z->x)
+  const B = [0,1,0, 0,0,1, 1,0,0];                  // axis shuffle: nose +x -> up
+  const Ry = [cy,0,-sy, 0,1,0, sy,0,cy];
+  const Rx = [1,0,0, 0,cp,sp, 0,-sp,cp];
+  const m3 = (a, b) => {
+    const o = new Array(9);
+    for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++)
+      o[c*3+r] = a[r]*b[c*3] + a[3+r]*b[c*3+1] + a[6+r]*b[c*3+2];
+    return o;
+  };
+  const rot = m3(Rx, m3(Ry, B));
+  if (!dist) dist = vLen*2.1;
+  const M = new Float32Array([
+    rot[0], rot[1], rot[2], 0,
+    rot[3], rot[4], rot[5], 0,
+    rot[6], rot[7], rot[8], 0,
+    -(rot[0]*0 + rot[3]*0 + rot[6]*0), 0, 0, 1]);
+  // translate model so the stack's centre sits at the origin BEFORE rotating:
+  // fold the pre-translation (-vLen/2 along model x) into the matrix
+  const tx = -vLen/2;
+  M[12] = rot[0]*tx; M[13] = rot[1]*tx; M[14] = rot[2]*tx;
+  const V = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-dist,1]);
+  const P = mPersp(0.5, w/h, 0.1, dist*40);
+  const MVP = mMul(P, mMul(V, M));
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(uMVP, false, MVP);
+  gl.uniformMatrix3fv(uRot, false, new Float32Array(rot));
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+  for (const [loc, off] of [[aP, 0], [aN, 12], [aC, 24]]) {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 36, off);
+  }
+  gl.drawArrays(gl.TRIANGLES, 0, nVerts);
+}
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  yaw += (e.clientX - drag[0])*0.008;
+  pitch = Math.min(1.35, Math.max(-1.35, pitch + (e.clientY - drag[1])*0.006));
+  drag = [e.clientX, e.clientY];
+  lastDrag = performance.now();
+});
+cv.addEventListener('pointerup', () => drag = null);
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  userZoomed = true;
+  if (!dist) dist = vLen*2.1;
+  dist = Math.min(vLen*8, Math.max(vLen*0.25, dist*(e.deltaY > 0 ? 1.12 : 0.89)));
+}, { passive: false });
+
+// --------------------------------------------------------------- startup --
+async function boot() {
+  try {
+    CATALOGUE = await (await fetch('/api/catalogue')).json();
+  } catch (e) {
+    $('state').className = 'status err';
+    $('state').textContent = 'no catalogue from the server: ' + e.message;
+    return;
+  }
+  // rehydrate from an inbound query (the panel links here with its whole
+  // form). Stack shape first — it decides which fields exist to fill.
+  const q = new URLSearchParams(location.search);
+  const own = k => k === 'nstages' || k === 'nboost' || k === 'vname' ||
+    k === 'diameter' || k === 'fairing' || k === 'pod_mass' ||
+    /^s\d+_/.test(k) || /^b_/.test(k);
+  if (q.has('nstages')) NSTAGES = Math.min(5, Math.max(2, Math.round(+q.get('nstages') || 3)));
+  if (q.has('nboost')) $('nboost').value =
+    [...$('nboost').options].some(o => o.value === q.get('nboost')) ? q.get('nboost') : 0;
+  const vals = {};
+  for (const [k, v] of q) {
+    if (!own(k)) { if (k !== 'selftest') PASSTHRU.set(k, v); continue; }
+    if (k === 'nstages' || k === 'nboost') continue;
+    vals[k] = v;
+  }
+  buildStages(vals);
+  buildBoost(vals);
+  setVals(vals);           // vname/diameter/fairing/pod_mass + anything missed
+  for (const id of ['vname', 'diameter', 'fairing', 'pod_mass'])
+    $(id).addEventListener('change', () => fetchGeo());
+  // the core diameter carries stage diameters that were tracking it, as on
+  // the panel
+  let lastDia = $('diameter').value;
+  $('diameter').addEventListener('change', () => {
+    for (let k = 1; k <= NSTAGES; k++) {
+      const el = $(`s${k}_diameter`);
+      if (el && Math.abs(+el.value - +lastDia) < 1e-9) el.value = $('diameter').value;
+    }
+    const b = $('b_diameter');
+    if (b && Math.abs(+b.value - +(+lastDia*0.85).toFixed(2)) < 1e-9)
+      b.value = +(+$('diameter').value*0.85).toFixed(2);
+    lastDia = $('diameter').value;
+    fetchGeo();
+  });
+  syncLocks();
+  fetchGeo();
+  requestAnimationFrame(draw);
+}
+boot();
+
+// -------------------------------------------------------------- selftest --
+window.__selftest = function () {
+  const out = { pass: 0, fail: 0, failures: [] };
+  const eq = (name, fn, want, tol) => {
+    let got;
+    try { got = fn(); }
+    catch (e) { out.fail++; out.failures.push(`${name}: threw ${e.message}`); return; }
+    if (got === want || Math.abs(got - want) <= (tol === undefined ? 1e-9 : tol)) out.pass++;
+    else { out.fail++; out.failures.push(`${name}: got ${got}, want ${want}`); }
+  };
+  eq('payload fraction', () => payloadFrac(350, 70000), 0.005);
+  eq('payload fraction of nothing', () => payloadFrac(350, 0), 0);
+  eq('mass ratio', () => stageMassRatio(1000, 9000), 10);
+  eq('mass ratio of no stage', () => stageMassRatio(0, 9000), 0);
+  eq('roles: first is the booster', () => roleAt(1, 3).label, 'booster');
+  eq('roles: last is the kick', () => roleAt(3, 3).label, 'kick stage');
+  eq('roles: uppers shrink with height', () => roleAt(3, 4).prop, Math.round(9500*0.25));
+  const vals = { s1_prop: 'a', s2_prop: 'b', s3_prop: 'c' };
+  eq('removing stage 2 slides stage 3 down',
+     () => removeStageVals(vals, 2, 3).s2_prop, 'c');
+  eq('and keeps stage 1', () => removeStageVals(vals, 2, 3).s1_prop, 'a');
+  eq('inserting before the kick moves the kick up',
+     () => insertStageVals(vals, 3).s4_prop, 'c');
+  eq('and leaves the new slot empty',
+     () => insertStageVals(vals, 3).s3_prop === undefined, true);
+  eq('face normal of the xy triangle points at +z',
+     () => faceNormal(0,0,0, 1,0,0, 0,1,0)[2], 1);
+  console.log(`__selftest: ${out.pass} passed, ${out.fail} failed`,
+              out.failures.length ? out.failures : '');
+  return out;
+};
+if (new URLSearchParams(location.search).get('selftest') === '1')
+  setTimeout(window.__selftest, 0);
+</script>
+</body>
+</html>

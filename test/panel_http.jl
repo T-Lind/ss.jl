@@ -134,6 +134,52 @@ end
         @test st == 200
         @test occursin("\"ok\":true", bod)
 
+        # --- the builder page and the engine-mixture rule -------------------
+        st, hdrs, bod = http("GET", "/build"; port = port)
+        @test st == 200
+        @test hdrs["content-type"] == "text/html; charset=utf-8"
+        @test occursin("<html", lowercase(bod))
+        st, hdrs, bod = http("GET", "/build?nstages=3&diameter=1.8"; port = port)
+        @test st == 200
+
+        # A named engine owns its mixture: naming both an engine and a
+        # DIFFERENT propellant is an error the user must see, not a silent
+        # override (the form used to display a mixture the server was not
+        # flying). The error carries the engine and both propellant names.
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port,
+                             body = "nstages=2&s1_engine=raptor_2&s1_propellant=kerolox")
+        @test st == 200
+        @test occursin("\"ok\":false", bod)
+        @test occursin("raptor_2", bod)
+        @test occursin("methalox", bod)
+        @test occursin("kerolox", bod)
+
+        # The matched pair is fine, an omitted mixture is fine, and manual
+        # mode keeps free choice.
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port,
+                             body = "nstages=2&s1_engine=raptor_2&s1_propellant=methalox")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port, body = "nstages=2&s1_engine=raptor_2")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port,
+                             body = "nstages=2&s1_engine=manual&s1_propellant=methalox")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+
+        # The rule guards the flight path too, not merely the preview
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port,
+                             body = "mode=flyby&s2_engine=rl10b2&s2_propellant=kerolox")
+        @test st == 200
+        @test occursin("\"ok\":false", bod)
+        @test occursin("hydrolox", bod)
+
         # --- method handling ------------------------------------------------
         st, hdrs, bod = http("HEAD", "/api/catalogue"; port = port)
         @test st == 200
