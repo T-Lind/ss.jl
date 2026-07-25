@@ -13,8 +13,11 @@ using SatelliteSim
 using Sockets
 using Printf
 
-const PAGE_PATH = joinpath(@__DIR__, "panel_page.html")
-const LAUNCH_PATH = joinpath(@__DIR__, "launch_page.html")
+# Refs, not consts, so a test can point one at a nonexistent file and exercise
+# `route`'s catch without a real file on disk — the only way to reach that
+# layer, since every shipped page always exists.
+const PAGE_PATH = Ref(joinpath(@__DIR__, "panel_page.html"))
+const LAUNCH_PATH = Ref(joinpath(@__DIR__, "launch_page.html"))
 
 # ---------------------------------------------------------------- helpers --
 
@@ -800,14 +803,26 @@ function read_request(sock)
     (method, path, body)
 end
 
-"Write a complete response. `head` suppresses the body but keeps the headers."
+"""
+Write a complete response. `head` suppresses the body but keeps the headers.
+
+A `204 No Content` gets neither `Content-Type` nor `Content-Length`: RFC 9112
+§6.2 is a MUST NOT for the latter on a 204, and the former has nothing to
+describe.
+"""
 function write_response(sock, status::AbstractString, ctype::AbstractString,
                         body::AbstractString; head::Bool = false)
-    write(sock, "HTTP/1.1 $status\r\nContent-Type: $ctype\r\n" *
-                "Content-Length: $(sizeof(body))\r\nConnection: close\r\n\r\n")
-    head || write(sock, body)
+    no_content = startswith(status, "204")
+    write(sock, no_content ?
+        "HTTP/1.1 $status\r\nConnection: close\r\n\r\n" :
+        "HTTP/1.1 $status\r\nContent-Type: $ctype\r\n" *
+        "Content-Length: $(sizeof(body))\r\nConnection: close\r\n\r\n")
+    (head || no_content) || write(sock, body)
     nothing
 end
+
+"The `{ok: false, error: ...}` shape every failure response shares."
+error_payload(err) = Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
 
 """
 Parse the form and call `f` on it, turning any failure into a result.
@@ -821,7 +836,7 @@ function safe_call(f, body::AbstractString)
     try
         f(parse_form(body))
     catch err
-        Dict{String,Any}("ok" => false, "error" => sprint(showerror, err))
+        error_payload(err)
     end
 end
 
@@ -836,10 +851,10 @@ function route(method::AbstractString, path::AbstractString,
     try
         if method in ("GET", "HEAD") && (path == "/" || startswith(path, "/?"))
             # re-read per request so page edits show on refresh (dev-friendly)
-            return ("200 OK", "text/html; charset=utf-8", read(PAGE_PATH, String))
+            return ("200 OK", "text/html; charset=utf-8", read(PAGE_PATH[], String))
         elseif method in ("GET", "HEAD") &&
                (path == "/launch" || startswith(path, "/launch?"))
-            return ("200 OK", "text/html; charset=utf-8", read(LAUNCH_PATH, String))
+            return ("200 OK", "text/html; charset=utf-8", read(LAUNCH_PATH[], String))
         elseif method in ("GET", "HEAD") && path == "/api/catalogue"
             return ("200 OK", "application/json", json(catalogue_payload()))
         elseif method in ("GET", "HEAD") && path == "/api/health"
@@ -862,39 +877,62 @@ function route(method::AbstractString, path::AbstractString,
                                       "error" => "no route for $method $path")))
     catch err
         return ("500 Internal Server Error", "application/json",
-                json(Dict{String,Any}("ok" => false,
-                                      "error" => sprint(showerror, err))))
+                json(error_payload(err)))
     end
 end
 
+"""
+Serve one connection, and answer it whatever happens.
+
+Two layers, because one is not enough: `route` turns any error below it into a
+response, and the `catch` here is the last resort for a failure in `route`'s
+own serialization or in the socket write.
+"""
 function handle(sock)
     t0 = time()
-    method, path, status, nbytes = "-", "-", "500", 0
+    method, path, status, nbytes = "-", "-", "-", 0
+    wrote = false
     try
         req = read_request(sock)
         req === nothing && return
         method, path, body = req
         st, ctype, payload = route(method, path, body)
+        # once write_response is called, bytes may already be on the wire —
+        # if it throws partway through, a second status line on top of a
+        # partial first one would corrupt the stream, so `wrote` must flip
+        # before the call, not after
+        wrote = true
+        write_response(sock, st, ctype, payload; head = method == "HEAD")
         status = first(st, 3)
         nbytes = sizeof(payload)
-        write_response(sock, st, ctype, payload; head = method == "HEAD")
     catch err
-        try
-            payload = json(Dict{String,Any}("ok" => false,
-                                            "error" => sprint(showerror, err)))
-            status = "500"
-            nbytes = sizeof(payload)
-            write_response(sock, "500 Internal Server Error",
-                           "application/json", payload)
-        catch
-            # the socket itself is gone; nothing left to say
+        if wrote
+            # the primary response may have partially reached the peer; the
+            # only safe thing left to do is say so in the log, not the socket
+            status = "ERR"
+        else
+            try
+                payload = json(error_payload(err))
+                nbytes = sizeof(payload)
+                write_response(sock, "500 Internal Server Error", "application/json",
+                               payload; head = method == "HEAD")
+                status = "500"
+            catch
+                # the socket itself is gone; nothing left to say
+                status = "ERR"; nbytes = 0
+            end
         end
     finally
         # One line per request. This is how an intermittent "Failed to fetch"
-        # gets diagnosed from a record rather than from a hypothesis.
-        @printf("[panel] %-7s %-44s %s %7.0f ms %9d B\n",
-                method, first(path, 44), status, 1e3 * (time() - t0), nbytes)
-        flush(stdout)
+        # gets diagnosed from a record rather than from a hypothesis. Wrapped
+        # so a throwing @printf/flush cannot skip the close below and leak
+        # the socket.
+        try
+            @printf("[panel] %-7s %-44s %s %7.0f ms %9d B\n",
+                    method, first(path, 44), status, 1e3 * (time() - t0), nbytes)
+            flush(stdout)
+        catch
+        end
         close(sock)
     end
 end
@@ -927,12 +965,29 @@ function start_panel(port::Int)
     acceptors = Task[]
     for l in listeners
         push!(acceptors, @async begin
+            fails = 0
             while isopen(l)
                 sock = try
                     accept(l)
-                catch
-                    break          # listener closed: the loop is done
+                catch err
+                    isopen(l) || break     # listener closed: the loop is done
+                    # accept can also fail transiently — ECONNABORTED when a
+                    # client aborts between SYN and accept (routine on
+                    # Windows), EMFILE under descriptor pressure. Treating
+                    # every such error as "closed" silently kills this
+                    # listener's loop; if that listener is the IPv6 one, every
+                    # `localhost` request (which resolves ::1 first) starts
+                    # failing with nothing in the request log, because the
+                    # request never reaches `handle` at all.
+                    fails += 1
+                    if fails >= 5
+                        @error "accept failed $fails times in a row; giving up on this listener" err
+                        break
+                    end
+                    @warn "accept failed; still listening" err
+                    continue
                 end
+                fails = 0
                 # @async would schedule on this thread, and panel_mission
                 # never yields — so a mission in flight stopped `accept` from
                 # running at all. Six concurrent runs took 11.9 s, serialized.
@@ -961,6 +1016,10 @@ function main(port::Int = 8137)
     panel_mission(Dict{String,String}())
     @printf("ready in %.1f s — panel at http://localhost:%d  (Ctrl-C to stop)\n",
             time() - t0, port)
+    Threads.nthreads() == 1 &&
+        println("single-threaded: a mission in flight will block every other " *
+                "request until it finishes. Restart with `-t auto` to serve " *
+                "requests concurrently.")
     srv = start_panel(port)
     wait(srv.acceptors[1])
     srv

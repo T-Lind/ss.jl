@@ -10,12 +10,41 @@ using Sockets
 
 include(joinpath(@__DIR__, "..", "scripts", "panelapp.jl"))
 
-"A free TCP port on the loopback interface."
+"""
+A TCP port free on the IPv4 loopback interface, verified free on the IPv6
+loopback too when this host has one to offer.
+
+`start_panel`'s own IPv6 bind is best-effort (a host without IPv6 still
+works), so an IPv4-only probe here could hand back a port that is free on
+IPv4 but already taken on IPv6 — the soft IPv6 failure downstream and this
+port choice would then have unrelated causes, and a test asserting on the
+IPv6 listener would fail for the wrong reason.
+"""
 function free_port()
-    s = listen(IPv4(127, 0, 0, 1), 0)
-    p = Int(getsockname(s)[2])
-    close(s)
-    p
+    # cheap capability check, once: does this host have an IPv6 loopback at
+    # all? If not, every port collides on IPv6 the same way, and retrying is
+    # pointless — that is exactly the condition start_panel already tolerates.
+    ipv6_capable = try
+        close(listen(IPv6(0, 0, 0, 0, 0, 0, 0, 1), 0))
+        true
+    catch
+        false
+    end
+    for _ in 1:20
+        s4 = listen(IPv4(127, 0, 0, 1), 0)
+        p = Int(getsockname(s4)[2])
+        close(s4)
+        ipv6_capable || return p
+        s6 = try
+            listen(IPv6(0, 0, 0, 0, 0, 0, 0, 1), p)
+        catch
+            nothing
+        end
+        s6 === nothing && continue   # this specific port collided on IPv6; retry
+        close(s6)
+        return p
+    end
+    error("could not find a port free on both IPv4 and IPv6 after 20 tries")
 end
 
 "Split a raw HTTP response into (header block, body)."
@@ -133,8 +162,12 @@ end
         # failed attempt before falling back.
         st, hdrs, bod = http("GET", "/api/health"; port = port, host = ip"127.0.0.1")
         @test st == 200
-        st, hdrs, bod = http("GET", "/api/health"; port = port, host = ip"::1")
-        @test st == 200
+        # start_panel's IPv6 bind is best-effort — a host without IPv6 still
+        # works — so this only holds when a second listener actually came up.
+        if length(srv.listeners) > 1
+            st, hdrs, bod = http("GET", "/api/health"; port = port, host = ip"::1")
+            @test st == 200
+        end
 
         # --- a slow request must not block the whole server -----------------
         # Guarded: with one thread there is nothing to interleave with, and
@@ -164,6 +197,23 @@ end
         (_, _, bb) = fetch(b)
         @test occursin("\"ok\":true", ba)
         @test ba == bb
+
+        # --- the last-resort 500 --------------------------------------------
+        # `route`'s own catch is the first of the two "answer it whatever
+        # happens" layers, and nothing exercised it: every shipped page file
+        # exists, so `read(PAGE_PATH[], String)` never threw. Pointing the
+        # Ref at a file that is not there does, and the response still has to
+        # be a real, parseable body — not a closed socket.
+        orig_page = PanelApp.PAGE_PATH[]
+        PanelApp.PAGE_PATH[] = joinpath(@__DIR__, "no-such-panel-page.html")
+        try
+            st, hdrs, bod = http("GET", "/"; port = port)
+            @test st == 500
+            @test !isempty(bod)
+            @test occursin("\"ok\":false", bod)
+        finally
+            PanelApp.PAGE_PATH[] = orig_page
+        end
     finally
         PanelApp.stop_panel(srv)
     end
