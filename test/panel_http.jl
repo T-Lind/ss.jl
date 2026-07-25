@@ -1,0 +1,82 @@
+# HTTP-level tests for the mission-control panel.
+#
+# The invariant this file exists to protect: *no request ever gets an empty
+# reply*. A socket closed without a response is indistinguishable, in a
+# browser, from the server being down — it surfaces as "Failed to fetch" with
+# nothing in the log to explain it.
+
+using Test
+using Sockets
+
+include(joinpath(@__DIR__, "..", "scripts", "panelapp.jl"))
+
+"A free TCP port on the loopback interface."
+function free_port()
+    s = listen(IPv4(127, 0, 0, 1), 0)
+    p = Int(getsockname(s)[2])
+    close(s)
+    p
+end
+
+"Split a raw HTTP response into (header block, body)."
+function split_response(raw::AbstractString)
+    i = findfirst("\r\n\r\n", raw)
+    i === nothing && return (raw, "")
+    (raw[1:first(i)-1], raw[last(i)+1:end])
+end
+
+"""
+    http(method, path; port, host, body, timeout) -> (status, headers, body)
+
+Minimal HTTP/1.1 client — enough to talk to the panel and nothing more.
+Errors if no response arrives within `timeout` seconds, which is exactly the
+failure this suite is here to catch.
+"""
+function http(method::AbstractString, path::AbstractString;
+              port::Int, host = Sockets.localhost,
+              body::AbstractString = "", timeout::Float64 = 60.0)
+    out = Ref{String}("")
+    t = @async begin
+        sock = connect(host, port)
+        req = "$method $path HTTP/1.1\r\nHost: localhost\r\n"
+        if !isempty(body)
+            req *= "Content-Type: application/x-www-form-urlencoded\r\n" *
+                   "Content-Length: $(sizeof(body))\r\n"
+        end
+        req *= "Connection: close\r\n\r\n" * body
+        write(sock, req)
+        out[] = read(sock, String)
+        close(sock)
+    end
+    timedwait(() -> istaskdone(t), timeout) === :ok ||
+        error("no response within $timeout s: $method $path")
+    istaskfailed(t) && throw(TaskFailedException(t))
+    head, bod = split_response(out[])
+    lines = split(head, "\r\n")
+    status = parse(Int, split(lines[1], ' ')[2])
+    hdrs = Dict{String,String}()
+    for l in lines[2:end]
+        kv = split(l, ':'; limit = 2)
+        length(kv) == 2 && (hdrs[lowercase(strip(kv[1]))] = String(strip(kv[2])))
+    end
+    (status, hdrs, bod)
+end
+
+@testset "panel http" begin
+    # the module must reuse the already-loaded package rather than loading a
+    # second copy off LOAD_PATH — a duplicate would give us two incompatible
+    # sets of types with identical names
+    @test PanelApp.SatelliteSim === SatelliteSim
+
+    port = free_port()
+    srv = PanelApp.start_panel(port)
+    try
+        st, hdrs, bod = http("GET", "/api/catalogue"; port = port)
+        @test st == 200
+        @test occursin("propellants", bod)
+        @test occursin("engines", bod)
+        @test occursin("kerolox", bod)
+    finally
+        PanelApp.stop_panel(srv)
+    end
+end

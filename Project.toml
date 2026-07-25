@@ -17,7 +17,8 @@ julia = "1.9"
 # REPL happens to have loaded: without them `using Test` in test/runtests.jl
 # fails with "Package Test not found in current path" on every Julia version.
 [extras]
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test"]
+test = ["Test", "Sockets"]

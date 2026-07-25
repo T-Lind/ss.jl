@@ -1434,3 +1434,7 @@ end
 end
 
 end
+
+# The panel is a script rather than part of the package, but it is the primary
+# way this simulator gets used, and its HTTP layer has its own failure modes.
+include("panel_http.jl")
