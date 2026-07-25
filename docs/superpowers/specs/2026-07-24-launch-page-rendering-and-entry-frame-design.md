@@ -238,11 +238,22 @@ measurements in §2.2 can be reproduced on any machine without a debugger.
 * `deckFade` takes a **true geometric altitude**, not `cam.eye[1]`. `drawScene`
   already computes exactly this as `camAlt` (`:3612`); it is passed in rather
   than recomputed, so there is one definition of altitude in the file.
-* `deckFade` additionally returns 0 when the camera is further than 60 km
+* `deckFade` additionally returns 0 when the camera is further than **150 km**
   horizontally from the local frame origin, because that is the region over
   which the drawn plane has any validity. The plane and the shell hand over
   through `exp(-|xz|/45000)` (`:833`); the gate is that profile made explicit
-  on the JS side.
+  on the JS side. 150 km rather than something tighter: the pad world runs all
+  the way to orbit insertion, so the vehicle goes genuinely downrange while
+  still below the 45 km altitude gate, and a tight gate would pop the deck off
+  mid-ascent. At 150 km the plane already contributes `exp(-3.33)` = 3.6%, so
+  nothing visible is given up, while the entry distances that caused the bug
+  are 5 645-6 642 km — four decades clear of the threshold.
+* the call site moves into a function, `deckWeight(world, camEye, earthC)`.
+  This is not tidying: the original `deckFade` was *correct given an altitude*
+  and returns 0 for 84 422 m exactly as it should. The defect was entirely in
+  what the call site passed it. So assertions on `deckFade` alone would have
+  been green on this bug, and the thing that needs to be testable is the
+  computation that turns a camera into a weight.
 * `PUP` becomes the true local up, `normalize(cam.eye - earthC)`, in the entry
   and pad worlds alike. At the pad the two agree to within the width of the
   complex, so this is a no-op there and a correction downrange.
@@ -270,11 +281,28 @@ modes, with `parts` cleared so no particle can be mistaken for an artefact:
 no full-width seam; a lit planet with clouds where the planet is; the capsule
 visible in the exterior views. Screenshots kept for the three that were wrong.
 
-**A regression test for the frame confusion.** `deckFade` is pure and now takes
-altitude and horizontal range, so it is unit-testable without a GPU: assert it
-is 0 at 84 km regardless of where the frame origin is, 0 at 5 000 km downrange
-regardless of altitude, and unchanged from today's values on the pad. This is
-the assertion that would have caught the original defect.
+**A regression test for the frame confusion.** Both `deckFade(alt, rng)` and
+`deckWeight(world, camEye, earthC)` are pure, so they are testable without a
+GPU, behind `window.__selftest()` and auto-run on `?selftest=1`.
+
+The assertions that matter are the `deckWeight` ones, built from camera
+positions with a known true altitude and known range from the frame origin:
+0 at 84 km and 5 884 km downrange, 0 at 272 km and 6 642 km downrange, but
+still 1 at 8 km over the splash site and 1 on the pad 5 km downrange. Solving
+for those positions is what makes `camEye[1]` come out at about −3.7e6, which
+is the number the old code was reading as an altitude — so one assertion pins
+its sign, putting the reason on the record rather than in a commit message.
+
+`deckFade`'s own arithmetic is asserted separately (altitude gate, the
+thin-shell exclusion at deck height, the range gate), but note that **every
+one of those passes against the buggy code.** That is the point: a test suite
+covering only `deckFade` would have been green throughout, which is why §4.4
+extracts the call site.
+
+**Stated limitation:** `__selftest` cannot run in CI — CI is Julia-only and has
+no browser, and adding a JS runner would mean a build step for a page whose
+whole value is being one dependency-free file. It is run by hand at the end of
+the entry-fix task and again at close-out.
 
 **No new Julia work**, so `test/runtests.jl` and `test/panel_http.jl` must
 simply stay green — run once at the end rather than per task, since nothing
