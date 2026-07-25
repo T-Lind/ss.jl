@@ -2847,14 +2847,49 @@ let skyBuf, partDyn;
 // the right value is whatever this machine can afford rather than a number
 // hard-coded for one GPU.
 //
-// Starts at 0.5, not at BG_MAX. The start value is what the first ~30 frames
-// actually render at, before the median has the samples to correct it: from 1.0
-// that is a second of 136 ms stutter on this machine at the moment the page is
-// first looked at, and from BG_MIN a fast GPU stays soft for the five seconds
-// the 0.05-per-30-frames ramp needs to climb. 0.5 is the value Task 3 shipped
-// and measured, three steps above the floor and ten below the ceiling.
-let bgScale = 0.5;
-let perfMed = 0, perfShow = false;
+// The scale is remembered PER WORLD CLASS, and across sessions. The pad and
+// the entry pay for two fullscreen noise passes and settle wherever this
+// machine affords; a coast is stars over black and can usually afford native.
+// One global scale meant every space scene inherited the launch's verdict and
+// crawled back up a step at a time — which the eye read as a blurry Earth and
+// a Moon whose craters arrived late and blocky, since the planets live in
+// exactly the buffer this number sizes. Defaults (0.5 air, 0.7 space) are only
+// the first session's opening bid; after that the stored verdicts open every
+// scene at the resolution this machine actually finished at last time.
+function bgClassFor(world) {
+  return world === 'eci' || world === 'moon' ? 'space' : 'air';
+}
+// localStorage is user data read back at startup: absent, garbage or edited,
+// it must come back as a usable table, clamped into the scaler's own range.
+function bgMemParse(raw) {
+  const mem = { air: 0.5, space: 0.7 };
+  try {
+    const j = JSON.parse(raw);
+    for (const k in mem)
+      if (typeof j[k] === 'number' && isFinite(j[k]))
+        mem[k] = Math.min(BG_MAX, Math.max(BG_MIN, +j[k].toFixed(2)));
+  } catch (e) {}
+  return mem;
+}
+const bgMem = bgMemParse((() => {
+  try { return localStorage.getItem('ssjl.bgScale'); } catch (e) { return null; }
+})());
+// Saving is gated on the real rAF: the test harness pumps frame() with 30 ms
+// synthetic steps, and letting that write 0.35s into storage would hand the
+// next real session a verdict no GPU ever rendered.
+function bgSave() {
+  if (window.__rafStubbed) return;
+  try { localStorage.setItem('ssjl.bgScale', JSON.stringify(bgMem)); } catch (e) {}
+}
+let bgClass = 'air';
+let bgScale = bgMem.air;
+let perfMed = 0, perfShow = false, fpsEma = 0;
+function bgClassSwitch(world) {
+  const cls = bgClassFor(world);
+  if (cls === bgClass) return;
+  bgClass = cls; bgScale = bgMem[cls];
+  fWin.length = 0; fHold = PERF_HOLD;
+}
 // 13 and 20 ms bracket the 16.7 ms vsync interval, so a frame comfortably making
 // rate is left alone instead of being hunted around it.
 //
@@ -2868,29 +2903,58 @@ let perfMed = 0, perfShow = false;
 // never remotely that, so 1.0 is reachable exactly on the machines that can pay
 // for it.
 const FRAME_HI = 20, FRAME_LO = 13, BG_MIN = 0.35, BG_MAX = 1.0;
+// 20 samples to a verdict and 12 dropped after a change: at 30 fps — the state
+// the scaler exists to escape — the old 30/30 spent a full second per 0.05
+// step, and a liftoff that needed three steps stuttered for three. The median
+// over 20 is as GC-proof as over 30; what the shorter window trades away is
+// only how long a wrong verdict can take, and wrong verdicts are exactly what
+// the proportional step below makes cheap.
+const PERF_WIN = 20, PERF_HOLD = 12;
 // Pure, so it can be tested without a GPU: given the current scale and a median
-// frame time, what should the scale become?
+// frame time, what should the scale become? The step is proportional to how
+// far off rate the median is — a frame at 40 ms is not a frame at 22, and
+// walking down from one 0.05 at a time is seconds of visible stutter.
 function bgScaleFor(scale, med) {
-  if (med > FRAME_HI) return Math.max(BG_MIN, +(scale - 0.05).toFixed(2));
-  if (med < FRAME_LO) return Math.min(BG_MAX, +(scale + 0.05).toFixed(2));
+  if (med > FRAME_HI) {
+    const step = med > 33 ? 0.15 : med > 24 ? 0.10 : 0.05;
+    return Math.max(BG_MIN, +(scale - step).toFixed(2));
+  }
+  if (med < FRAME_LO) {
+    const step = med < 9 ? 0.10 : 0.05;
+    return Math.min(BG_MAX, +(scale + step).toFixed(2));
+  }
   return scale;
 }
 const fWin = [];
 let fHold = 0;
 function perfPush(ms) {
+  if (!(ms > 0)) return;
+  // The FPS readout smooths over ~10 frames and keeps running through holds
+  // AND through the pause gate below: it is an instrument, not an input to
+  // the scaler, and an instrument that freezes exactly when frames get slow
+  // is worse than none. Capped at 1 s so a minutes-long tab switch reads as
+  // "1 fps" for a moment instead of poisoning the average for the next ten.
+  // the cap applies to the seed too: the first sample after a long stall is
+  // the stall itself, and seeding the average with it pins the readout at 0
+  const c = Math.min(ms, 1000);
+  fpsEma = fpsEma ? fpsEma + (c - fpsEma)*0.1 : c;
   // A tab switch, a breakpoint or a GC pause is not a slow frame, and letting
   // one drive the scale would drop resolution for the rest of the flight.
-  if (!(ms > 0) || ms > 500) return;
+  if (ms > 500) return;
   if (fHold > 0) { fHold--; return; }
   fWin.push(ms);
-  if (fWin.length < 30) return;
+  if (fWin.length < PERF_WIN) return;
   const s = fWin.slice().sort((a, b) => a - b);
   perfMed = s[Math.floor(s.length/2)];
   fWin.length = 0;
   const next = bgScaleFor(bgScale, perfMed);
-  // After a change, ignore 30 frames: the new resolution has to be in effect
-  // before it is judged, or the scale chases its own last decision.
-  if (next !== bgScale) { bgScale = next; fHold = 30; }
+  // After a change, ignore PERF_HOLD frames: the new resolution has to be in
+  // effect before it is judged, or the scale chases its own last decision.
+  // Every accepted verdict is also this class's opening value next time.
+  if (next !== bgScale) {
+    bgScale = next; fHold = PERF_HOLD;
+    bgMem[bgClass] = next; bgSave();
+  }
 }
 let bgFB = null, bgTex = null, bgDepth = null, bgW = 0, bgH = 0;
 function bgTarget(w, h) {
@@ -4177,6 +4241,10 @@ function drawScene(sc) {
   // and giving the sky a different aspect would walk the horizon a fraction of a
   // degree off the plane that is supposed to be lying on it. Only the pixel
   // COUNT changes here, never the frustum.
+  // Crossing between an air world and a space world swaps in that class's
+  // remembered scale before this frame's target is sized, so the first coast
+  // frame after SECO is already sharp instead of opening at the launch's floor.
+  bgClassSwitch(sc.world);
   const sw = Math.max(480, Math.round(w*bgScale)),
         sh = Math.max(270, Math.round(h*bgScale));
   bgTarget(sw, sh);
@@ -4371,9 +4439,19 @@ function drawHUD(sc, ph) {
             ['HEATING', es.q.toFixed(0) + ' W/cm²'],
             ['CAMERA', sc.cam.mode.toUpperCase()]];
   }
-  if (perfShow)
-    rows = rows.concat([['FRAME', perfMed ? perfMed.toFixed(1) + ' ms' : '—'],
-                        ['BG SCALE', bgScale.toFixed(2)]]);
+  if (perfShow) {
+    // FPS is the smoothed live rate; FRAME is the median the scaler last ruled
+    // on — they disagree exactly when something just changed, which is the
+    // moment worth watching. LENS is the current camera's field of view with
+    // its 35 mm-equivalent focal length (24 mm frame height), so the tracker
+    // cameras' zoom is visible as a number that moves during the flight.
+    const mm = 12/Math.tan(sc.cam.fov/2);
+    rows = rows.concat([['FPS', fpsEma ? (1000/fpsEma).toFixed(0) : '—'],
+                        ['FRAME', perfMed ? perfMed.toFixed(1) + ' ms' : '—'],
+                        ['BG SCALE', bgScale.toFixed(2)],
+                        ['LENS', (sc.cam.fov*180/Math.PI).toFixed(1) + '° / '
+                                 + mm.toFixed(0) + ' mm']]);
+  }
   $('stats').innerHTML = rows.map(r => `<b>${r[0]}</b><span>${r[1]}</span>`).join('<br>');
 }
 // phase-segmented timeline (equal width per phase — a broken time axis)
@@ -4547,7 +4625,9 @@ window.__selftest = function () {
     let got;
     try { got = fn(); }
     catch (e) { out.fail++; out.failures.push(`${name}: threw ${e.message}`); return; }
-    if (Math.abs(got - want) <= (tol === undefined ? 1e-9 : tol)) out.pass++;
+    // exact equality first, so non-numeric answers (a class name) can be
+    // asserted with the same helper; the tolerance path is numbers only
+    if (got === want || Math.abs(got - want) <= (tol === undefined ? 1e-9 : tol)) out.pass++;
     else { out.fail++; out.failures.push(`${name}: got ${got}, want ${want}`); }
   };
   const EC = [0, -RE, 0];
@@ -4688,15 +4768,36 @@ window.__selftest = function () {
   // --- the adaptive scaler. Pure by design, so its behaviour is testable
   // without a GPU — which matters because GPU timings are invalid in a
   // background tab, where the null render times slower than the full frame.
-  eq('slow frame lowers the scale', () => bgScaleFor(0.50, 40), 0.45);
-  eq('fast frame raises the scale', () => bgScaleFor(0.50, 8), 0.55);
+  // Steps are proportional to how far off the median is: a launch that opens
+  // at 40 ms must not spend three visible seconds walking down in 0.05s.
+  eq('slow frame lowers the scale', () => bgScaleFor(0.50, 22), 0.45);
+  eq('a very slow frame steps double', () => bgScaleFor(0.50, 28), 0.40);
+  eq('a dire frame steps triple', () => bgScaleFor(0.50, 40), 0.35);
+  eq('fast frame raises the scale', () => bgScaleFor(0.50, 12), 0.55);
+  eq('a very fast frame climbs double', () => bgScaleFor(0.50, 8), 0.60);
   eq('a frame making rate is left alone', () => bgScaleFor(0.50, 16), 0.50);
   eq('the dead band brackets vsync at the top', () => bgScaleFor(0.50, 20), 0.50);
   eq('and at the bottom', () => bgScaleFor(0.50, 13), 0.50);
   eq('clamped at the floor', () => bgScaleFor(0.35, 100), 0.35);
   eq('clamped at the ceiling', () => bgScaleFor(1.00, 1), 1.00);
-  // no float drift: 0.05 steps must land on clean values or equality breaks
-  eq('steps stay clean', () => bgScaleFor(bgScaleFor(0.50, 8), 8), 0.60);
+  // no float drift: steps must land on clean values or equality breaks
+  eq('steps stay clean', () => bgScaleFor(bgScaleFor(0.50, 8), 8), 0.70);
+
+  // --- the scale's world classes. The launch pays for two fullscreen noise
+  // passes and settles near the floor; a coast is stars over black and can
+  // afford native. One global scale made every space scene inherit the
+  // launch's verdict and crawl back up 0.05 at a time — that WAS the blurry
+  // Earth and the late, blocky Moon.
+  eq('pad frames share the air scale', () => bgClassFor('pad'), 'air');
+  eq('entry does too', () => bgClassFor('entry'), 'air');
+  eq('coast and flyby share the space scale', () => bgClassFor('eci'), 'space');
+  eq('the landing as well', () => bgClassFor('moon'), 'space');
+  // the stored memory is user data read back at startup: hostile until clamped
+  eq('bgMemParse survives garbage', () => bgMemParse('nonsense').air, 0.5);
+  eq('bgMemParse survives null', () => bgMemParse(null).space, 0.7);
+  eq('bgMemParse clamps a stored scale high', () => bgMemParse('{"air":9}').air, 1.0);
+  eq('and low', () => bgMemParse('{"air":0.01}').air, 0.35);
+  eq('and ignores a non-number', () => bgMemParse('{"space":"x"}').space, 0.7);
 
   console.log(`__selftest: ${out.pass} passed, ${out.fail} failed`,
               out.failures.length ? out.failures : '');
@@ -4944,6 +5045,14 @@ async function boot() {
     gl.bindBuffer(gl.ARRAY_BUFFER, partDyn);
     gl.bufferData(gl.ARRAY_BUFFER, partArr.byteLength, gl.DYNAMIC_DRAW);
     initControls();
+    // Warm the pipeline while the overlay still covers the canvas. ANGLE
+    // defers each program's real compile to its first draw, so the first
+    // started frame used to pay for SPACE, MESH and the blit all at once — a
+    // one-frame hitch landing at the exact moment the user clicks GO. One
+    // throwaway frame at T-15 moves that bill here, where nobody is watching;
+    // finish() keeps the driver from deferring it past the overlay anyway.
+    drawScene(buildScene(phaseAt(simT)));
+    gl.finish();
     $('ov_sub').textContent = MS ?
       `${run.metrics.liftoff_t.toFixed(1)} t · ${LEN.toFixed(1)} m — ` +
       `pad to the surface of the Moon in ${run.metrics.t_days.toFixed(1)} days` :
