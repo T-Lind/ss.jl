@@ -18,6 +18,7 @@ using Printf
 # layer, since every shipped page always exists.
 const PAGE_PATH = Ref(joinpath(@__DIR__, "panel_page.html"))
 const LAUNCH_PATH = Ref(joinpath(@__DIR__, "launch_page.html"))
+const BUILD_PATH = Ref(joinpath(@__DIR__, "build_page.html"))
 
 # ---------------------------------------------------------------- helpers --
 
@@ -111,9 +112,21 @@ function stage_from_params(p, pre::String, name::Symbol, dia::Float64;
     dst = max(0.3, getf(p, pre * "diameter", dia))     # this stage's own width
     mdry_in = getf(p, pre * "dry", dry)
     # the propellant has to be resolved first: sizing a stage by its length
-    # needs the bulk density to say how much that volume actually holds
-    pr = eng != "manual" ? lookup_engine(Symbol(eng)).prop :
-                           propellant(Symbol(gets(p, pre * "propellant", ptype)))
+    # needs the bulk density to say how much that volume actually holds.
+    # A named engine OWNS its mixture — a Raptor does not burn kerolox — so a
+    # form that names both an engine and a different mixture is a mistake to
+    # report, not to resolve silently (which is what this used to do, and the
+    # form showed a propellant the server was not flying).
+    pr = if eng != "manual"
+        epr = lookup_engine(Symbol(eng)).prop
+        typed = gets(p, pre * "propellant", "")
+        if !isempty(typed) && Symbol(typed) != epr.name
+            throw(ArgumentError("$eng burns $(epr.name); it cannot run on $typed"))
+        end
+        epr
+    else
+        propellant(Symbol(gets(p, pre * "propellant", ptype)))
+    end
     mprop = if gets(p, pre * "size_by", "prop") == "length"
         # invert the barrel-length rule: a wider stage of the same length
         # holds proportionally more
@@ -855,6 +868,9 @@ function route(method::AbstractString, path::AbstractString,
         elseif method in ("GET", "HEAD") &&
                (path == "/launch" || startswith(path, "/launch?"))
             return ("200 OK", "text/html; charset=utf-8", read(LAUNCH_PATH[], String))
+        elseif method in ("GET", "HEAD") &&
+               (path == "/build" || startswith(path, "/build?"))
+            return ("200 OK", "text/html; charset=utf-8", read(BUILD_PATH[], String))
         elseif method in ("GET", "HEAD") && path == "/api/catalogue"
             return ("200 OK", "application/json", json(catalogue_payload()))
         elseif method in ("GET", "HEAD") && path == "/api/health"
