@@ -2803,6 +2803,59 @@ function buildStatics() {
 const quadBuf = () => buffer(new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]));
 let skyBuf, partDyn;
 
+// ------------------------------------------- scaled background target --
+// Measured on an Intel UHD 630 at 2560x1263: the planet/sky pass costs ~84 ms
+// and the cloud deck ~52 ms of a 136.8 ms frame, and everything else in this
+// page — meshes, particles, decals, HUD, the JS integration — costs 0.1 ms
+// together. So the only knob worth turning is how many pixels those two cover.
+// They are also both low-frequency, which is what makes upscaling them cheap in
+// quality terms; the vehicle and its plume, which carry the edges the eye
+// tracks, never leave native resolution.
+let bgScale = 0.5;
+let bgFB = null, bgTex = null, bgDepth = null, bgW = 0, bgH = 0;
+function bgTarget(w, h) {
+  if (bgFB && bgW === w && bgH === h) return;
+  if (!bgFB) { bgFB = gl.createFramebuffer(); bgTex = gl.createTexture();
+               bgDepth = gl.createRenderbuffer(); }
+  bgW = w; bgH = h;
+  gl.bindTexture(gl.TEXTURE_2D, bgTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  // LINEAR, because this texture exists to be magnified
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  // WebGL 1 has no depth textures without an extension, and nothing here needs
+  // to sample depth — a renderbuffer is enough to depth-test the deck against
+  // the vehicle.
+  gl.bindRenderbuffer(gl.RENDERBUFFER, bgDepth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bgFB);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bgTex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, bgDepth);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
+    throw new Error('background framebuffer incomplete at ' + w + 'x' + h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+const BLIT = program(`
+attribute vec2 aP; varying vec2 vT;
+void main(){ vT = aP*0.5 + 0.5; gl_Position = vec4(aP, 0.0, 1.0); }`, `
+precision mediump float;
+varying vec2 vT; uniform sampler2D uSrc;
+void main(){ gl_FragColor = vec4(texture2D(uSrc, vT).rgb, 1.0); }`);
+function blitBackground() {
+  gl.useProgram(BLIT.p);
+  gl.disable(gl.DEPTH_TEST);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, bgTex);
+  gl.uniform1i(BLIT.u.uSrc, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
+  gl.enableVertexAttribArray(BLIT.a.aP);
+  gl.vertexAttribPointer(BLIT.a.aP, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  gl.enable(gl.DEPTH_TEST);
+}
+
 // land-mask texture (256x128 equirect, 1 bit/px — same dataset as the panel)
 const LAND_B64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//AABf/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/v0f/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAT9v8H////9AAABfgAAAAAABaAAAAAAAAAAAAAAAAAEGx/+f/////gAAAXQAAAAAAAAHgAAAAAAAAAAAAAAAcAAE/A//////gAAAQAAAAAAAAAMAAAAAAAAAAAAAAAAeY4Y4AA////8AAAAAAAAA8AAA//4AAfAAAAAAAAAAA4AAAAAAA////gAAAAAAAAcAAB//9AAAAAAAAAAAAAAD2GW5/wAB///0AAAAAAAADAAB/////8AAAAADAAAAAAO/8DO/4AF//+4AAAAAAAAcA6//////y/+AAAQAH/6AUB/8OLXwAX//3AAAAAvAAACDv/////////4AAgD/////+yBPcHwAP//gAAAAf/+AE/3X////////////wD//////v9/xH4D//AAAAAB//+T//7/////////////x/////////aA9wP/wBvAAAf/+H////////////////BAP////////cT8AP4AD8AAH+f7////////////////wAH////////wADQA/AAAAAA/n//////////////////gA////////8AHgAB4AAAAAP8f///////////////j/gAH/2P/////gAfgAAgAAAAA/5x//////////////8GIAABGAC/////AD9YAAAAAAADvB/////////////8ABgAAAAsAB////8AD/wAAAAAB4AcX/////////////gAeAAAAYAAH/////AP/gAAAAABAJB/////////////4AD4AAAEAAAD/////z//gAAAAA3Akv/////////////wAPAAACAAAAn/////v//AAAAAHcP///////////////wAYAAAAAAAAf////+//8AAAAAT5////////////////QBAAAAAAAAB///////jQAAAAAIf///////////////9AAAAAAAAAAB//////7DwAAAAAH////////////////iAAAAAAAAAAD//////8BgAAAAA////////////////+AAAAAAAAAAAP///////AAAAAAB///8n///////////wAAAAAAAAAAA//////9gAAAAAAH/n/gf//////////+IAAAAAAAAAAD//////AAAAAAAf8nP8Af//////////h4AAAAAAAAAAP/////8AAAAAAA/wmPxg//////////wEAAAAAAAAAAA//////AAAAAAAD8CG4//////////+eAQAAAAAAAAAAD/////4AAAAAAAfwARn//////////gYBAAAAAAAAAAAH/////AAAAAAAA+AGGf//////////YwMAAAAAAAAAAAP////8AAAAAAAAD+AAB/////////+DDwAAAAAAAAAAAf////wAAAAAAAH/8AAH/////////4RuAAAAAAAAAAAAf///8AAAAAAAA//wAAf/////////xYAAAAAAAAAAAAB////AAAAAAAAH//48B//////////AgAAAAAAAAAAAAC///8AAAAAAAAf//7///////////8CAAAAAAAAAAAAAF/+AYAAAAAAAB//////8////////wAAAAAAAAAAAAAAT/gBgAAAAAAAf////9/5////////AAAAAAAAAAAAAAAn+ACAAAAAAAD/////z/wf//////4IAAAAAAAAAAAAADf4AAAAAAAAAf/////v/EA//////AAAAAAAAAAAAAAAAfgAAAAAAAAB/////+f/8B/////5AAAAAAAAAAAAAAAB+ABgAAAAAAP/////8//wG//f/8AAAAAAAAAAAAAAAAH4OBgAAAAAA//////z/+AD/w/8AAAAAAAAAAAQAAAAAPxwA4AAAAAD//////H/4AP8D/kAAAAAAAAAAAAAAAAAP+AAAAAAAAH/////+P+AA/gH+AGAAAAAAAAAAAAAAAAP4AACAAAAA//////8/gAD8AX+AYAAAAAAAAAAAAAAAAD+AAAAAACD//////78AAHgAf4BgAAAAAAAAAAAAAAAAB4AAAAAAAP//////2AAAeAAvgHAAIAAAAAAAAAAAAAABgEAAAAAA///////gAAB4AC+ACAAAAAAAAAAAAAAAAAGB84AAAAA//////+8AADgEBwA4AAAAAAAAAAAAAAAAAFu/gAAAAB///////wAAMAACABAAAAAAAAAAAAAAAAAAB//AAAAAH//////+AAAEACAADAAAAAAAAAAAAAAAAAAH/+AAAAAP/f////4AAAQAEAIIAAAAAAAAAAAAAAAAAAf//gAAAAMg/////AAAAACYBwAAAAAAAAAAAAAAAAAAB///AAAAAAAf///4AAAAAEgPAAAAAAAAAAAAAAAAAAAP//8AAAAAAB////AAAAAAtB8AAAAAAAAAAAAAAAAAAB///wAAAAAAH///4AAAAAA8fnIAAAAAAAAAAAAAAAAQH///4AAAAAA////AAAAAABh+AmAAAAAAAAAAAAAAAAAf///wAAAAAB///4AAAAAAHDzAJgAAAAAAAAAAAAAAAB////8AAAAAD///AAAAAAAOBCS/wAAAAAAAAAAAAAAAH////8AAAAAP//8AAAAAAAYAAAfhAAAAAAAAAAAAAAAf////4AAAAAf//wAAAAAAAYAAA/gAAAAAAAAAAAAAAA/////gAAAAB///AAAAAAAAOAQD2AgAAAAAAAAAAAAAD////+AAAAAH//8AAAAAAAAACAAMAAAAAAAAAAAAAAAH////wAAAAAP//4AAAAAAAAAAAAIAAAAAAAAAAAAAAAf///+AAAAAA///gAAAAAAAAAA4AAAAAAAAAAAAAAAAA////wAAAAAH//+CAAAAAAAAAPjAAAAAAAAAAAAAAAAD////AAAAAAf//4MAAAAAAAAG8OAAAAAAAAAAAAAAAAD///8AAAAAD///HgAAAAAAAA/84AAAAAAAAAAAAAAAAH///wAAAAAP//weAAAAAAAAH//wAAAgAAAAAAAAAAAAP///AAAAAAf/+B4AAAAAAAA///AAAAAAAAAAAAAAAAA///4AAAAAB//4HAAAAAAAAP//+ACAAAAAAAAAAAAAAD///gAAAAAD//gcAAAAAAAH///8AAAAAAAAAAAAAAAAP//wAAAAAAP/+BwAAAAAAAf///4AAAAAAAAAAAAAAAA//8AAAAAAA//4GAAAAAAAB////wAAAAAAAAAAAAAAAD//wAAAAAAB/+AAAAAAAAAH////AAAAAAAAAAAAAAAAP//AAAAAAAH/4AAAAAAAAAf///+AAAAAAAAAAAAAAAB//4AAAAAAAP/AAAAAAAAAB////4AAAAAAAAAAAAAAAH//AAAAAAAA/8AAAAAAAAAD////AAAAAAAAAAAAAAAAf/4AAAAAAAB/gAAAAAAAAAP+P/8AAAAAAAAAAAAAAAB//gAAAAAAAH8AAAAAAAAAA/Ab/gAAAAAAAAAAAAAAAH/sAAAAAAAAAAAAAAAAAAADAAf+AAAAAAAAAAAAAAAA/+AAAAAAAAAAAAAAAAAAAAAAAfwAAQAAAAAAAAAAAAD/8AAAAAAAAAAAAAAAAAAAAAAB/AAAgAAAAAAAAAAAAP+AAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAAAAAA/wAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAGAADAAAAAAAAAAAAAfwAAAAAAAAAAAAAAAAAAAAAAAAQAAQAAAAAAAAAAAAA/AAAAAAAAAAAAAAAAAAAAAAAAAAAGAAAAAAAAAAAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAAAAAfgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWBgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAAAAAAAAAAAfwAAf//+///wAAAAAAAAAAAAAAAAAYAAAAAAAAAAAB///gf////////QAAAAAAAAAAAAAACfwAAAAAAAAAAH///+P/////////8AAAAAAAAAAAAAAH/AAAAAB/v///////7///////////wAAAAAAAAAAAYCg+AAAAAP/////////////////////AAAAAAAAQED////wAAAAB/////////////////////gAAAAAP////////8AAAAH/////////////////////4AAAAOL////////AAAAAf//////////////////////wAAAAP///////+4EAD4P///////////////////////gAAAAD////////gAAfgB//////////////////////wAAAAD//////////gAA////////////////////////AAAAAP//////////h//////////////////////////wAAAH///////////////////////////////////////7//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////w==';
 function buildLandTex() {
@@ -3861,31 +3914,11 @@ function spawnEntry(dt, es) {
   }
 }
 
-function drawScene(sc) {
-  const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth*dpr | 0, h = cv.clientHeight*dpr | 0;
-  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-  gl.viewport(0, 0, w, h);
-  const cam = sc.cam, asp = w/h;
-  const inCab = cam.mode === 'cabin' || cam.mode === 'window';
-  const sun = sc.sun || SUN;
-  const view = mLookAt(cam.eye, cam.look, cam.up);
-  // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
-  // nearer clip plane than the outside views
-  const proj = mPersp(cam.fov, asp,
-                      inCab ? 0.04 : sc.nearZ || 0.35, 3.0e6);
-  const camAlt = Math.max(altOf(cam.eye, sc.earthC), 2);
-  // no air on the Moon, so no haze, no scattered fill, and a black sky at
-  // noon — the single most recognisable thing about the place
-  const dens = sc.world === 'moon' ? 0 : Math.exp(-camAlt/9000);
-  const fogCol = [0.62*dens + 0.02, 0.75*dens + 0.04, 0.92*dens + 0.08];
-  const fogDen = (sc.world === 'eci' || sc.world === 'moon') ? 0 : 5e-5*dens + 2e-7;
-  const deck = deckWeight(sc.world, cam.eye, sc.earthC);
-  gl.enable(gl.DEPTH_TEST);
-  gl.clearColor(0, 0, 0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-  // planet pass (Earth + Moon + sky + stars), camera-relative in f64
+// The planet pass (Earth + Moon + sky + stars), camera-relative in f64. Its own
+// function because it no longer draws where everything else does: it goes into
+// the scaled background target, so it needs to be told which height to
+// band-limit against.
+function drawPlanet(sc, cam, sun, asp, pxH, deck) {
   gl.useProgram(SPACE.p);
   gl.depthMask(false);
   const camF = V.norm(V.sub(cam.look, cam.eye));
@@ -3894,9 +3927,15 @@ function drawScene(sc) {
   gl.uniform3fv(SPACE.u.uF, camF); gl.uniform3fv(SPACE.u.uSun, sun);
   gl.uniform1f(SPACE.u.uTan, Math.tan(cam.fov/2));
   gl.uniform1f(SPACE.u.uAsp, asp);
-  // one pixel's angular size: the starfield sizes itself off this, so stars
-  // stay a fixed number of pixels across at any zoom or display density
-  gl.uniform1f(SPACE.u.uPxA, 2*Math.tan(cam.fov/2)/h);
+  // One pixel's angular size: the starfield sizes itself off this, so stars stay
+  // a fixed number of pixels across at any zoom or display density — and every
+  // fractal in here band-limits against it. So it has to be a pixel of the
+  // TARGET, not of the canvas. Handed the canvas height while filling a half-size
+  // buffer, the shader would admit octaves finer than the pixels it is actually
+  // writing and they would alias into a crawl. Feeding it the target height also
+  // drops those octaves, which is why the smaller target comes out cheaper than
+  // its pixel count alone predicts.
+  gl.uniform1f(SPACE.u.uPxA, 2*Math.tan(cam.fov/2)/pxH);
   // scintillation runs on the wall clock, not the (warpable) mission clock
   gl.uniform1f(SPACE.u.uT, performance.now()/1000);
   gl.uniform3fv(SPACE.u.uEc, V.sub(sc.earthC, cam.eye));
@@ -3922,16 +3961,18 @@ function drawScene(sc) {
   gl.vertexAttribPointer(aQ, 2, gl.FLOAT, false, 0, 0);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   gl.depthMask(true);
+}
 
-  // lit meshes
-  const rotSun = V.sub(mApply(view, V.add(cam.eye, sun)), mApply(view, cam.eye));
-  const engV = mApply(view, sc.engW);
-  // a cabin has its own lighting: raise the fill so interior surfaces facing
-  // away from the sun still read (the plasma/engine point light still applies)
-  const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 :
-              sc.world === 'moon' ? 0.22 : 0.30 + 0.16*dens;
-  beginMeshes(view, V.norm(rotSun), fogDen, fogCol, amb, sc.engI, engV, sc.engC);
-  setMeshHeat(sc, view);
+// Everything solid in the world, for whichever world we are in. Called twice a
+// frame: once with the colour mask off into the scaled target, purely to give
+// the cloud deck something to depth-test against, and once for real at native
+// resolution. That is affordable because the whole mesh pass measures under
+// 0.1 ms — it is the two fullscreen noise shaders that cost the frame, not this.
+// The caller sets the mesh program up (beginMeshes + setMeshHeat) before each
+// call; the cloud-deck draws deliberately stay outside, because the deck belongs
+// to the scaled pass and the meshes do not.
+function drawWorldMeshes(sc, proj, inCab) {
+  const cam = sc.cam;
   // from inside, the cabin is drawn and the window panes are dropped, so the
   // apertures in the pressure shell become real openings onto the world
   const skip = s => secGone[s.name] ||
@@ -3958,7 +3999,6 @@ function drawScene(sc) {
       const m = mMul(mBasis(d.bx, dby, dbz, d.p), mRotAxis(d.ax, d.a));
       drawRange(m, proj, d.draw.first, d.draw.count);
     }
-    drawClouds(sc, view, proj, fogCol, fogDen, deck);
   } else if (sc.world === 'eci') {
     const cs = sc.cs;
     const stackM = sc.craftM;
@@ -4003,9 +4043,93 @@ function drawScene(sc) {
     };
     if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2);
     else drawChute(mainBuf, mainN, tMain, 8.5);
-    drawClouds(sc, view, proj, fogCol, fogDen, deck);
   }
+}
 
+function drawScene(sc) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth*dpr | 0, h = cv.clientHeight*dpr | 0;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const cam = sc.cam, asp = w/h;
+  const inCab = cam.mode === 'cabin' || cam.mode === 'window';
+  const sun = sc.sun || SUN;
+  const view = mLookAt(cam.eye, cam.look, cam.up);
+  // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
+  // nearer clip plane than the outside views
+  const proj = mPersp(cam.fov, asp,
+                      inCab ? 0.04 : sc.nearZ || 0.35, 3.0e6);
+  const camAlt = Math.max(altOf(cam.eye, sc.earthC), 2);
+  // no air on the Moon, so no haze, no scattered fill, and a black sky at
+  // noon — the single most recognisable thing about the place
+  const dens = sc.world === 'moon' ? 0 : Math.exp(-camAlt/9000);
+  const fogCol = [0.62*dens + 0.02, 0.75*dens + 0.04, 0.92*dens + 0.08];
+  const fogDen = (sc.world === 'eci' || sc.world === 'moon') ? 0 : 5e-5*dens + 2e-7;
+  const deck = deckWeight(sc.world, cam.eye, sc.earthC);
+  // The two fullscreen noise passes go into a smaller buffer and get magnified
+  // back out; everything with an edge on it stays native. Floors so a very
+  // small window does not shrink the sky to mush — at this scale they only bite
+  // below 960x540, where nothing is fill-bound anyway.
+  // The projection, and so the aspect the planet pass builds its rays from,
+  // stays the NATIVE one: the deck plane and the meshes are projected with it,
+  // and giving the sky a different aspect would walk the horizon a fraction of a
+  // degree off the plane that is supposed to be lying on it. Only the pixel
+  // COUNT changes here, never the frustum.
+  const sw = Math.max(480, Math.round(w*bgScale)),
+        sh = Math.max(270, Math.round(h*bgScale));
+  bgTarget(sw, sh);
+
+  const rotSun = V.sub(mApply(view, V.add(cam.eye, sun)), mApply(view, cam.eye));
+  const engV = mApply(view, sc.engW);
+  // a cabin has its own lighting: raise the fill so interior surfaces facing
+  // away from the sun still read (the plasma/engine point light still applies)
+  const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 :
+              sc.world === 'moon' ? 0.22 : 0.30 + 0.16*dens;
+  // Both mesh passes want identical program state, and MESH's uniforms are
+  // per-program so in principle one setup would carry — but the passes are
+  // separated by two other programs and a framebuffer switch, so state that is
+  // set once and relied on later is exactly the kind of thing that rots. It
+  // costs a handful of uniform calls.
+  const setupMeshes = () => {
+    beginMeshes(view, V.norm(rotSun), fogDen, fogCol, amb, sc.engI, engV, sc.engC);
+    setMeshHeat(sc, view);
+  };
+
+  // ---- scaled pass: sky, planet, and the cloud deck ----
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bgFB);
+  gl.viewport(0, 0, sw, sh);
+  gl.enable(gl.DEPTH_TEST);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (deck > 0) {
+    // Depth only, no colour: the deck is a blended plane that depth-tests
+    // without writing, so the only reason the vehicle needs to exist in this
+    // buffer is to keep the deck from painting over the part of the sky the
+    // vehicle is standing in front of. Skipped entirely when there is no deck.
+    gl.colorMask(false, false, false, false);
+    setupMeshes();
+    drawWorldMeshes(sc, proj, inCab);
+    gl.colorMask(true, true, true, true);
+  }
+  // The planet pass gets the depth test DISABLED, not merely depth-write off.
+  // Left enabled it would fail against the prepass and leave the vehicle's
+  // silhouette at cleared black — and magnifying a hole full of black draws a
+  // dark halo a couple of native pixels wide around the vehicle, which is much
+  // more visible than it sounds. The sky is behind everything by construction,
+  // so it has no business consulting depth at all.
+  gl.disable(gl.DEPTH_TEST);
+  drawPlanet(sc, cam, sun, asp, sh, deck);
+  gl.enable(gl.DEPTH_TEST);
+  if (deck > 0) drawClouds(sc, view, proj, fogCol, fogDen, deck);
+
+  // ---- native pass: the vehicle, its plume, and whatever else has an edge ----
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  // Depth only. The blit covers every pixel, so clearing colour here would be
+  // a second fullscreen write for nothing.
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  blitBackground();
+  setupMeshes();
+  drawWorldMeshes(sc, proj, inCab);
   drawParticles(view, proj, cam.fov,
                 sc.world === 'entry' ? [0.60, 0.50, 0.45] :
                 sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined,
