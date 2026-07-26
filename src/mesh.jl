@@ -386,6 +386,29 @@ function _shell_mesh(prof::Vector{Tuple{Float64,Float64}}, thick::Float64;
     ensure_outward(TriMesh(tris))
 end
 
+# A capsule's size follows its own mass, not the rocket underneath it: most of
+# what a crew capsule weighs is pressure vessel, heat shield and the volume
+# they enclose, so radius goes as the cube root of mass. Fitting r = k·m^(1/3)
+# to the ones that have flown —
+#   Mercury  1.4 t / 0.95 m  k = 0.085     Gemini  3.85 t / 1.15 m  k = 0.073
+#   Soyuz DM 2.95 t / 1.10 m k = 0.077     Apollo  5.56 t / 1.95 m  k = 0.110
+#   Dragon  12.5 t / 2.00 m  k = 0.086
+# gives a spread of 0.073-0.110 and a mean of 0.086, which is the constant
+# below. The old geometry took `min(0.75, 0.85·r_stage)` instead: a hard 1.5 m
+# ceiling that made every capsule a phone booth, so a 12.5 t Dragon-class
+# payload and a 350 kg smallsat were drawn exactly the same size.
+const POD_R_COEFF = 0.086
+
+"""
+    pod_radius(payload_mass) -> r [m]
+
+Base radius of a crew capsule of this mass, from `r = 0.086·m^(1/3)` fitted to
+the flown capsules. Clamped to 0.30 m at the bottom (below that there is no
+cabin to sit in) and 3.0 m at the top (above it, it is a station module).
+"""
+pod_radius(payload_mass::Real) =
+    clamp(POD_R_COEFF * cbrt(max(float(payload_mass), 1.0)), 0.30, 3.0)
+
 """
     pod_mesh(; radius=0.75, nseg=24, ncrew=0) -> (hull, glass, cabin, height)
 
@@ -600,6 +623,82 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
                                         (xtop - 0.02rp, 0.180rp, 0.016rp));
                                roll = a))
     end
+
+    # --- second fit-out pass -----------------------------------------------
+    # Everything above gave the cabin its furniture; this gives it a finish.
+    # It all lives at or outside 0.68·rin — the clear volume the viewer's camera
+    # and its zero-g clamp are bounded by — so nothing here can be floated into.
+
+    # Ribbed liner. A smooth cone reads as a tent whatever you paint on it; the
+    # ribs are what give the eye a sense of the wall's distance and of the
+    # capsule turning around you. One rib every 12 degrees on the two liner
+    # bands, standing a centimetre proud.
+    for (xa_, xb_) in ((xfl + 0.05rp, xw0), (xw1, xtop - 0.10rp))
+        for a in range(0.0, 2pi; length = 31)[1:end-1]
+            rr = 0.945rin(xb_)
+            push!(cab, _place_mesh(box_mesh((xa_ + 0.01rp, rr - 0.012rp, -0.010rp),
+                                            (xb_ - 0.01rp, rr + 0.004rp, 0.010rp));
+                                   roll = a))
+        end
+    end
+    # Conduit runs: the wiring and ECS ducting a pressure vessel actually
+    # carries, taken up the two rolls that nothing else uses and turned along
+    # the wall under the console.
+    for a in (deg2rad(158.0), deg2rad(202.0))
+        push!(cab, _place_mesh(box_mesh((xa + 0.05rp, 0.90rin(xcon) - 0.030rp, -0.026rp),
+                                        (xcon - 0.02rp, 0.90rin(xcon), 0.026rp));
+                               roll = a))
+        for xs in (xa + 0.14rp, xa + 0.34rp, xa + 0.54rp)   # P-clamps to the wall
+            xs < xcon - 0.06rp || continue
+            push!(cab, _place_mesh(box_mesh((xs, 0.90rin(xcon) - 0.034rp, -0.034rp),
+                                            (xs + 0.020rp, 0.97rin(xs + 0.02rp), 0.034rp));
+                                   roll = a))
+        end
+    end
+    # Light coves. Recessed boxes just under the console, aimed down the cabin —
+    # the viewer paints these as emissive, which is what stops the interior
+    # being lit only by whatever leaks through the panes.
+    for a in range(0.0, 2pi; length = 7)[1:end-1]
+        xl = xcon - 0.16rp
+        # off the NARROW end again, and with the corner of the slab allowed for:
+        # a box of half-width w sitting at radius R has its corners out at
+        # sqrt(R^2 + w^2), which is what put the first cut of these 7 mm through
+        # the pressure wall
+        rl = 0.90rin(xl + 0.075rp)
+        push!(cab, _place_mesh(box_mesh((xl, 0.78rl, -0.055rp),
+                                        (xl + 0.075rp, rl, 0.055rp));
+                               roll = a + deg2rad(26.0)))
+    end
+    # Foot restraints on the deck, one pair per couch: the thing a crew member
+    # in zero g actually anchors to when they are out of the seat and working.
+    for zc in zs, sg in (-1.0, 1.0)
+        push!(cab, box_mesh((xa - 0.005rp, 0.62ln, zc + sg * 0.62hw - 0.05rp),
+                            (xa + 0.030rp, 0.62ln + 0.11rp, zc + sg * 0.62hw + 0.05rp)))
+    end
+    # Stowage lockers on the hatch wall, either side of the inner surround, with
+    # a latch on each: the wall opposite the console was the one blank surface
+    # left in here.
+    for (a0, a1) in ((deg2rad(146.0), deg2rad(172.0)), (deg2rad(188.0), deg2rad(214.0)))
+        x0s, x1s = xw1 + 0.03rp, xtop - 0.20rp
+        x1s > x0s + 0.05rp || continue
+        push!(cab, _arc_slab(x0s, x1s, 0.74rin(x1s), 0.95rin(x1s), a0, a1; nseg = 6))
+        push!(cab, _place_mesh(box_mesh((0.5(x0s + x1s) - 0.02rp, 0.70rin(x1s), -0.018rp),
+                                        (0.5(x0s + x1s) + 0.02rp, 0.76rin(x1s), 0.018rp));
+                               roll = 0.5(a0 + a1)))
+    end
+    # Two crew controls on the console face, on the rolls the couches look
+    # along. The viewer picks against these by name and cycles the cabin
+    # lighting and the console page from them, so they are switches and not
+    # decoration — see CAB_CTL in the launch view.
+    for (k, a) in enumerate((deg2rad(-32.0), deg2rad(32.0)))
+        rc = 0.62rin(xcon)
+        push!(cab, _place_mesh(box_mesh((xcon - 0.075rp, rc - 0.075rp, -0.075rp),
+                                        (xcon - 0.020rp, rc + 0.075rp, 0.075rp));
+                               roll = a))
+        push!(cab, _place_mesh(box_mesh((xcon - 0.105rp, rc - 0.042rp, -0.042rp),
+                                        (xcon - 0.070rp, rc + 0.042rp, 0.042rp));
+                               roll = a))
+    end
     (ext, glass, cab, hgt)
 end
 
@@ -647,6 +746,7 @@ function rocket_mesh(; diameter::Float64 = 1.8,
                      n_engines::Vector{Int} = ones(Int, length(prop_masses)),
                      diameters::Vector{Float64} = fill(diameter, length(prop_masses)),
                      boosters::Vector = NamedTuple[],
+                     payload_mass::Float64 = 350.0,
                      fairing_len::Float64 = 2.2 * last(diameters),
                      nseg::Int = 48)
     length(prop_masses) == length(densities) ||
@@ -735,12 +835,19 @@ function rocket_mesh(; diameter::Float64 = 1.8,
         x += len + ltap
         rtop_prev = ltap > 0 ? rj : r
     end
-    D = diameters[K]                             # fairing and capsule ride on top
+    D = diameters[K]                             # the capsule rides on top
     r = D / 2
     # pod: crew capsule seated on the adapter, inside the fairing. The cabin
     # is its own section so a viewer can cull the hull and look inside; it
     # shares the pod's axial extent so `sections` stays sorted by x0.
-    rp = min(0.75, 0.85r)
+    # Sized by what it weighs (see `pod_radius`), then held to 1.25 times the
+    # WIDEST stage — a capsule two or three times wider than its own launcher is
+    # not a capsule, it is a mismatch worth showing as one. Measured against the
+    # widest and not against the kick stage it sits on, because a real capsule
+    # routinely overhangs its upper stage and is judged against the core: Dragon
+    # is 4.0 m on a 3.7 m Falcon, and reading its 1.7 m kick stage instead would
+    # cut it in half.
+    rp = min(pod_radius(payload_mass), 1.25 * maximum(diameters) / 2)
     xb = x + 0.13D + 0.02                        # a hair off the adapter face
     phull, pglass, pcab, lp = pod_mesh(; radius = rp, nseg = max(20, nseg ÷ 2))
     shift = (xb, 0.0, 0.0)
@@ -750,16 +857,24 @@ function rocket_mesh(; diameter::Float64 = 1.8,
     place!(:glass, pglass)
     place!(:cabin, pcab)
     #= fairing follows =#
-    # fairing: closed shell — cylindrical shoulder, power-law ogive, eased tip
+    # fairing: closed shell — cylindrical shoulder, power-law ogive, eased tip.
+    # It has to ENCLOSE the capsule rather than merely match the stage: a pod
+    # sized by its mass can be wider than the barrel it sits on, and a shroud
+    # drawn at the stage radius then leaves the capsule sticking out through its
+    # own nose. Widening it into a hammerhead is what real launchers do with an
+    # oversized payload (a 5 m Atlas fairing on a 3.8 m core), and lengthening it
+    # keeps the ogive clear of the docking tunnel.
     x0f = x
-    xsh = x0f + 0.12 * fairing_len
-    prof = Tuple{Float64,Float64}[(x0f, 0.0), (x0f, r), (xsh, r)]
+    rF = max(r, rp / 0.90)
+    flen = max(fairing_len * rF / r, (xb + lp - x0f) + 0.55rF)
+    xsh = x0f + 0.12 * flen
+    prof = Tuple{Float64,Float64}[(x0f, 0.0), (x0f, rF), (xsh, rF)]
     for f in range(0.0, 1.0; length = 11)[2:end-1]
-        push!(prof, (xsh + f * 0.88 * fairing_len, r * (1 - f^2)^0.60))
+        push!(prof, (xsh + f * 0.88 * flen, rF * (1 - f^2)^0.60))
     end
-    push!(prof, (x0f + 0.985 * fairing_len, 0.055r))
-    push!(prof, (x0f + fairing_len, 0.0))
-    finish!(:fairing, x0f, x0f + fairing_len, TriMesh[lathe_mesh(prof; nseg = nseg)])
+    push!(prof, (x0f + 0.985 * flen, 0.055rF))
+    push!(prof, (x0f + flen, 0.0))
+    finish!(:fairing, x0f, x0f + flen, TriMesh[lathe_mesh(prof; nseg = nseg)])
 
     # --- strap-on boosters ------------------------------------------------
     # Clustered around the first stage, standing on the same plane, each a
@@ -802,7 +917,7 @@ needs a three-times longer tank — the vehicle visibly grows.
 """
 rocket_mesh(lv::LaunchVehicle; diameter::Float64 = 2 * sqrt(lv.sref / pi),
             kwargs...) =
-    rocket_mesh(; diameter = diameter,
+    rocket_mesh(; diameter = diameter, payload_mass = lv.payload_mass,
                 prop_masses = [s.mprop for s in lv.stages],
                 densities = [bulk_density(s.prop) for s in lv.stages],
                 n_engines = [s.n_engines for s in lv.stages],

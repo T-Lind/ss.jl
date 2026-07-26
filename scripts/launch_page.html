@@ -74,6 +74,23 @@
   .chip.on { background: rgba(242,193,78,.22); border-color: var(--acc); }
   #seek { position: fixed; left: 20px; bottom: 2px; width: calc(100% - 40px);
           height: 18px; z-index: 2; cursor: pointer; }
+  /* the console screen: a DOM panel pinned to where the console actually
+     projects, so it reads as glass in the capsule rather than as another HUD */
+  #cabdisp { position: fixed; z-index: 2; pointer-events: none;
+             transform: translate(-50%, -50%); font: 11px ui-monospace, monospace;
+             color: #7fe3c4; background: rgba(4,14,12,.82); line-height: 1.55;
+             border: 1px solid rgba(127,227,196,.35); border-radius: 4px;
+             padding: 6px 9px; min-width: 132px; letter-spacing: .4px;
+             box-shadow: 0 0 14px rgba(60,200,160,.20) inset; }
+  #cabdisp_h { color: #cfe9df; letter-spacing: 2.4px; font-size: 9.5px;
+               border-bottom: 1px solid rgba(127,227,196,.25);
+               padding-bottom: 3px; margin-bottom: 4px; }
+  #cabdisp i { color: #cfe9df; font-style: normal; float: right; padding-left: 10px; }
+  #cabtip { position: fixed; z-index: 2; pointer-events: none;
+            transform: translate(-50%, -140%); font: 10.5px system-ui;
+            letter-spacing: 1.6px; color: var(--acc);
+            background: rgba(8,9,11,.66); border-radius: 12px; padding: 3px 9px;
+            white-space: nowrap; }
   #overlay { position: fixed; inset: 0; z-index: 3; display: flex; flex-direction: column;
              align-items: center; justify-content: center; gap: 14px; cursor: pointer;
              background: radial-gradient(ellipse at 50% 60%, rgba(6,8,12,.35), rgba(2,3,5,.88));
@@ -101,9 +118,12 @@
   <div><b>w</b> <b>a</b> <b>s</b> <b>d</b> pitch/yaw · <b>q</b> <b>e</b> roll · <b>x</b> kill rotation — reaction wheels, coasting at &times;1</div>
   <div><b>shift</b> + those keys pushes off and floats you round the cabin, in the cabin view</div>
   <div>drag to look around in free and cabin views</div>
+  <div>in the cabin, <b>click</b> the console switches — lights and display page (<b>right click</b> steps back)</div>
 </div>
 <div class="hud" id="cams"></div>
 <div class="hud" id="speed"></div>
+<div id="cabdisp" class="hidden"><div id="cabdisp_h"></div><div id="cabdisp_b"></div></div>
+<div id="cabtip" class="hidden"></div>
 <canvas id="seek"></canvas>
 <div id="overlay">
   <h1 id="ov_title">SABLE</h1>
@@ -2218,11 +2238,22 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
   } else if (s.name === 'glass') {
     c = [0.06,0.09,0.14];                                           // window pane
   } else if (s.name === 'cabin') {
+    // Read against the LOCAL wall, not against a fixed fraction of rp: the
+    // cone tapers by a factor of four from the deck to the tunnel, so a fixed
+    // radius is a rack at the bottom and thin air at the top.
     const K = capStations(s.x0), u = cx - K.xb;
+    const rin = K.rcone(u) - 0.05*K.rp, f = rad/Math.max(rin, 1e-6);
+    const ctl = u > K.xcon - 0.12*K.rp && u < K.xcon &&
+                f > 0.42 && f < 0.85 &&
+                (angNear(Math.atan2(cz, cy), -0.559, 0.30) ||
+                 angNear(Math.atan2(cz, cy),  0.559, 0.30));
     if (u < K.xa + 0.01*K.rp) c = [0.40,0.43,0.41];               // deck
+    else if (ctl) c = [0.95,0.74,0.30];                           // crew switches
     else if (u > K.xcon) c = [0.16,0.17,0.19];                    // console panel
     else if (u > K.xcon - 0.07*K.rp) c = [0.11,0.27,0.31];        // instruments
-    else if (rad > 0.45*K.rp) c = [0.52,0.50,0.42];               // wall racks
+    else if (u > K.xcon - 0.17*K.rp && f > 0.70) c = [0.96,0.95,0.86]; // light coves
+    else if (f > 0.925) c = [0.62,0.62,0.58];                     // liner + ribs
+    else if (f > 0.60) c = [0.52,0.50,0.42];                      // racks, lockers
     else c = [0.29,0.32,0.38];                                    // crew couch
   } else {                                                        // fairing
     c = cx < s.x0 + 0.10 ? [0.55,0.55,0.53] : [0.96,0.96,0.93];
@@ -3270,13 +3301,22 @@ function anchorMat(latD, lonD) {
 }
 
 // -------------------------------------------------------------- particles --
-const PMAX = 4200;
+const PMAX = 9000;
 const parts = [];
 const partArr = new Float32Array(PMAX*6);
 function spawn(p, v, life, size, grow, kind, age) {
-  if (parts.length >= PMAX) parts.shift();
+  // Trimming one element per spawn is a full memmove of the array per particle;
+  // at entry rates that is millions of moves a frame for nothing. Take a batch
+  // of the oldest when the ceiling is reached instead, so the cost is paid once
+  // every few hundred spawns.
+  if (parts.length >= PMAX) parts.splice(0, PMAX >> 5);
   parts.push({ p: p.slice(), v: v.slice(), life, age: age || 0, size, grow, kind });
 }
+// How far the particle clock is behind the world clock. Below x4 they are the
+// same and this is 1; above it the particle step is deliberately clamped, so
+// the vehicle covers more ground per frame than its own wake does and the trail
+// has to be emitted denser to cover the stretch. Set once per frame.
+let PSTRETCH = 1;
 // Emit a frame's worth of particles ACROSS the frame instead of all at one
 // point. Every particle of a frame used to be born at the same place, so a
 // plume was never a stream — it was one clump per frame, spaced by the
@@ -3674,31 +3714,57 @@ let headYaw = 0, headPitch = 0;      // look around from inside the capsule
 const CAMS = ['auto','wide','chase','onboard','cabin','free'];
 const CAMS_MOON = ['auto','wide','chase','onboard','ground','free'];
 
+// ------------------------------------------------------ the clear volume --
+// The habitable volume, and the ONE definition of it. It is NOT the pressure
+// cone: the cabin is fitted out, and every fitting stands proud of the wall —
+// equipment racks from 0.68 of the inner radius, handrails at 0.88, overhead
+// lockers from 0.70, the console across the top and the couches across the
+// bottom. Bounding the eye by the bare cone let it float straight into a rack,
+// and worse: the default `wide` station sat at 0.75 of the inner radius on roll
+// 100 deg, which is the port rack exactly, so the wall of khaki filling the
+// frame was there before anyone touched a key. A camera station is now a point
+// in this volume by construction, and the self-test checks that it is.
+// And the clear volume is a CYLINDER, not a scaled-down cone. Every fitting in
+// here is sized off the NARROW end of the taper it sits on — it has to be, or
+// it comes out through the top — so each one cuts furthest inboard at its low
+// end, and a clear radius taken as a constant fraction of the local wall is
+// widest exactly where the racks are deepest. Measured: at a 0.75 m capsule the
+// racks reach 0.275 m from the axis, the hatch surround 0.291 and the conduit
+// runs 0.307, while 0.66 of the local wall is 0.36 there. The radius that is
+// clear all the way up is the one measured at the TOP of the volume.
+const CAB_RFRAC = 0.60;
+function cabRin(K, u) { return K.rcone(u) - 0.05*K.rp; }
+function cabXLo(K) { return K.xa + 0.16*K.rp; }   // clear of the couch headrests
+function cabXHi(K) { return K.xcon - 0.14*K.rp; } // under the console switches
+function cabRLim(K) { return Math.max(0.02, CAB_RFRAC*cabRin(K, cabXHi(K))); }
+// A station written the only way a clamp can check: station along the cone, a
+// fraction of the clear radius, and a roll in degrees.
+function cabPt(K, u, fr, aDeg) {
+  const a = aDeg*Math.PI/180, R = fr*cabRLim(K);
+  return [K.xb + u, R*Math.cos(a), R*Math.sin(a)];
+}
+// Rolls that are free of fittings: the racks own 100-136 and 224-260, the
+// handrails 34/90/270/326, the windows 0 and +-68, the hatch 180.
+const CAB_ROLL_EYE = 198, CAB_ROLL_HEAD = 282;
+
 // Camera stations inside the crew capsule, in vehicle model coordinates.
 // These mirror pod_mesh's layout (heat-shield sagitta, 32.5 deg afterbody,
 // deck and couch stations) so the eye lands in the cabin, not in a wall.
-function cabinPose(aim, roll) {
-  const pr = podRange();
-  if (!pr) return null;
-  const D = TOPD, rp = POD_RP;
-  const ta = Math.tan(32.5*Math.PI/180);
-  const xsh = 2.4*rp - Math.sqrt((2.4*rp)*(2.4*rp) - rp*rp);
-  const xb = pr.x0 + 0.13*D + 0.02;            // capsule base along the stack
-  const xb0 = xsh + 0.05*rp, Lc = (rp - 0.26*rp)/ta;
-  const rcone = x => rp - ta*(x - xb0);
-  const rin = x => rcone(x) - 0.05*rp;
-  const xa = xb0 + 0.085*rp;                   // couch back
-  const ln = 0.60*rin(xa + 0.07*rp);           // couch half-length
+function cabinPose(aim, roll, Kin) {
+  const pr = Kin ? null : podRange();
+  if (!Kin && !pr) return null;
+  const K = Kin || capStations(pr.x0), rp = K.rp, Lc = K.Lc;
+  const ln = 0.60*cabRin(K, K.xa + 0.07*rp);   // couch half-length
   // eye just above the headrest, set back from the wall so the viewport, the
   // console edge and the couch all fall inside a wide lens
-  const head = [xb + xa + 0.16*rp, 0.12*ln, -0.30*rp];
+  const head = cabPt(K, K.xa + 0.24*rp, 0.50, CAB_ROLL_HEAD);
   if (aim === 'console')
-    return { eye: head, look: [xb + xb0 + 0.62*Lc, 0.06*ln, 0], up: [0,1,0],
+    return { eye: head, look: [K.xb + K.xcon, 0.06*ln, 0], up: [0,1,0],
              fov: 1.25 };
   // wide interior: looking across the cabin so couch, console and the
   // window wall are all in frame, with the capsule axis as up
-  return { eye:  [xb + xb0 + 0.26*Lc, -0.10*rp,  0.56*rp],
-           look: [xb + xb0 + 0.42*Lc,  0.16*rp, -0.16*rp], up: [1,0,0], fov: 1.45 };
+  return { eye:  cabPt(K, K.xb0 + 0.30*Lc, 0.50, CAB_ROLL_EYE),
+           look: cabPt(K, K.xb0 + 0.44*Lc, 0.30, 0), up: [1,0,0], fov: 1.45 };
 }
 // ---------------------------------------------------- floating in the cabin --
 // Zero g inside the pressure shell: a push-off, a drift, and a wall. There is
@@ -3723,18 +3789,22 @@ function cabDirs() {
                            V.scale(uu0, sp)));
   return { fwd, rt: V.norm(V.cross(fwd, up0)), up: up0 };
 }
-// the habitable volume: inside the pressure wall, clear of the deck and the
-// tunnel, with a head's worth of room kept off every surface
-function cabClamp(pt) {
-  const pr = podRange();
-  if (!pr) return { p: pt, hit: false };
-  const S = capStations(pr.x0), pad = 0.26*S.rp;
-  const x = Math.min(Math.max(pt[0], S.xb + S.xfl + pad), S.xb + S.xtop - pad);
-  const rmax = Math.max(0.04, S.rcone(x - S.xb) - 0.05*S.rp - pad);
+// the habitable volume: the fit-out's clear envelope (see cabRLim), between
+// the couch tops and the console face, with a head's worth of room kept off
+// every surface
+function cabBox(K, pt) {
+  const pad = Math.max(0.06, 0.09*K.rp);
+  const x = Math.min(Math.max(pt[0], K.xb + cabXLo(K)), K.xb + cabXHi(K));
+  const rmax = Math.max(0.03, cabRLim(K) - pad);
   const r = Math.hypot(pt[1], pt[2]);
   if (x === pt[0] && r <= rmax) return { p: pt, hit: false };
   const k = r > rmax ? rmax/r : 1;
   return { p: [x, pt[1]*k, pt[2]*k], hit: true };
+}
+function cabClamp(pt) {
+  const pr = podRange();
+  if (!pr) return { p: pt, hit: false };
+  return cabBox(capStations(pr.x0), pt);
 }
 function cabStep(dt, active) {
   CAB.live = active;
@@ -3761,6 +3831,81 @@ function cabStep(dt, active) {
   // along it at full speed for the rest of the coast
   if (c.hit) CAB.v = V.scale(CAB.v, 0.15);
 }
+// ------------------------------------------------------- cabin controls --
+// Two switches on the console face, on the rolls the couches look along. The
+// geometry is in pod_mesh (a housing and a paddle at 0.62 rin, rolls -+32) and
+// these are the pick volumes over them, derived from the same stations — so
+// the thing you click is the thing that is drawn. Left click steps forward,
+// right click steps back, which is the only sensible use for the second button
+// on a two-position and a three-position switch.
+const CAB_CTL = [
+  { key: 'lights', roll: -32, label: 'CABIN LIGHTS' },
+  { key: 'page',   roll:  32, label: 'DISPLAY' },
+];
+const CAB_PAGES = ['FLIGHT', 'TRAJECTORY', 'SYSTEMS'];
+let cabPage = 0, cabHover = null;
+function cabControls() {
+  const pr = podRange();
+  if (!pr) return [];
+  const K = capStations(pr.x0), rc = 0.62*cabRin(K, K.xcon);
+  return CAB_CTL.map(c => {
+    const a = c.roll*Math.PI/180;
+    return { key: c.key, label: c.label, r: 0.15*K.rp,
+             p: [K.xb + K.xcon - 0.06*K.rp, rc*Math.cos(a), rc*Math.sin(a)] };
+  });
+}
+// Last frame's camera and craft transform, so a click can be turned into a ray
+// without re-deriving either. craftM is rigid — proved by the camera audit, and
+// the reason the inverse rotation here is a transpose.
+let PICK = null;
+function cabRay(cx, cy) {
+  if (!PICK || !PICK.inCab || !PICK.craftM) return null;
+  const rect = cv.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const ndcX = 2*(cx - rect.left)/rect.width - 1;
+  const ndcY = 1 - 2*(cy - rect.top)/rect.height;
+  const cam = PICK.cam;
+  const f = V.norm(V.sub(cam.look, cam.eye));
+  const rt = V.norm(V.cross(f, cam.up)), up = V.cross(rt, f);
+  const t = Math.tan(cam.fov/2), asp = PICK.asp;
+  const dir = V.norm(V.add(V.add(V.scale(rt, ndcX*t*asp), V.scale(up, ndcY*t)), f));
+  const M = PICK.craftM;
+  const toM = v => [V.dot(v, [M[0],M[1],M[2]]),
+                    V.dot(v, [M[4],M[5],M[6]]),
+                    V.dot(v, [M[8],M[9],M[10]])];
+  return { o: toM(V.sub(cam.eye, [M[12], M[13], M[14]])), d: toM(dir) };
+}
+function cabPick(cx, cy) {
+  const ray = cabRay(cx, cy);
+  if (!ray) return null;
+  let best = null, bestT = Infinity;
+  for (const c of cabControls()) {
+    const L = V.sub(c.p, ray.o), tca = V.dot(L, ray.d);
+    if (tca <= 0) continue;
+    const d2 = V.dot(L, L) - tca*tca;
+    if (d2 > c.r*c.r) continue;
+    const t0 = tca - Math.sqrt(c.r*c.r - d2);
+    if (t0 < bestT) { bestT = t0; best = c; }
+  }
+  return best;
+}
+function cabActivate(key, back) {
+  if (key === 'lights')
+    cabLight = rrIdx(cabLight + (back ? -1 : 1), CAB_LIGHTS.length);
+  else if (key === 'page')
+    cabPage = rrIdx(cabPage + (back ? -1 : 1), CAB_PAGES.length);
+  else return false;
+  // same banner the mission events use, so a switch throw reads like anything
+  // else that happens on the flight
+  const el = $('toast');
+  el.textContent = key === 'lights' ? `CABIN LIGHTS ${CAB_LIGHTS[cabLight].n}`
+                                    : `DISPLAY ${CAB_PAGES[cabPage]}`;
+  el.style.opacity = 1;
+  clearTimeout(cabActivate._t);
+  cabActivate._t = setTimeout(() => el.style.opacity = 0, 1800);
+  return true;
+}
+
 // place a model-space pose into the world using the craft's model matrix
 function poseToWorld(pose, M, mode, noHead) {
   let eye = mApply(M, pose.eye), look = mApply(M, pose.look);
@@ -4168,11 +4313,19 @@ function drawWhole(buf, n, model, proj) { bindMeshBuf(buf); drawRange(model, pro
 // washed out with it. Inside, the only way in is an aperture, which is what the
 // window panes are: they still take the heat, and glow. The interior is lit by
 // its own cabin lighting, which is the ambient floor here.
-const CAB_AMB = 0.42;
+// Which is a switch the crew has, not a constant: the lights are on the panel
+// (see CAB_CTL) and this is what they set.
+const CAB_LIGHTS = [{ n: 'BRIGHT', amb: 0.58 }, { n: 'DIM', amb: 0.26 },
+                    { n: 'OFF', amb: 0.06 }];
+let cabLight = 0;
+const CAB_AMB = () => CAB_LIGHTS[cabLight].amb;
 function drawRangeInside(model, proj, first, count) {
   gl.uniform1f(MESH.u.uHeat, 0);
   gl.uniform1f(MESH.u.uEngI, 0);
-  gl.uniform1f(MESH.u.uAmb, Math.max(meshAmb, CAB_AMB));
+  // the cabin's own lighting, and only that: taking the max with the scene's
+  // ambient would mean the DIM and OFF settings changed nothing, since the pass
+  // already raises ambient while the camera is inside
+  gl.uniform1f(MESH.u.uAmb, CAB_AMB());
   drawRange(model, proj, first, count);
   gl.uniform1f(MESH.u.uHeat, meshHeat);
   gl.uniform1f(MESH.u.uEngI, meshEngI);
@@ -4280,6 +4433,7 @@ function frame(now) {
   // because there the alternative is a plume that ages out in a single frame
   // and goes dark, and a smeared trail beats no trail.
   const dtP = warpEff <= 4 ? dt : Math.min(dt, 0.05);
+  PSTRETCH = dtP > 1e-6 ? Math.max(1, Math.min(8, dt/dtP)) : 1;
   if (warpEff <= 8) stepDebris(dt);
   else debris.length = 0;
   if (warpEff <= PARTWARP) {
@@ -4559,23 +4713,29 @@ function spawnEntry(dt, es) {
     // Shock layer: a thin bright sheet standing off the blunt face, domed so
     // the middle sits furthest forward. Many small sprites read as a surface;
     // the three big ones this replaced read as three balls.
-    // Emission runs on the particle clock, and that clock is deliberately
-    // CLAMPED at warp so the trail stays lit rather than going dark. But the
-    // vehicle still covers warped distance: at x2 the same particles have to
-    // stretch over twice the trail, and the wake beads again for a reason that
-    // has nothing to do with how many are spawned per second. Scale with the
-    // warp being covered, to x2 and no further — beyond that the trail is a
-    // streak anyway, and the cap is the only thing protecting the frame.
-    const wf = Math.min(4, Math.max(1, warpEff));
-    const nS = Math.min(32*wf, Math.round(60*dt*(14 + 58*I)*wf));
+    // Emission is a RATE PER SECOND of particle clock, so the number alive —
+    // and therefore the density along the trail — comes out at rate x life
+    // whatever the frame rate and whatever the warp. It used to be a per-frame
+    // count under a per-frame ceiling, and a ceiling on a per-frame count is a
+    // rate that halves when the frame rate does: measured, the same entry ran
+    // 8.9 particles per metre at 60 fps and 4.3 at 30, with a 12 m hole in the
+    // trail. That is most of why the wake read as a string of sparks on a
+    // slower machine, and no amount of raising the numbers would have fixed it.
+    //
+    // Above x4 the particle clock is deliberately clamped while the vehicle
+    // keeps covering warped ground, so the trail has to stretch: PSTRETCH is
+    // exactly that ratio and nothing else scales with warp.
+    const emit = (rate, cap) =>
+      Math.max(0, Math.min(cap, Math.round(rate*PSTRETCH*dt)));
+    const nS = emit(1400 + 5200*I, 420);
     emitStream(nS, dt, vC, () => {
       const th = Math.random()*6.2832, u = Math.sqrt(Math.random());
       const r = rp*1.10*u;
       return { p: V.add(V.add(es.pos, V.scale(es.vdir, 0.45 + 0.42*(1 - u*u))),
                         ring(r, th)),
                v: V.add(rel(8 + 34*I), V.scale(ring(1, th), 5*I)),
-               life: rnd(0.15, 0.07), size: (0.16 + 0.24*I)*rnd(1.25, 0.8),
-               grow: 0.5*I + 0.18, kind: 4 };
+               life: rnd(0.15, 0.07), size: (0.12 + 0.17*I)*rnd(1.2, 0.8),
+               grow: 0.35*I + 0.13, kind: 4 };
     });
     // Near wake: shed from the shoulder where the flow separates, entrained
     // aft, spreading with distance. Small and dense — a sprite 2.4 m across at
@@ -4586,7 +4746,11 @@ function spawnEntry(dt, es) {
     // it is a column. The spread in entrainment SPEED is narrower too — a
     // 0.75-1.25 spread stretches a packet over 60% of its own travel, which
     // tears the same holes from the other end.
-    const n = Math.min(60*wf, Math.round(60*dt*(26 + 104*I)*wf));
+    // Each particle is a good deal smaller than it was, because the brightness
+    // of a wake should come from how many there are and not from how fat each
+    // one is: three times the count at two thirds the diameter is the same fill
+    // rate on the GPU and a continuous sheet instead of a bead necklace.
+    const n = emit(2200 + 8000*I, 900);
     emitStream(n, dt, vC, () => {
       const back = Math.pow(Math.random(), 0.65)*(16*I + 2.5);
       const spread = rp*(1.0 + back*0.13);
@@ -4595,12 +4759,12 @@ function spawnEntry(dt, es) {
                         V.add(ring(spread*Math.sqrt(Math.random()), th), jit(0.08))),
                v: V.add(rel((55 + 250*I)*(0.86 + rnd(0.28))),
                         V.add(V.scale(ring(1, th), (2 + 8*I)*Math.random()), jit(2.5))),
-               life: rnd(0.40, 0.16), size: (0.16 + 0.34*I)*rnd(1.3, 0.7),
-               grow: 0.9*I + 0.3, kind: 4 };
+               life: rnd(0.40, 0.16), size: (0.13 + 0.21*I)*rnd(1.25, 0.75),
+               grow: 0.6*I + 0.22, kind: 4 };
     });
     // wake smoke: non-buoyant while hypersonic, otherwise it climbs away
     // from the trail instead of following it
-    if (Math.random() < 60*dt*0.9)
+    if (Math.random() < 60*dt*2.2)
       spawn(V.sub(es.pos, V.scale(es.vdir, 2.5)), rel(30 + 130*I),
             rnd(2.6, 1.1), 2.0 + 3.5*I, 5, es.v > 400 ? 3 : 1);
   }
@@ -4786,6 +4950,8 @@ function drawScene(sc) {
   const inCab = cam.mode === 'cabin';
   const sun = sc.sun || SUN;
   const view = mLookAt(cam.eye, cam.look, cam.up);
+  // everything a click needs to become a ray into the capsule
+  PICK = { cam, asp, craftM: sc.craftM, inCab };
   // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
   // nearer clip plane than the outside views
   const proj = mPersp(cam.fov, asp,
@@ -4870,6 +5036,7 @@ function drawScene(sc) {
                 sc.world === 'entry' ? [0.60, 0.50, 0.45] :
                 sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined,
                 sc.world === 'entry' && sc.es ? heatOf(sc.es.q) : 0);
+  cabinPanel(sc, view, proj, cv.clientWidth, cv.clientHeight);
 }
 // The drawn deck and the planet pass's own cloud shell are the same clouds at
 // the same altitude. The plane has the resolution near the world origin and
@@ -4947,6 +5114,104 @@ function drawClouds(sc, view, proj, fogCol, fogDen, deck) {
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   gl.depthMask(true);
   gl.disable(gl.BLEND);
+}
+
+// ----------------------------------------------------- the console screen --
+// A live display pinned to where the console actually projects. It is DOM and
+// not a texture on purpose: the mesh shader's decal path wraps cylindrically in
+// (station, roll), and a flat annulus facing +x is degenerate in exactly those
+// coordinates, so a texture would have to bring its own UV channel along for
+// one panel. Projecting a point and moving a div is the same picture for none
+// of that, and it is legible at any capsule size.
+function projectPt(view, proj, p, wCss, hCss) {
+  const v = mApply(view, p);
+  const wq = proj[3]*v[0] + proj[7]*v[1] + proj[11]*v[2] + proj[15];
+  if (wq <= 1e-6) return null;                     // behind the eye
+  const x = (proj[0]*v[0] + proj[4]*v[1] + proj[8]*v[2]  + proj[12])/wq;
+  const y = (proj[1]*v[0] + proj[5]*v[1] + proj[9]*v[2]  + proj[13])/wq;
+  if (Math.abs(x) > 1.6 || Math.abs(y) > 1.6) return null;
+  return [(x*0.5 + 0.5)*wCss, (0.5 - y*0.5)*hCss];
+}
+function cabinPanel(sc, view, proj, wCss, hCss) {
+  const el = $('cabdisp'), tip = $('cabtip');
+  const pr = sc.cam.mode === 'cabin' && sc.craftM ? podRange() : null;
+  if (!pr) { el.classList.add('hidden'); tip.classList.add('hidden'); return; }
+  const K = capStations(pr.x0);
+  const scr = projectPt(view, proj,
+    mApply(sc.craftM, [K.xb + K.xcon - 0.01*K.rp, 0.42*cabRin(K, K.xcon), 0]),
+    wCss, hCss);
+  el.classList.toggle('hidden', !scr);
+  if (scr) {
+    el.style.left = scr[0].toFixed(1) + 'px';
+    el.style.top  = scr[1].toFixed(1) + 'px';
+    const page = CAB_PAGES[cabPage];
+    const rows = cabRows(sc, page);
+    $('cabdisp_h').textContent = page + '  ' + (cabPage + 1) + '/' + CAB_PAGES.length;
+    $('cabdisp_b').innerHTML =
+      rows.map(r => `${r[0]}<i>${r[1]}</i>`).join('<br>');
+  }
+  // the hovered switch names itself where it is, rather than in a corner
+  const hov = cabHover && cabControls().find(c => c.key === cabHover);
+  const hp = hov && projectPt(view, proj, mApply(sc.craftM, hov.p), wCss, hCss);
+  tip.classList.toggle('hidden', !hp);
+  if (hp) {
+    tip.style.left = hp[0].toFixed(1) + 'px';
+    tip.style.top  = hp[1].toFixed(1) + 'px';
+    tip.textContent = hov.key === 'lights'
+      ? `CABIN LIGHTS · ${CAB_LIGHTS[cabLight].n}`
+      : `DISPLAY · ${CAB_PAGES[cabPage]}`;
+  }
+}
+// Osculating apsides from the state, so the TRAJECTORY page shows the orbit
+// rather than the instantaneous numbers every other readout already carries.
+const MU_E = 3.986004418e14;
+function apsides(pos, vel) {
+  const r = V.len(pos), v2 = V.dot(vel, vel);
+  const eps = 0.5*v2 - MU_E/r;
+  if (eps >= 0) return null;                       // escaping: no apogee to show
+  const a = -MU_E/(2*eps), h2 = V.dot(V.cross(pos, vel), V.cross(pos, vel));
+  const e = Math.sqrt(Math.max(0, 1 + 2*eps*h2/(MU_E*MU_E)));
+  return { ra: a*(1 + e), rp: a*(1 - e) };
+}
+function cabRows(sc, page) {
+  const st = sc.st, cs = sc.cs, es = sc.es;
+  const km = m => !isFinite(m) ? '—' :
+    Math.abs(m) < 1e4 ? m.toFixed(0) + ' m' : (m/1000).toFixed(1) + ' km';
+  const deg = a => (a*180/Math.PI).toFixed(1) + '°';
+  if (page === 'SYSTEMS') {
+    const rate = RCS.rate > 3e-4 ? (RCS.rate*180/Math.PI).toFixed(1) + '°/s' : 'NULL';
+    return [['LIGHTS', CAB_LIGHTS[cabLight].n], ['ATT RATE', rate],
+            ['CLOCK', warpEff > 1.5 ? '×' + Math.round(warpEff) : 'REAL'],
+            ['ZERO G', CAB.live ? 'FREE' : 'STOWED'],
+            ['O2 / PRESS', 'NOMINAL']];
+  }
+  if (page === 'TRAJECTORY') {
+    if (cs) {
+      const ap = apsides(cs.pos, cs.vel);
+      return [['APOGEE', ap ? km(ap.ra - RE) : 'ESCAPE'],
+              ['PERIGEE', ap ? km(ap.rp - RE) : '—'],
+              ['SPEED', (cs.speed/1000).toFixed(2) + ' km/s'],
+              ['MET', (simT/86400).toFixed(2) + ' d']];
+    }
+    if (st) return [['DOWNRANGE', km(st.dr)], ['FLIGHT PATH', deg(st.gam)],
+                    ['MACH', st.h > 82000 ? '—' : st.mach.toFixed(2)],
+                    ['THRUST', (st.thr/1e3).toFixed(0) + ' kN']];
+    if (es) return [['FLIGHT PATH', deg(es.gam)],
+                    ['SPEED', es.v.toFixed(0) + ' m/s'],
+                    ['TO SPLASH', isFinite(tSplash)
+                       ? Math.max(0, tSplash - simT).toFixed(0) + ' s' : '—']];
+    return [['STANDBY', '—']];
+  }
+  if (st) return [['ALTITUDE', km(st.h)], ['VELOCITY', st.v.toFixed(0) + ' m/s'],
+                  ['ACCEL', (st.m > 0 ? st.thr/st.m/9.81 : 0).toFixed(2) + ' g'],
+                  ['DYN PRESS', st.q.toFixed(1) + ' kPa']];
+  if (es) return [['ALTITUDE', km(es.h)], ['VELOCITY', es.v.toFixed(0) + ' m/s'],
+                  ['G-LOAD', es.g.toFixed(1) + ' g'],
+                  ['HEATING', es.q.toFixed(0) + ' W/cm²']];
+  if (cs) return [['EARTH', fmtDist(cs.rE - RE)], ['MOON', fmtDist(cs.rM - RM)],
+                  ['VELOCITY', (cs.speed/1000).toFixed(2) + ' km/s'],
+                  ['MET', (simT/86400).toFixed(2) + ' d']];
+  return [['STANDBY', '—']];
 }
 
 // -------------------------------------------------------------------- hud --
@@ -5152,12 +5417,28 @@ function initControls() {
   };
   chipRow($('speed'), sp, 'auto', setSpeed);
   const inside = () => camMode === 'cabin';
+  // A switch takes the click; anything else starts a head turn. Right click on
+  // a switch steps it back, and only then is the context menu suppressed — a
+  // right click anywhere else in the page still behaves like a right click.
+  cv.addEventListener('contextmenu', e => {
+    if (inside() && cabPick(e.clientX, e.clientY)) e.preventDefault();
+  });
   cv.addEventListener('pointerdown', e => {
+    if (inside() && e.button <= 2) {
+      const hit = cabPick(e.clientX, e.clientY);
+      if (hit) { cabActivate(hit.key, e.button === 2); e.preventDefault(); return; }
+    }
+    if (e.button !== 0) return;
     if (camMode !== 'free' && !inside()) return;
     cv.setPointerCapture(e.pointerId);
     cv._drag = [e.clientX, e.clientY];
   });
   cv.addEventListener('pointermove', e => {
+    if (inside() && !cv._drag) {                 // hover, so switches announce themselves
+      const hit = cabPick(e.clientX, e.clientY);
+      cabHover = hit ? hit.key : null;
+      cv.style.cursor = hit ? 'pointer' : '';
+    }
     if (!cv._drag) return;
     const dx = e.clientX - cv._drag[0], dy = e.clientY - cv._drag[1];
     if (inside()) {
@@ -5579,6 +5860,35 @@ window.__selftest = function () {
   }, 0.5, 1e-9);
   eq('and runs all the way back to identity', () =>
      qShrink([Math.cos(0.5), 0, 0, Math.sin(0.5)], 0)[0], 1, 1e-12);
+
+  // --- the cabin's clear volume. The wall of khaki filling the frame was not
+  // the floating: the DEFAULT wide station sat at 0.751 of the inner radius on
+  // roll 100 deg, which is the port equipment rack exactly, so the shot started
+  // inside a rack and no key had to be pressed. Bounding the eye by the bare
+  // pressure cone could never have caught that — the cone is not the volume,
+  // the fit-out is, and these pin the difference.
+  const CK = capStations(0);
+  const rfrac = p => Math.hypot(p[1], p[2]) / cabRin(CK, p[0] - CK.xb);
+  const eyeAtAim = a => cabinPose(a, 0, CK).eye;
+  eq('the clear radius is inside the racks', () => CAB_RFRAC < 0.68, true);
+  eq('the wide eye is in the clear volume', () => cabBox(CK, eyeAtAim('wide')).hit, false);
+  eq('and inboard of the racks', () => rfrac(eyeAtAim('wide')) < 0.68, true);
+  eq('the console eye is in the clear volume',
+     () => cabBox(CK, eyeAtAim('console')).hit, false);
+  eq('and it too is inboard of the racks',
+     () => rfrac(eyeAtAim('console')) < 0.68, true);
+  eq('the wide shot looks at the cabin, not through it',
+     () => cabBox(CK, cabinPose('wide', 0, CK).look).hit, false);
+  eq('a push into the wall is caught', () =>
+     cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]).hit, true);
+  eq('and lands inboard of the racks', () =>
+     rfrac(cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]).p) < 0.68, true);
+  eq('the floor is the couch tops, not the deck',
+     () => cabXLo(CK) > CK.xa + 0.15*CK.rp, true);
+  eq('and the ceiling is the console face',
+     () => cabXHi(CK) < CK.xcon, true);
+  eq('and there is somewhere to float between them',
+     () => cabXHi(CK) - cabXLo(CK) > 0.15*CK.rp, true);
 
   // the stored memory is user data read back at startup: hostile until clamped
   eq('bgMemParse survives garbage', () => bgMemParse('nonsense').air, 0.5);

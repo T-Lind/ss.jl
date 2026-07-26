@@ -109,14 +109,21 @@
       </div>
       <div class="row">
         <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
-        <div><label for="pod_mass">payload [kg]</label><input id="pod_mass" value="350"></div>
+        <div><label for="pod_mass" title="the crew capsule IS the payload — this
+             mass is what re-enters, and it sets how big the capsule is drawn">
+          payload / capsule [kg]</label><input id="pod_mass" value="350"></div>
       </div>
+      <div id="podpresets" style="margin:2px 0 0"></div>
+      <div class="sub" id="pod_note" style="margin:4px 0 0">&mdash;</div>
       <div class="row">
         <div><label for="kick_deg" title="pitch-over kick [deg] — the one guidance
              number that does not scale with the vehicle">pitch-over kick [&deg;]</label>
           <input id="kick_deg" value="8"></div>
-        <div><label style="display:flex;gap:6px;align-items:center;margin-top:20px">
-          <input type="checkbox" id="opt_kick" style="width:auto;margin:0">
+        <div><label style="display:flex;gap:6px;align-items:center;margin-top:20px"
+             title="solves the ascent at a ladder of kick angles and keeps the one
+             that puts the most mass in orbit — about 2 s, and the difference
+             between orbit and a perigee underground on a high-thrust stack">
+          <input type="checkbox" id="opt_kick" style="width:auto;margin:0" checked>
           search for the best kick</label></div>
       </div>
     </div>
@@ -720,17 +727,24 @@ cv.addEventListener('wheel', e => {
 // vehicle editing. Each carries the pitch-over kick too — the one guidance
 // number that decides whether some of these fly at all (the Falcon-class
 // stack lofts on the reference 8° and arrives with its perigee underground).
+// Every preset states its own payload. It used to omit it, so whatever was in
+// the box carried over — which is how a Falcon-class stack sat there claiming
+// to fly 350 kg, a payload two orders of magnitude under what it lifts, on a
+// launcher whose whole point is that it carries a crew capsule.
 const VEHICLES = {
   'Sable (reference)': {
-    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    pod_mass: 350,
   },
   'Sable + 4 strap-ons': {
     nstages: 3, nboost: 4, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    pod_mass: 900,
     b_engine: 'manual', b_prop: 12000, b_dry: 900, b_thrust_kn: 380, b_isp: 285,
       b_engines: 2, b_propellant: 'kerolox', b_diameter: 1.53, b_throttle: 60,
   },
   'Falcon-class (Merlin)': {
-    nstages: 3, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: false,
+    nstages: 3, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: true,
+    pod_mass: 12500,
     s1_engine: 'merlin_1d', s1_engines: 9, s1_prop: 411000, s1_dry_auto: true,
       s1_diameter: 3.7,
     s2_engine: 'merlin_1d_vac', s2_engines: 1, s2_prop: 108000, s2_dry_auto: true,
@@ -739,26 +753,35 @@ const VEHICLES = {
       s3_diameter: 2.4,
   },
   'Starship (expendable)': {
-    nstages: 2, nboost: 0, diameter: 9.0, fairing: 0, kick_deg: 5, opt_kick: false,
+    nstages: 2, nboost: 0, diameter: 9.0, fairing: 0, kick_deg: 5, opt_kick: true,
+    pod_mass: 50000,
     s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
       s1_diameter: 9.0,
     s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
       s2_diameter: 9.0,
   },
   'hydrolox upper': {
-    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    pod_mass: 450,
     s2_engine: 'rl10b2', s2_propellant: 'hydrolox', s2_engines: 1, s2_prop: 9500,
     s2_dry_auto: true,
   },
 };
+// The capsules this repo's pod geometry is fitted against, so "payload" stops
+// being an abstract number: pick one and the drawn capsule is that capsule.
+const PODS = [
+  ['cubesat carrier', 120], ['smallsat', 350], ['Mercury-class', 1400],
+  ['Gemini-class', 3850], ['Apollo-class', 5560], ['Dragon-class', 12500],
+];
 function applyPreset(name) {
   const o = VEHICLES[name];
   NSTAGES = Math.min(5, Math.max(2, Math.round(+o.nstages || 3)));
   $('nboost').value = String(o.nboost || 0);
   $('vname').value = name.replace(/\s*\(.*\)$/, '');
-  for (const id of ['diameter', 'fairing', 'kick_deg'])
+  for (const id of ['diameter', 'fairing', 'kick_deg', 'pod_mass'])
     if (o[id] !== undefined) $(id).value = o[id];
   $('opt_kick').checked = !!o.opt_kick;
+  podNote();
   // reset to the role defaults, then lay the preset's own keys over them —
   // a preset states only what it changes
   const vals = {};
@@ -776,6 +799,27 @@ function initPresets() {
     .map(k => `<span class="chip" data-p="${k}">${k}</span>`).join('');
   for (const el of $('vpresets').querySelectorAll('.chip'))
     el.onclick = () => applyPreset(el.dataset.p);
+  $('podpresets').innerHTML = PODS
+    .map(([k, m]) => `<span class="chip" data-m="${m}">${k}</span>`).join('');
+  for (const el of $('podpresets').querySelectorAll('.chip'))
+    el.onclick = () => { $('pod_mass').value = el.dataset.m; podNote(); fetchGeo(); };
+  $('pod_mass').addEventListener('input', podNote);
+  podNote();
+}
+// Capsule radius from mass, the same r = 0.086*m^(1/3) the mesh is built on
+// (see pod_radius in mesh.jl), so the box says what the model will do before
+// the server is asked.
+const podR = m => Math.min(3.0, Math.max(0.30, 0.086*Math.cbrt(Math.max(m, 1))));
+function podNote() {
+  const m = +$('pod_mass').value || 0;
+  const near = PODS.reduce((a, b) =>
+    Math.abs(Math.log(b[1]/Math.max(m,1))) < Math.abs(Math.log(a[1]/Math.max(m,1))) ? b : a);
+  for (const el of $('podpresets').querySelectorAll('.chip'))
+    el.classList.toggle('sel', +el.dataset.m === m);
+  $('pod_note').innerHTML = m < 1 ? 'no payload' :
+    `capsule ${fmt(2*podR(m), 2)} m across &mdash; the payload IS the crew ` +
+    `capsule here, and it is what re-enters. Nearest flown: ${near[0]} ` +
+    `(${fmtMass(near[1])}).`;
 }
 
 // --------------------------------------------------------------- startup --

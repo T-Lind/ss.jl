@@ -238,8 +238,12 @@
         <div><label for="kick_deg" title="pitch-over kick [deg]">kick [°]</label><input id="kick_deg" value="8"></div>
       </div>
       <div class="row" style="margin-top:6px">
-        <div style="flex:1"><label style="display:flex;gap:6px;align-items:center">
-          <input type="checkbox" id="opt_kick" style="width:auto;margin:0">
+        <div style="flex:1"><label style="display:flex;gap:6px;align-items:center"
+             title="solves the ascent at a ladder of kick angles and keeps the one
+             that puts the most mass in orbit — about 2 s on top of the run, and
+             the difference between orbit and a perigee underground on anything
+             with a high liftoff thrust-to-weight">
+          <input type="checkbox" id="opt_kick" style="width:auto;margin:0" checked>
           search for the best pitch-over kick</label></div>
       </div>
       </div>
@@ -265,7 +269,7 @@
         <span><span class="kbd">space</span></span><span>play / pause the timeline</span>
         <span><span class="kbd">←</span> <span class="kbd">→</span></span><span>step the timeline</span>
         <span><span class="kbd">F</span></span><span>inertial ⇄ rotating frame</span>
-        <span><span class="kbd">E</span> <span class="kbd">Z</span></span><span>zoom to Earth / fit the whole trajectory</span>
+        <span><span class="kbd">E</span> <span class="kbd">C</span> <span class="kbd">Z</span></span><span>zoom to Earth / to the craft / fit the whole trajectory</span>
         <span><span class="kbd">L</span></span><span>open the cinematic launch view</span>
         <span><span class="kbd">B</span></span><span>open the vehicle builder</span>
       </div>
@@ -286,6 +290,8 @@
         <input id="scrub" type="range" min="0" max="1000" value="1000">
         <button id="frame" class="ghost">rotating frame</button>
         <span class="chip" data-zoom="30" title="key E">Earth</span>
+        <span class="chip" data-zoom="0.4" title="key C — a 400 km frame that
+              follows the craft; the only way to see a suborbital arc">craft</span>
         <span class="chip" data-zoom="fit" title="key Z — frame the whole trajectory">fit</span>
         <span class="chip hidden" id="moonview" title="the lunar phase, Moon-centred">&#127765; Moon</span>
         <span class="chip" id="launchbtn" title="cinematic pad-cam liftoff, flown from this run's parameters">&#128640; launch view</span>
@@ -747,7 +753,7 @@ const LANDING_PRESETS = {
 // mass-estimating relations size the stage rather than a typed-in number.
 const VEHICLES = {
   'Sable (reference)': {
-    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
     s1_engine: 'manual', s1_prop: 42000, s1_dry: 3800, s1_thrust_kn: 950, s1_isp: 305,
       s1_engines: 5, s1_propellant: 'kerolox', s1_diameter: 1.8,
     s2_engine: 'manual', s2_prop: 9500, s2_dry: 900, s2_thrust_kn: 95, s2_isp: 345,
@@ -764,7 +770,7 @@ const VEHICLES = {
   // energy with its perigee underground. The kick search finds the same thing
   // in a few seconds if you would rather not take the number on faith.
   'Falcon-class (Merlin)': {
-    nstages: 3, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: false,
+    nstages: 3, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: true,
     s1_engine: 'merlin_1d', s1_engines: 9, s1_prop: 411000, s1_dry_auto: true,
       s1_diameter: 3.7,
     s2_engine: 'merlin_1d_vac', s2_engines: 1, s2_prop: 108000, s2_dry_auto: true,
@@ -773,14 +779,14 @@ const VEHICLES = {
       s3_diameter: 2.4,
   },
   'Starship (expendable)': {
-    nstages: 2, nboost: 0, diameter: 9.0, fairing: 0, kick_deg: 5, opt_kick: false,
+    nstages: 2, nboost: 0, diameter: 9.0, fairing: 0, kick_deg: 5, opt_kick: true,
     s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
       s1_diameter: 9.0,
     s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
       s2_diameter: 9.0,
   },
   'hydrolox upper': {
-    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
     s2_engine: 'rl10b2', s2_propellant: 'hydrolox', s2_engines: 1, s2_prop: 9500,
     s2_dry_auto: true,
   },
@@ -795,8 +801,12 @@ let rotFrame = false, camYaw = 0.6, camPitch = 1.05, camDist = 1150;
 // number: a 2000 km flyby and a 60 km lunar orbit are five orders of
 // magnitude apart, and a default zoom can only be right for one of them.
 let autoFit = true, moonView = null, moonDist = 12000;
+// The tightest frame: 40 km across, which is a suborbital apogee filling the
+// view. It was 30,000 km, one Earth diameter of headroom, so the scale bar
+// bottomed out at 5000 km and a 100 km hop was three pixels tall.
+const CAM_MIN = 0.04;
 { const z = new URLSearchParams(location.search).get('zoom');
-  if (z) { camDist = Math.min(2400, Math.max(30, +z)); autoFit = false; } }
+  if (z) { camDist = Math.min(2400, Math.max(CAM_MIN, +z)); autoFit = false; } }
 
 function params() {
   const u = new URLSearchParams();
@@ -980,18 +990,27 @@ function isLand(lat, lon) {
 let globeCv = null, globeCtx = null;
 // G maps camera axes (screen-x, screen-y, depth) -> ECEF: v_ecef = Gᵀ·u_cam,
 // where G = Rc·A (camera rotation times the ECEF->scene orientation)
-function drawGlobe(ctx, cx, cy, R, G) {
-  const D = Math.ceil(2*R) + 2;
-  if (!globeCv || globeCv.width < D) {
+// Only the part of the disc that is actually on screen is rasterised. The whole
+// disc used to be, and that is the real reason this view could not zoom past a
+// 30,000 km frame: at a 200 km frame the Earth is 80,000 px across, and a
+// full-disc buffer for it is a 6.4-gigapixel allocation. Clipped to the
+// viewport the cost is bounded by the canvas however far you zoom in.
+function drawGlobe(ctx, cx, cy, R, G, w, h) {
+  const x0 = Math.max(0, Math.floor(cx - R)), x1 = Math.min(w, Math.ceil(cx + R));
+  const y0 = Math.max(0, Math.floor(cy - R)), y1 = Math.min(h, Math.ceil(cy + R));
+  const Dw = x1 - x0, Dh = y1 - y0;
+  if (Dw <= 0 || Dh <= 0) return;
+  if (!globeCv || globeCv.width < Dw || globeCv.height < Dh) {
     globeCv = document.createElement('canvas');
-    globeCv.width = globeCv.height = D;
+    globeCv.width = Math.max(Dw, globeCv.width || 0);
+    globeCv.height = Math.max(Dh, globeCv.height || 0);
     globeCtx = globeCv.getContext('2d');
   }
-  const img = globeCtx.createImageData(D, D);
+  const img = globeCtx.createImageData(Dw, Dh);
   const px = img.data;
-  for (let j = 0; j < D; j++) {
-    for (let i = 0; i < D; i++) {
-      const nx = (i - D/2) / R, nyS = -(j - D/2) / R;
+  for (let j = 0; j < Dh; j++) {
+    for (let i = 0; i < Dw; i++) {
+      const nx = (x0 + i + 0.5 - cx) / R, nyS = -(y0 + j + 0.5 - cy) / R;
       const rr = nx*nx + nyS*nyS;
       if (rr > 1) continue;
       const nz = Math.sqrt(1 - rr);          // toward the viewer
@@ -1006,12 +1025,12 @@ function drawGlobe(ctx, cx, cy, R, G) {
       let r, g, b;
       if (land) { r = 92*sh; g = 128*sh; b = 84*sh; }
       else      { r = 34*sh; g = 74*sh;  b = 112*sh; }
-      const o = (j*D + i) * 4;
+      const o = (j*Dw + i) * 4;
       px[o] = r; px[o+1] = g; px[o+2] = b; px[o+3] = 255;
     }
   }
   globeCtx.putImageData(img, 0, 0);
-  ctx.drawImage(globeCv, 0, 0, D, D, cx - D/2, cy - D/2, D, D);
+  ctx.drawImage(globeCv, 0, 0, Dw, Dh, x0, y0, Dw, Dh);
 }
 
 // ------------------------------------------------------------- 3D scene --
@@ -1082,7 +1101,21 @@ function camMatrix() {
   const sp = Math.sin(camPitch), cp = Math.cos(camPitch);
   return [[cy, -sy, 0], [sy*sp, cy*sp, cp], [sy*cp, cy*cp, -sp]];
 }
-function project(cv, p) {
+// Where the frame is centred, in scene units. Earth's centre while the planet
+// still fits; past that the frame follows the craft, because a 200 km-wide view
+// centred on the Earth's core is a view from inside the mantle — which is what
+// made zooming in beyond a 30,000 km frame pointless as well as expensive.
+let camCen = [0, 0, 0];
+const FOCUS_HI = 26, FOCUS_LO = 9;   // Mm of frame width: hand-over band
+function focusCentre(p) {
+  if (!p || camDist >= FOCUS_HI) return [0, 0, 0];
+  const u = camDist <= FOCUS_LO ? 1 :
+            (FOCUS_HI - camDist) / (FOCUS_HI - FOCUS_LO);
+  const k = u*u*(3 - 2*u);           // smoothstep, so the pan has no corner in it
+  return [p[0]*k, p[1]*k, p[2]*k];
+}
+function project(cv, p0) {
+  const p = [p0[0] - camCen[0], p0[1] - camCen[1], p0[2] - camCen[2]];
   const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
   const sp = Math.sin(camPitch), cp = Math.cos(camPitch);
   const X = p[0]*cy - p[1]*sy;
@@ -1090,7 +1123,13 @@ function project(cv, p) {
   const dpr = window.devicePixelRatio || 1;
   const w = cv.width/dpr, h = cv.height/dpr;
   const f = Math.min(w, h) * 0.95 / camDist;
-  return [w/2 + X*f, h*0.52 - (Yh*sp + p[2]*cp)*f, f, Yh*cp - p[2]*sp];
+  // Depth stays measured from the EARTH's centre, not from wherever the frame
+  // is centred: it is what decides whether a trajectory segment is behind the
+  // globe, and that plane belongs to the globe. Panning the origin with the
+  // craft and leaving depth attached to it put the near half of a parking orbit
+  // behind the planet.
+  const Yh0 = p0[0]*sy + p0[1]*cy;
+  return [w/2 + X*f, h*0.52 - (Yh*sp + p[2]*cp)*f, f, Yh0*cp - p0[2]*sp];
 }
 
 function circle(ctx, x, y, r, fill) {
@@ -1110,7 +1149,7 @@ function fitCamera() {
     const p = P(i);
     r = Math.max(r, Math.hypot(p[0], p[1], p[2]));
   }
-  camDist = Math.max(30, Math.min(2400, 2.3 * r));
+  camDist = Math.max(CAM_MIN, Math.min(2400, 2.3 * r));
 }
 
 // ------------------------------------------------------- Moon-centred view --
@@ -1193,6 +1232,7 @@ function drawScene() {
   if (moonView && run.moon) { drawMoonScene(cv, ctx, w, h); return; }
   const N = S.n, i0 = Math.min(ti, N-1);
   const tNow = S.t[i0];
+  camCen = focusCentre(P(i0));         // everything below projects through this
 
   const Rc = camMatrix();
   // globe orientation, ECEF -> scene
@@ -1239,7 +1279,7 @@ function drawScene() {
   const pe = project(cv, [0, 0, 0]);
   const rE = Math.max(3, RE_MM*pe[2]);
   if (rE >= 7) {
-    drawGlobe(ctx, pe[0], pe[1], rE, matmul(Rc, A));
+    drawGlobe(ctx, pe[0], pe[1], rE, matmul(Rc, A), w, h);
   } else {
     const g = ctx.createRadialGradient(pe[0]-rE*.3, pe[1]-rE*.3, rE*.2, pe[0], pe[1], rE);
     g.addColorStop(0, '#4a7fa8'); g.addColorStop(1, '#193349');
@@ -1989,6 +2029,7 @@ window.addEventListener('keydown', e => {
   else if (e.key === 'ArrowLeft' && S) { geoFollow = true; ti = Math.max(0, ti - Math.max(1, S.n/200|0)); $('scrub').value = 1000*ti/(S.n-1); }
   else if (k === 'f') $('frame').click();
   else if (k === 'e') { moonView = false; autoFit = false; camDist = 30; }
+  else if (k === 'c') { moonView = false; autoFit = false; camDist = 0.4; }
   else if (k === 'z') { moonView = false; autoFit = true; fitCamera(); }
   else if (k === 'l') $('launchbtn').click();
   else if (k === 'b') $('buildbtn').click();
@@ -2008,7 +2049,7 @@ scene.addEventListener('wheel', e => {
   e.preventDefault();
   const f = e.deltaY > 0 ? 1.12 : 0.89;
   if (moonView) moonDist = Math.min(60000, Math.max(1900, moonDist * f));
-  else { autoFit = false; camDist = Math.min(2400, Math.max(30, camDist * f)); }
+  else { autoFit = false; camDist = Math.min(2400, Math.max(CAM_MIN, camDist * f)); }
 }, { passive: false });
 const geoCv = $('geo');
 let gdrag = null;
