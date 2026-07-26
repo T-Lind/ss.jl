@@ -79,11 +79,6 @@
            font: 600 22px system-ui; letter-spacing: 3px; color: var(--acc);
            opacity: 0; transition: opacity .4s; white-space: nowrap; }
   #cams { left: 20px; bottom: 20px; display: flex; gap: 6px; }
-  /* Who the keys are flying, shown only where there are two answers. On the
-     right, above the warp chips: the bottom left is the stats panel's, and at
-     bottom 54 this sat straight on top of it. */
-  #ctl { right: 20px; bottom: 54px; display: flex; gap: 6px; align-items: center; }
-  #ctl .lab { font: 10.5px system-ui; letter-spacing: 2px; color: var(--dim); }
   #speed { right: 20px; bottom: 20px; display: flex; gap: 6px; align-items: center; }
   #backlink { top: 20px; right: 20px; font: 12px system-ui; }
   #backlink a { color: var(--dim); text-decoration: none; }
@@ -125,33 +120,31 @@
 <div class="hud" id="toast"></div>
 <div class="hud" id="backlink"><a href="/">&#8617; mission control</a></div>
 <div id="keys" class="show">
-  <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>7</b> cameras · drag to look · <b>h</b> for all controls</div>
+  <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>h</b> for all controls</div>
 </div>
 <div id="help" class="hidden">
   <h2>Controls</h2>
   <table>
     <tr><td><b>space</b></td><td>pause and resume</td></tr>
     <tr><td><b>&#8592;</b> <b>&#8594;</b></td><td>scrub the clock — hold to accelerate</td></tr>
-    <tr><td><b>1</b>–<b>7</b></td><td>cameras · <b>[</b> <b>]</b> zoom, <b>\</b> reset</td></tr>
+    <tr><td><b>1</b>–<b>6</b></td><td>cameras · <b>[</b> <b>]</b> zoom, <b>\</b> reset</td></tr>
     <tr><td><b>m</b> · <b>p</b> · <b>h</b></td><td>mute · frame time · this list</td></tr>
-    <tr><td colspan="2" class="sec">Flying the vehicle — coasting, at &times;1</td></tr>
+    <tr><td colspan="2" class="sec">Flying the vehicle — strapped in, coasting, at &times;1</td></tr>
     <tr><td><b>w a s d</b></td><td>pitch and yaw on the reaction wheels</td></tr>
     <tr><td><b>q</b> <b>e</b> · <b>x</b></td><td>roll · kill rotation</td></tr>
-    <tr><td colspan="2" class="sec">In the cabin</td></tr>
-    <tr><td><b>t</b></td><td>hand the keys between the wheels and the crew</td></tr>
+    <tr><td colspan="2" class="sec">Out of the couch — the same keys, now your body</td></tr>
     <tr><td><b>w a s d</b> <b>r</b> <b>f</b></td><td>move — fore/aft, left/right, up/down</td></tr>
     <tr><td><b>q</b> <b>e</b> · <b>z</b></td><td>roll your body · square yourself up again</td></tr>
-    <tr><td><b>g</b></td><td>unbuckle, or strap back in</td></tr>
+    <tr><td><b>g</b></td><td>unbuckle, or strap back in — which also hands the keys over</td></tr>
     <tr><td>drag</td><td>look around — a head turn in the couch, your whole body out of it</td></tr>
     <tr><td colspan="2" class="sec">The console — hover any of it to see what it is</td></tr>
     <tr><td>paddles</td><td>the two amber switches: cabin lights, and the centre display's page</td></tr>
-    <tr><td>caps</td><td>the coloured buttons are wired — crew station, clock up and down, trajectory view, attitude keys, null rates, level, and this list</td></tr>
+    <tr><td>caps</td><td>the coloured buttons are wired — crew station, clock up and down, trajectory view, audio, null rates, level, and this list</td></tr>
     <tr><td>click</td><td>the console switches: cabin lights, and the centre display's page. <b>Right click</b> steps a switch back, or a couch in and out of.</td></tr>
   </table>
   <div class="hint">You can only push off while you are touching something — then you coast until you catch the next handrail. <b>h</b> closes this.</div>
 </div>
 <div class="hud" id="cams"></div>
-<div class="hud hidden" id="ctl"></div>
 <div class="hud" id="speed"></div>
 <div id="cabtip" class="hidden"></div>
 <canvas id="seek"></canvas>
@@ -2254,7 +2247,7 @@ const CAP_FN = [
   { cell: 0*8 + 2*2 + 0, key: 'warpdn',  label: 'TIME',         c: [0.62,0.44,0.20] },
   { cell: 1*8 + 3*2 + 1, key: 'traj',    label: 'TRAJECTORY VIEW', c: [0.25,0.62,0.45] },
   { cell: 1*8 + 0*2 + 1, key: 'help',    label: 'CHECKLIST',    c: [0.60,0.60,0.66] },
-  { cell: 2*8 + 0*2 + 1, key: 'att',     label: 'ATTITUDE KEYS', c: [0.70,0.33,0.30] },
+  { cell: 2*8 + 0*2 + 1, key: 'audio',   label: 'AUDIO',        c: [0.70,0.33,0.30] },
   { cell: 2*8 + 3*2 + 1, key: 'nullr',   label: 'RATE NULL',    c: [0.34,0.56,0.64] },
   { cell: 2*8 + 3*2 + 0, key: 'level',   label: 'LEVEL',        c: [0.40,0.52,0.50] },
 ];
@@ -3849,37 +3842,410 @@ function rcsMat() { return qMat(RCS.q); }
 function rcsReset() { RCS.q = [1,0,0,0]; RCS.w = [0,0,0]; RCS.rate = 0; }
 
 // ------------------------------------------------------------------ audio --
+// Every sound on this page is generated here, at run time, out of oscillators
+// and noise. That is the same rule the geometry, the textures and the placards
+// follow and it is kept for the same reason: this file is the whole program,
+// it fetches nothing, and a soundtrack of downloaded assets would be the first
+// thing in it that is not made of the thing it is describing. It also means the
+// score can be told what the mission is doing — a bar line cannot be a mission
+// event if the bar came out of a file.
+//
+// Three buses under one master, because they answer to different clocks:
+//   world — the vehicle, heard across whatever is between you and it. Diegetic:
+//           it stops with the clock, fades out under warp, and it is the one
+//           bus that goes through the speed-of-sound delay.
+//   room  — where the LISTENER is. A cabin has air in it and hums; a chase
+//           camera thirty metres off the hull does not.
+//   score — music and interface, on the WALL clock. A cap pressed at x10000
+//           clicks once, now, and the bar line does not care what the clock is
+//           doing. A score paced by simT would be a siren.
 let AC = null, gRum = null, gCrk = null, dly = null, muted = false;
+let busMaster = null, busWorld = null, busRoom = null, busScore = null;
+let NOISE = null, WHITE = null, AMBN = null;
+// brown noise is a rumble and white noise is a transient; a page that wants
+// both is better off with one buffer of each than filtering one into the other
+// on every hit
+function noiseBuf(sec, brown) {
+  const n = Math.floor(AC.sampleRate*sec), b = AC.createBuffer(1, n, AC.sampleRate);
+  const ch = b.getChannelData(0);
+  let s = 0;
+  for (let i = 0; i < n; i++) {
+    const w = Math.random()*2 - 1;
+    if (brown) { s = 0.985*s + 0.015*w; ch[i] = s*3.2; } else ch[i] = w;
+  }
+  return b;
+}
+// A room, as an impulse response: decaying noise, which is what a room's
+// impulse response essentially is once the early reflections have blurred
+// together. Two channels of independent noise is what makes it wide.
+function irBuf(sec, decay) {
+  const n = Math.floor(AC.sampleRate*sec), b = AC.createBuffer(2, n, AC.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const ch = b.getChannelData(c);
+    for (let i = 0; i < n; i++)
+      ch[i] = (Math.random()*2 - 1)*Math.pow(1 - i/n, decay);
+  }
+  return b;
+}
 function initAudio() {
+  // the overlay can be clicked twice (REPLAY), and a second context would give
+  // the page two of every drone
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
   try {
     AC = new (window.AudioContext || window.webkitAudioContext)();
-    const n = AC.sampleRate*3, buf = AC.createBuffer(1, n, AC.sampleRate);
-    const ch = buf.getChannelData(0);
-    let b = 0;
-    for (let i = 0; i < n; i++) {
-      b = 0.985*b + 0.015*(Math.random()*2-1);
-      ch[i] = b*3.2;
-    }
-    const mk = () => { const s = AC.createBufferSource(); s.buffer = buf; s.loop = true; return s; };
+    NOISE = noiseBuf(3, true);
+    WHITE = noiseBuf(4, false);
+    busMaster = AC.createGain(); busMaster.gain.value = 0.9;
+    busMaster.connect(AC.destination);
+    busWorld = AC.createGain(); busWorld.connect(busMaster);
+    busRoom  = AC.createGain(); busRoom.connect(busMaster);
+    busScore = AC.createGain(); busScore.connect(busMaster);
+    // A send, not an insert: the bell tails and the console clicks want a tail
+    // on them, and the bass and the drones very much do not want to be smeared.
+    const verb = AC.createConvolver(); verb.buffer = irBuf(2.6, 2.2);
+    const send = AC.createGain(); send.gain.value = 0.30;
+    const ret = AC.createGain(); ret.gain.value = 0.85;
+    busScore.connect(send); send.connect(verb); verb.connect(ret);
+    ret.connect(busMaster);
+    // --- the vehicle, as heard from outside it
+    const mk = () => { const s = AC.createBufferSource(); s.buffer = NOISE;
+                       s.loop = true; return s; };
     dly = new DelayNode(AC, { maxDelayTime: 10 });
-    const master = AC.createGain(); master.gain.value = 0.9;
-    dly.connect(master); master.connect(AC.destination);
+    dly.connect(busWorld);
     const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 95;
     gRum = AC.createGain(); gRum.gain.value = 0;
     const s1 = mk(); s1.connect(lp); lp.connect(gRum); gRum.connect(dly); s1.start();
-    const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 650; bp.Q.value = 0.9;
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass';
+    bp.frequency.value = 650; bp.Q.value = 0.9;
     gCrk = AC.createGain(); gCrk.gain.value = 0;
     const s2 = mk(); s2.connect(bp); bp.connect(gCrk); gCrk.connect(dly); s2.start();
+    // --- the room. One graph, re-tuned rather than rebuilt: an oscillator
+    // started at a non-zero gain clicks, and rebuilding this on every phase
+    // change would click on every phase change.
+    const drone = f => {
+      const g = AC.createGain(); g.gain.value = 0; g.connect(busRoom);
+      const os = [];
+      // two of them seven cents apart, which beats at about a sixth of a hertz
+      // — a six-second breath, and the reason this reads as air rather than as
+      // a test tone
+      for (const det of [0, 7]) {
+        const o = AC.createOscillator();
+        o.type = 'sine'; o.frequency.value = f; o.detune.value = det;
+        o.connect(g); o.start(); os.push(o);
+      }
+      // retuned, never restarted: the pitch slides from one room's to the next
+      return { g, set: (hz, t, T) => {
+        for (const o of os) o.frequency.setTargetAtTime(hz, t, T); } };
+    };
+    const bed = (src, type) => {
+      const s = AC.createBufferSource(); s.buffer = src; s.loop = true;
+      const f = AC.createBiquadFilter(); f.type = type;
+      const g = AC.createGain(); g.gain.value = 0;
+      s.connect(f); f.connect(g); g.connect(busRoom); s.start();
+      return { f, g };
+    };
+    const nb = bed(NOISE, 'bandpass'), wb = bed(WHITE, 'bandpass');
+    // The breath goes on the FILTER, never on a gain: an LFO summed into a gain
+    // whose base is 0.03 swings it negative, which is a phase inversion and not
+    // a fade. On the cutoff it is a timbre that moves, which is what air does.
+    const lfo = AC.createOscillator(), ld = AC.createGain();
+    lfo.frequency.value = 0.055; ld.gain.value = 55;
+    lfo.connect(ld); ld.connect(nb.f.frequency); lfo.start();
+    AMBN = { d1: drone(41), d2: drone(61.5), nb, wb, kind: null };
   } catch (e) { AC = null; }
 }
+// What each place sounds like when nothing is happening in it. d = the drone
+// pair, n = the filtered bed, w = the thin resonant voice that gives a room its
+// size. The two places with air in them — the pad and the cabin — are the two
+// with a bed you would notice; the vacuum is nearly all drone, which is a
+// deliberate lie, and the alternative is silence for three days.
+const AMB = {
+  none:  { d1: 41,   d2: 61.5, dg: 0,     nf: 150, ng: 0,     wf: 780,  wq: 6,  wg: 0 },
+  space: { d1: 41,   d2: 61.5, dg: 0.032, nf: 150, ng: 0.010, wf: 780,  wq: 6,  wg: 0 },
+  // The pad has weather on it. Broad and low-mid, which is what wind across a
+  // steel tower is, and the only room here whose bed is louder than its drone.
+  pad:   { d1: 34,   d2: 51,   dg: 0.018, nf: 380, ng: 0.045, wf: 900,  wq: 3,  wg: 0.006 },
+  cabin: { d1: 62,   d2: 93,   dg: 0.022, nf: 330, ng: 0.030, wf: 1500, wq: 12, wg: 0.005 },
+  moon:  { d1: 55,   d2: 82.5, dg: 0.028, nf: 220, ng: 0.014, wf: 1180, wq: 14, wg: 0.008 },
+  entry: { d1: 48,   d2: 72,   dg: 0.036, nf: 520, ng: 0.052, wf: 2100, wq: 4,  wg: 0.012 },
+};
+function ambTo(kind) {
+  if (!AC || !AMBN || AMBN.kind === kind) return;
+  const a = AMB[kind] || AMB.none, t = AC.currentTime, T = 1.6;
+  AMBN.kind = kind;
+  AMBN.d1.g.gain.setTargetAtTime(a.dg, t, T);
+  AMBN.d2.g.gain.setTargetAtTime(a.dg*0.62, t, T);
+  AMBN.nb.g.gain.setTargetAtTime(a.ng, t, T);
+  AMBN.wb.g.gain.setTargetAtTime(a.wg, t, T);
+  // The frequencies move at the same pace as the levels, so a transition is one
+  // room turning into another rather than a crossfade between two of them.
+  AMBN.d1.set(a.d1, t, T); AMBN.d2.set(a.d2, t, T);
+  AMBN.nb.f.frequency.setTargetAtTime(a.nf, t, T);
+  AMBN.nb.f.Q.setTargetAtTime(1.0, t, T);
+  AMBN.wb.f.frequency.setTargetAtTime(a.wf, t, T);
+  AMBN.wb.f.Q.setTargetAtTime(a.wq, t, T);
+}
+
+// --------------------------------------------------------------- the score --
+// Four moods and one engine. A mood is a key, a tempo, a chord loop and which
+// voices are allowed to speak in it — a pad that breathes under everything, a
+// bass on the bar, a pulse that drives, and a bell that does not. Nothing here
+// is a recording, so a mood change is a change of parameters at the next bar
+// line rather than a crossfade between two files.
+const SCALE = { min: [0,2,3,5,7,8,10], dor: [0,2,3,5,7,9,10], lyd: [0,2,4,6,7,9,11] };
+const MOODS = {
+  // A1 dorian, driving. The pulse is the launch: something under it moving at a
+  // fixed rate while everything above it changes.
+  launch: { root: 55.00, sc: 'dor', bpm: 104, wave: 'sawtooth', cut: 900,
+            chords: [[0,3,7],[0,3,7],[-2,3,5],[-4,3,7]],
+            pad: 0.050, bass: 0.085, pulse: 0.045, bell: 0 },
+  // G1 minor, wide and slow. Open fifths and octaves, because a stack of thirds
+  // is a room and this is not one.
+  space:  { root: 49.00, sc: 'min', bpm: 54, wave: 'triangle', cut: 620,
+            chords: [[0,7,14],[0,3,10],[-5,2,7],[0,7,12]],
+            pad: 0.070, bass: 0.045, pulse: 0, bell: 0.048 },
+  // B-flat1 lydian: one note different from the major scale and it is the note
+  // that makes it sound like somewhere else. Colder, and the bells carry it.
+  moon:   { root: 58.27, sc: 'lyd', bpm: 46, wave: 'sine', cut: 900,
+            chords: [[0,7,16],[2,9,14],[-3,4,11],[0,6,13]],
+            pad: 0.066, bass: 0.038, pulse: 0, bell: 0.060 },
+  // F1 minor, low and close. A half step inside the chord is the whole trick.
+  entry:  { root: 43.65, sc: 'min', bpm: 76, wave: 'sawtooth', cut: 480,
+            chords: [[0,3,7],[0,3,8],[-1,3,6],[0,3,7]],
+            pad: 0.080, bass: 0.070, pulse: 0.028, bell: 0 },
+};
+const MUS = { mood: null, want: null, chord: 0, next: 0 };
+const ftone = (semi, root) => root*Math.pow(2, semi/12);
+// Take the voice out of the graph when its last source stops. A browser does
+// collect a finished source and the chain hanging off it, but this page is
+// asked to run a six-and-a-half-day mission with a bar going by every few
+// seconds, and one line that makes it unambiguous is cheaper than finding out.
+function reap(src, ...nodes) {
+  src.onended = () => { for (const n of nodes) { try { n.disconnect(); } catch (e) {} } };
+}
+function vPad(freqs, t0, dur, g, m) {
+  const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 0.7;
+  lp.frequency.setValueAtTime(m.cut*0.6, t0);
+  lp.frequency.linearRampToValueAtTime(m.cut, t0 + dur*0.5);
+  lp.frequency.linearRampToValueAtTime(m.cut*0.55, t0 + dur);
+  const env = AC.createGain();
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(g, t0 + dur*0.35);
+  env.gain.linearRampToValueAtTime(0, t0 + dur);
+  lp.connect(env); env.connect(busScore);
+  let last = null;
+  for (const f of freqs) for (const det of [-5, 5]) {
+    const o = AC.createOscillator();
+    o.type = m.wave; o.frequency.value = f; o.detune.value = det;
+    o.connect(lp); o.start(t0); o.stop(t0 + dur + 0.05);
+    last = o;
+  }
+  if (last) reap(last, env, lp);
+}
+function vBass(f, t0, dur, g) {
+  const env = AC.createGain(), oct = AC.createGain();
+  oct.gain.value = 0.25;
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(g, t0 + 0.02);
+  env.gain.exponentialRampToValueAtTime(1e-4, t0 + dur);
+  env.connect(busScore); oct.connect(env);
+  let last = null;
+  for (const [ff, ty, to] of [[f, 'sine', env], [f*2, 'triangle', oct]]) {
+    const o = AC.createOscillator();
+    o.type = ty; o.frequency.value = ff;
+    o.connect(to); o.start(t0); o.stop(t0 + dur + 0.02);
+    last = o;
+  }
+  reap(last, env, oct);
+}
+function vPluck(f, t0, g) {
+  const o = AC.createOscillator(), env = AC.createGain();
+  o.type = 'triangle'; o.frequency.value = f;
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(g, t0 + 0.008);
+  env.gain.exponentialRampToValueAtTime(1e-4, t0 + 0.32);
+  o.connect(env); env.connect(busScore);
+  o.start(t0); o.stop(t0 + 0.34);
+  reap(o, env);
+}
+// FM, and the ratio is the whole point: 3.5 is INHARMONIC, so the partials do
+// not line up on a harmonic series and the ear hears struck metal instead of a
+// flute. The modulation index decays faster than the note does, which is also
+// what a struck thing does — bright at the strike, pure in the tail.
+function vBell(f, t0, g) {
+  const car = AC.createOscillator(), mod = AC.createOscillator();
+  const mg = AC.createGain(), env = AC.createGain();
+  car.frequency.value = f; mod.frequency.value = f*3.5;
+  mg.gain.setValueAtTime(f*2.2, t0);
+  mg.gain.exponentialRampToValueAtTime(f*0.02, t0 + 1.2);
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(g, t0 + 0.006);
+  env.gain.exponentialRampToValueAtTime(1e-4, t0 + 3.4);
+  mod.connect(mg); mg.connect(car.frequency); car.connect(env);
+  env.connect(busScore);
+  mod.start(t0); car.start(t0); mod.stop(t0 + 3.5); car.stop(t0 + 3.5);
+  reap(car, env, mg);
+}
+// The standard lookahead: a timer that runs far more often than a bar, and
+// schedules whatever falls inside the next second and a bit. setTimeout cannot
+// place a note accurately and AC.currentTime can, so the timer only decides
+// WHEN TO ASK, never when the note happens.
+function musSchedule() {
+  if (!AC || !busScore) return;
+  const m = MOODS[MUS.mood];
+  if (!m) return;
+  const spb = 60/m.bpm, bar = spb*4, now = AC.currentTime;
+  if (MUS.next < now) MUS.next = now + 0.08;
+  while (MUS.next < now + 1.2) {
+    // a mood waits for the bar line — that is the whole reason this is a
+    // scheduler and not a switch
+    if (MUS.want && MUS.want !== MUS.mood) { MUS.mood = MUS.want; MUS.chord = 0; return; }
+    const t0 = MUS.next, sc = SCALE[m.sc];
+    const c = m.chords[MUS.chord % m.chords.length];
+    vPad(c.map(s => ftone(s + 24, m.root)), t0, bar*0.98, m.pad, m);
+    vBass(ftone(c[0], m.root), t0, bar*0.5, m.bass);
+    if (m.pulse)
+      for (let b = 0; b < 8; b++) {
+        // a hole in the drive on a rotating beat, so eight bars do not sound
+        // like the same bar eight times
+        if (b % 2 === 1 && (MUS.chord + b) % 3 === 0) continue;
+        vPluck(ftone(c[b % c.length] + 36, m.root), t0 + b*spb/2, m.pulse);
+      }
+    if (m.bell && MUS.chord % 2 === 0)
+      vBell(ftone(sc[(MUS.chord*3) % sc.length] + 36, m.root), t0 + bar*0.25, m.bell);
+    MUS.next += bar;
+    MUS.chord++;
+  }
+}
+// Asked from the frame loop and NOT from a setInterval, which is the whole
+// reason this is worth a comment: Chrome throttles a background tab's timers to
+// about one call a minute, and measured on a hidden tab the scheduler ran
+// exactly zero times in twenty-four seconds — silence, with an AudioContext
+// happily reporting `running`. requestAnimationFrame stops in a background tab
+// too, but a page that has stopped rendering has stopped, and a score that
+// stops with it is right. The call is cheap by construction: it does nothing at
+// all until the lookahead window has moved past the next bar.
+function musTo(kind) {
+  if (!AC) return;
+  MUS.want = kind;
+  if (!MUS.mood) { MUS.mood = kind; MUS.next = 0; }
+  musSchedule();
+}
+
+// ---------------------------------------------------------- sound effects --
+// One noise burst and one swept tone cover almost everything that is not music:
+// a click is a short bright burst, a bang is a long dark one, a chute is a
+// burst with a tail. Writing them as two shapes with numbers rather than as
+// fifteen hand-built graphs is what keeps this readable.
+const sfxOn = () => !!AC && !muted;
+// Mute is ONE gain, not fifteen conditionals: the score keeps its place, the
+// drones keep running, and unmuting picks up where the piece had got to instead
+// of starting a bar from silence. It is applied here rather than left to the
+// next updateAudio so that the toast and the sound agree about when it happened.
+function audioMute(m) {
+  muted = !!m;
+  if (AC && busMaster)
+    busMaster.gain.setTargetAtTime(muted ? 0 : 0.9, AC.currentTime, 0.05);
+}
+function vNoise(t0, dur, g, type, f0, q, f1) {
+  const s = AC.createBufferSource(); s.buffer = WHITE;
+  s.playbackRate.value = 0.85 + Math.random()*0.3;
+  const bq = AC.createBiquadFilter(); bq.type = type; bq.Q.value = q;
+  bq.frequency.setValueAtTime(f0, t0);
+  if (f1) bq.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t0 + dur);
+  const env = AC.createGain();
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(g, t0 + Math.min(0.012, dur*0.25));
+  env.gain.exponentialRampToValueAtTime(1e-4, t0 + dur);
+  s.connect(bq); bq.connect(env); env.connect(busScore);
+  s.start(t0, Math.random()*2); s.stop(t0 + dur + 0.02);
+  reap(s, env, bq);
+}
+function vTone(t0, dur, g, f0, f1, type) {
+  const o = AC.createOscillator(), env = AC.createGain();
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(f0, t0);
+  if (f1) o.frequency.exponentialRampToValueAtTime(Math.max(12, f1), t0 + dur);
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(g, t0 + Math.min(0.01, dur*0.2));
+  env.gain.exponentialRampToValueAtTime(1e-4, t0 + dur);
+  o.connect(env); env.connect(busScore);
+  o.start(t0); o.stop(t0 + dur + 0.02);
+  reap(o, env);
+}
 function beep(f, dur) {
-  if (!AC || muted) return;
-  const o = AC.createOscillator(), g = AC.createGain();
-  o.frequency.value = f; o.type = 'sine';
-  g.gain.setValueAtTime(0.12, AC.currentTime);
-  g.gain.exponentialRampToValueAtTime(1e-4, AC.currentTime + dur);
-  o.connect(g); g.connect(AC.destination);
-  o.start(); o.stop(AC.currentTime + dur);
+  if (!sfxOn()) return;
+  vTone(AC.currentTime, dur, 0.10, f, 0, 'sine');
+}
+// A switch is a mechanism: the click you hear is the contact, and the thing
+// that makes it sound like a real one is the small dull thump of the body it
+// is mounted in arriving a few milliseconds later.
+function sfxClick()   { if (!sfxOn()) return; const t = AC.currentTime;
+                        vNoise(t, 0.030, 0.13, 'bandpass', 2800, 2.2, 1500);
+                        vTone(t + 0.004, 0.045, 0.045, 190, 95, 'square'); }
+function sfxSwitch()  { if (!sfxOn()) return; const t = AC.currentTime;
+                        vNoise(t, 0.022, 0.10, 'highpass', 2200, 0.9);
+                        vNoise(t + 0.045, 0.035, 0.14, 'bandpass', 1500, 2.6, 700);
+                        vTone(t + 0.048, 0.06, 0.05, 150, 70, 'square'); }
+function sfxStrap()   { if (!sfxOn()) return; const t = AC.currentTime;
+                        vNoise(t, 0.13, 0.08, 'bandpass', 900, 1.1, 380);
+                        vNoise(t + 0.14, 0.04, 0.16, 'bandpass', 2000, 3.0, 900); }
+// A reaction wheel is not a thruster: nothing leaves the vehicle, a rotor
+// spins up. So it is a rising tone with almost no attack, not a hiss.
+function sfxThruster(){ if (!sfxOn()) return; const t = AC.currentTime;
+                        vTone(t, 0.55, 0.030, 220, 470, 'triangle');
+                        vNoise(t, 0.16, 0.020, 'bandpass', 1400, 5, 2200); }
+// Somebody hitting a wall in zero g, which is soft, low, and over immediately.
+function sfxThump(v)  { if (!sfxOn()) return; const t = AC.currentTime;
+                        const g = Math.min(0.22, 0.07 + 0.34*v);
+                        vTone(t, 0.22, g, 105, 46, 'sine');
+                        vNoise(t, 0.09, g*0.45, 'lowpass', 700, 0.7, 240); }
+function sfxStage()   { if (!sfxOn()) return; const t = AC.currentTime;
+                        vNoise(t, 0.55, 0.34, 'lowpass', 1600, 0.8, 90);
+                        vTone(t, 0.45, 0.22, 95, 32, 'sine');
+                        vNoise(t + 0.05, 0.9, 0.10, 'bandpass', 420, 0.6, 150); }
+function sfxIgnite(k) { if (!sfxOn()) return; const t = AC.currentTime, g = 0.30*(k || 1);
+                        // the swell IS the ignition: a chamber comes up to
+                        // pressure over about a second and the low end arrives last
+                        vNoise(t, 1.30, g, 'lowpass', 260, 0.7, 1500);
+                        vTone(t + 0.08, 1.10, g*0.5, 34, 62, 'sine'); }
+function sfxShutdown(){ if (!sfxOn()) return; const t = AC.currentTime;
+                        vNoise(t, 0.85, 0.20, 'lowpass', 1300, 0.7, 120);
+                        vTone(t, 0.7, 0.10, 70, 26, 'sine'); }
+function sfxChute(k)  { if (!sfxOn()) return; const t = AC.currentTime, g = k || 1;
+                        vNoise(t, 0.16, 0.30*g, 'bandpass', 1100, 0.9, 420);
+                        for (let i = 1; i < 6; i++)                // canopy flutter
+                          vNoise(t + 0.13*i, 0.09, 0.10*g/i, 'bandpass',
+                                 700 + 200*Math.random(), 1.4, 300); }
+function sfxSplash()  { if (!sfxOn()) return; const t = AC.currentTime;
+                        vNoise(t, 1.4, 0.32, 'lowpass', 2600, 0.6, 160);
+                        vTone(t, 0.5, 0.14, 130, 40, 'sine'); }
+function sfxAlarm()   { if (!sfxOn()) return; const t = AC.currentTime;
+                        for (let i = 0; i < 3; i++) {
+                          vTone(t + 0.28*i, 0.13, 0.075, 740, 0, 'square');
+                          vTone(t + 0.28*i + 0.14, 0.13, 0.075, 560, 0, 'square');
+                        } }
+function sfxChime()   { if (!sfxOn()) return; vBell(660, AC.currentTime, 0.055); }
+function sfxTick()    { if (!sfxOn()) return;
+                        vNoise(AC.currentTime, 0.022, 0.09, 'bandpass', 3200, 3, 2000); }
+
+// The moments the mission itself makes a noise. Every one is a CROSSING of the
+// mission clock, tested exactly the way the countdown beeps are — which is also
+// why a scrub is silent: scrubStep has already moved simT before tPrev is
+// taken, so dragging back and forth over ignition does not re-fire it.
+function audioEvents(t0, t1) {
+  if (!sfxOn() || !(t1 > t0)) return;
+  const cross = x => isFinite(x) && t0 < x && t1 >= x;
+  if (t1 < 0 && Math.floor(t1) !== Math.floor(t0) && t1 > -10.5) beep(880, 0.1);
+  if (cross(0)) { beep(1320, 0.45); sfxIgnite(1); }
+  for (const k in dropT) if (cross(dropT[k])) sfxStage();
+  for (const b of BURNW) { if (cross(b[0])) sfxIgnite(0.55);
+                           if (cross(b[1])) sfxShutdown(); }
+  if (cross(secoT)) sfxShutdown();
+  if (cross(tDrog)) sfxChute(0.7);
+  if (cross(tMain)) sfxChute(1);
+  if (cross(tEI)) sfxAlarm();
+  if (cross(tSplash)) sfxSplash();
 }
 function updateAudio(sc, camEye) {
   if (!AC) return;
@@ -3893,6 +4259,30 @@ function updateAudio(sc, camEye) {
   gCrk.gain.setTargetAtTime(target*(Math.random() < 0.45 ? 0.85 : 0.2),
                             AC.currentTime, 0.03);
   dly.delayTime.setTargetAtTime(Math.min(9.5, d/340), AC.currentTime, 0.5);
+  ambTo(ambFor(sc.world, sc.cam.mode === 'cabin'));
+  musTo(musFor(sc.world, simT));
+}
+// Where the LISTENER is picks the room; where the VEHICLE is picks the mood.
+// They are genuinely different questions — a crew member in the cabin over the
+// Moon is in a cabin, listening to the Moon — and both have to be TOTAL. A
+// world that names no room is a silence nobody asked for, and it would only
+// ever show up on the one mission that reaches that world.
+function ambFor(world, inCabin) {
+  return muted ? 'none'
+       // entry is the one place loud enough to come through the hull, so it
+       // beats the cabin rather than losing to it
+       : world === 'entry' ? 'entry'
+       : inCabin ? 'cabin'
+       : world === 'moon' ? 'moon'
+       : world === 'pad' ? 'pad' : 'space';
+}
+function musFor(world, t) {
+  return world === 'entry' ? 'entry'
+       : world === 'moon' ? 'moon'
+       // the launch cue covers the count and the ascent and hands over shortly
+       // after the last engine quits; a suborbital flight never leaves the pad
+       // world, so this cannot key off the world alone
+       : world === 'pad' && t < secoT + 30 ? 'launch' : 'space';
 }
 
 // ---------------------------------------------------------------- cameras --
@@ -3960,6 +4350,30 @@ function headFrame(base) {
 // having and it is also easy to get lost in, so there is one key that undoes
 // it — the equivalent of finding a handrail and squaring up on it.
 function headLevel() { HEAD.q = [1,0,0,0]; headYaw = headPitch = 0; }
+// ONE place decides what a drag does, so the couch and the float station cannot
+// disagree about it — which they did, on exactly one of the four axes. Both
+// stations obey the same two sentences: drag down and you look down, drag right
+// and you look right.
+//
+// The float pitch is the sign that is easy to get backwards and the reason is
+// worth writing down. r x f = u, so turning about your own right by a POSITIVE
+// angle carries your view toward your own up; a downward drag therefore has to
+// command a NEGATIVE one. Get it wrong and three of the four axes still feel
+// right, which is precisely what an inverted axis feels like.
+function lookDrag(dx, dy, Kin) {
+  if (CAB.seat !== null) {
+    headYaw = Math.min(HEAD_YAW_LIM,
+                       Math.max(-HEAD_YAW_LIM, headYaw + dx*LOOK_SENS));
+    headPitch = Math.min(HEAD_PITCH_LIM,
+                         Math.max(-HEAD_PITCH_LIM, headPitch - dy*LOOK_SENS));
+    return true;
+  }
+  const base = cabinPose('float', 0, Kin);
+  if (!base) return false;
+  if (dx) headTurn(headFrame(base).up, -dx*LOOK_SENS);
+  if (dy) headTurn(headFrame(base).rt, -dy*LOOK_SENS);
+  return true;
+}
 // No separate `window` station any more: it was a fixed pose pressed against
 // one pane, and now that the crew can push off and float to whichever viewport
 // they like, a camera whose whole job was to pick one for them is a worse way
@@ -4112,11 +4526,14 @@ const CAB_VMAX = 0.9;      // m/s, a brisk float across a 2 m cabin
 const CAB_RROLL = 0.9;     // rad/s of body roll — a twist, not a spin
 const CAB_ROLL_TAU = 0.20; // s to wind that rate up, and to settle out of it
 // Two things in this cabin move — the vehicle and the person in it — and there
-// is one set of keys. Which of them the keys drive is a SWITCH, not a modifier:
-// holding shift is fine for a nudge and useless for crossing a cabin, and while
-// the crew keys were the shifted ones there was nothing left to bind roll to.
-const CAB_MODES = ['pilot', 'crew'];
-let cabCtl = 'pilot';
+// is one set of keys. Which of them the keys drive is NOT a mode you switch to.
+// It is where you are sitting. Strapped into a couch your hands are on the
+// controller and WASD is the reaction wheels; out of the couch there is nothing
+// under your hands and WASD is your own body. Nobody flies a stack while
+// swimming across a cabin, so the state that told the keys apart was already on
+// the screen — and a key that toggled it was a control whose only job was to
+// contradict where the crew member visibly was.
+function cabHands() { return CAB.live && CAB.seat === null; }
 // A shove is not an instant. An arm extends over about a third of a second, and
 // that is exactly how long the surface is still there to push against — ending
 // the push the moment you start moving instead gives you one frame of contact
@@ -4129,6 +4546,18 @@ function cabReset() {
   const K = cabK();
   CAB.seat = K ? cabSeatHome(K) : 0;
   headLevel();
+}
+// What a SEEK does to the crew, which is much less. A seek moves the clock;
+// where you are in the cabin and which way you are facing are not the clock's
+// to move, and putting them back in the middle couch every time the timeline
+// was nudged meant you could not look at anything and scrub at the same time —
+// every scrub ended with the console back in your face. Momentum does not
+// survive the jump, because the trajectory on the far side of it is a different
+// one and the velocity you had was measured against the old one. The POSE does.
+function cabHold() {
+  CAB.v = [0,0,0]; CAB.keys = {}; CAB.push = 0; CAB.rw = 0;
+  CAB.pv = CAB.p.slice();          // and the eye arrives where the body is
+  CAB.touch = true; CAB.n = null;  // a hand back on whatever you were holding
 }
 // The crew member's own axes in MODEL space — where they are looking, not where
 // the couch faces. Every translation key is measured in this frame, so "up" is
@@ -4223,7 +4652,12 @@ function cabStep(dt, active, Kin) {
   // Arriving at a surface is arriving: you put a hand out and stop. The cabin
   // is ringed with handrails and that is exactly what they are for — so a
   // contact is not a bounce, it is the next thing you can push off.
-  if (c.hit) { CAB.v = [0,0,0]; CAB.touch = true; CAB.n = c.n; CAB.push = 0; }
+  if (c.hit) {
+    // and it makes a noise, once, on the frame you arrive — not while you rest
+    // against it, which is what testing `hit` alone would have given you
+    if (!CAB.touch) sfxThump(V.len(CAB.v)/CAB_VMAX);
+    CAB.v = [0,0,0]; CAB.touch = true; CAB.n = c.n; CAB.push = 0;
+  }
   cabSmooth(dt);
 }
 // The rule is a push, a coast and a wall — correct, and abrupt: a shove starts
@@ -4283,6 +4717,7 @@ function cabSit(i, Kin) {
   CAB.v = [0,0,0]; CAB.p = [0,0,0];
   CAB.touch = true; CAB.n = null; CAB.push = 0;
   headLevel();                                // strapping in squares you up
+  sfxStrap();
   cabToast(`STRAPPED IN · ${cabSeatLabel(K, CAB.seat)}`);
   return true;
 }
@@ -4308,6 +4743,7 @@ function cabStand(Kin) {
   headYaw = headPitch = 0;
   CAB.seat = null; CAB.v = [0,0,0]; CAB.rw = 0;
   CAB.touch = true; CAB.n = null; CAB.push = 0;   // a hand still on the couch
+  sfxSwitch();                                    // the harness letting go
   cabToast('UNBUCKLED · ZERO G');
   return true;
 }
@@ -4419,8 +4855,9 @@ function cabActivate(hit, back) {
     else cabSit(nxt);
   } else if (key === 'warpup' || key === 'warpdn') {
     cabToast(`CLOCK · ${warpStep(key === 'warpup' ? 1 : -1)}`);
-  } else if (key === 'att') {
-    setCtl(cabCtl === 'crew' ? 'pilot' : 'crew');   // setCtl toasts for itself
+  } else if (key === 'audio') {
+    audioMute(!muted);
+    cabToast(`AUDIO ${muted ? 'MUTED' : 'ON'}`);
   } else if (key === 'nullr') {
     RCS.w = [0, 0, 0]; RCS.rate = 0; CAB.v = [0, 0, 0];
     cabToast('RATES NULLED');
@@ -4432,6 +4869,9 @@ function cabActivate(hit, back) {
     // the couch you are already in is the one that lets you out of it
     return CAB.seat === hit.seat ? cabStand() : cabSit(hit.seat);
   } else return false;
+  // The two paddles are levers and everything else on that face is a cap. They
+  // do not sound alike, and which one you just pressed is worth hearing.
+  if (key === 'lights' || key === 'page') sfxSwitch(); else sfxClick();
   return true;
 }
 
@@ -4681,7 +5121,13 @@ function cameraEci(t, cs, ph, M) {
   } else if (mode === 'chase') {
     eye = V.add(p, V.add(V.scale(cs.bz, 26), V.scale(cs.bx, -8)));
   } else if (mode === 'drift' || mode === 'free') {
-    if (mode === 'drift') freeYaw += 0.0009;
+    // Held, not orbiting. This used to advance freeYaw by a fixed step every
+    // FRAME, which makes the rate a function of the frame time — so the coast
+    // turned at one speed while the background scaler was happy and visibly
+    // another when it was not, and the whole point of a slow drift is that you
+    // do not notice it. It was also answering a question the vehicle now
+    // answers for itself: the wheels turn the stack, so a camera that spun you
+    // round to show you the other side is a worse version of flying it there.
     const R = (mode === 'free' && freeDist) ? freeDist : 30;
     const cp = Math.cos(freePitch), sp = Math.sin(freePitch);
     const e1 = cs.bx, e2 = cs.bz, e3 = V.cross(e1, e2);
@@ -4917,11 +5363,11 @@ function frame(now) {
   const tPrev = simT;
   simT += dt;
 
-  if (simT < 0 && Math.floor(simT) !== Math.floor(tPrev) && simT > -10.5) beep(880, 0.1);
-  if (tPrev < 0 && simT >= 0) beep(1320, 0.45);
+  audioEvents(tPrev, simT);
   for (const q of toasts) if (!q.done && simT >= q.t) {
     q.done = true;
     if (simT - q.t < 60 || warpEff > 8) {
+      sfxChime();
       $('toast').textContent = q.s; $('toast').style.opacity = 1;
       clearTimeout(frame._tt);
       frame._tt = setTimeout(() => $('toast').style.opacity = 0, 2600);
@@ -6221,9 +6667,6 @@ function projectPt(view, proj, p, wCss, hCss) {
 function cabinPanel(sc, view, proj, wCss, hCss) {
   const tip = $('cabtip');
   const live = sc.cam.mode === 'cabin' && sc.craftM;
-  // the keys drive two different things only when there is a crew member in
-  // here to be the second one
-  $('ctl').classList.toggle('hidden', !live);
   const hov = live && cabHover;
   const hp = hov && projectPt(view, proj, mApply(sc.craftM, hov.p), wCss, hCss);
   tip.classList.toggle('hidden', !hp);
@@ -6241,8 +6684,7 @@ function cabinPanel(sc, view, proj, wCss, hCss) {
                                 : K ? cabSeatLabel(K, CAB.seat) : 'COUCH'}` :
       hov.key === 'warpup'  ? `CLOCK UP · ${warpLabel(manualWarp).toUpperCase()}` :
       hov.key === 'warpdn'  ? `CLOCK DOWN · ${warpLabel(manualWarp).toUpperCase()}` :
-      hov.key === 'att'     ? `ATTITUDE KEYS · ${cabCtl === 'crew' ? 'CREW'
-                                                                  : 'WHEELS'}` :
+      hov.key === 'audio'   ? `AUDIO · ${muted ? 'MUTED' : 'ON'}` :
       hov.key === 'nullr'   ? 'NULL RATES' :
       hov.key === 'level'   ? 'LEVEL THE CREW' :
       hov.key === 'help'    ? `CHECKLIST · ${helpShow ? 'SHOWN' : 'PRESS H'}` :
@@ -6361,7 +6803,7 @@ function drawHUD(sc, ph) {
   // The wheels only answer while the stack coasts at real time, so the row
   // shows up exactly when the keys will do something — and reads out the rate,
   // because the rate is what the vehicle's mass decides.
-  const flying = !CAB.live || cabCtl === 'pilot';
+  const flying = !cabHands();
   // What the attitude is doing, in the three states it can be in — the crew's
   // to fly, held where they left it, or being handed back for a burn or entry.
   if (RCS.align) {
@@ -6388,9 +6830,8 @@ function drawHUD(sc, ph) {
     // whole mechanic.
     const s = V.len(CAB.v);
     rows.push(['CREW', CAB.seat !== null
-      ? 'STRAPPED IN · G, or right click a couch, to unbuckle'
-      : CAB.touch ? 'CONTACT · ' + (flying ? 'T for crew keys, then ' : '') +
-                    'WASD RF to push'
+      ? 'STRAPPED IN · WASD flies · G to unbuckle'
+      : CAB.touch ? 'CONTACT · WASD RF to push'
                   : 'DRIFTING · ' + s.toFixed(2) + ' m/s']);
   }
   if (perfShow) {
@@ -6462,7 +6903,11 @@ function jumpTo(t) {
   simT = Math.max(-15, Math.min(t, tEnd - 0.5));
   for (const q of toasts) q.done = simT >= q.t;
   parts.length = 0; debris.length = 0;
-  rcsReset(); cabReset();            // hand-flown state does not survive a seek
+  // Hand-flown ATTITUDE does not survive a seek — the trajectory owns the
+  // stack's frame either side of the jump and a held offset against the old one
+  // is meaningless against the new. The crew inside it is not attitude: they
+  // keep their station and their aim, and only their momentum is dropped.
+  rcsReset(); cabHold();
   splashed = simT >= tSplash;
   warpCur = 1;
   ended = false;
@@ -6507,20 +6952,6 @@ function chipRow(el, items, cur, cb) {
     el.appendChild(c);
   }
 }
-// The control switch, drawn only in the cabin because outside it there is only
-// one thing the keys could be flying.
-function setCtl(m, quiet) {
-  cabCtl = m;
-  const el = $('ctl');
-  el.innerHTML = '<span class="lab">KEYS</span>';
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:6px';
-  el.appendChild(row);
-  chipRow(row, CAB_MODES, cabCtl, setCtl);
-  if (!quiet)
-    cabToast(m === 'crew' ? 'KEYS · CREW · WASD RF move · QE roll'
-                          : 'KEYS · PILOT · REACTION WHEELS');
-}
 let helpShow = false;
 function syncHelp() { $('help').classList.toggle('hidden', !helpShow); }
 // The clock rates the speed chips offer, and the label each wears. The console's
@@ -6532,11 +6963,11 @@ function warpStep(dir) {
   const i = WARPS.indexOf(manualWarp);
   manualWarp = WARPS[Math.min(WARPS.length - 1, Math.max(0, (i < 0 ? 0 : i) + dir))];
   speedSync();
+  sfxTick();
   return manualWarp === 0 ? 'AUTO' : warpLabel(manualWarp).toUpperCase();
 }
 function initControls() {
   chipRow($('cams'), MS ? CAMS_MOON : CAMS, 'auto', m => camMode = m);
-  setCtl(cabCtl, true);
   syncHelp();
   // the hint has done its job by the time the vehicle is off the pad
   setTimeout(() => $('keys').classList.remove('show'), 9000);
@@ -6593,18 +7024,7 @@ function initControls() {
       // in that is a neck, with a neck's limits; loose it is your whole body,
       // turned about the axes you can currently SEE — which is what stops a
       // sideways drag from tipping you over once you have rolled.
-      if (CAB.seat !== null) {
-        headYaw = Math.min(HEAD_YAW_LIM,
-                           Math.max(-HEAD_YAW_LIM, headYaw + dx*LOOK_SENS));
-        headPitch = Math.min(HEAD_PITCH_LIM,
-                             Math.max(-HEAD_PITCH_LIM, headPitch - dy*LOOK_SENS));
-      } else {
-        const base = cabinPose('float', 0);
-        if (base) {
-          if (dx) headTurn(headFrame(base).up, -dx*LOOK_SENS);
-          if (dy) headTurn(headFrame(base).rt, dy*LOOK_SENS);
-        }
-      }
+      lookDrag(dx, dy);
     } else {
       freeYaw += dx*0.006;
       freePitch = Math.min(1.4, Math.max(-1.2, freePitch + dy*0.004));
@@ -6632,7 +7052,7 @@ function initControls() {
       camMode = CAMS[i-1];
       chipRow($('cams'), CAMS, camMode, m => camMode = m);
     }
-    if (e.key === 'm') muted = !muted;
+    if (e.key === 'm') audioMute(!muted);
     if (e.key === 'p') perfShow = !perfShow;
     // Manual lens on top of whatever the camera computed: ] tightens, [ opens,
     // \ goes back to the rig's own framing. A multiplier rather than an
@@ -6641,16 +7061,14 @@ function initControls() {
     if (e.key === ']') zoomK = Math.min(8, +(zoomK*1.18).toFixed(3));
     if (e.key === '[') zoomK = Math.max(0.4, +(zoomK/1.18).toFixed(3));
     if (e.key === '\\') zoomK = 1;
-    // One set of keys, two things they can drive, and a switch that says which.
-    //   pilot — the reaction wheels: held, a key is a torque; released, the
-    //           wheels spend the same torque nulling the rate they built, so the
-    //           stack stops where it is instead of tumbling on.
-    //   crew  — your own body: WASD and RF translate, QE roll, and all six are
-    //           in the frame you are looking along.
+    // One set of keys, two things they can drive, and the couch says which.
+    //   in it  — the reaction wheels: held, a key is a torque; released, the
+    //            wheels spend the same torque nulling the rate they built, so
+    //            the stack stops where it is instead of tumbling on.
+    //   out of it — your own body: WASD and RF translate, QE roll, and all six
+    //            are in the frame you are looking along.
     // X kills whichever rotation is yours to kill.
     const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
-    if (kk === 't' && inside()) { setCtl(cabCtl === 'crew' ? 'pilot' : 'crew');
-                                  e.preventDefault(); }
     // the keyboard way in and out of a couch, for anyone who would rather not
     // hunt for it with the mouse
     if (kk === 'g' && inside()) {
@@ -6660,9 +7078,16 @@ function initControls() {
       e.preventDefault();
     }
     if (CAB_KEYS[kk]) {
-      const crew = cabCtl === 'crew' && CAB.live;
+      // Out of the couch the keys are the body's, whether or not the cabin is
+      // live enough to move it — a key held through a warp must not be sitting
+      // in the wheels' hand when real time comes back and the crew member is
+      // still floating in the middle of the cabin.
+      const crew = inside() && CAB.seat === null;
       if (crew) CAB.keys[kk] = true;
-      else if (RCS_KEYS[kk]) RCS.keys[kk] = true;
+      else if (RCS_KEYS[kk]) {
+        RCS.keys[kk] = true;
+        if (!e.repeat && RCS.live) sfxThruster();   // a wheel pair spinning up
+      }
       if (crew || RCS_KEYS[kk]) e.preventDefault();
     }
     if (kk === 'x') { RCS.w = [0, 0, 0]; RCS.rate = 0; CAB.v = [0, 0, 0]; }
@@ -6876,6 +7301,80 @@ window.__selftest = function () {
     }
     return back;
   }, 0);
+
+  // --- the coast camera holds still. It used to advance its own yaw by a fixed
+  // step every FRAME, which makes the rate a function of the frame time: the
+  // same coast turned at one speed while the background scaler was happy and
+  // visibly another when it was not, and a drift you can see stepping is not a
+  // drift. Two calls at one instant is the whole test — a camera that moves
+  // when nothing asked it to fails it.
+  const dCs = { pos: [7e6, 0, 0], vel: [0, 7500, 0], speed: 7500,
+                moon: [3.8e8, 0, 0], bx: [0,1,0], by: [0,0,1], bz: [1,0,0],
+                rE: 7e6, rM: 3.8e8, burning: false };
+  eq('the coast camera does not move on its own', () => {
+    const save = camMode, saveYaw = freeYaw;
+    camMode = 'auto';                          // an unnamed phase falls to drift
+    const a = cameraEci(0, dCs, { n: 'COAST', w: 'eci' }, null);
+    const b = cameraEci(0, dCs, { n: 'COAST', w: 'eci' }, null);
+    const d = V.len(V.sub(a.eye, b.eye)) + Math.abs(freeYaw - saveYaw);
+    camMode = save; freeYaw = saveYaw;
+    return d;
+  }, 0, 1e-12);
+
+  // --- audio. Nothing here needs an AudioContext, and the two things worth
+  // asserting without one are that the routing is TOTAL and that the tables are
+  // complete. A world that names no room is a silence that only shows up on the
+  // one mission that reaches it; a room missing a field writes NaN into an
+  // AudioParam, which does not throw — it takes the whole graph silent.
+  const WORLDS = ['pad', 'eci', 'moon', 'entry'];
+  eq('every world names a room and a mood that exist', () => {
+    const m = muted; muted = false;
+    const ok = WORLDS.every(w => [false, true].every(c =>
+      !!AMB[ambFor(w, c)] && !!MOODS[musFor(w, 0)]));
+    muted = m;
+    return ok;
+  }, true);
+  eq('the cabin is a room wherever the vehicle is', () => {
+    const m = muted; muted = false;
+    const ok = ['pad','eci','moon'].every(w => ambFor(w, true) === 'cabin');
+    muted = m;
+    return ok;
+  }, true);
+  eq('but entry is loud enough to be heard through the hull', () => {
+    const m = muted; muted = false;
+    const k = ambFor('entry', true);
+    muted = m;
+    return k;
+  }, 'entry');
+  eq('muting names a room too, rather than leaving the last one running', () => {
+    const m = muted; muted = true;
+    const k = ambFor('eci', false);
+    muted = m;
+    return k;
+  }, 'none');
+  eq('the pad is the launch cue and the coast is not',
+     () => musFor('pad', -5) + '/' + musFor('eci', 1e5), 'launch/space');
+  eq('the pad has weather on it rather than the vacuum drone', () => {
+    const m = muted; muted = false;
+    const k = ambFor('pad', false);
+    muted = m;
+    return k;
+  }, 'pad');
+  eq('and the launch cue hands over once the engines have quit',
+     () => musFor('pad', secoT + 90), 'space');
+  eq('every room sets every knob the setter reads', () => {
+    const knobs = ['d1','d2','dg','nf','ng','wf','wq','wg'];
+    return Object.keys(AMB).every(k => knobs.every(n => isFinite(AMB[k][n])));
+  }, true);
+  eq('and silence is silent on all three voices',
+     () => AMB.none.dg + AMB.none.ng + AMB.none.wg, 0);
+  eq('every mood is playable', () =>
+     Object.keys(MOODS).every(k => {
+       const m = MOODS[k];
+       return !!SCALE[m.sc] && m.bpm > 0 && m.chords.length > 0 &&
+              m.root > 20 && m.root < 200 && m.cut > 0 &&
+              m.chords.every(c => c.length >= 2);
+     }), true);
 
   // --- the adaptive scaler. Pure by design, so its behaviour is testable
   // without a GPU — which matters because GPU timings are invalid in a
@@ -7298,6 +7797,68 @@ window.__selftest = function () {
     for (let i = 0; i < 60; i++) cabStep(1/60, true, FK);
     return V.len(CAB.v) + V.len(CAB.p) + (1 - V.dot(cabDirs(FK).up, u0));
   }, 0, 1e-12);
+
+  // --- WHICH of the two things in this cabin the keys drive. It is not a mode
+  // any more, it is the couch: hands on the controller fly the stack, hands on
+  // nothing move you. Worth pinning because the failure mode is silent — keys
+  // that drive the wrong thing feel exactly like keys that are not bound.
+  eq('strapped in, the keys are the wheels', () => {
+    cabReset(); CAB.live = true;                  // cabReset seats you
+    return cabHands();
+  }, false);
+  eq('out of the couch, the keys are your own body', () => {
+    cabReset(); CAB.seat = null; CAB.live = true;
+    return cabHands();
+  }, true);
+  eq('and with no cabin to be in, they are the wheels either way', () => {
+    cabReset(); CAB.seat = null; CAB.live = false;
+    return cabHands();
+  }, false);
+
+  // --- looking around. Four assertions that all say the same two sentences —
+  // drag down, look down; drag right, look right — asserted in BOTH stations,
+  // because the two used to disagree about the pitch and about nothing else.
+  // Measured against the frame you started in, so this is about the DIRECTION
+  // the view moved and not about any particular angle convention.
+  const dragTo = (seated, dx, dy) => {
+    cabReset(); headLevel();
+    CAB.seat = seated ? 0 : null;
+    const d0 = cabDirs(FK);
+    lookDrag(dx, dy, FK);
+    const d1 = cabDirs(FK);
+    return { up: V.dot(d1.fwd, d0.up), rt: V.dot(d1.fwd, d0.rt) };
+  };
+  eq('dragging down looks down, in the couch', () => dragTo(true, 0, 60).up < 0, true);
+  eq('and out of the couch too', () => dragTo(false, 0, 60).up < 0, true);
+  eq('dragging right looks right, in the couch', () => dragTo(true, 60, 0).rt > 0, true);
+  eq('and out of the couch too as well', () => dragTo(false, 60, 0).rt > 0, true);
+  eq('the two stations move the view the same way', () => {
+    const a = dragTo(true, 40, 40), b = dragTo(false, 40, 40);
+    return Math.sign(a.up) === Math.sign(b.up) &&
+           Math.sign(a.rt) === Math.sign(b.rt);
+  }, true);
+
+  // --- a seek moves the CLOCK. Where the crew member is and which way they are
+  // facing are not the clock's to move, and having them thrown back into the
+  // middle couch meant you could not look at anything and scrub at the same
+  // time. Momentum is the one thing that does not survive: the trajectory on
+  // the far side of the jump is a different one.
+  eq('a seek leaves you where you were, looking where you were looking', () => {
+    cabReset(); CAB.seat = null;
+    CAB.p = [0.11, -0.07, 0.05]; CAB.pv = [0.03, 0.01, -0.02];
+    CAB.v = [0.3, -0.1, 0.2];
+    headTurn([0.2, 1, -0.4], 0.8);
+    const p0 = CAB.p.slice(), q0 = HEAD.q.slice();
+    cabHold();
+    const dq = Math.abs(HEAD.q.reduce((s, v, i) => s + v*q0[i], 0));
+    return V.len(V.sub(CAB.p, p0)) + (1 - dq) + (CAB.seat === null ? 0 : 1);
+  }, 0, 1e-12);
+  eq('and drops the momentum, and the eye with it', () => {
+    cabReset(); CAB.seat = null;
+    CAB.p = [0.11, -0.07, 0.05]; CAB.pv = [0, 0, 0]; CAB.v = [0.3, -0.1, 0.2];
+    cabHold();
+    return V.len(CAB.v) + V.len(V.sub(CAB.pv, CAB.p));
+  }, 0, 1e-12);
   cabReset();
   eq('the floor is the couch tops, not the deck',
      () => cabXLo(CK) > CK.xa + 0.15*CK.rp, true);
@@ -7505,7 +8066,7 @@ window.__cameraAudit = function (times, modes) {
   // camMode/simT/running are the obvious three, and they are not enough:
   // buildScene ALSO advances state, so an audit does not merely read the page,
   // it moves it. The pad cameras step their tilt-lag filter (CS.ly toward
-  // CS.tly), the drift camera advances freeYaw, and the pad branch integrates
+  // CS.tly) and the pad branch integrates
   // scorch whenever the vehicle is on the table under thrust. Leave those and a
   // second audit of the same instants disagrees with the first — which is
   // backwards for a regression test, because then a mismatch means either a
@@ -7709,6 +8270,12 @@ async function boot() {
       pickGroundCam();
     }
     buildToasts();
+    // Seat the crew once, here, now the capsule exists to say how many couches
+    // it has and which is the middle one. A seek used to do this as a side
+    // effect of throwing the whole cabin state away; it no longer throws it
+    // away, so the one thing that genuinely needed the vehicle has to be asked
+    // for — otherwise a three-seat capsule starts the flight in couch 0.
+    cabReset();
     skyBuf = quadBuf();
     pickWeather(run.sites.launch_lat, run.sites.launch_lon);
     partDyn = gl.createBuffer();

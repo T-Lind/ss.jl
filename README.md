@@ -852,18 +852,21 @@ cover exterior, onboard and in-cabin views:
   than a 40 s one that would average across the TLI burn's acceleration.
   The plume also runs on its own near-real-time clock, so it keeps burning
   when you wind the time warp up instead of blinking out.
-* **Inside the capsule** — `cabin` (key `5`) puts the eye on the couch;
-  `window` (key `6`) puts it up against a viewport looking out. Because the
+* **Inside the capsule** — `cabin` (key `5`) puts you in a couch. Because the
   hull is a real shell with real apertures, the renderer simply drops the
   window panes and you see straight out through the openings: display
   console overhead, equipment racks along the wall, the ocean or the stars
-  through the glass. In space the view picks whichever of the three
-  windows currently faces the Moon or Earth, and dragging turns your head
-  rather than orbiting the capsule. Riding inside, the camera moves *with*
-  the hull — only a few millimetres of vibration remain, because a crew
-  member is shaken along with the vehicle rather than watching it shake.
-  The director cuts inside when the fairing splits and daylight first
-  reaches the cabin, and again through peak heating.
+  through the glass. Dragging turns your head rather than orbiting the
+  capsule, and `g` unbuckles you into zero g — you can only push off
+  something, so a shove is a shove and then a coast until you catch the next
+  handrail. **The couch decides what the keys fly.** Strapped in, `WASD QE`
+  is the reaction wheels; out of the couch the same keys are your own body,
+  in the frame you are looking along. Nothing switches between them, because
+  where the crew member is already says which it is. Riding inside, the
+  camera moves *with* the hull — only a few millimetres of vibration remain,
+  because a crew member is shaken along with the vehicle rather than
+  watching it shake. The director cuts inside when the fairing splits and
+  daylight first reaches the cabin, and again through peak heating.
 
 Press `p` in the launch view to show the frame time and the background
 render scale. The planet/sky and cloud-deck shaders are the entire frame
@@ -929,12 +932,27 @@ from lunar distance (no flat terrain disc, no far-plane clipping). The
 surface combines the panel's real land-mask texture with procedural
 detail, cloud fields, polar ice, night-side shading, and Earth's actual
 rotation over the 6.5-day cruise. HUD readouts sample the same logs the
-analysis plots use; event callouts, procedural audio (distance-delayed
-rumble + crackle, vacuum-silent, wind on entry), and keyboard/manual
-cameras round it out. Everything is generated in-page — vehicle mesh from
-`rocket_mesh` via the API, lattice tower, pad, terrain, clouds, plume,
-parachutes, and sound are all procedural; no external assets, no
-libraries.
+analysis plots use; event callouts and keyboard/manual cameras round it
+out. Everything is generated in-page — vehicle mesh from `rocket_mesh` via
+the API, lattice tower, pad, terrain, clouds, plume, parachutes, and sound
+are all procedural; no external assets, no libraries.
+
+**Sound** is synthesised at run time, on three buses that answer to
+different clocks. *World* is the vehicle heard across whatever is between
+you and it: rumble and crackle, attenuated by distance and delayed by the
+speed of sound, silent when the clock is stopped. *Room* is where the
+listener is — a drone pair, a filtered bed and a thin resonant voice,
+re-tuned rather than rebuilt, so the pad has wind on it, the cabin has an
+ECS hum, the Moon is colder and hollower, and entry roars. *Score* is music
+and interface on the **wall** clock, never the mission clock: four moods
+(a driving A dorian for the launch, a wide slow G minor for the coast, a
+B♭ lydian for the Moon, a close F minor for entry) built from a breathing
+pad, a bass on the bar, a pulse and an FM bell, scheduled on a lookahead
+against `AudioContext.currentTime` so a cap pressed at ×10000 clicks once,
+now. Mission events — ignition, staging, shutdown, chutes, entry
+interface, splashdown — are clock *crossings*, which is why scrubbing back
+and forth across ignition is silent. `m` mutes, and so does the red cap on
+the console.
 
 A **parameter sweep** tab varies any knob across a range (threaded; ~50
 missions/min) and plots the outcome curve — e.g. sweeping pod mass shows
