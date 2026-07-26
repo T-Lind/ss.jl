@@ -186,6 +186,29 @@ struct AscentResult
 end
 
 "Commanded thrust direction (unit, ECI) for the current guidance phase."
+# how far below and above the local horizon the closed-loop law may point
+const PITCH_CMD_MIN = -10.0 * pi / 180
+const PITCH_CMD_MAX = 85.0 * pi / 180
+
+"""
+Perigee radius of the osculating orbit through this inertial state [m], or
+`Inf` on an escape trajectory. Cutting an ascent off on energy alone says
+nothing about where that energy points: the same specific energy describes a
+circular orbit and a dive, and only the perigee tells them apart.
+"""
+function _perigee_radius(r::V3, v::V3)
+    rr = vnorm(r)
+    eps = 0.5 * vdot(v, v) - MU_EARTH / rr
+    eps >= 0.0 && return Inf
+    hv = vcross(r, v)
+    a = -MU_EARTH / (2 * eps)
+    e = sqrt(max(0.0, 1 + 2 * eps * vdot(hv, hv) / MU_EARTH^2))
+    a * (1 - e)
+end
+
+# an insertion whose perigee is below this is a suborbital arc, not an orbit
+const SECO_HP_MIN = 100.0e3
+
 function _steer(guid::AscentGuidance, ctx::AscentCtx, r::V3, v::V3, t::Float64,
                 theta_g0::Float64)
     rhat = vunit(r)
@@ -209,7 +232,14 @@ function _steer(guid::AscentGuidance, ctx::AscentCtx, r::V3, v::V3, t::Float64,
     else # :closed_loop — linear tangent in the instantaneous orbital plane
         that = vunit(vsub(v, vscale(rhat, vdot(v, rhat))))   # horizontal along-track (inertial)
         tt = tan(guid.pitch0) - guid.pitch_rate * (t - ctx.t_loop0)
-        th = atan(tt)
+        # The linear-tangent law has no floor of its own: tan(theta) falls
+        # without limit, so any burn that outlasts the window it was tuned for
+        # walks the thrust vector round past the horizon and on into a dive.
+        # A launcher above its target genuinely does push a little below
+        # horizontal to arrest the climb — a few degrees of it — but it never
+        # aims at the ground, and a vehicle that does is spending propellant to
+        # make its own orbit worse.
+        th = clamp(atan(tt), PITCH_CMD_MIN, PITCH_CMD_MAX)
         return vadd(vscale(that, cos(th)), vscale(rhat, sin(th)))
     end
 end
@@ -358,6 +388,19 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
             ev!(:fairing_jettison)
         end
 
+        # The ground is the floor. Nothing here stopped a trajectory that came
+        # back down from carrying on through the surface and out the far side,
+        # so a flight that had already crashed went on being integrated as if
+        # it were flying. It ends where it hits, and how hard it hit is the
+        # event's own velocity — a few m/s is a landing, anything else is not.
+        if t > 5.0 && d.h <= 0.0
+            h_cut = 0.0; gam_cut = d.gamma
+            ctx.burning = false; ctx.phase = :coast
+            reached = false
+            ev!(:ground_impact)
+            break
+        end
+
         # --- strap-on boosters: light, burn out, then drop --------------------
         # Each transition is checked in turn rather than as a chain of
         # elseifs, so a set with no separation delay goes on the same step it
@@ -409,9 +452,27 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
                     st = lv.stages[ctx.stage]
                     prop_left[ctx.stage] = st.mprop - ctx.burned
                     ctx.burning = false; ctx.phase = :coast
+                    # Energy alone is not an orbit: the same specific energy
+                    # describes a circular orbit and a dive, and only the
+                    # perigee tells them apart. Reaching the target energy with
+                    # the velocity pointed at the ground used to be reported as
+                    # "in orbit", which is how a mission ended up flying a
+                    # trajectory whose perigee was inside the planet. The
+                    # cutoff INSTANT is deliberately unchanged — tune_ascent
+                    # solves a 2x2 on (h_cut, gamma_cut) and a moving cutoff
+                    # makes those discontinuous in its own parameters — so this
+                    # decides what the result is called, not when it happens.
+                    rp = _perigee_radius((x[1], x[2], x[3]), (x[4], x[5], x[6]))
                     reached = true
                     h_cut = d.h; gam_cut = d.gamma
                     ev!(:seco)
+                    # An insertion can meet the energy target on a trajectory
+                    # that comes straight back down, and until this event
+                    # existed nothing said so. It is reported rather than
+                    # failed because the cause is upstream — tune_ascent not
+                    # converging for the vehicle — and turning a silent bad
+                    # orbit into a silent failed mission would hide it twice.
+                    rp < RE_MEAN + SECO_HP_MIN && ev!(:insertion_below_surface)
                     break
                 end
             end
