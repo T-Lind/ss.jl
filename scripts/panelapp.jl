@@ -265,24 +265,29 @@ units of 1000 km, decimated for the wire. Both missions fly the same launch
 and trans-lunar legs, so both scenes are built from the same code.
 """
 function scene_payload(asc, cis)
-    L = cis.log
-    k = max(2, length(L.t) ÷ 3)
-    nrm = SatelliteSim.vunit(SatelliteSim.vcross((L.mx[1], L.my[1], L.mz[1]),
-                                                 (L.mx[k], L.my[k], L.mz[k])))
-    idx = deci_idx(length(L.t), 1600)
-    px = Float64[]; py = Float64[]; pz = Float64[]
-    mx = Float64[]; my = Float64[]; mz = Float64[]
-    tt = Float64[]; pp = Int[]
-    for i in idx
-        push!(px, L.rx[i] / 1e6); push!(py, L.ry[i] / 1e6); push!(pz, L.rz[i] / 1e6)
-        push!(mx, L.mx[i] / 1e6); push!(my, L.my[i] / 1e6); push!(mz, L.mz[i] / 1e6)
-        push!(tt, L.t[i]); push!(pp, L.phase[i])
+    # a mission whose ascent failed has no cislunar leg at all; the ascent
+    # still flew and is still worth the wire
+    cisd = nothing
+    if cis !== nothing
+        L = cis.log
+        k = max(2, length(L.t) ÷ 3)
+        nrm = SatelliteSim.vunit(SatelliteSim.vcross((L.mx[1], L.my[1], L.mz[1]),
+                                                     (L.mx[k], L.my[k], L.mz[k])))
+        idx = deci_idx(length(L.t), 1600)
+        px = Float64[]; py = Float64[]; pz = Float64[]
+        mx = Float64[]; my = Float64[]; mz = Float64[]
+        tt = Float64[]; pp = Int[]
+        for i in idx
+            push!(px, L.rx[i] / 1e6); push!(py, L.ry[i] / 1e6); push!(pz, L.rz[i] / 1e6)
+            push!(mx, L.mx[i] / 1e6); push!(my, L.my[i] / 1e6); push!(mz, L.mz[i] / 1e6)
+            push!(tt, L.t[i]); push!(pp, L.phase[i])
+        end
+        cisd = Dict("t" => tt, "x" => px, "y" => py, "z" => pz,
+                    "mx" => mx, "my" => my, "mz" => mz, "ph" => pp,
+                    "n" => [nrm[1], nrm[2], nrm[3]])
     end
     AL = asc.log
     aidx = deci_idx(length(AL.t), 400)
-    cisd = Dict("t" => tt, "x" => px, "y" => py, "z" => pz,
-                "mx" => mx, "my" => my, "mz" => mz, "ph" => pp,
-                "n" => [nrm[1], nrm[2], nrm[3]])
     asc3d = Dict("t" => [AL.t[i] for i in aidx],
                  "x" => [AL.rx[i] / 1e6 for i in aidx],
                  "y" => [AL.ry[i] / 1e6 for i in aidx],
@@ -504,6 +509,7 @@ function panel_mission(p)::Dict{String,Any}
         tli_point_err = deg2rad_(getf(p, "tli_point_err_deg", 0.0)),
         kick_angle = kick_rad(p),
         optimize_kick = opt_kick(p),
+        strict = false,
     )
     asc, cis, ent = ms.ascent, ms.cislunar, ms.entry
     el = asc.elements
@@ -512,82 +518,102 @@ function panel_mission(p)::Dict{String,Any}
     # renders the inclined trajectory plane, the textured globe about the real
     # pole (scene z = ECI z), and launch/splashdown markers fixed to the
     # rotating surface — all in one consistent frame.
+    #
+    # A mission that ended early is a RESULT, not an error: every leg that was
+    # simulated is served, and "outcome" says where the flight stopped
+    # ("nominal", "ascent_failed", or the cislunar outcome such as "timeout").
+    # The browser flies whatever is here.
     sc = scene_payload(asc, cis)
 
-    EL = ent.log
-    eidx = deci_idx(length(EL.t), 500)
-
-    # the entry log is geodetic — rebuild ECI so it joins the same scene
-    ex3 = Float64[]; ey3 = Float64[]; ez3 = Float64[]; et3 = Float64[]
-    for i in eidx
-        re_ = ecef_from_geodetic(EL.lat[i], EL.lon[i], EL.h[i])
-        th = SatelliteSim.earth_rotation_angle(0.0, EL.t[i])
-        reci = SatelliteSim.rot_z(re_, -th)
-        push!(ex3, reci[1] / 1e6); push!(ey3, reci[2] / 1e6); push!(ez3, reci[3] / 1e6)
-        push!(et3, EL.t[i])
-    end
-
-    prop_margin = cis.m - (ms.lv.stages[end].mdry + ms.lv.payload_mass)
-    ei = findfirst(e -> e.name == :entry_interface, ent.events)
-
-    # did the free-return design actually hit its targets? (a prop-starved
-    # TLI still "flies", but the result is not the requested mission)
-    hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3
-    hp_ret = getf(p, "hp_return_km", 50.0) * 1e3
-    on_target = abs(cis.perilune_alt - hp_moon) <= max(0.05 * hp_moon, 50e3) &&
-                abs(cis.vac_perigee_alt - hp_ret) <= 20e3
-
     events = ascent_events(asc)
-    push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
-    push!(events, Dict("phase" => "cislunar", "name" => "tli_cutoff",
-                       "t" => cis.t_tli + cis.burn_duration))
-    push!(events, Dict("phase" => "cislunar", "name" => "perilune", "t" => cis.t_perilune))
-    push!(events, Dict("phase" => "cislunar", "name" => "entry_handoff", "t" => cis.t))
-    for e in ent.events
-        push!(events, Dict("phase" => "entry", "name" => string(e.name), "t" => e.t))
-    end
-
-    Dict{String,Any}(
+    metrics = Dict{String,Any}(
+        "liftoff_t" => liftoff_mass(ms.lv) / 1e3,
+        "t_days" => (ent !== nothing ? ent.t_splash :
+                     cis !== nothing ? cis.t : asc.t) / 86400,
+    )
+    out = Dict{String,Any}(
         "ok" => true, "mode" => "flyby",
-        "metrics" => Dict(
-            "on_target" => on_target,
-            "tcm_dv" => ms.cruise === nothing ? nothing : ms.cruise.tcm_dv,
-            "tcm_prop_kg" => ms.cruise === nothing ? nothing : ms.cruise.tcm_prop,
-            "rcs_margin_kg" => ms.cruise === nothing ? nothing : ms.cruise.rcs.margin,
-            "liftoff_t" => liftoff_mass(ms.lv) / 1e3,
-            "park_perigee_km" => (el.rp - RE_MEAN) / 1e3,
-            "park_apogee_km" => (el.ra - RE_MEAN) / 1e3,
-            "incl_deg" => rad2deg_(el.i),
-            "tli_dv" => cis.dv_tli,
-            "tli_burn_s" => cis.burn_duration,
-            "prop_margin_kg" => prop_margin,
-            "perilune_km" => cis.perilune_alt / 1e3,
-            "t_perilune_d" => cis.t_perilune / 86400,
-            "vac_perigee_km" => cis.vac_perigee_alt / 1e3,
-            "ei_v_ms" => ei === nothing ? NaN : ent.events[ei].vrel,
-            "peak_g" => ent.peak_gload,
-            "peak_q_wcm2" => ent.peak_qdot / 1e4,
-            "heat_mj" => ent.heat_load / 1e6,
-            "splash_lat" => rad2deg_(ent.lat_splash),
-            "splash_lon" => rad2deg_(ent.lon_splash),
-            "v_splash" => ent.v_splash,
-            "t_days" => ent.t_splash / 86400,
-        ),
-        "cis" => sc.cis,
+        "outcome" => ent !== nothing ? "nominal" :
+                     cis !== nothing ? string(cis.outcome) : "ascent_failed",
+        "metrics" => metrics,
         "asc3d" => sc.asc3d,
-        "ent3d" => Dict("t" => et3, "x" => ex3, "y" => ey3, "z" => ez3),
-        "sites" => Dict(
+        "ascent" => sc.ascent,
+        "events" => events,
+        "sites" => Dict{String,Any}(
             "launch_lat" => rad2deg_(ms.guid.site_lat),
             "launch_lon" => rad2deg_(ms.guid.site_lon),
-            "splash_lat" => rad2deg_(ent.lat_splash),
-            "splash_lon" => rad2deg_(ent.lon_splash),
         ),
-        "ascent" => sc.ascent,
-        "entry" => Dict("t" => deci(EL.t[eidx] .- EL.t[1], 500), "h" => deci(EL.h[eidx] ./ 1e3, 500),
-                        "v" => deci(EL.vrel[eidx], 500), "g" => deci(EL.gload[eidx], 500),
-                        "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500)),
-        "events" => events,
     )
+    if asc.reached_orbit
+        metrics["park_perigee_km"] = (el.rp - RE_MEAN) / 1e3
+        metrics["park_apogee_km"] = (el.ra - RE_MEAN) / 1e3
+        metrics["incl_deg"] = rad2deg_(el.i)
+    end
+
+    if cis !== nothing
+        out["cis"] = sc.cis
+        metrics["tli_dv"] = cis.dv_tli
+        metrics["tli_burn_s"] = cis.burn_duration
+        metrics["prop_margin_kg"] = cis.m - (ms.lv.stages[end].mdry + ms.lv.payload_mass)
+        metrics["perilune_km"] = cis.perilune_alt / 1e3
+        metrics["t_perilune_d"] = cis.t_perilune / 86400
+        metrics["vac_perigee_km"] = cis.vac_perigee_alt / 1e3
+        metrics["tcm_dv"] = ms.cruise === nothing ? nothing : ms.cruise.tcm_dv
+        metrics["tcm_prop_kg"] = ms.cruise === nothing ? nothing : ms.cruise.tcm_prop
+        metrics["rcs_margin_kg"] = ms.cruise === nothing ? nothing : ms.cruise.rcs.margin
+        # did the free-return design actually hit its targets? (a prop-starved
+        # TLI still "flies", but the result is not the requested mission)
+        hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3
+        hp_ret = getf(p, "hp_return_km", 50.0) * 1e3
+        metrics["on_target"] = ent !== nothing &&
+            abs(cis.perilune_alt - hp_moon) <= max(0.05 * hp_moon, 50e3) &&
+            abs(cis.vac_perigee_alt - hp_ret) <= 20e3
+        push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
+        push!(events, Dict("phase" => "cislunar", "name" => "tli_cutoff",
+                           "t" => cis.t_tli + cis.burn_duration))
+        isfinite(cis.t_perilune) &&
+            push!(events, Dict("phase" => "cislunar", "name" => "perilune",
+                               "t" => cis.t_perilune))
+        ent !== nothing &&
+            push!(events, Dict("phase" => "cislunar", "name" => "entry_handoff",
+                               "t" => cis.t))
+    else
+        metrics["on_target"] = false
+    end
+
+    if ent !== nothing
+        EL = ent.log
+        eidx = deci_idx(length(EL.t), 500)
+        # the entry log is geodetic — rebuild ECI so it joins the same scene
+        ex3 = Float64[]; ey3 = Float64[]; ez3 = Float64[]; et3 = Float64[]
+        for i in eidx
+            re_ = ecef_from_geodetic(EL.lat[i], EL.lon[i], EL.h[i])
+            th = SatelliteSim.earth_rotation_angle(0.0, EL.t[i])
+            reci = SatelliteSim.rot_z(re_, -th)
+            push!(ex3, reci[1] / 1e6); push!(ey3, reci[2] / 1e6); push!(ez3, reci[3] / 1e6)
+            push!(et3, EL.t[i])
+        end
+        ei = findfirst(e -> e.name == :entry_interface, ent.events)
+        metrics["ei_v_ms"] = ei === nothing ? NaN : ent.events[ei].vrel
+        metrics["peak_g"] = ent.peak_gload
+        metrics["peak_q_wcm2"] = ent.peak_qdot / 1e4
+        metrics["heat_mj"] = ent.heat_load / 1e6
+        metrics["splash_lat"] = rad2deg_(ent.lat_splash)
+        metrics["splash_lon"] = rad2deg_(ent.lon_splash)
+        metrics["v_splash"] = ent.v_splash
+        for e in ent.events
+            push!(events, Dict("phase" => "entry", "name" => string(e.name), "t" => e.t))
+        end
+        out["ent3d"] = Dict("t" => et3, "x" => ex3, "y" => ey3, "z" => ez3)
+        out["entry"] = Dict("t" => deci(EL.t[eidx] .- EL.t[1], 500),
+                            "h" => deci(EL.h[eidx] ./ 1e3, 500),
+                            "v" => deci(EL.vrel[eidx], 500),
+                            "g" => deci(EL.gload[eidx], 500),
+                            "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500))
+        out["sites"]["splash_lat"] = rad2deg_(ent.lat_splash)
+        out["sites"]["splash_lon"] = rad2deg_(ent.lon_splash)
+    end
+    out
 end
 
 """

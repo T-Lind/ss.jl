@@ -776,8 +776,22 @@ async function doRun() {
     run = j;
     history.unshift(j);
     if (history.length > 12) history.pop();
-    renderAll();
-    if (j.metrics.on_target) {
+    // A partial mission (ascent failed, coast timed out) is served with every
+    // leg that flew; the dashboard renders what exists. A render throw on a
+    // partial is survivable — the status line and the launch view are the
+    // product there — but on a nominal run it is a real bug and stays fatal.
+    try { renderAll(); }
+    catch (err) {
+      if (j.outcome && j.outcome !== 'nominal') console.warn('partial render:', err);
+      else throw err;
+    }
+    if (j.outcome && j.outcome !== 'nominal' && j.mode !== 'landing') {
+      $('status').className = 'status err';
+      $('status').textContent = (j.outcome === 'ascent_failed'
+        ? 'flown, but the ascent never reached orbit'
+        : `flown, but the mission ended in "${j.outcome}"`) +
+        ' — open the launch view (L) to fly what was simulated';
+    } else if (j.metrics.on_target) {
       $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
     } else if (j.mode === 'landing') {
       $('status').className = 'status err';
@@ -965,24 +979,27 @@ const matmul = (A, B) => A.map((r, i) => B[0].map((_, j) =>
 const matvec = (A, v) => [dot3(A[0], v), dot3(A[1], v), dot3(A[2], v)];
 
 function precompute() {
-  const A3 = run.asc3d, C = run.cis, E = run.ent3d;
+  // a partial run may carry no cislunar leg and no entry — the scene is then
+  // the ascent alone, with the Moon parked at its mean distance for scale
+  const A3 = run.asc3d, C = run.cis, E = run.ent3d || { t: [], x: [], y: [], z: [] };
   const t = [], x = [], y = [], z = [], ph = [];
-  const t0c = C.t[0], tec = C.t[C.t.length-1];
+  const t0c = C ? C.t[0] : Infinity, tec = C ? C.t[C.t.length-1] : -Infinity;
   for (let i = 0; i < A3.t.length; i++) if (A3.t[i] < t0c) {
     t.push(A3.t[i]); x.push(A3.x[i]); y.push(A3.y[i]); z.push(A3.z[i]); ph.push(4);
   }
-  for (let i = 0; i < C.t.length; i++) {
+  if (C) for (let i = 0; i < C.t.length; i++) {
     t.push(C.t[i]); x.push(C.x[i]); y.push(C.y[i]); z.push(C.z[i]); ph.push(C.ph[i]);
   }
   for (let i = 0; i < E.t.length; i++) if (E.t[i] > tec) {
     t.push(E.t[i]); x.push(E.x[i]); y.push(E.y[i]); z.push(E.z[i]); ph.push(5);
   }
-  const N = t.length, n = norm3(C.n);
+  const N = t.length, n = C ? norm3(C.n) : [0, 0, 1];
   // Moon at every combined sample (circular ephemeris: rotate the nearest
   // cislunar sample about the plane normal at the lunar mean motion)
   const mx = new Float64Array(N), my = new Float64Array(N), mz = new Float64Array(N);
   let j = 0;
   for (let i = 0; i < N; i++) {
+    if (!C) { mx[i] = 384.4; my[i] = 0; mz[i] = 0; continue; }
     while (j < C.t.length-1 && C.t[j+1] <= t[i]) j++;
     const m = rotAxis([C.mx[j], C.my[j], C.mz[j]], n, N_MOON*(t[i] - C.t[j]));
     mx[i] = m[0]; my[i] = m[1]; mz[i] = m[2];
@@ -995,7 +1012,7 @@ function precompute() {
     rx[i] = dot3(p, e1); ry[i] = dot3(p, e2); rz[i] = dot3(p, n);
   }
   S = { n: N, t, x, y, z, ph, mx, my, mz, rx, ry, rz, nrm: n,
-        moonR: Math.hypot(C.mx[0], C.my[0], C.mz[0]) };
+        moonR: C ? Math.hypot(C.mx[0], C.my[0], C.mz[0]) : 384.4 };
 }
 const P  = i => rotFrame ? [S.rx[i], S.ry[i], S.rz[i]] : [S.x[i], S.y[i], S.z[i]];
 const Pm = i => rotFrame ? [S.moonR, 0, 0] : [S.mx[i], S.my[i], S.mz[i]];

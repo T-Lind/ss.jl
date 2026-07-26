@@ -5234,11 +5234,23 @@ async function boot() {
     // finish() keeps the driver from deferring it past the overlay anyway.
     drawScene(buildScene(phaseAt(simT)));
     gl.finish();
-    $('ov_sub').textContent = MS ?
-      `${run.metrics.liftoff_t.toFixed(1)} t · ${LEN.toFixed(1)} m — ` +
-      `pad to the surface of the Moon in ${run.metrics.t_days.toFixed(1)} days` :
-      `${run.metrics.liftoff_t.toFixed(1)} t · ${LEN.toFixed(1)} m — ` +
-      `around the Moon and home in ${run.metrics.t_days.toFixed(1)} days`;
+    // A mission that ended early still flies: the server sends every leg it
+    // simulated plus `outcome`, and the timeline built itself from only the
+    // events that exist. Say plainly where this flight stops.
+    const M = run.metrics || {};
+    const tD = isFinite(M.t_days) ? M.t_days : 0;
+    const mass = isFinite(M.liftoff_t) ? `${M.liftoff_t.toFixed(1)} t · ` : '';
+    const oc = run.outcome;
+    $('ov_sub').textContent =
+      oc && oc !== 'nominal' ?
+      `${mass}${LEN.toFixed(1)} m — this flight ends where the simulation ` +
+      `ended: ${oc === 'ascent_failed' ? 'the ascent never reached orbit'
+              : `the return leg ended in "${oc}"`}` :
+      MS ?
+      `${mass}${LEN.toFixed(1)} m — ` +
+      `pad to the surface of the Moon in ${tD.toFixed(1)} days` :
+      `${mass}${LEN.toFixed(1)} m — ` +
+      `around the Moon and home in ${tD.toFixed(1)} days`;
     $('ov_go').classList.remove('hidden');
     $('overlay').onclick = () => {
       $('overlay').classList.add('hidden');

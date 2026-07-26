@@ -180,6 +180,24 @@ end
         @test occursin("\"ok\":false", bod)
         @test occursin("hydrolox", bod)
 
+        # --- a mission that fails still FLIES -------------------------------
+        # A stack with almost no propellant depletes in seconds and never
+        # reaches orbit. That used to be ok:false plus an error string, with
+        # the fully-simulated ascent thrown away; now every leg that flew
+        # comes back, ok:true, with the outcome named — and the launch page
+        # flies it to wherever the simulation actually ended.
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port, timeout = 180.0,
+                             body = "mode=flyby&nstages=2&s1_prop=3000&s1_dry=2500&" *
+                                    "s2_prop=100&s2_dry=140")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test occursin("\"outcome\":\"ascent_failed\"", bod)
+        @test occursin("\"ascent\":", bod)       # the leg that DID fly
+        @test occursin("\"launch_lat\"", bod)    # the launch page's hard needs
+        @test occursin("\"liftoff_t\"", bod)
+        @test !occursin("\"cis\":", bod)         # and no leg it did not fly
+
         # --- method handling ------------------------------------------------
         st, hdrs, bod = http("HEAD", "/api/catalogue"; port = port)
         @test st == 200
