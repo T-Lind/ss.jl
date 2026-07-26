@@ -468,21 +468,41 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
                               for w in wins]
     push!(ext, _shell_mesh(cone, tw; nseg = nc, holes = holes))
 
+    # Anything raised off the hull is built from a contour SUNK INTO it, not from
+    # the hull's own contour. A panel laid exactly on the surface it sits on has
+    # a face coplanar with that surface, both faces are drawn (nothing in the
+    # viewers culls back faces), and the depth test then has to choose between
+    # two surfaces at the same depth — which it does differently per triangle,
+    # because the two are triangulated differently. That is the striping that
+    # kept appearing on the window frames, the hatch and half the cabin. Measured
+    # on the hull alone it was 1.2 rp^2 of coplanar overlap; see `_no_coplanar`
+    # in the tests, which now holds it at zero.
+    csn, ccs = sin(deg2rad(32.5)), cos(deg2rad(32.5))
+    sink(prof, d) = [(p[1] - d * csn, p[2] - d * ccs) for p in prof]
+    bite = 0.010rp                                # how far into whatever it stands on
+
     # window frames (raised collar around each pane) and the panes themselves
     for w in wins
-        fr = cone[wi0-1:wi1+2]
+        fr = sink(cone[wi0-1:wi1+2], bite)
         ncell = length(fr) - 1
-        push!(ext, _shell_mesh(fr, -0.030rp; nseg = nc, holes = NTuple{4,Float64}[
+        push!(ext, _shell_mesh(fr, -(0.030rp + bite); nseg = nc,
+                               holes = NTuple{4,Float64}[
             (1.0, Float64(ncell), w[1] + w[2] + 0.10, w[1] - w[2] - 0.10),
             (2.0, Float64(ncell - 1), w[1] - w[2], w[1] + w[2])]))
-        pn = cone[wi0:wi1+1]
+        # The pane is bonded to the INSIDE of the wall, not floated in the middle
+        # of the aperture. Both are the same picture from outside and only one of
+        # them is drawable: a pane inside the wall's thickness has its edge in the
+        # same plane as the aperture's own edge, over the pane's whole perimeter,
+        # and that edge then stipples. Sat against the inner face, the two share
+        # a line and no area — and a recessed pane is what a pressure hull has.
+        pn = sink(cone[wi0:wi1+1], tw)
         push!(glass, _shell_mesh(pn, 0.012rp; nseg = nc, holes = NTuple{4,Float64}[
             (1.0, Float64(length(pn) - 1), w[1] + w[2], w[1] - w[2])]))
     end
     # side hatch: raised panel over its own sector, with a small port
-    hh = cone[4:9]
+    hh = sink(cone[4:9], bite)
     nhc = length(hh) - 1
-    push!(ext, _shell_mesh(hh, -0.026rp; nseg = nc, holes = NTuple{4,Float64}[
+    push!(ext, _shell_mesh(hh, -(0.026rp + bite); nseg = nc, holes = NTuple{4,Float64}[
         (1.0, Float64(nhc), hatch[1] + hatch[2], hatch[1] - hatch[2])]))
 
     # RCS quads on the upper cone: a housing with fore- and aft-firing nozzles
@@ -524,8 +544,11 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     for zc in zs
         push!(cab, box_mesh((xa + 0.02rp, -ln,      zc - hw),
                             (xa + 0.07rp,  0.36ln,  zc + hw)))         # back pan
-        push!(cab, box_mesh((xa + 0.07rp, 0.19ln, zc - 0.78hw),
-                            (xa + 0.15rp, 0.41ln, zc + 0.78hw)))       # headrest
+        # every joint in here OVERLAPS rather than abuts, for the reason given
+        # at the window frames: two faces at the same station are two surfaces
+        # at the same depth, and the depth test stripes them
+        push!(cab, box_mesh((xa + 0.055rp, 0.19ln, zc - 0.78hw),
+                            (xa + 0.15rp,  0.41ln, zc + 0.78hw)))      # headrest
         push!(cab, _place_mesh(box_mesh((-0.025rp, -0.20ln, -0.88hw),
                                         ( 0.025rp,  0.20ln,  0.88hw));
                                pitch = deg2rad(-50.0),
@@ -535,9 +558,9 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
                                 (xa + 0.13rp,  0.31ln, zc + sg * hw + 0.022rp)))
         end
         for (sy, sg) in ((-0.84, -1.0), (-0.84, 1.0), (0.24, -1.0), (0.24, 1.0))
-            push!(cab, box_mesh((xfl + 0.045rp, sy * ln - 0.022rp,
+            push!(cab, box_mesh((xfl + 0.030rp, sy * ln - 0.022rp,     # into the deck
                                  zc + sg * hw * 0.8 - 0.022rp),
-                                (xa + 0.02rp,   sy * ln + 0.022rp,
+                                (xa + 0.035rp,  sy * ln + 0.022rp,     # into the pan
                                  zc + sg * hw * 0.8 + 0.022rp)))       # struts
         end
     end
@@ -557,6 +580,11 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     xcon = xb0 + 0.62Lc
     rcin = rin(xcon)
     xf = xcon                                    # the console's crew-side face
+    # Every fitting on the face runs PAST it, into the panel behind. Ending a
+    # bezel or a button cap exactly at xf gave it a back face coplanar with the
+    # console's front face, over the whole console: 70-odd coplanar pairs on the
+    # one surface the crew look at. The panel is 0.05 rp deep, so this is buried.
+    xfb = xf + 0.012rp
     push!(cab, lathe_mesh(Tuple{Float64,Float64}[
         (xcon, 0.20rcin), (xcon, 0.92rcin), (xcon + 0.05rp, 0.92rcin),
         (xcon + 0.05rp, 0.20rcin), (xcon, 0.20rcin)]; nseg = nc))
@@ -573,11 +601,22 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
         # could ever see. Four bars round an opening, and the opening is the
         # recess face's own extent less a margin, so the frame overlaps what it
         # frames and there is no line of sight past it into the console.
+        # The side bars carry the FULL radial span and stand a hair proud of the
+        # other two, so they LAP the corners at their own depth. A butt joint
+        # would put two end faces on one plane and a flush lap would put two
+        # front faces on one plane — both are the same defect one scale down,
+        # and both were measured on the bezels before this.
         let b0 = a0 + 0.030, b1 = a1 - 0.030
-            push!(cab, _arc_slab(xf - 0.055rp, xf, 0.44rcin, 0.48rcin, a0, a1; nseg = 7))
-            push!(cab, _arc_slab(xf - 0.055rp, xf, 0.76rcin, 0.80rcin, a0, a1; nseg = 7))
-            push!(cab, _arc_slab(xf - 0.055rp, xf, 0.48rcin, 0.76rcin, a0, b0; nseg = 2))
-            push!(cab, _arc_slab(xf - 0.055rp, xf, 0.48rcin, 0.76rcin, b1, a1; nseg = 2))
+            push!(cab, _arc_slab(xf - 0.055rp, xfb, 0.44rcin, 0.48rcin, a0, a1; nseg = 7))
+            push!(cab, _arc_slab(xf - 0.055rp, xfb, 0.76rcin, 0.80rcin, a0, a1; nseg = 7))
+            # and a hair PAST them radially too: at the same nominal radius the
+            # two bars' cylinder facets differ only by the sagitta of a coarser
+            # arc — a tenth of a millimetre, which is coplanar as far as the
+            # depth buffer is concerned
+            push!(cab, _arc_slab(xf - 0.059rp, xfb + 0.004rp, 0.435rcin, 0.805rcin,
+                                 a0 - 0.004, b0; nseg = 2))
+            push!(cab, _arc_slab(xf - 0.059rp, xfb + 0.004rp, 0.435rcin, 0.805rcin,
+                                 b1, a1 + 0.004; nseg = 2))
         end
         # the face, set back inside the bezel by a bezel's own depth, and wider
         # than the opening so the rim laps over its edges
@@ -588,12 +627,12 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
             b0 = a0 + (a1 - a0) * (0.10 + 0.26i)
             b1 = b0 + (a1 - a0) * 0.17
             r0 = (0.24 + 0.09j) * rcin
-            push!(cab, _arc_slab(xf - 0.042rp, xf, r0, r0 + 0.062rcin, b0, b1; nseg = 3))
+            push!(cab, _arc_slab(xf - 0.042rp, xfb, r0, r0 + 0.062rcin, b0, b1; nseg = 3))
         end
         # rocker switches along the outer edge of the bay
         for i in 0:2
             b0 = a0 + (a1 - a0) * (0.12 + 0.32i)
-            push!(cab, _arc_slab(xf - 0.036rp, xf, 0.83rcin, 0.905rcin,
+            push!(cab, _arc_slab(xf - 0.036rp, xfb, 0.83rcin, 0.905rcin,
                                  b0, b0 + (a1 - a0) * 0.20; nseg = 3))
         end
     end
@@ -603,14 +642,15 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
         for i in 0:4
             a0 = sg * deg2rad(58.0 + 13.0i)
             r0 = (0.30 + 0.19row) * rcin
-            push!(cab, _arc_slab(xf - 0.028rp, xf, r0, r0 + 0.115rcin,
+            push!(cab, _arc_slab(xf - 0.028rp, xfb, r0, r0 + 0.115rcin,
                                  min(a0, a0 + sg * deg2rad(9.0)),
                                  max(a0, a0 + sg * deg2rad(9.0)); nseg = 3))
         end
     end
-    # equipment racks against the cabin wall, clear of the couches
+    # equipment racks against the cabin wall, clear of the couches. The lower
+    # box stands ON the deck, so it starts BELOW the deck's top face.
     for (a0, a1) in ((deg2rad(100.0), deg2rad(136.0)), (deg2rad(224.0), deg2rad(260.0)))
-        x0r, x1r = xa, xa + 0.26rp
+        x0r, x1r = xa - 0.022rp, xa + 0.26rp     # below the deck, below the struts
         push!(cab, _arc_slab(x0r, x1r, 0.72rin(x1r), 0.97rin(x1r), a0, a1; nseg = 8))
         x2r, x3r = x1r + 0.04rp, x1r + 0.30rp
         push!(cab, _arc_slab(x2r, x3r, 0.68rin(x3r), 0.96rin(x3r),
@@ -636,10 +676,18 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # width. Placed on the rolls between the viewports, the side hatch and the
     # equipment racks, which is the only clear real estate there is.
     for a in (deg2rad(34.0), deg2rad(90.0), deg2rad(270.0), deg2rad(326.0))
-        for (x0h, x1h) in ((xa + 0.05rp, xw0 - 0.03rp), (xw1 + 0.03rp, xtop - 0.14rp))
+        # the lower rail starts clear of the couch side rails at xa + 0.05 rp: on
+        # a three-seat capsule the outboard couches reach the rolls the rails are
+        # on, and two boxes starting at the same station share an end face
+        for (x0h, x1h) in ((xa + 0.085rp, xw0 - 0.03rp), (xw1 + 0.03rp, xtop - 0.14rp))
             # size every radius off the NARROW end: the wall tapers along the
-            # rail, so a radius taken at the middle punches out through the top
-            rr = 0.88rin(x1h)
+            # rail, so a radius taken at the middle punches out through the top.
+            # 0.82 and not 0.88: the rails run THROUGH the overhead lockers (four
+            # rails, five lockers, no roll clears all of them), and at 0.88 the
+            # rail's own outer face landed on the locker door's to within a
+            # millimetre. At 0.82 the rail passes between the door's two faces
+            # with about 6 mm either side, which the depth buffer can separate.
+            rr = 0.82rin(x1h)
             push!(cab, _place_mesh(box_mesh((x0h, rr - 0.018rp, -0.018rp),
                                             (x1h, rr + 0.018rp, 0.018rp));
                                    roll = a))
@@ -659,7 +707,10 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
         a1 = a0 + deg2rad(56.0)
         xl0, xl1 = xtop - 0.36rp, xtop - 0.13rp
         push!(cab, _arc_slab(xl0, xl1, 0.70rin(xl1), 0.96rin(xl1), a0, a1; nseg = 7))
-        push!(cab, _arc_slab(xl0 - 0.018rp, xl0, 0.74rin(xl1), 0.92rin(xl1),
+        # the door runs INTO the box it closes — abutting it at xl0 put a
+        # 7-segment face and a 6-segment face on the same plane, which is the
+        # striping the crew could see across all five lockers
+        push!(cab, _arc_slab(xl0 - 0.018rp, xl0 + 0.012rp, 0.74rin(xl1), 0.92rin(xl1),
                              a0 + 0.05, a1 - 0.05; nseg = 6))
     end
     # Inner hatch surround on the wall the outside hatch is cut into, and a
@@ -673,8 +724,9 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # the tunnel mouth necks the wall down to 0.21 rp, so the loops live well
     # inside that or they come out through the forward bulkhead
     for a in (0.0, 0.5pi, 1.0pi, 1.5pi)
+        # into the forward bulkhead, whose disc is at xtop - 0.02 rp
         push!(cab, _place_mesh(box_mesh((xtop - 0.10rp, 0.105rp, -0.016rp),
-                                        (xtop - 0.02rp, 0.180rp, 0.016rp));
+                                        (xtop + 0.01rp, 0.180rp, 0.016rp));
                                roll = a))
     end
 
@@ -699,7 +751,8 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # carries, taken up the two rolls that nothing else uses and turned along
     # the wall under the console.
     for a in (deg2rad(158.0), deg2rad(202.0))
-        push!(cab, _place_mesh(box_mesh((xa + 0.05rp, 0.90rin(xcon) - 0.030rp, -0.026rp),
+        # starts clear of the couch side rails, which begin at xa + 0.05 rp
+        push!(cab, _place_mesh(box_mesh((xa + 0.065rp, 0.90rin(xcon) - 0.030rp, -0.026rp),
                                         (xcon - 0.02rp, 0.90rin(xcon), 0.026rp));
                                roll = a))
         for xs in (xa + 0.14rp, xa + 0.34rp, xa + 0.54rp)   # P-clamps to the wall
@@ -741,9 +794,12 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     for (a0, a1) in ((deg2rad(146.0), deg2rad(172.0)), (deg2rad(188.0), deg2rad(214.0)))
         x0s, x1s = xw1 + 0.03rp, xtop - 0.20rp
         x1s > x0s + 0.05rp || continue
-        push!(cab, _arc_slab(x0s, x1s, 0.74rin(x1s), 0.95rin(x1s), a0, a1; nseg = 6))
-        push!(cab, _place_mesh(box_mesh((0.5(x0s + x1s) - 0.02rp, 0.70rin(x1s), -0.018rp),
-                                        (0.5(x0s + x1s) + 0.02rp, 0.76rin(x1s), 0.018rp));
+        # 0.70 and not 0.74: the upper liner's ribs stand in to 0.749 rin, and a
+        # locker face 1 mm outside them is a surface the depth buffer cannot
+        # separate from a rib
+        push!(cab, _arc_slab(x0s, x1s, 0.70rin(x1s), 0.95rin(x1s), a0, a1; nseg = 6))
+        push!(cab, _place_mesh(box_mesh((0.5(x0s + x1s) - 0.02rp, 0.64rin(x1s), -0.018rp),
+                                        (0.5(x0s + x1s) + 0.02rp, 0.73rin(x1s), 0.018rp));
                                roll = 0.5(a0 + a1)))
     end
     # Two crew controls on the console face, in the ONE gap the console leaves:
@@ -758,12 +814,165 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # see CAB_CTL in the launch view.
     for (k, a) in enumerate((deg2rad(-52.0), deg2rad(52.0)))
         rc = 0.62rin(xcon)
+        # the housing runs into the panel: it stopped 1.5 cm short of it, so the
+        # switch was a block hovering in front of the console rather than one
+        # mounted through it
         push!(cab, _place_mesh(box_mesh((xcon - 0.075rp, rc - 0.025rp, -0.026rp),
-                                        (xcon - 0.020rp, rc + 0.025rp, 0.026rp));
+                                        (xcon + 0.012rp, rc + 0.025rp, 0.026rp));
                                roll = a))
         push!(cab, _place_mesh(box_mesh((xcon - 0.100rp, rc - 0.014rp, -0.015rp),
                                         (xcon - 0.070rp, rc + 0.014rp, 0.015rp));
                                roll = a))
+    end
+
+    # --- third fit-out pass: hand-scale detail ------------------------------
+    # What is above is structure and stowage, and at arm's length a cabin made
+    # of structure and stowage reads as a shed. This pass is the hand-scale
+    # detail that gives the eye a sense of scale: what the crew hold, pull,
+    # latch and look at. Every piece here BITES into whatever it stands on, for
+    # the reason set out at the window frames — two faces on one plane is two
+    # surfaces at one depth, and the depth test stripes them.
+
+    # Armrests, and a hand controller on each. From the couch these are the
+    # nearest objects in the cabin and the only ones at hand scale, so they do
+    # more for the sense of being in a cockpit than anything on the walls.
+    # Sized off the gap BETWEEN couches: on a three-seat capsule the couches are
+    # 0.44 rp apart and 0.28 wide, so a 0.11 rp armrest on each flank would have
+    # the middle couch's arm inside its neighbour's.
+    # Sized off the gap BETWEEN couches, which is what actually bounds an arm:
+    # three seats are 0.44 rp apart and 0.28 wide, so the 0.16 rp between two of
+    # them has to hold two armrests and still leave a gap. At 0.038 they met.
+    let aw = crew >= 3 ? 0.028rp : crew == 2 ? 0.038rp : 0.055rp,
+        gw = min(0.040rp, 0.9aw), pw = min(0.020rp, 0.6aw)
+        # and only where there is room for one. On a three-seat capsule the
+        # outboard couches sit against the wall, so their outboard arm would be
+        # through it — those crew get one arm, on the inboard side, which is
+        # also how three people fit shoulder to shoulder in a capsule.
+        zmax = 0.92 * rin(xa + 0.37rp)
+        for zc in zs, sg in (-1.0, 1.0)
+            za = zc + sg * (hw + aw + 0.012rp)
+            hypot(abs(za) + aw, 0.34ln) < zmax || continue
+            # Nothing here reaches past xa + 0.24 rp. That is not styling: the
+            # viewer's zero-g clamp treats everything above the couches as clear
+            # space, so a stick that stood higher would be something the crew
+            # could be pushed straight through. cabXLo is set to clear this.
+            push!(cab, box_mesh((xa + 0.035rp, -0.34ln, za - aw),
+                                (xa + 0.150rp,  0.14ln, za + aw)))     # armrest
+            # the stick rises OUT of the pad, so its foot is inside it
+            push!(cab, box_mesh((xa + 0.115rp, -0.15ln, za - pw),
+                                (xa + 0.205rp, -0.03ln, za + pw)))       # post
+            push!(cab, box_mesh((xa + 0.190rp, -0.16ln, za - gw),
+                                (xa + 0.240rp,  0.00ln, za + gw)))       # grip
+            # the umbilical panel at the shoulder: oxygen, comms, coolant
+            push!(cab, box_mesh((xa + 0.060rp, 0.20ln, za - 0.9aw),
+                                (xa + 0.125rp, 0.34ln, za + 0.9aw)))
+        end
+    end
+
+    # Master caution and warning: a block of tiles on each console flank, in the
+    # wedge between the outermost screen bay (ends at 46 deg) and the first
+    # breaker column (starts at 58) — under the crew switches, which are the
+    # only other things that fit there.
+    # 49 deg and not 47.5: the outermost bay's own button column runs to 47.4,
+    # because a column is 0.17 of the bay's span starting at 0.88 of it and so
+    # ends past the bay. Two panels a tenth of a degree apart share their end
+    # faces. Radii mirrored by the viewer's colour rule, which reads a tile's
+    # band to know whether it is the master alarm, a caution or a systems light.
+    for sg in (-1.0, 1.0)
+        b0 = sg > 0 ? deg2rad(49.0) : -deg2rad(57.0)
+        b1 = sg > 0 ? deg2rad(57.0) : -deg2rad(49.0)
+        push!(cab, _arc_slab(xf - 0.026rp, xfb, 0.205rcin, 0.44rcin, b0, b1; nseg = 3))
+        for j in 0:2
+            r0 = (0.225 + 0.070j) * rcin
+            push!(cab, _arc_slab(xf - 0.040rp, xf - 0.019rp, r0, r0 + 0.052rcin,
+                                 b0 + 0.020, b1 - 0.020; nseg = 3))
+        end
+    end
+
+    # Drawer fronts on the equipment racks. The racks were two blank slabs the
+    # size of a wardrobe door; a rack is drawers, and a drawer has a handle.
+    for (a0, a1) in ((deg2rad(100.0), deg2rad(136.0)), (deg2rad(224.0), deg2rad(260.0)))
+        x2r, x3r = xa + 0.30rp, xa + 0.56rp
+        rd = rin(x3r)
+        for k in 0:2
+            xd0 = x2r + 0.025rp + k * 0.078rp
+            xd1 = xd0 + 0.060rp
+            # The drawer sits BACK in its opening and only its pull comes forward,
+            # because the rack's own inner face at 0.68 rin is the boundary of
+            # the volume the viewer lets a floating crew member into — 0.60 of
+            # the wall at the top of that volume. A drawer front standing proud
+            # of the rack would be something you could be pushed through.
+            push!(cab, _arc_slab(xd0, xd1, 0.690rd, 0.760rd,
+                                 a0 + 0.12, a1 - 0.12; nseg = 6))
+            push!(cab, _place_mesh(box_mesh((0.5(xd0 + xd1) - 0.011rp, 0.672rd, -0.055rp),
+                                            (0.5(xd0 + xd1) + 0.011rp, 0.716rd, 0.055rp));
+                                   roll = 0.5(a0 + a1)))
+        end
+    end
+
+    # A handle on every overhead locker door, and a lever on the inner hatch.
+    for a0 in (deg2rad(6.0), deg2rad(78.0), deg2rad(150.0), deg2rad(222.0),
+               deg2rad(294.0))
+        xl0 = xtop - 0.36rp
+        rl = rin(xtop - 0.13rp)
+        push!(cab, _place_mesh(box_mesh((xl0 - 0.014rp, 0.712rl, -0.050rp),
+                                        (xl0 + 0.004rp, 0.762rl,  0.050rp));
+                               roll = a0 + deg2rad(28.0)))
+    end
+    let xh = xb0 + 0.50Lc, rh = 0.90rin(xb0 + 0.55Lc)
+        push!(cab, _place_mesh(box_mesh((xh - 0.05rp, rh - 0.045rp, -0.070rp),
+                                        (xh + 0.05rp, rh + 0.020rp,  0.070rp));
+                               roll = Float64(pi)))                     # latch plate
+        push!(cab, _place_mesh(box_mesh((xh - 0.016rp, rh - 0.130rp, -0.020rp),
+                                        (xh + 0.016rp, rh - 0.030rp,  0.020rp));
+                               roll = Float64(pi)))                     # the lever
+    end
+
+    # Tie-down rails on the deck: the grid a crew clip equipment to, and the one
+    # thing that tells the eye the floor is a floor and not a disc.
+    for k in 0:3
+        yr = (-0.72 + 0.48k) * ln
+        # sunk well into the deck and standing clear of everything else that
+        # meets it — the couch struts at xa - 0.015 rp and the racks at -0.022
+        push!(cab, box_mesh((xa - 0.032rp, yr - 0.016rp, -0.86 * 0.96rin(xa)),
+                            (xa + 0.018rp, yr + 0.016rp,  0.86 * 0.96rin(xa))))
+    end
+
+    # Aperture rims on the CABIN side of each viewport. From inside, a window is
+    # a hole in a cone until something frames it; this is what makes it read as
+    # a window from the couch.
+    # The rim FOLLOWS the cone: the wall drops by a fifth of its radius over the
+    # length of a viewport, so a side bar at one radius would be buried at the
+    # bottom and floating at the top. Each bar is sized off its own station, and
+    # the sides are cut into segments to track the taper — which is also why the
+    # sides carry their own radii rather than the top and bottom bars': two bars
+    # at one nominal radius are two cylinders one sagitta apart.
+    for (ac, awd) in ((0.0, deg2rad(22.0)), (deg2rad(68.0), deg2rad(15.0)),
+                      (deg2rad(-68.0), deg2rad(15.0)))
+        # The bars are SEPARATED by a hair, not butted and not lapped. Two arc
+        # slabs on the same rolls that meet at a station share that station's
+        # face; two that overlap share their roll end caps. A joint you can see
+        # a millimetre of is the only one of the three that is not a defect.
+        # 0.322 at the bottom clears the lower liner's ribs, which end at 0.311;
+        # 0.605 at the top clears the console, whose face is at 0.620.
+        cuts = (0.322, 0.352, 0.420, 0.500, 0.572, 0.605)   # aperture: 0.333-0.583
+        gp = 0.0022
+        for k in 1:length(cuts)-1
+            xk0 = xb0 + (cuts[k] + (k == 1 ? 0.0 : gp)) * Lc
+            xk1 = xb0 + (cuts[k+1] - (k == length(cuts) - 1 ? 0.0 : gp)) * Lc
+            rk = rin(xk1)
+            if k == 1 || k == length(cuts) - 1                # the bars that close it
+                push!(cab, _arc_slab(xk0, xk1, 0.880rk, 0.985rk,
+                                     ac - awd - 0.09, ac + awd + 0.09; nseg = 7))
+            else
+                for sg in (-1.0, 1.0)
+                    push!(cab, _arc_slab(xk0, xk1, 0.872rk, 0.991rk,
+                                         min(ac + sg * awd, ac + sg * (awd + 0.09)),
+                                         max(ac + sg * awd, ac + sg * (awd + 0.09));
+                                         nseg = 3))
+                end
+            end
+        end
     end
     (ext, glass, cab, hgt)
 end
