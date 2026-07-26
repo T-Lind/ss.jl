@@ -212,6 +212,27 @@ function payloadFrac(pod, liftoff) {
 function stageMassRatio(dry, prop) {
   return dry > 0 ? (dry + prop)/dry : 0;
 }
+const fmtMass = m => m >= 1000 ? (m/1000).toFixed(1) + ' t' : Math.round(m) + ' kg';
+// How far the dry mass entered is from what a stage of this size, propellant
+// and engine count would actually weigh. The server does that estimate from
+// tank volumes, insulation, engine mass and thrust structure, so this is a
+// comparison against a build, not against a rule of thumb — which is what
+// makes it worth showing next to a number the operator is free to type.
+function dryOff(s) {
+  const est = +s.dry_est_kg;
+  return est > 0 ? (+s.dry_kg - est)/est : 0;
+}
+function dryClass(s) {
+  const o = Math.abs(dryOff(s));
+  return o > 0.45 ? 'bad' : o > 0.22 ? 'warn' : 'good';
+}
+function dryNote(s) {
+  const o = dryOff(s), est = fmtMass(+s.dry_est_kg);
+  if (Math.abs(o) <= 0.22) return `about what it should weigh (${est})`;
+  return o < 0 ? `${Math.round(-o*100)}% lighter than buildable — a stage this `
+                 + `size works out near ${est}`
+               : `${Math.round(o*100)}% heavier than it needs to be (${est})`;
+}
 // remove stage k of n from a {s1_..sn_} value map: everything above slides down
 function removeStageVals(vals, k, n) {
   const out = {};
@@ -270,8 +291,11 @@ function stageBlock(pre, title, r, dia) {
       <div><label for="${pre}dry">dry mass [kg]</label><input id="${pre}dry" value="${r.dry}"></div>
       <div><label for="${pre}engines">engines</label><input id="${pre}engines" value="${r.engines}"></div>
     </div>
-    <label style="display:flex;gap:6px;align-items:center;margin:6px 0 0">
-      <input type="checkbox" id="${pre}dry_auto" style="width:auto;margin:0">
+    <label style="display:flex;gap:6px;align-items:center;margin:6px 0 0"
+           title="tanks, insulation, engines, thrust structure and systems for a
+                  stage this size — naming an engine should give you that
+                  engine's stage, not a number left over from the last one">
+      <input type="checkbox" id="${pre}dry_auto" checked style="width:auto;margin:0">
       estimate dry mass from the design</label>
     <div class="row">
       <div><label for="${pre}thrust_kn">vac thrust [kN]</label><input id="${pre}thrust_kn" value="${r.thrust}"></div>
@@ -491,11 +515,12 @@ function renderStats(j) {
     (dvt < 11500 ? ' · <span class="warn">&Delta;v is thin for a Moon shot</span>' : '');
 
   $('stagestats').innerHTML = '<table><tr><th></th><th>prop</th><th>dry</th>' +
-    '<th>len</th><th>&Delta;v</th><th>T/W</th><th>burn</th><th>MR</th></tr>' +
+    '<th>dry %</th><th>len</th><th>&Delta;v</th><th>T/W</th><th>burn</th><th>MR</th></tr>' +
     (j.stages || []).map((s, i) => `<tr>
       <td>S${i+1}</td>
       <td>${fmt(s.prop_kg/1000)} t</td>
       <td>${fmt(s.dry_kg/1000)} t</td>
+      <td class="${dryClass(s)}" title="${dryNote(s)}">${fmt(100*s.dry_frac, 1)}%</td>
       <td>${fmt(s.length_m)} m</td>
       <td>${Math.round(s.dv_mps)}</td>
       <td class="${i === 0 && s.twr < 1.15 ? 'bad' : ''}">${fmt(s.twr, 2)}</td>
@@ -503,9 +528,18 @@ function renderStats(j) {
       <td>${fmt(stageMassRatio(+s.dry_kg, +s.prop_kg), 1)}</td></tr>`).join('') + '</table>';
   for (let k = 1; k <= NSTAGES; k++) {
     const el = $(`s${k}_derived`), s = (j.stages || [])[k-1];
-    if (el && s) el.innerHTML =
+    if (!s) continue;
+    // Show what will actually FLY in the dry-mass box. A stage that sizes
+    // itself had its dry mass computed on the server while the form went on
+    // showing the role default it was seeded with — a Falcon-class kick stage
+    // read 140 kg while a heavier stage flew. The field is the trajectory now.
+    const inp = $(`s${k}_dry`);
+    if (inp && inp.disabled) inp.value = Math.round(+s.dry_kg);
+    if (el) el.innerHTML =
       `${fmt(s.length_m)} m &middot; ${Math.round(s.dv_mps)} m/s &middot; ` +
-      `${s.propellant}${s.interstage_m > 0.01 ? ` &middot; +${fmt(s.interstage_m)} m adapter` : ''}`;
+      `${s.propellant}${s.interstage_m > 0.01 ? ` &middot; +${fmt(s.interstage_m)} m adapter` : ''}` +
+      ` &middot; <span class="${dryClass(s)}">${fmt(100*s.dry_frac, 1)}% dry</span>` +
+      ` &middot; builds out near ${fmtMass(+s.dry_est_kg)}`;
   }
   const bs = (j.boosters || [])[0];
   $('booststats_card').classList.toggle('hidden', !bs);

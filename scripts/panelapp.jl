@@ -145,6 +145,42 @@ function stage_from_params(p, pre::String, name::Symbol, dia::Float64;
           getf(p, pre * "isp", isp), ae, pr, ne, dst)
 end
 
+"""
+What this stage would weigh dry if it were built the way `stage_mass` says
+stages are built — tanks, insulation, engines, thrust structure, systems.
+
+`sized_stage` can only do this for a stage that named a catalogue engine,
+because it needs an engine to weigh. A hand-entered stage has thrust but no
+engine, so its engines are sized from that thrust at an assumed
+thrust-to-weight of 100. That number is an assumption and not a measurement:
+the real spread is wide (Merlin 1D 183, Raptor 2 143, RL10B-2 37), because a
+vacuum engine carries a large nozzle for thrust it does not have. It is
+reported so a builder can see whether a hand-entered dry mass is anywhere
+near buildable, which is worth a great deal more than the error it carries.
+"""
+function dry_estimate(st::Stage, vehicle_d::Float64)
+    n = max(st.n_engines, 1)
+    per = st.thrust_vac / n
+    # A Stage does not record which engine built it, but its per-engine thrust,
+    # Isp and mixture identify one almost uniquely — so a stack that DID name a
+    # catalogue engine gets weighed with that engine's real mass and the
+    # estimate agrees with the stage the server actually flies, instead of
+    # reporting a nearby-but-different number and calling the true one wrong.
+    hit = nothing
+    for (_, e) in ENGINES
+        if e.prop.name === st.prop.name &&
+           abs(e.thrust_vac - per) <= 0.02 * max(per, 1.0) &&
+           abs(e.isp_vac - st.isp_vac) <= 0.02 * max(st.isp_vac, 1.0)
+            hit = e
+            break
+        end
+    end
+    eng = hit === nothing ?
+          Engine(:estimate, st.prop, per, st.isp_vac, st.isp_vac,
+                 st.ae / n, per / (G0 * 100.0), 0.4) : hit
+    stage_mass(eng, n, st.mprop, stage_diameter(st, vehicle_d)).dry
+end
+
 "Barrel length a stage needs for its propellant load [m]."
 stage_length(st::Stage, vehicle_d::Float64) =
     (d = stage_diameter(st, vehicle_d);
@@ -816,6 +852,12 @@ function rocket_geometry(p)::Dict{String,Any}
                           "propellant" => string(s.prop.name),
                           "engines" => s.n_engines,
                           "dry_kg" => s.mdry, "prop_kg" => s.mprop,
+                          # what a stage this size would actually weigh, and
+                          # the structural coefficient that follows from what
+                          # was entered — the two numbers that say whether a
+                          # configuration is a vehicle or a wish
+                          "dry_est_kg" => dry_estimate(s, d),
+                          "dry_frac" => s.mdry / (s.mdry + s.mprop),
                           "thrust_kn" => s.thrust_vac / 1e3,
                           "isp_s" => s.isp_vac,
                           "diameter_m" => stage_diameter(s, d),
