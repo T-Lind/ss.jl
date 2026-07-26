@@ -965,6 +965,59 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
 end
 
 """
+    probe_mesh(; radius=0.75, nseg=24) -> (hull, glass, cabin, height)
+
+An uncrewed payload: a spacecraft bus rather than a capsule. Returns the same
+four things `pod_mesh` does so the two are interchangeable at the call site,
+and the middle two are deliberately EMPTY — there is no glass because there
+are no windows, and no cabin because there is nobody in it. A viewer that
+offers an interior view by asking whether a `:cabin` section exists therefore
+stops offering one, without having to be told separately.
+
+The shape is what an uncrewed spacecraft actually is and a capsule is not: a
+flat-ended box structure sized to fit its ring, a high-gain dish looking back
+the way it came, solar wings out either side, and a thruster cluster. Nothing
+here is shaped by re-entry, because nothing here comes back.
+"""
+function probe_mesh(; radius::Float64 = 0.75, nseg::Int = 24)
+    r = radius
+    ext = TriMesh[]
+    # the bus: a squat drum, because a payload volume is a volume and the cone
+    # of a capsule is a heat-shield shape that has no reason to be here
+    hb = 1.35r
+    push!(ext, lathe_mesh([(0.0, 0.0), (0.0, 0.96r), (0.06r, r),
+                           (hb - 0.06r, r), (hb, 0.90r), (hb, 0.0)]; nseg = nseg))
+    # equipment boxes round the waist, on the rolls the wings do not take
+    for k in 0:3
+        a = deg2rad(35.0 + 90.0k)
+        push!(ext, _place_mesh(box_mesh((0.28hb, 0.86r, -0.20r),
+                                        (0.78hb, 1.06r, 0.20r)); roll = a))
+    end
+    # High-gain dish on a short mast, facing back down the stack — which is
+    # where Earth is on the way out, and the reason a real bus points it there.
+    push!(ext, box_mesh((-0.30r, -0.05r, -0.05r), (0.0, 0.05r, 0.05r)))
+    push!(ext, lathe_mesh([(-0.30r, 0.0), (-0.30r, 0.62r), (-0.10r, 0.30r),
+                           (-0.12r, 0.0)]; nseg = nseg))
+    # Solar wings: two panels a side, stowed flat against the bus rather than
+    # deployed. A payload inside a fairing has not unfolded yet, and one flying
+    # bare is still minutes from doing it.
+    for sg in (-1.0, 1.0)
+        for j in 0:1
+            push!(ext, box_mesh((0.20hb + j*0.42hb, sg*1.02r - sg*0.02r, -0.62r),
+                                (0.58hb + j*0.42hb, sg*1.02r + sg*0.02r, 0.62r)))
+        end
+    end
+    # thruster cluster on the aft ring, four of them, canted out
+    for k in 0:3
+        a = deg2rad(90.0k)
+        push!(ext, _place_mesh(lathe_mesh([(0.02r, 0.0), (0.02r, 0.055r),
+                                           (0.14r, 0.10r)]; nseg = 8);
+                               shift = (0.0, 0.90r, 0.0), roll = a))
+    end
+    (ext, TriMesh[], TriMesh[], hb)
+end
+
+"""
     rocket_mesh(; diameter, diameters, prop_masses, densities, n_engines,
                   fairing_len, nseg) -> (mesh, sections)
 
@@ -1010,6 +1063,7 @@ function rocket_mesh(; diameter::Float64 = 1.8,
                      boosters::Vector = NamedTuple[],
                      payload_mass::Float64 = 350.0,
                      pod_diameter::Float64 = 0.0,
+                     crewed::Bool = true,
                      fairing_len::Float64 = 2.2 * last(diameters),
                      fairing::Bool = true,
                      nseg::Int = 48)
@@ -1122,13 +1176,20 @@ function rocket_mesh(; diameter::Float64 = 1.8,
     rp = pod_diameter > 0 ? pod_diameter / 2 :
          min(pod_radius(payload_mass), 1.25 * maximum(diameters) / 2)
     xb = x + 0.13D + 0.02                        # a hair off the adapter face
-    phull, pglass, pcab, lp = pod_mesh(; radius = rp, nseg = max(20, nseg ÷ 2))
+    # Crewed or not. An uncrewed payload is not a capsule with the seats taken
+    # out — it has no heat shield to be shaped by, no windows and no cabin — so
+    # it gets its own body, and the sections it does NOT emit matter as much as
+    # the one it does: no `:glass` and no `:cabin` means a viewer has nothing to
+    # put a camera inside, which is exactly right.
+    phull, pglass, pcab, lp = crewed ?
+        pod_mesh(; radius = rp, nseg = max(20, nseg ÷ 2)) :
+        probe_mesh(; radius = rp, nseg = max(20, nseg ÷ 2))
     shift = (xb, 0.0, 0.0)
     place!(nm, ms) = finish!(nm, x, xb + lp,
                              TriMesh[_place_mesh(m; shift = shift) for m in ms])
     place!(:pod, phull)
-    place!(:glass, pglass)
-    place!(:cabin, pcab)
+    isempty(pglass) || place!(:glass, pglass)
+    isempty(pcab)   || place!(:cabin, pcab)
     #= fairing follows =#
     # Unless there isn't one. A crewed stack routinely flies its spacecraft in
     # the open — Apollo under an escape tower, Dragon and Starliner on the nose,

@@ -2126,6 +2126,7 @@ function podRange() { return secDraw.find(s => s.name === 'pod'); }
 // measuring the mesh instead would pick up RCS pods and raceways that stand
 // proud of the barrel. TOPD is the stage the capsule and fairing ride on.
 let TOPD = 1.8, POD_RP = 0.75, SECR = {}, BAX = [];
+let HASCAB = true;             // does this vehicle have an interior to look at?
 function measureRadii() {
   const maxRad = sec => {
     let m = 0;
@@ -2148,6 +2149,12 @@ function measureRadii() {
     if (s) SECR[nm] = maxRad(s);
   }
   POD_RP = SECR.pod || Math.min(0.75, 0.85*TOPD/2);
+  // An uncrewed payload has no cabin section, because there is no cabin. That
+  // one fact is the whole switch: the interior camera, the crew stations and
+  // everything the console does exist only where there is somewhere to stand.
+  // Asked of the GEOMETRY rather than of a flag in the query, so the viewer
+  // cannot disagree with the vehicle it was sent.
+  HASCAB = geo.sections.some(x => x.name === 'cabin');
   // Strap-ons stand beside the core, so a vertex's distance from the stack
   // axis says nothing about where it sits on its own booster. Record each
   // set's stand-off radius and body radius, and the colouring works off the
@@ -4412,8 +4419,16 @@ function lookDrag(dx, dy, Kin) {
 // one pane, and now that the crew can push off and float to whichever viewport
 // they like, a camera whose whole job was to pick one for them is a worse way
 // of doing the same thing.
-const CAMS = ['auto','wide','chase','onboard','cabin','free'];
-const CAMS_MOON = ['auto','wide','chase','onboard','ground','free'];
+// `cabin` is dropped from both when the payload has no cabin — an uncrewed bus
+// is a solid block and a camera inside it looks at the inside of a solid block.
+const CAMS_ALL = ['auto','wide','chase','onboard','cabin','free'];
+const CAMS_MOON_ALL = ['auto','wide','chase','onboard','ground','free'];
+// Read as FUNCTIONS, not as constants: HASCAB is not known until the geometry
+// arrives, and a const evaluated at load would freeze the list before the
+// vehicle was ever seen.
+const camList = l => HASCAB ? l : l.filter(m => m !== 'cabin');
+const CAMS = () => camList(CAMS_ALL);
+const CAMS_MOON = () => camList(CAMS_MOON_ALL);
 
 // ------------------------------------------------------ the clear volume --
 // The habitable volume, and the ONE definition of it. It is NOT the pressure
@@ -5051,8 +5066,9 @@ function autoPickPad(t) {
   if (t < fairT - 6) return 'chase';
   if (t < fairT + 2) return 'onboard';
   // the shell splits and daylight reaches the cabin for the first time
-  if (t < fairT + 8) return 'cabin';
-  if (t < fairT + 16) return 'cabin';
+  // the director never cuts inside a vehicle with no inside
+  if (t < fairT + 8) return HASCAB ? 'cabin' : 'onboard';
+  if (t < fairT + 16) return HASCAB ? 'cabin' : 'onboard';
   if (t < secoT - 35) return 'wide';
   return 'chase';
 }
@@ -5225,8 +5241,8 @@ function cameraEci(t, cs, ph, M) {
 function autoPickEntry(t) {
   const dep = isFinite(tDrog) ? tDrog : tMain;
   if (t < tEI + 45) return 'chase';
-  if (t < tEI + 110) return 'cabin';       // peak heating, seen from inside
-  if (t < tEI + 175) return 'cabin';       // peak heating, seen from inside
+  if (t < tEI + 110) return HASCAB ? 'cabin' : 'chase';   // peak heating, from inside
+  if (t < tEI + 175) return HASCAB ? 'cabin' : 'chase';   // peak heating, from inside
   if (isFinite(dep) && t < dep - 5) return 'onboard';
   if (isFinite(tMain) && t < tMain + 25) return 'chase';
   if (isFinite(tSplash) && t < tSplash - 30) return 'onboard';
@@ -7208,7 +7224,7 @@ function warpStep(dir) {
   return manualWarp === 0 ? 'AUTO' : warpLabel(manualWarp).toUpperCase();
 }
 function initControls() {
-  chipRow($('cams'), MS ? CAMS_MOON : CAMS, 'auto', m => camMode = m);
+  chipRow($('cams'), MS ? CAMS_MOON() : CAMS(), 'auto', m => camMode = m);
   syncHelp();
   // the hint has done its job by the time the vehicle is off the pad
   setTimeout(() => $('keys').classList.remove('show'), 9000);
@@ -7289,9 +7305,10 @@ function initControls() {
       if (scrubDir !== d) { scrubDir = d; scrubT0 = performance.now(); }
     }
     const i = +e.key;
-    if (i >= 1 && i <= CAMS.length) {
-      camMode = CAMS[i-1];
-      chipRow($('cams'), CAMS, camMode, m => camMode = m);
+    const cl = MS ? CAMS_MOON() : CAMS();
+    if (i >= 1 && i <= cl.length) {
+      camMode = cl[i-1];
+      chipRow($('cams'), cl, camMode, m => camMode = m);
     }
     if (e.key === 'm') audioMute(!muted);
     if (e.key === 'p') perfShow = !perfShow;
@@ -7542,6 +7559,38 @@ window.__selftest = function () {
     }
     return back;
   }, 0);
+
+  // --- an uncrewed payload has no inside, and the viewer has to agree with the
+  // vehicle it was sent about that. The cabin camera is the thing that would
+  // otherwise put an eye inside a solid bus, so it is the thing that goes.
+  eq('the cabin camera is offered when there is a cabin', () => {
+    const h = HASCAB; HASCAB = true;
+    const ok = CAMS().includes('cabin') && CAMS_MOON().length === 6;
+    HASCAB = h;
+    return ok;
+  }, true);
+  eq('and withdrawn when there is not', () => {
+    const h = HASCAB; HASCAB = false;
+    const ok = !CAMS().includes('cabin') && !CAMS_MOON().includes('cabin') &&
+               CAMS().length === 5;
+    HASCAB = h;
+    return ok;
+  }, true);
+  eq('and the director never cuts to it either', () => {
+    const h = HASCAB; HASCAB = false;
+    const picks = new Set();
+    for (let t = -10; t < 400; t += 5) picks.add(autoPickPad(t));
+    for (let t = tEI - 20; t < tEI + 400; t += 5) picks.add(autoPickEntry(t));
+    HASCAB = h;
+    return picks.has('cabin') ? [...picks].join(',') : 'ok';
+  }, 'ok');
+  // every camera the chips offer has to be one the pickers can actually resolve
+  eq('every offered camera is a real one', () => {
+    const h = HASCAB; HASCAB = false;
+    const ok = CAMS().every(m => CAMS_ALL.includes(m));
+    HASCAB = h;
+    return ok;
+  }, true);
 
   // --- the trajectory display's soft keys. The whole design rests on one
   // claim — that a key is under its own label — and that holds only because

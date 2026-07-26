@@ -777,11 +777,29 @@ function _tune_with_kick(lv::LaunchVehicle, guid::AscentGuidance;
     end
     pick(cands) = isempty(cands) ? nothing : cands[argmax([c[2].m for c in cands])]
 
-    step = deg2rad_(3.0)
-    best = pick(scan([deg2rad_(4.0) + i * step for i in 0:5]))    # 4..19 degrees
+    # The ladder used to be 4 to 19 degrees in even 3-degree steps, and both
+    # halves of that were wrong for a heavy stack.
+    #
+    # The FLOOR was the fatal one. A Saturn V lifts off at a thrust-to-weight of
+    # 1.20 and needs about one degree; at two it no longer inserts at all.
+    # Nothing in a 4-degree floor could find that, so the scan returned empty,
+    # fell back to whatever angle was typed, and the vehicle flew into the sea —
+    # which is what "the Saturn V doesn't work" looked like from the outside.
+    #
+    # The EVEN SPACING was wrong for the same reason. Sensitivity to this angle
+    # is not uniform: between 1 and 2 degrees a Saturn V goes from orbit to no
+    # orbit, while between 13 and 16 a light stack barely notices. A ladder
+    # spaced roughly geometrically spends its samples where the answer changes,
+    # and refinement follows the LOCAL spacing rather than a fixed half-step for
+    # the same reason.
+    ladder = deg2rad_.([0.6, 1.0, 1.5, 2.2, 3.0, 4.0, 5.5, 7.5, 10.0, 13.5, 18.0])
+    best = pick(scan(ladder))
     if best !== nothing                                    # refine around the peak
         ka = best[1].kick_angle
-        best = pick(vcat([best], scan([ka - step / 2, ka + step / 2])))
+        i = argmin(abs.(ladder .- ka))
+        lo = i > 1 ? sqrt(ladder[i-1] * ka) : ka * 0.8
+        hi = i < length(ladder) ? sqrt(ladder[i+1] * ka) : ka * 1.25
+        best = pick(vcat([best], scan([lo, hi])))
         verbose && @info "kick scan" kick_deg = rad2deg_(best[1].kick_angle) m = best[2].m
     end
     best === nothing ? tune_ascent(lv, guid; tol_h = tol_h, tol_gamma = tol_gamma,

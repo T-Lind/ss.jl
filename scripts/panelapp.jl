@@ -941,7 +941,8 @@ function rocket_geometry(p)::Dict{String,Any}
     d = getf(p, "diameter", 1.8)
     lv = lv_from_params(p)
     mesh, secs = rocket_mesh(lv; diameter = d, nseg = 36,
-                             pod_diameter = getf(p, "pod_dia", 0.0))
+                             pod_diameter = getf(p, "pod_dia", 0.0),
+                             crewed = getb(p, "crewed", true))
     nst = length(lv.stages)
     # Static performance, so a bad stack is obvious before it is flown: the
     # mass each stage actually pushes is everything above it (the fairing

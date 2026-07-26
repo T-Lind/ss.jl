@@ -276,10 +276,14 @@
       <div class="row" style="margin-top:6px">
         <div style="flex:1"><label for="pod_mass">payload / capsule [kg]</label>
           <input id="pod_mass" value="350"></div>
-        <div style="flex:1"><label for="pod_dia" title="the capsule's body diameter;
+        <div style="flex:1"><label for="pod_dia" title="the payload's body diameter;
              blank works it out from the mass. The builder has the flown ones.">
-          capsule &oslash; [m]</label>
+          payload &oslash; [m]</label>
           <input id="pod_dia" value="" placeholder="auto"></div>
+        <div style="flex:1"><label for="crewed" title="off flies an uncrewed bus:
+             no cabin, and no interior view in the launch page">crew aboard
+          <input type="checkbox" id="crewed" checked
+                 style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label></div>
       </div>
       <div class="row" style="margin-top:6px">
         <div style="flex:1"><label style="display:flex;gap:6px;align-items:center"
@@ -428,7 +432,7 @@
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
-const BASE_FIELDS = ['pod_mass','pod_dia','h_park_km','incl_deg','hp_moon_km','hp_return_km',
+const BASE_FIELDS = ['pod_mass','pod_dia','crewed','h_park_km','incl_deg','hp_moon_km','hp_return_km',
   'fairing','fairing_on','diameter','nstages','nboost','opt_kick','kick_deg',
   'tli_mag_err_pct','tli_point_err_deg'];
 // the landing mission adds a lander and a descent plan; everything else — the
@@ -864,7 +868,13 @@ const VEHICLES = {
   // two orders of magnitude outside it. No fairing — Apollo flew its spacecraft
   // exposed under an escape tower, with the lander in an adapter below.
   'Saturn V (Apollo)': {
-    nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 4,
+    // 1 degree, not the reference 8 and not the 4 this shipped with. At a
+    // lift-off thrust-to-weight of 1.20 this is the slowest-accelerating stack
+    // in the catalogue, and it has to stay near vertical long enough to get out
+    // of the thick air; at 2 degrees it does not insert at all. The kick search
+    // finds it now — its ladder used to start at 4 — but the number is stated
+    // so the vehicle also flies with the search turned off.
+    nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 1,
     opt_kick: true, pod_mass: 45000,
     s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000,
       s1_diameter: 10.1,
