@@ -30,14 +30,21 @@ struct CruiseReport
     rcs::NamedTuple            # cruise_rcs_budget output
 end
 
+# The legs past the ascent are Union{Nothing,...} because a mission that
+# fails is still a mission that FLEW: with `strict = false` the chain returns
+# whatever legs completed instead of throwing the partial trajectory away.
+# `cislunar === nothing` means the ascent never reached orbit;
+# `entry === nothing` with a cislunar leg means the coast ended somewhere
+# other than entry interface (its `outcome` says where). Under the default
+# `strict = true` every field is populated exactly as before.
 struct MoonshotResult
     lv::LaunchVehicle
     guid::AscentGuidance
     ascent::AscentResult
-    eph::CircularMoonEphemeris
-    cislunar::CislunarResult
-    entry_scn::Scenario
-    entry::SimResult
+    eph::Union{Nothing,CircularMoonEphemeris}
+    cislunar::Union{Nothing,CislunarResult}
+    entry_scn::Union{Nothing,Scenario}
+    entry::Union{Nothing,SimResult}
     cruise::Union{Nothing,CruiseReport}
 end
 
@@ -69,25 +76,37 @@ function translunar_design(lv::LaunchVehicle;
                            # into — see `launch_window`. Both lunar missions
                            # share this leg, so both inherit the epoch.
                            theta_g0::Float64 = 0.0,
+                           # strict = true throws on a failed leg (the
+                           # behaviour every script and test was built on);
+                           # strict = false returns the partial design with
+                           # `cis = nothing`, so a caller can serve the
+                           # ascent that DID fly instead of an error string
+                           strict::Bool = true,
                            verbose::Bool = false)
     az = launch_azimuth(inclination, deg2rad_(28.5))
     guid0 = AscentGuidance(azimuth = az, h_target = h_park,
                            kick_angle = kick_angle)
     guid, asc = tune_ascent(lv, guid0; optimize_kick = optimize_kick,
                             theta_g0 = theta_g0, verbose = verbose)
-    asc.reached_orbit ||
-        error("ascent failed to reach orbit (h_cut=$(asc.h_cut/1e3) km, gamma=$(rad2deg_(asc.gamma_cut))°)")
+    partial = (guid = guid, ascent = asc, eph = nothing, t_ign = NaN,
+               dv = NaN, cis = nothing, m_stack = NaN, kick = lv.stages[end])
+    if !asc.reached_orbit
+        strict && error("ascent failed to reach orbit (h_cut=$(asc.h_cut/1e3) km, gamma=$(rad2deg_(asc.gamma_cut))°)")
+        return partial
+    end
     # Reaching the target *energy* is not the same as reaching the target
     # *orbit*: a stack whose pitch program the shooter could not close arrives
     # fast and steep, and the elements come back with the perigee underground.
     # Saying so here beats designing a trans-lunar injection off it.
     el0 = asc.elements
-    (el0.rp > RE_MEAN + 0.5 * h_park && abs(asc.gamma_cut) < deg2rad_(1.0)) ||
-        error("ascent reached orbital energy but not the orbit " *
+    if !(el0.rp > RE_MEAN + 0.5 * h_park && abs(asc.gamma_cut) < deg2rad_(1.0))
+        strict && error("ascent reached orbital energy but not the orbit " *
               "(perigee $(round((el0.rp - RE_MEAN)/1e3, digits=0)) km, " *
               "gamma $(round(rad2deg_(asc.gamma_cut), digits=2))°) — the pitch " *
               "program did not close at a $(round(rad2deg_(kick_angle), digits=1))° " *
               "pitch-over kick; try another kick angle or turn on the kick search")
+        return partial
+    end
 
     # jettison the insertion stage (with any residuals) before the TLI coast:
     # the kick stage + payload alone make the trans-lunar stack
@@ -159,6 +178,11 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   # period, and the free return's perigee acceptance band [m]
                   cis_eta::Float64 = SatelliteSim.CIS_ETA,
                   perigee_tol::Float64 = SatelliteSim.PERIGEE_TOL,
+                  # strict = false: a failed leg ends the mission where the
+                  # simulation ended and returns everything that DID fly,
+                  # instead of discarding a fully-materialized trajectory
+                  # for the sake of an error string
+                  strict::Bool = true,
                   verbose::Bool = false)
     # --- 1-3. launch, ephemeris, free-return design ------------------------
     # a supplied launch vehicle wins; its payload IS the pod
@@ -168,12 +192,18 @@ function moonshot(; pod_mass::Float64 = 350.0,
                             hp_return = hp_return, inclination = inclination,
                             kick_angle = kick_angle, optimize_kick = optimize_kick,
                             cis_eta = cis_eta, perigee_tol = perigee_tol,
-                            theta_g0 = theta_g0, verbose = verbose)
+                            theta_g0 = theta_g0, strict = strict,
+                            verbose = verbose)
     guid, asc, eph = des.guid, des.ascent, des.eph
+    des.cis === nothing &&
+        return MoonshotResult(lv, guid, asc, nothing, nothing, nothing,
+                              nothing, nothing)
     t_ign, dv, cis = des.t_ign, des.dv, des.cis
     m_stack, kick = des.m_stack, des.kick
-    cis.outcome == :entry_interface ||
-        error("free-return design did not come home (outcome: $(cis.outcome))")
+    if cis.outcome != :entry_interface
+        strict && error("free-return design did not come home (outcome: $(cis.outcome))")
+        return MoonshotResult(lv, guid, asc, eph, cis, nothing, nothing, nothing)
+    end
 
     # --- 3b. optional dispersed execution + mid-course correction ----------
     cruise = nothing
@@ -204,8 +234,10 @@ function moonshot(; pod_mass::Float64 = 350.0,
                                          hp_moon_target = hp_moon,
                                          hp_perigee_proxy = proxy,
                                          verbose = verbose)
-        cis_d.outcome == :entry_interface ||
-            error("dispersed cruise did not come home (outcome: $(cis_d.outcome))")
+        if cis_d.outcome != :entry_interface
+            strict && error("dispersed cruise did not come home (outcome: $(cis_d.outcome))")
+            return MoonshotResult(lv, guid, asc, eph, cis_d, nothing, nothing, nothing)
+        end
         tcm_prop = cis_d.m * (exp(tcm_dv / (G0 * kick.isp_vac)) - 1)
         rcs_budget = cruise_rcs_budget(default_kick_rcs(), 1000.0;
                                        duration = cis_d.t - cis_d.t_tli)

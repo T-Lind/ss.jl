@@ -73,6 +73,7 @@
           cursor: pointer; font-variant-numeric: tabular-nums; text-decoration: none;
           color: #c3c2b7; }
   .chip:hover { background: #383835; }
+  .chip.sel { border-color: #3987e5; color: #fff; }
   .status { font-size: 12px; color: #898781; margin-top: 8px; min-height: 17px;
             font-variant-numeric: tabular-nums; }
   .status.err { color: #e66767; }
@@ -96,6 +97,11 @@
     </div>
 
     <div class="card">
+      <h2>Presets</h2>
+      <div id="vpresets"></div>
+    </div>
+
+    <div class="card">
       <h2>Vehicle</h2>
       <div class="row">
         <div><label for="vname">name</label><input id="vname" value="Sable (builder)"></div>
@@ -104,6 +110,14 @@
       <div class="row">
         <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
         <div><label for="pod_mass">payload [kg]</label><input id="pod_mass" value="350"></div>
+      </div>
+      <div class="row">
+        <div><label for="kick_deg" title="pitch-over kick [deg] — the one guidance
+             number that does not scale with the vehicle">pitch-over kick [&deg;]</label>
+          <input id="kick_deg" value="8"></div>
+        <div><label style="display:flex;gap:6px;align-items:center;margin-top:20px">
+          <input type="checkbox" id="opt_kick" style="width:auto;margin:0">
+          search for the best kick</label></div>
       </div>
     </div>
 
@@ -387,7 +401,8 @@ function params() {
   u.set('vname', $('vname').value);
   u.set('nstages', NSTAGES);
   u.set('nboost', nBoost());
-  for (const id of ['diameter', 'fairing', 'pod_mass']) u.set(id, $(id).value);
+  for (const id of ['diameter', 'fairing', 'pod_mass', 'kick_deg']) u.set(id, $(id).value);
+  u.set('opt_kick', $('opt_kick').checked ? '1' : '0');
   const fields = [];
   for (let k = 1; k <= NSTAGES; k++) fields.push(...STAGE_FIELDS.map(f => `s${k}_${f}`));
   if (nBoost()) fields.push(...BOOST_FIELDS.map(f => `b_${f}`));
@@ -396,6 +411,22 @@ function params() {
     if (el) u.set(f, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
   }
   return u;
+}
+// the keys this page owns; everything else in an inbound query is mission
+// state that passes through untouched
+const own = k => k === 'nstages' || k === 'nboost' || k === 'vname' ||
+  k === 'diameter' || k === 'fairing' || k === 'pod_mass' ||
+  k === 'kick_deg' || k === 'opt_kick' || /^s\d+_/.test(k) || /^b_/.test(k);
+// The wire to mission control: every good edit lands in localStorage, and
+// the panel (in any other tab) applies it on its storage event — so the
+// mission page's geometry view follows this page live. Only the vehicle's
+// own keys are stored — echoing mission fields back would resurrect stale
+// ones — and only when the server accepted the configuration, so a
+// half-typed NaN stays local.
+function saveVehicle() {
+  const u = params(), v = new URLSearchParams();
+  for (const [k, val] of u) if (own(k)) v.set(k, val);
+  try { localStorage.setItem('ssjl.vehicle', v.toString()); } catch (e) {}
 }
 function refreshLinks() {
   const u = params();
@@ -424,6 +455,7 @@ async function doFetchGeo() {
       return;
     }
     geo = j;
+    saveVehicle();
     $('state').className = 'status';
     $('state').textContent =
       `${(j.stages || []).length} stages` +
@@ -649,6 +681,69 @@ cv.addEventListener('wheel', e => {
   dist = Math.min(vLen*8, Math.max(vLen*0.25, dist*(e.deltaY > 0 ? 1.12 : 0.89)));
 }, { passive: false });
 
+// -------------------------------------------------------------- presets --
+// Whole-launcher presets, moved here from the panel with the rest of the
+// vehicle editing. Each carries the pitch-over kick too — the one guidance
+// number that decides whether some of these fly at all (the Falcon-class
+// stack lofts on the reference 8° and arrives with its perigee underground).
+const VEHICLES = {
+  'Sable (reference)': {
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
+  },
+  'Sable + 4 strap-ons': {
+    nstages: 3, nboost: 4, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    b_engine: 'manual', b_prop: 12000, b_dry: 900, b_thrust_kn: 380, b_isp: 285,
+      b_engines: 2, b_propellant: 'kerolox', b_diameter: 1.53, b_throttle: 60,
+  },
+  'Falcon-class (Merlin)': {
+    nstages: 3, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: false,
+    s1_engine: 'merlin_1d', s1_engines: 9, s1_prop: 411000, s1_dry_auto: true,
+      s1_diameter: 3.7,
+    s2_engine: 'merlin_1d_vac', s2_engines: 1, s2_prop: 108000, s2_dry_auto: true,
+      s2_diameter: 3.7,
+    s3_engine: 'aj10', s3_engines: 1, s3_prop: 2200, s3_dry_auto: true,
+      s3_diameter: 2.4,
+  },
+  'Starship (expendable)': {
+    nstages: 2, nboost: 0, diameter: 9.0, fairing: 0, kick_deg: 5, opt_kick: false,
+    s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
+      s1_diameter: 9.0,
+    s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
+      s2_diameter: 9.0,
+  },
+  'hydrolox upper': {
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: false,
+    s2_engine: 'rl10b2', s2_propellant: 'hydrolox', s2_engines: 1, s2_prop: 9500,
+    s2_dry_auto: true,
+  },
+};
+function applyPreset(name) {
+  const o = VEHICLES[name];
+  NSTAGES = Math.min(5, Math.max(2, Math.round(+o.nstages || 3)));
+  $('nboost').value = String(o.nboost || 0);
+  $('vname').value = name.replace(/\s*\(.*\)$/, '');
+  for (const id of ['diameter', 'fairing', 'kick_deg'])
+    if (o[id] !== undefined) $(id).value = o[id];
+  $('opt_kick').checked = !!o.opt_kick;
+  // reset to the role defaults, then lay the preset's own keys over them —
+  // a preset states only what it changes
+  const vals = {};
+  for (const k in o) if (/^s\d+_/.test(k) || /^b_/.test(k)) vals[k] = o[k];
+  buildStages({});
+  buildBoost({});
+  setVals(vals);
+  syncLocks();
+  fetchGeo();
+  for (const el of $('vpresets').querySelectorAll('.chip'))
+    el.classList.toggle('sel', el.dataset.p === name);
+}
+function initPresets() {
+  $('vpresets').innerHTML = Object.keys(VEHICLES)
+    .map(k => `<span class="chip" data-p="${k}">${k}</span>`).join('');
+  for (const el of $('vpresets').querySelectorAll('.chip'))
+    el.onclick = () => applyPreset(el.dataset.p);
+}
+
 // --------------------------------------------------------------- startup --
 async function boot() {
   try {
@@ -658,25 +753,33 @@ async function boot() {
     $('state').textContent = 'no catalogue from the server: ' + e.message;
     return;
   }
-  // rehydrate from an inbound query (the panel links here with its whole
-  // form). Stack shape first — it decides which fields exist to fill.
+  // Rehydrate from an inbound query (the panel links here with its whole
+  // form); with no vehicle in the query, the last stored vehicle applies —
+  // opening /build cold shows the vehicle you actually have, not a default.
+  // Stack shape first — it decides which fields exist to fill.
   const q = new URLSearchParams(location.search);
-  const own = k => k === 'nstages' || k === 'nboost' || k === 'vname' ||
-    k === 'diameter' || k === 'fairing' || k === 'pod_mass' ||
-    /^s\d+_/.test(k) || /^b_/.test(k);
-  if (q.has('nstages')) NSTAGES = Math.min(5, Math.max(2, Math.round(+q.get('nstages') || 3)));
-  if (q.has('nboost')) $('nboost').value =
-    [...$('nboost').options].some(o => o.value === q.get('nboost')) ? q.get('nboost') : 0;
+  for (const [k, v] of q)
+    if (!own(k) && k !== 'selftest') PASSTHRU.set(k, v);
+  let src = q;
+  if (![...q.keys()].some(own)) {
+    try {
+      const s = localStorage.getItem('ssjl.vehicle');
+      if (s) src = new URLSearchParams(s);
+    } catch (e) {}
+  }
+  if (src.has('nstages')) NSTAGES = Math.min(5, Math.max(2, Math.round(+src.get('nstages') || 3)));
+  if (src.has('nboost')) $('nboost').value =
+    [...$('nboost').options].some(o => o.value === src.get('nboost')) ? src.get('nboost') : 0;
   const vals = {};
-  for (const [k, v] of q) {
-    if (!own(k)) { if (k !== 'selftest') PASSTHRU.set(k, v); continue; }
-    if (k === 'nstages' || k === 'nboost') continue;
+  for (const [k, v] of src) {
+    if (!own(k) || k === 'nstages' || k === 'nboost') continue;
     vals[k] = v;
   }
   buildStages(vals);
   buildBoost(vals);
-  setVals(vals);           // vname/diameter/fairing/pod_mass + anything missed
-  for (const id of ['vname', 'diameter', 'fairing', 'pod_mass'])
+  setVals(vals);           // vname/diameter/fairing/pod_mass/kick + anything missed
+  initPresets();
+  for (const id of ['vname', 'diameter', 'fairing', 'pod_mass', 'kick_deg', 'opt_kick'])
     $(id).addEventListener('change', () => fetchGeo());
   // the core diameter carries stage diameters that were tracking it, as on
   // the panel

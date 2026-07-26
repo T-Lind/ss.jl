@@ -739,6 +739,21 @@ stage 2, and finally the spent kick stage drop away at their actual event
 times, with an engine flame while a stage burns and the view recentering
 on whatever is still flying (down to the bare pod on the return leg).
 
+### Earth-orbit missions
+
+The mission switch offers a third family: **Earth orbit**, whose goal is the
+orbit itself. Presets cover **LEO, polar, Molniya, GEO,** and **LEO
+re-entry** (up, a few revolutions, a deorbit burn, and home on parachutes).
+The chain flies the ascent at the target inclination, executes finite
+transfer burns on the kick stage — the raise at an equator crossing when the
+plane must move, the combined circularise-and-plane-change at apogee — and
+reports the achieved elements against the request. A vehicle that cannot
+afford a target says so: GEO wants ~4.3 km/s of kick stage, and the
+reference vehicle's honest answer is "propellant depleted". Failed missions
+in any mode now return everything that **was** simulated, with the outcome
+named, and the launch view flies the flight to wherever the simulation
+actually ended.
+
 ### Vehicle builder
 
 The **🛠 vehicle builder** chip in the Launcher card (key `B`, or

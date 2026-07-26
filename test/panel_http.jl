@@ -91,6 +91,41 @@ function http(method::AbstractString, path::AbstractString;
     (status, hdrs, bod)
 end
 
+@testset "earth orbit" begin
+    # each requested target is reached within tolerance — or the failure is
+    # the honest physical one
+    eo = earthorbit(target = :leo, strict = false)
+    @test eo.outcome === :on_orbit
+    @test eo.on_target
+    @test isempty(eo.burns)                       # direct ascent, no transfer
+
+    eo = earthorbit(target = :polar, strict = false)
+    @test eo.on_target
+    @test abs(rad2deg_(eo.elements.i) - 90.0) < 1.0
+
+    eo = earthorbit(target = :molniya, strict = false)
+    @test eo.on_target
+    @test abs((eo.elements.ra - SatelliteSim.RE_MEAN)/1e3 - 39400) < 250
+    @test abs(rad2deg_(eo.elements.i) - 63.4) < 1.0
+    # the finite burn's gravity loss is small and positive against the plan
+    for b in eo.burns
+        @test b.dv >= b.dv_plan - 5.0
+        @test b.dv <= b.dv_plan * 1.05 + 10.0
+    end
+
+    # the reference kick stage cannot reach GEO (~4.3 km/s against ~3.3 of
+    # capacity); saying so is correct behaviour, not a bug
+    eo = earthorbit(target = :geo, strict = false)
+    @test eo.outcome === :prop_depleted
+
+    # the round trip: up, around, retrograde burn, splashdown on parachutes
+    eo = earthorbit(target = :leo, deorbit = true, n_orbits = 1.0, strict = false)
+    @test eo.outcome === :splashdown
+    @test eo.entry !== nothing
+    @test eo.entry.v_splash < 15.0
+    @test 2.0 < eo.entry.peak_gload < 12.0        # ballistic LEO entry range
+end
+
 @testset "panel http" begin
     # the module must reuse the already-loaded package rather than loading a
     # second copy off LOAD_PATH — a duplicate would give us two incompatible
@@ -179,6 +214,51 @@ end
         @test st == 200
         @test occursin("\"ok\":false", bod)
         @test occursin("hydrolox", bod)
+
+        # --- a mission that fails still FLIES -------------------------------
+        # A stack with almost no propellant depletes in seconds and never
+        # reaches orbit. That used to be ok:false plus an error string, with
+        # the fully-simulated ascent thrown away; now every leg that flew
+        # comes back, ok:true, with the outcome named — and the launch page
+        # flies it to wherever the simulation actually ended.
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port, timeout = 180.0,
+                             body = "mode=flyby&nstages=2&s1_prop=3000&s1_dry=2500&" *
+                                    "s2_prop=100&s2_dry=140")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test occursin("\"outcome\":\"ascent_failed\"", bod)
+        @test occursin("\"ascent\":", bod)       # the leg that DID fly
+        @test occursin("\"launch_lat\"", bod)    # the launch page's hard needs
+        @test occursin("\"liftoff_t\"", bod)
+        @test !occursin("\"cis\":", bod)         # and no leg it did not fly
+
+        # --- Earth-orbit missions -------------------------------------------
+        st, hdrs, bod = http("GET", "/api/catalogue"; port = port)
+        @test occursin("\"orbits\"", bod)
+        @test occursin("molniya", bod)
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port, timeout = 180.0,
+                             body = "mode=orbit&orbit=leo")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test occursin("\"mode\":\"orbit\"", bod)
+        @test occursin("\"outcome\":\"nominal\"", bod)
+        @test occursin("\"orbit_rp_km\"", bod)
+        @test occursin("\"cis\":", bod)          # the coast, in the shared shape
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port, timeout = 180.0,
+                             body = "mode=orbit&orbit=molniya")
+        @test occursin("\"on_target\":true", bod)
+        @test occursin("raise_ignition", bod)
+        @test occursin("shape_cutoff", bod)
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port, timeout = 240.0,
+                             body = "mode=orbit&orbit=leo&deorbit=1&n_orbits=2")
+        @test occursin("\"outcome\":\"nominal\"", bod)
+        @test occursin("deorbit_ignition", bod)
+        @test occursin("entry_handoff", bod)
+        @test occursin("splashdown", bod)
 
         # --- method handling ------------------------------------------------
         st, hdrs, bod = http("HEAD", "/api/catalogue"; port = port)
