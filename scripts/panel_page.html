@@ -621,7 +621,11 @@ const METRIC_LABEL = { prop_margin_kg: 'launcher prop margin [kg]',
   prop_left_kg: 'lander propellant left [kg]', hover_s: 'hover margin [s]',
   descent_dv: 'descent Δv [m/s]', loi_dv: 'insertion Δv [m/s]',
   touchdown_v: 'touchdown sink [m/s]', downrange_km: 'descent downrange [km]',
-  min_throttle_pct: 'deepest throttle [%]' };
+  min_throttle_pct: 'deepest throttle [%]',
+  apogee_km: 'apogee [km]', range_km: 'ground range [km]',
+  cutoff_h_km: 'cutoff altitude [km]', t_apogee_s: 'coast to apogee [s]' };
+const SPARAM_LABEL = { sub_apogee_km: 'target apogee', sub_range_km: 'target range',
+  sub_loft_deg: 'loft angle', sub_azimuth_deg: 'launch azimuth' };
 const LPARAM_LABEL = { l_dry: 'lander dry mass', l_prop: 'lander propellant',
   l_thrust_kn: 'lander thrust', l_isp: 'lander Isp',
   l_throttle_min: 'lander min throttle', h_moon_park_km: 'lunar orbit altitude',
@@ -632,6 +636,8 @@ function fillSolveParams() {
   const opts = Object.keys(PARAM_LABEL).map(k => [k, PARAM_LABEL[k]]);
   if (landing())
     for (const k in LPARAM_LABEL) opts.push([k, LPARAM_LABEL[k]]);
+  if (subm())
+    for (const k in SPARAM_LABEL) opts.push([k, SPARAM_LABEL[k]]);
   for (let k = 1; k <= n; k++)
     for (const f in SFIELD_LABEL)
       opts.push([`s${k}_${f}`, `stage ${k} ${SFIELD_LABEL[f]}`]);
@@ -640,7 +646,7 @@ function fillSolveParams() {
     const was = el.value;
     el.innerHTML = html;
     el.value = opts.some(o => o[0] === was) ? was :
-               (landing() ? 'l_prop' : 'pod_mass');
+               (landing() ? 'l_prop' : subm() ? 'sub_apogee_km' : 'pod_mass');
   }
   if (landing() && !$('sweep_param').dataset.touched) {
     $('sweep_param').value = 'l_prop';
@@ -649,16 +655,20 @@ function fillSolveParams() {
   // a target this vehicle can actually hit, so the first solve demonstrates
   // the feature instead of reporting an unreachable goal
   if (!$('solve_param').dataset.touched)
-    $('solve_param').value = landing() ? 'l_prop' : 'hp_moon_km';
-  const ms = (landing() ? CATALOGUE.landing_metrics : CATALOGUE.solve_metrics)
+    $('solve_param').value = landing() ? 'l_prop' :
+                             subm() ? 'sub_apogee_km' : 'hp_moon_km';
+  const ms = (landing() ? CATALOGUE.landing_metrics :
+              subm() ? CATALOGUE.suborbital_metrics : CATALOGUE.solve_metrics)
              || Object.keys(METRIC_LABEL);
   for (const id of ['solve_metric', 'sweep_metric']) {
     const sel = $(id), was = sel.value;
     sel.innerHTML = ms.map(m =>
       `<option value="${m}">${METRIC_LABEL[m] || m}</option>`).join('');
-    sel.value = ms.includes(was) && was ? was :
-                (landing() ? (id === 'sweep_metric' ? 'hover_s' : 'prop_left_kg')
-                           : (id === 'sweep_metric' ? 'peak_g' : 'perilune_km'));
+    const want = landing() ? (id === 'sweep_metric' ? 'hover_s' : 'prop_left_kg')
+               : subm()    ? (id === 'sweep_metric' ? 'peak_g' : 'apogee_km')
+               :             (id === 'sweep_metric' ? 'peak_g' : 'perilune_km');
+    sel.value = ms.includes(was) && was ? was
+              : ms.includes(want) ? want : ms[0];
   }
 }
 

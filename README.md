@@ -754,6 +754,31 @@ in any mode now return everything that **was** simulated, with the outcome
 named, and the launch view flies the flight to wherever the simulation
 actually ended.
 
+### Suborbital missions
+
+The switch also offers **suborbital**, for flights that never intend to reach
+orbit. There are two, because there are two things people mean by the word:
+
+- a **hop** — straight up and back down, closing on an **apogee**. No
+  pitch-over at all; the vertical is held the whole way and the engines cut the
+  moment the arc they have built reaches the altitude asked for. The reference
+  vehicle asked for 100 km reaches 99.9 and splashes down 2.7 km from the pad.
+- a **shot** — a lofted ballistic arc, closing on a **ground range**. The
+  gravity turn hands over to the commanded loft attitude, and cutoff comes when
+  the free-flight arc through the vehicle's own state reaches the range asked
+  for. 400 km asked, 399 flown, apogee 91 km.
+
+Neither can use the orbital cutoff, which closes on specific energy: energy is
+the right quantity for an orbit and the wrong one here, since the same energy
+describes an arc that lands 200 km downrange and one that lands 2000, and says
+nothing at all about apogee. A vehicle has one degree of freedom at cutoff, so
+it is given one target — the other number is a consequence and is reported, not
+commanded. The commanded target is corrected for what the atmosphere takes: a
+hop that cuts at 40 km still has 40 km of air to climb through, and one secant
+step on the command is the difference between asking for 100 km and reaching
+it. The capsule is handed to the same entry simulator the returning missions
+use, so the arc gets real drag, heating and parachutes.
+
 ### Vehicle builder
 
 The **🛠 vehicle builder** chip in the Launcher card (key `B`, or

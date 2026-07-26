@@ -116,7 +116,7 @@
 <div id="keys" class="show">
   <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub (hold to accelerate) · <b>[</b> <b>]</b> zoom · <b>m</b> mute · <b>p</b> frame time</div>
   <div><b>w</b> <b>a</b> <b>s</b> <b>d</b> pitch/yaw · <b>q</b> <b>e</b> roll · <b>x</b> kill rotation — reaction wheels, coasting at &times;1</div>
-  <div><b>shift</b> + those keys pushes off and floats you round the cabin, in the cabin view</div>
+  <div><b>shift</b> + those keys pushes off a surface and floats you round the cabin — you can only push while you are touching something, then you coast until you catch the next one</div>
   <div>drag to look around in free and cabin views</div>
   <div>in the cabin, <b>click</b> the console switches — lights and display page (<b>right click</b> steps back)</div>
 </div>
@@ -3772,14 +3772,34 @@ function cabinPose(aim, roll, Kin) {
 // you touch something, and touching something is what stops you. What bounds
 // the volume is the capsule's own geometry, the same cone the mesh is lathed
 // from, so a crew member cannot end up inside a wall however hard they push.
-const CAB = { p: [0,0,0], v: [0,0,0], keys: {}, live: false };
-const CAB_ACC = 0.55;      // m/s2 off a handrail
+// You can only push off something. In free fall there is nothing to push
+// against, so the keys do nothing while you are in mid-air: a shove works while
+// your hand or your foot is still on the surface, and the instant you leave it
+// the shove is over and you coast. Attitude is different and is left alone —
+// the wheels are reaction wheels and a crew member can turn by twisting, so
+// looking around never needs a handhold.
+//
+// `touch` starts true because a flight starts with the crew in the couch, and a
+// couch, a handrail and a locker face are all the same thing to this: something
+// to push off. `n` is the inward normal of whatever you are on, or null for a
+// handhold, which lets you push any way you like.
+const CAB = { p: [0,0,0], v: [0,0,0], keys: {}, live: false,
+              touch: true, n: null, push: 0 };
+const CAB_ACC = 3.2;       // m/s2 while a hand or a foot is still on the surface
 const CAB_VMAX = 0.9;      // m/s, a brisk float across a 2 m cabin
-function cabReset() { CAB.p = [0,0,0]; CAB.v = [0,0,0]; CAB.keys = {}; }
+// A shove is not an instant. An arm extends over about a third of a second, and
+// that is exactly how long the surface is still there to push against — ending
+// the push the moment you start moving instead gives you one frame of contact
+// and a 5 cm/s drift, which is not a push off anything, it is a twitch.
+const CAB_PUSH_T = 0.35;
+function cabReset() {
+  CAB.p = [0,0,0]; CAB.v = [0,0,0]; CAB.keys = {};
+  CAB.touch = true; CAB.n = null; CAB.push = 0;
+}
 // eye-frame axes, in MODEL space, including wherever the head is turned — so
 // forward is where you are looking rather than where the couch faces
-function cabDirs() {
-  const p = cabinPose('wide');
+function cabDirs(Kin) {
+  const p = cabinPose('wide', 0, Kin);
   if (!p) return null;
   const f0 = V.norm(V.sub(p.look, p.eye)), up0 = V.norm(p.up);
   const rt0 = V.norm(V.cross(f0, up0)), uu0 = V.cross(rt0, f0);
@@ -3792,44 +3812,77 @@ function cabDirs() {
 // the habitable volume: the fit-out's clear envelope (see cabRLim), between
 // the couch tops and the console face, with a head's worth of room kept off
 // every surface
+// Returns the clamped point, whether it was against a surface, and the INWARD
+// normal there — the direction the surface can push you. A wall cannot pull.
 function cabBox(K, pt) {
   const pad = Math.max(0.06, 0.09*K.rp);
   const x = Math.min(Math.max(pt[0], K.xb + cabXLo(K)), K.xb + cabXHi(K));
   const rmax = Math.max(0.03, cabRLim(K) - pad);
   const r = Math.hypot(pt[1], pt[2]);
-  if (x === pt[0] && r <= rmax) return { p: pt, hit: false };
+  if (x === pt[0] && r <= rmax) return { p: pt, hit: false, n: null };
+  // whichever constraint bit hardest owns the normal; a corner takes the wall,
+  // because the wall is the one you can actually get a hand to
+  const n = r > rmax ? [0, -pt[1]/r, -pt[2]/r]
+                     : [x > pt[0] ? 1 : -1, 0, 0];
   const k = r > rmax ? rmax/r : 1;
-  return { p: [x, pt[1]*k, pt[2]*k], hit: true };
+  return { p: [x, pt[1]*k, pt[2]*k], hit: true, n };
 }
 function cabClamp(pt) {
   const pr = podRange();
   if (!pr) return { p: pt, hit: false };
   return cabBox(capStations(pr.x0), pt);
 }
-function cabStep(dt, active) {
+// `Kin` lets the self-test drive this without a loaded vehicle: the stations
+// are the only thing it needs from the geometry, and the rule it verifies —
+// that you can only push off something — has nothing to do with which rocket
+// is underneath the capsule.
+function cabStep(dt, active, Kin) {
   CAB.live = active;
-  if (!active) { if (CAB.v[0] || CAB.v[1] || CAB.v[2]) CAB.v = [0,0,0]; return; }
+  if (!active) {
+    if (CAB.v[0] || CAB.v[1] || CAB.v[2]) CAB.v = [0,0,0];
+    CAB.touch = true; CAB.n = null; CAB.push = 0;   // back in the couch
+    return;
+  }
   if (!(dt > 0)) return;
-  const d = cabDirs();
+  const pr = Kin ? null : podRange();
+  const K = Kin || (pr ? capStations(pr.x0) : null);
+  if (!K) return;
+  const d = cabDirs(K);
   if (!d) return;
   const k = CAB.keys;
-  const cmd = V.add(V.add(V.scale(d.fwd, (k.w ? 1 : 0) - (k.s ? 1 : 0)),
-                          V.scale(d.rt,  (k.d ? 1 : 0) - (k.a ? 1 : 0))),
-                    V.scale(d.up,  (k.e ? 1 : 0) - (k.q ? 1 : 0)));
-  const l = V.len(cmd);
-  if (l > 1e-6) {
-    CAB.v = V.add(CAB.v, V.scale(cmd, CAB_ACC*dt/l));
+  let cmd = V.add(V.add(V.scale(d.fwd, (k.w ? 1 : 0) - (k.s ? 1 : 0)),
+                        V.scale(d.rt,  (k.d ? 1 : 0) - (k.a ? 1 : 0))),
+                  V.scale(d.up,  (k.e ? 1 : 0) - (k.q ? 1 : 0)));
+  let l = V.len(cmd);
+  // A surface can only push you AWAY from itself, so the part of the shove
+  // that goes into the wall is not a shove at all — it is just leaning.
+  if (l > 1e-6 && CAB.touch && CAB.n) {
+    const into = V.dot(cmd, CAB.n);
+    if (into < 0) { cmd = V.sub(cmd, V.scale(CAB.n, into)); l = V.len(cmd); }
+  }
+  if (CAB.touch && l > 1e-6) {
+    if (CAB.push <= 0) CAB.push = CAB_PUSH_T;    // hand goes on, arm starts out
+    const use = Math.min(dt, CAB.push);
+    CAB.v = V.add(CAB.v, V.scale(cmd, CAB_ACC*use/l));
     const s = V.len(CAB.v);
     if (s > CAB_VMAX) CAB.v = V.scale(CAB.v, CAB_VMAX/s);
+    CAB.push -= use;
+    // arm fully extended: you are off the surface and that is the last of it
+    if (CAB.push <= 1e-9) { CAB.touch = false; CAB.n = null; CAB.push = 0; }
+  } else if (CAB.touch && CAB.push > 0) {
+    // let go part way through: you leave with whatever you had built
+    CAB.push = 0;
+    if (V.len(CAB.v) > 0.02) { CAB.touch = false; CAB.n = null; }
   }
   const want = V.add(CAB.p, V.scale(CAB.v, dt));
-  const base = cabinPose('wide');
+  const base = cabinPose('wide', 0, K);
   if (!base) return;
-  const c = cabClamp(V.add(base.eye, want));
+  const c = cabBox(K, V.add(base.eye, want));
   CAB.p = V.sub(c.p, base.eye);
-  // a wall takes the momentum that ran into it rather than letting you grind
-  // along it at full speed for the rest of the coast
-  if (c.hit) CAB.v = V.scale(CAB.v, 0.15);
+  // Arriving at a surface is arriving: you put a hand out and stop. The cabin
+  // is ringed with handrails and that is exactly what they are for — so a
+  // contact is not a bounce, it is the next thing you can push off.
+  if (c.hit) { CAB.v = [0,0,0]; CAB.touch = true; CAB.n = c.n; CAB.push = 0; }
 }
 // ------------------------------------------------------- cabin controls --
 // Two switches on the console face, on the rolls the couches look along. The
@@ -3875,17 +3928,21 @@ function cabRay(cx, cy) {
                     V.dot(v, [M[8],M[9],M[10]])];
   return { o: toM(V.sub(cam.eye, [M[12], M[13], M[14]])), d: toM(dir) };
 }
+// distance along a unit ray to the near hit on a sphere, or Infinity
+function raySphere(o, d, c, r) {
+  const L = V.sub(c, o), tca = V.dot(L, d);
+  if (tca <= 0) return Infinity;                  // behind the eye
+  const d2 = V.dot(L, L) - tca*tca;
+  if (d2 > r*r) return Infinity;
+  return tca - Math.sqrt(r*r - d2);
+}
 function cabPick(cx, cy) {
   const ray = cabRay(cx, cy);
   if (!ray) return null;
   let best = null, bestT = Infinity;
   for (const c of cabControls()) {
-    const L = V.sub(c.p, ray.o), tca = V.dot(L, ray.d);
-    if (tca <= 0) continue;
-    const d2 = V.dot(L, L) - tca*tca;
-    if (d2 > c.r*c.r) continue;
-    const t0 = tca - Math.sqrt(c.r*c.r - d2);
-    if (t0 < bestT) { bestT = t0; best = c; }
+    const t = raySphere(ray.o, ray.d, c.p, c.r);
+    if (t < bestT) { bestT = t; best = c; }
   }
   return best;
 }
@@ -5280,7 +5337,10 @@ function drawHUD(sc, ph) {
   }
   if (CAB.live) {
     const s = V.len(CAB.v);
-    rows.push(['ZERO G', s > 0.005 ? s.toFixed(2) + ' m/s' : 'SHIFT + WASD QE']);
+    // which of the two states you are in is the whole mechanic, so it is the
+    // thing the row says: on a surface you can push, in the air you cannot
+    rows.push(['ZERO G', CAB.touch ? 'CONTACT · SHIFT + WASD QE to push'
+                                   : 'DRIFTING · ' + s.toFixed(2) + ' m/s']);
   }
   if (perfShow) {
     // FPS is the smoothed live rate; FRAME is the median the scaler last ruled
@@ -5883,12 +5943,83 @@ window.__selftest = function () {
      cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]).hit, true);
   eq('and lands inboard of the racks', () =>
      rfrac(cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]).p) < 0.68, true);
+  // A wall can only push you AWAY from itself. The contact normal is what says
+  // which way that is, and it has to point back into the cabin or a shove
+  // against the wall would drive you further into it.
+  eq('a wall contact hands back an inward normal', () => {
+     const c = cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]);
+     return c.n[2];                                  // hit on +z, normal on -z
+  }, -1, 1e-12);
+  eq('and it is a unit vector', () =>
+     V.len(cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 3, 4]).n), 1, 1e-12);
+  eq('the floor pushes you up the cabin', () =>
+     cabBox(CK, [-9e3, 0, 0]).n[0], 1);
+  eq('and the ceiling pushes you down it', () =>
+     cabBox(CK, [9e3, 0, 0]).n[0], -1);
+  eq('free space has no normal to push against', () =>
+     cabBox(CK, cabinPose('wide', 0, CK).eye).n, null);
+  // --- and the rule the float runs on: you can only push off something. A
+  // shove works while a hand or a foot is still on the surface and ends when
+  // the arm runs out; in mid-air the keys do nothing at all.
+  const floatRun = (secs, keys, seed) => {
+    cabReset();
+    if (seed) { CAB.v = seed.v.slice(); CAB.touch = seed.touch; CAB.n = seed.n; }
+    CAB.keys = keys;
+    for (let i = 0; i < Math.round(secs*60); i++) cabStep(1/60, true, CK);
+    return { v: CAB.v.slice(), touch: CAB.touch };
+  };
+  eq('a full shove is a real push', () =>
+     V.len(floatRun(CAB_PUSH_T, { w: 1 }).v) > 0.6, true);
+  eq('and never faster than a person can shove', () =>
+     V.len(floatRun(2.0, { w: 1 }).v) <= CAB_VMAX + 1e-9, true);
+  eq('the arm runs out and lets go', () =>
+     floatRun(CAB_PUSH_T + 0.05, { w: 1 }).touch, false);
+  eq('mid-air input does nothing at all', () =>
+     V.len(floatRun(0.15, { w: 1, s: 1, a: 1, d: 1, q: 1, e: 1 },
+                    { v: [0.4, 0, 0], touch: false, n: null }).v), 0.4, 1e-12);
+  eq('opposite keys push opposite ways', () =>
+     V.dot(V.norm(floatRun(CAB_PUSH_T, { w: 1 }).v),
+           V.norm(floatRun(CAB_PUSH_T, { s: 1 }).v)) < -0.9, true);
+  cabReset();
   eq('the floor is the couch tops, not the deck',
      () => cabXLo(CK) > CK.xa + 0.15*CK.rp, true);
   eq('and the ceiling is the console face',
      () => cabXHi(CK) < CK.xcon, true);
   eq('and there is somewhere to float between them',
      () => cabXHi(CK) - cabXLo(CK) > 0.15*CK.rp, true);
+
+  // --- clicking a switch. A click becomes a ray in the CAPSULE's frame, and
+  // the craft transform is rigid — proved by the camera audit — which is the
+  // only reason the inverse rotation here can be a transpose. Get that wrong
+  // and the switches are unclickable in exactly the attitudes you would try.
+  const rigidM = mMul(mTrans([1200, -3, 7]), mRotAxis(V.norm([0.3, 0.5, 0.8]), 0.9));
+  const toModel = (M, w) => {
+    const d = V.sub(w, [M[12], M[13], M[14]]);
+    return [V.dot(d, [M[0],M[1],M[2]]), V.dot(d, [M[4],M[5],M[6]]),
+            V.dot(d, [M[8],M[9],M[10]])];
+  };
+  eq('a rigid transform inverts by transpose', () =>
+     V.len(V.sub(toModel(rigidM, mApply(rigidM, [1.2, -0.4, 0.7])), [1.2, -0.4, 0.7])),
+     0, 1e-9);
+  eq('a ray straight at a sphere hits its near face', () =>
+     raySphere([0,0,0], [1,0,0], [10,0,0], 2), 8, 1e-12);
+  eq('a ray past it misses', () =>
+     raySphere([0,0,0], [1,0,0], [10,3,0], 2), Infinity);
+  eq('a sphere behind the eye is not clickable', () =>
+     raySphere([0,0,0], [1,0,0], [-10,0,0], 2), Infinity);
+  eq('grazing it still counts', () =>
+     raySphere([0,0,0], [1,0,0], [10,2,0], 2.0001) < Infinity, true);
+  // the two switches are distinct places, and both sit on the console face
+  eq('there are two switches', () => CAB_CTL.length, 2);
+  eq('and they are not the same one', () => CAB_CTL[0].roll !== CAB_CTL[1].roll, true);
+  // cycling wraps in both directions — right click is the only sensible use
+  // for the second button on a three-position switch
+  eq('lights cycle forward', () => rrIdx(0 + 1, CAB_LIGHTS.length), 1);
+  eq('and backward off the front', () => rrIdx(0 - 1, CAB_LIGHTS.length),
+     CAB_LIGHTS.length - 1);
+  eq('lights off is darker than dim is darker than bright', () =>
+     CAB_LIGHTS[2].amb < CAB_LIGHTS[1].amb && CAB_LIGHTS[1].amb < CAB_LIGHTS[0].amb,
+     true);
 
   // the stored memory is user data read back at startup: hostile until clamped
   eq('bgMemParse survives garbage', () => bgMemParse('nonsense').air, 0.5);
@@ -6166,6 +6297,14 @@ async function boot() {
       MS ?
       `${mass}${LEN.toFixed(1)} m — ` +
       `pad to the surface of the Moon in ${tD.toFixed(1)} days` :
+      // a suborbital flight is minutes, not days, and its whole story is how
+      // high or how far — so it gets told in its own units
+      run.mode === 'suborbital' ?
+      `${mass}${LEN.toFixed(1)} m — ` +
+      ((run.suborbital || {}).profile === 'downrange'
+        ? `${(M.range_km || 0).toFixed(0)} km downrange, apogee ${(M.apogee_km || 0).toFixed(0)} km`
+        : `straight up to ${(M.apogee_km || 0).toFixed(0)} km and back`) +
+      `, in ${(tD*1440).toFixed(0)} minutes` :
       `${mass}${LEN.toFixed(1)} m — ` +
       `around the Moon and home in ${tD.toFixed(1)} days`;
     $('ov_go').classList.remove('hidden');
