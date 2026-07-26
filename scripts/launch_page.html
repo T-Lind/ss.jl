@@ -99,6 +99,7 @@
 <div id="keys" class="show">
   <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub (hold to accelerate) · <b>[</b> <b>]</b> zoom · <b>m</b> mute · <b>p</b> frame time</div>
   <div><b>w</b> <b>a</b> <b>s</b> <b>d</b> pitch/yaw · <b>q</b> <b>e</b> roll · <b>x</b> kill rotation — reaction wheels, coasting at &times;1</div>
+  <div><b>shift</b> + those keys pushes off and floats you round the cabin, in the cabin view</div>
   <div>drag to look around in free and cabin views</div>
 </div>
 <div class="hud" id="cams"></div>
@@ -3289,6 +3290,10 @@ function spawn(p, v, life, size, grow, kind, age) {
 // that motion already), and aged by the same fraction so it has grown and
 // faded by exactly the right amount. The particle count is untouched, so this
 // costs nothing and holds at any frame rate.
+// A round-robin index that survives a counter running backwards: JS `%` keeps
+// the sign of its left operand, so a negative accumulator indexes off the
+// front of the array and hands the emitter an undefined bell.
+function rrIdx(i, n) { return n > 0 ? ((i % n) + n) % n : 0; }
 function emitStream(n, dt, vveh, make) {
   for (let i = 0; i < n; i++) {
     const q = make(i);
@@ -3662,7 +3667,11 @@ function fovZoom(fov, k) {
   return Math.min(1.5, Math.max(0.015, fov/k));
 }
 let headYaw = 0, headPitch = 0;      // look around from inside the capsule
-const CAMS = ['auto','wide','chase','onboard','cabin','window','free'];
+// No separate `window` station any more: it was a fixed pose pressed against
+// one pane, and now that the crew can push off and float to whichever viewport
+// they like, a camera whose whole job was to pick one for them is a worse way
+// of doing the same thing.
+const CAMS = ['auto','wide','chase','onboard','cabin','free'];
 const CAMS_MOON = ['auto','wide','chase','onboard','ground','free'];
 
 // Camera stations inside the crew capsule, in vehicle model coordinates.
@@ -3683,20 +3692,6 @@ function cabinPose(aim, roll) {
   // eye just above the headrest, set back from the wall so the viewport, the
   // console edge and the couch all fall inside a wide lens
   const head = [xb + xa + 0.16*rp, 0.12*ln, -0.30*rp];
-  if (aim === 'window') {
-    // Pressed up to a viewport, looking straight out along the cone's own
-    // surface normal, so the aperture frames the view. `roll` selects which
-    // of the three windows.
-    const cw = Math.cos(roll || 0), sw = Math.sin(roll || 0);
-    const c32 = Math.cos(0.5672), s32 = Math.sin(0.5672);
-    const nrm = [s32, c32*cw, c32*sw];         // outward normal at the pane
-    const xw = xb0 + 0.458*Lc, rw = rcone(xw); // centre of the window band
-    const ctr = [xb + xw, rw*cw, rw*sw];
-    const d = 0.33*rp;                         // face up against the glass
-    return { eye: [ctr[0] - nrm[0]*d, ctr[1] - nrm[1]*d, ctr[2] - nrm[2]*d],
-             look: [ctr[0] + nrm[0]*60, ctr[1] + nrm[1]*60, ctr[2] + nrm[2]*60],
-             up: [1,0,0], fov: 1.35 };
-  }
   if (aim === 'console')
     return { eye: head, look: [xb + xb0 + 0.62*Lc, 0.06*ln, 0], up: [0,1,0],
              fov: 1.25 };
@@ -3705,22 +3700,66 @@ function cabinPose(aim, roll) {
   return { eye:  [xb + xb0 + 0.26*Lc, -0.10*rp,  0.56*rp],
            look: [xb + xb0 + 0.42*Lc,  0.16*rp, -0.16*rp], up: [1,0,0], fov: 1.45 };
 }
-// the capsule carries three windows; pick whichever currently looks nearest
-// to something worth seeing
-const WINROLL = [0, 1.187, -1.187];
-function pickWindow(M, targetW) {
-  if (!targetW) return 0;
-  const o = mApply(M, [0,0,0]);
-  const dir = V.norm(V.sub(targetW, o));
-  const c32 = Math.cos(0.5672), s32 = Math.sin(0.5672);
-  let best = 0, bd = -2;
-  for (const rl of WINROLL) {
-    const nm = [s32, c32*Math.cos(rl), c32*Math.sin(rl)];
-    const w = V.norm(V.sub(mApply(M, nm), o));
-    const dp = V.dot(w, dir);
-    if (dp > bd) { bd = dp; best = rl; }
+// ---------------------------------------------------- floating in the cabin --
+// Zero g inside the pressure shell: a push-off, a drift, and a wall. There is
+// no damping term because there is nothing to damp against — you coast until
+// you touch something, and touching something is what stops you. What bounds
+// the volume is the capsule's own geometry, the same cone the mesh is lathed
+// from, so a crew member cannot end up inside a wall however hard they push.
+const CAB = { p: [0,0,0], v: [0,0,0], keys: {}, live: false };
+const CAB_ACC = 0.55;      // m/s2 off a handrail
+const CAB_VMAX = 0.9;      // m/s, a brisk float across a 2 m cabin
+function cabReset() { CAB.p = [0,0,0]; CAB.v = [0,0,0]; CAB.keys = {}; }
+// eye-frame axes, in MODEL space, including wherever the head is turned — so
+// forward is where you are looking rather than where the couch faces
+function cabDirs() {
+  const p = cabinPose('wide');
+  if (!p) return null;
+  const f0 = V.norm(V.sub(p.look, p.eye)), up0 = V.norm(p.up);
+  const rt0 = V.norm(V.cross(f0, up0)), uu0 = V.cross(rt0, f0);
+  const cy = Math.cos(headYaw), sy = Math.sin(headYaw);
+  const cp = Math.cos(headPitch), sp = Math.sin(headPitch);
+  const fwd = V.norm(V.add(V.add(V.scale(f0, cy*cp), V.scale(rt0, sy*cp)),
+                           V.scale(uu0, sp)));
+  return { fwd, rt: V.norm(V.cross(fwd, up0)), up: up0 };
+}
+// the habitable volume: inside the pressure wall, clear of the deck and the
+// tunnel, with a head's worth of room kept off every surface
+function cabClamp(pt) {
+  const pr = podRange();
+  if (!pr) return { p: pt, hit: false };
+  const S = capStations(pr.x0), pad = 0.26*S.rp;
+  const x = Math.min(Math.max(pt[0], S.xb + S.xfl + pad), S.xb + S.xtop - pad);
+  const rmax = Math.max(0.04, S.rcone(x - S.xb) - 0.05*S.rp - pad);
+  const r = Math.hypot(pt[1], pt[2]);
+  if (x === pt[0] && r <= rmax) return { p: pt, hit: false };
+  const k = r > rmax ? rmax/r : 1;
+  return { p: [x, pt[1]*k, pt[2]*k], hit: true };
+}
+function cabStep(dt, active) {
+  CAB.live = active;
+  if (!active) { if (CAB.v[0] || CAB.v[1] || CAB.v[2]) CAB.v = [0,0,0]; return; }
+  if (!(dt > 0)) return;
+  const d = cabDirs();
+  if (!d) return;
+  const k = CAB.keys;
+  const cmd = V.add(V.add(V.scale(d.fwd, (k.w ? 1 : 0) - (k.s ? 1 : 0)),
+                          V.scale(d.rt,  (k.d ? 1 : 0) - (k.a ? 1 : 0))),
+                    V.scale(d.up,  (k.e ? 1 : 0) - (k.q ? 1 : 0)));
+  const l = V.len(cmd);
+  if (l > 1e-6) {
+    CAB.v = V.add(CAB.v, V.scale(cmd, CAB_ACC*dt/l));
+    const s = V.len(CAB.v);
+    if (s > CAB_VMAX) CAB.v = V.scale(CAB.v, CAB_VMAX/s);
   }
-  return best;
+  const want = V.add(CAB.p, V.scale(CAB.v, dt));
+  const base = cabinPose('wide');
+  if (!base) return;
+  const c = cabClamp(V.add(base.eye, want));
+  CAB.p = V.sub(c.p, base.eye);
+  // a wall takes the momentum that ran into it rather than letting you grind
+  // along it at full speed for the rest of the coast
+  if (c.hit) CAB.v = V.scale(CAB.v, 0.15);
 }
 // place a model-space pose into the world using the craft's model matrix
 function poseToWorld(pose, M, mode, noHead) {
@@ -3751,10 +3790,15 @@ function cabinShake(cam, amp) {
   cam.look = V.add(V.add(cam.look, body), shakeVec(amp*0.02*d));
   return cam;
 }
-function cabinCam(M, aim, targetW) {
+function cabinCam(M, aim) {
   if (!M) return null;
-  const p = cabinPose(aim, aim === 'window' ? pickWindow(M, targetW) : 0);
-  return p ? poseToWorld(p, M, aim === 'window' ? 'window' : 'cabin') : null;
+  const p = cabinPose(aim);
+  if (!p) return null;
+  if (aim === 'wide' && (CAB.p[0] || CAB.p[1] || CAB.p[2])) {
+    p.eye = V.add(p.eye, CAB.p);
+    p.look = V.add(p.look, CAB.p);
+  }
+  return poseToWorld(p, M, 'cabin');
 }
 // An exterior camera bolted to the pod's flank — the shot every crewed vehicle
 // carries, and the one that used to vanish at second-stage jettison because
@@ -3811,7 +3855,7 @@ function autoPickPad(t) {
   if (t < fairT + 2) return 'onboard';
   // the shell splits and daylight reaches the cabin for the first time
   if (t < fairT + 8) return 'cabin';
-  if (t < fairT + 16) return 'window';
+  if (t < fairT + 16) return 'cabin';
   if (t < secoT - 35) return 'wide';
   return 'chase';
 }
@@ -3865,9 +3909,8 @@ function cameraPad(t, st, M) {
   const mid = V.add(st.pos, V.scale(st.dir, LEN*0.5));
   let eye, look = mid, up = [0,1,0], fov = 0.42, shake = 0;
   const tn = Math.min(1, st.thr/9.5e5)*Math.exp(-st.h/15000);
-  if (mode === 'cabin' || mode === 'window') {
-    const c = cabinCam(M, mode === 'window' ? 'window' :
-                          t > fairT + 1 ? 'window' : 'wide');
+  if (mode === 'cabin') {
+    const c = cabinCam(M, 'wide');
     if (c) return cabinShake(c, tn*0.9 + st.q/50*0.5);
   }
   // Pad camera stand-offs are distances *for this vehicle*: a 32 m stack and
@@ -3937,11 +3980,11 @@ function cameraEci(t, cs, ph, M) {
      ph.n === 'RETURN' ? 'earthframe' :
      ph.n === 'ORBIT' || ph.n === 'ON ORBIT' ? 'earthframe' : 'drift')
     : camMode;
-  if (mode === 'cabin' || mode === 'window') {
+  if (mode === 'cabin') {
     // out the viewport, through whichever window faces the Moon near the
     // flyby and Earth the rest of the time
     const tgt = ph.n === 'FLYBY' ? cs.moon : [0, 0, 0];
-    const c = cabinCam(M, mode === 'window' ? 'window' : 'wide', tgt);
+    const c = cabinCam(M, 'wide');
     if (c) return cabinShake(c, cs.burning ? 0.5 : 0);
   }
   if (mode === 'onboard') {
@@ -3980,7 +4023,7 @@ function autoPickEntry(t) {
   const dep = isFinite(tDrog) ? tDrog : tMain;
   if (t < tEI + 45) return 'chase';
   if (t < tEI + 110) return 'cabin';       // peak heating, seen from inside
-  if (t < tEI + 175) return 'window';      // and out through the viewport
+  if (t < tEI + 175) return 'cabin';       // peak heating, seen from inside
   if (isFinite(dep) && t < dep - 5) return 'onboard';
   if (isFinite(tMain) && t < tMain + 25) return 'chase';
   if (isFinite(tSplash) && t < tSplash - 30) return 'onboard';
@@ -3991,8 +4034,8 @@ function cameraEntry(t, es, M) {
   const p = es.pos;
   let eye, look = p, up = es.up, fov = 0.42, shake = Math.min(1.4, es.g/9);
   const side = [0, 0, 1];
-  if (mode === 'cabin' || mode === 'window') {
-    const c = cabinCam(M, mode === 'window' ? 'window' : 'wide');
+  if (mode === 'cabin') {
+    const c = cabinCam(M, 'wide');
     if (c) return cabinShake(c, shake);
   }
   if (mode === 'onboard') {
@@ -4057,8 +4100,11 @@ let meshCommon = null;
 // return runs a little under 200 W/cm2; the exponent keeps the middle of the
 // entry visibly warm instead of saving everything for a two-second peak.
 const heatOf = q => Math.min(1, Math.pow(Math.max(0, q)/165, 0.72));
+// what the pass is currently lit by, so a shielded draw can put it back
+let meshHeat = 0, meshEngI = 0, meshAmb = 0;
 function setMeshHeat(sc, view) {
   const h = sc.world === 'entry' && sc.es ? heatOf(sc.es.q) : 0;
+  meshHeat = h;
   gl.uniform1f(MESH.u.uHeat, h);
   if (h <= 0) return;
   // the flow arrives along the velocity vector, so the windward normal is
@@ -4085,6 +4131,7 @@ function beginMeshes(view, sunV, fogDen, fogCol, amb, engI, engV, engC) {
   gl.uniform3fv(MESH.u.uEngV, engV);
   gl.uniform3fv(MESH.u.uEngC, engC || [1.0, 0.55, 0.22]);
   gl.uniform1f(MESH.u.uAmb, amb);
+  meshEngI = engI; meshAmb = amb;
   if (livTex) {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, livTex);
@@ -4114,6 +4161,23 @@ function drawRange(model, proj, first, count) {
   gl.drawArrays(gl.TRIANGLES, first, count);
 }
 function drawWhole(buf, n, model, proj) { bindMeshBuf(buf); drawRange(model, proj, 0, n); }
+// Draw with the outside switched off. Stagnation heating and the engine's own
+// light belong to the OUTSIDE of the hull, and they were applied to every mesh
+// in the pass — so through entry the cabin interior was flooded bright orange
+// by a shock standing on the far side of a pressure wall, and the whole fit-out
+// washed out with it. Inside, the only way in is an aperture, which is what the
+// window panes are: they still take the heat, and glow. The interior is lit by
+// its own cabin lighting, which is the ambient floor here.
+const CAB_AMB = 0.42;
+function drawRangeInside(model, proj, first, count) {
+  gl.uniform1f(MESH.u.uHeat, 0);
+  gl.uniform1f(MESH.u.uEngI, 0);
+  gl.uniform1f(MESH.u.uAmb, Math.max(meshAmb, CAB_AMB));
+  drawRange(model, proj, first, count);
+  gl.uniform1f(MESH.u.uHeat, meshHeat);
+  gl.uniform1f(MESH.u.uEngI, meshEngI);
+  gl.uniform1f(MESH.u.uAmb, meshAmb);
+}
 // where a swing arm is at time t: eased from stowed to clear over its own
 // retraction window, and a pure function of the clock so seeking works
 function armMat(a, t) {
@@ -4139,7 +4203,11 @@ function buildToasts() {
 function frame(now) {
   requestAnimationFrame(frame);
   const raw = now - lastNow;
-  const dtReal = Math.min(0.05, raw/1000 || 0.016);
+  // Never negative. A clock that goes backwards — a harness restarting its
+  // timebase, a browser stepping performance.now() back — used to hand every
+  // rate in the frame a negative dt, which runs the emission COUNT negative
+  // and walks the round-robin index off the front of its array.
+  const dtReal = Math.min(0.05, Math.max(0, raw/1000) || 0.016);
   lastNow = now;
   if (!started) return;
   perfPush(raw);
@@ -4189,7 +4257,12 @@ function frame(now) {
   // Attitude runs on the wall clock, not the warped one, so the wheels still
   // answer with the clock stopped — which is when you actually want to turn
   // the stack and look at something.
-  rcsStep(running ? dt : dtReal, rcsActive(ph));
+  const dtA = running ? dt : dtReal;
+  rcsStep(dtA, rcsActive(ph));
+  // Floating is allowed exactly where hand-flying is: coasting, unpowered, at
+  // real time. Under thrust or through entry there is a g-load holding the
+  // crew in the couch, and unstrapping into it is not a thing you survive.
+  cabStep(dtA, camMode === 'cabin' && rcsActive(ph));
 
   const scene = buildScene(ph);
   scene.cam.fov = fovZoom(scene.cam.fov, zoomK);
@@ -4198,7 +4271,15 @@ function frame(now) {
   // trail into disconnected blobs, which is why this used to switch off
   // entirely above ×8 — and made a burning engine go dark the moment you
   // sped up. Clamping the particle step keeps the flame lit at any warp.
-  const dtP = Math.min(dt, 0.05);
+  // Particles move with the vehicle, so a CLAMPED step does not merely slow
+  // them down — it drops them behind. At x2 and 8 km/s the vehicle advances
+  // 541 m in a frame while its own wake is stepped only 410 m, so every frame
+  // leaves the trail 131 m further back, and over a particle's life that is
+  // two kilometres of stretch the physics never asked for. Below x4 they get
+  // the true step and stay where they belong; above it the clamp comes back,
+  // because there the alternative is a plume that ages out in a single frame
+  // and goes dark, and a smeared trail beats no trail.
+  const dtP = warpEff <= 4 ? dt : Math.min(dt, 0.05);
   if (warpEff <= 8) stepDebris(dt);
   else debris.length = 0;
   if (warpEff <= PARTWARP) {
@@ -4381,7 +4462,7 @@ function spawnAscent(dt, st, rocketVel, noz, bnoz, coreBells) {
   // nozzles, no matter how long you watched it.
   const rr = spawnAscent._rr | 0;
   emitStream(nf, dt, rocketVel, i => {
-    const b = emit[(rr + i) % emit.length];
+    const b = emit[rrIdx(rr + i, emit.length)];
     // Sideways scatter must NOT ride the altitude factor. At E = 4.4 a jit(7E)
     // is +-31 m/s across the column, which over a particle's life throws it
     // +-13 m off axis and tears holes in the very trail the expansion is
@@ -4445,7 +4526,7 @@ function spawnTli(dt, cs) {
   emitStream(n, dt, cs.vel, i => {
     let p, bs;
     if (kb && kb.pts.length && ls) {
-      const pt = kb.pts[(rr + i) % kb.pts.length];
+      const pt = kb.pts[rrIdx(rr + i, kb.pts.length)];
       bs = pt[2];
       p = V.add(V.add(cs.pos, V.scale(cs.bx, kb.exitX - ls.x0)),
                 V.add(V.scale(cs.by, pt[0]), V.scale(cs.bz, pt[1])));
@@ -4478,29 +4559,45 @@ function spawnEntry(dt, es) {
     // Shock layer: a thin bright sheet standing off the blunt face, domed so
     // the middle sits furthest forward. Many small sprites read as a surface;
     // the three big ones this replaced read as three balls.
-    const nS = Math.min(24, Math.round(60*dt*(10 + 44*I)));
-    for (let i = 0; i < nS; i++) {
+    // Emission runs on the particle clock, and that clock is deliberately
+    // CLAMPED at warp so the trail stays lit rather than going dark. But the
+    // vehicle still covers warped distance: at x2 the same particles have to
+    // stretch over twice the trail, and the wake beads again for a reason that
+    // has nothing to do with how many are spawned per second. Scale with the
+    // warp being covered, to x2 and no further — beyond that the trail is a
+    // streak anyway, and the cap is the only thing protecting the frame.
+    const wf = Math.min(4, Math.max(1, warpEff));
+    const nS = Math.min(32*wf, Math.round(60*dt*(14 + 58*I)*wf));
+    emitStream(nS, dt, vC, () => {
       const th = Math.random()*6.2832, u = Math.sqrt(Math.random());
       const r = rp*1.10*u;
-      spawn(V.add(V.add(es.pos, V.scale(es.vdir, 0.45 + 0.42*(1 - u*u))),
-                  ring(r, th)),
-            V.add(rel(8 + 34*I), V.scale(ring(1, th), 5*I)),
-            rnd(0.15, 0.07), (0.16 + 0.24*I)*rnd(1.25, 0.8), 0.5*I + 0.18, 4);
-    }
+      return { p: V.add(V.add(es.pos, V.scale(es.vdir, 0.45 + 0.42*(1 - u*u))),
+                        ring(r, th)),
+               v: V.add(rel(8 + 34*I), V.scale(ring(1, th), 5*I)),
+               life: rnd(0.15, 0.07), size: (0.16 + 0.24*I)*rnd(1.25, 0.8),
+               grow: 0.5*I + 0.18, kind: 4 };
+    });
     // Near wake: shed from the shoulder where the flow separates, entrained
     // aft, spreading with distance. Small and dense — a sprite 2.4 m across at
     // 34 m fills 290 px, which is why the trail used to be bokeh.
-    const n = Math.min(44, Math.round(60*dt*(18 + 76*I)));
-    for (let i = 0; i < n; i++) {
+    // Born at one instant per frame, this was the plume's bug again: at 300 m/s
+    // of entrainment and 30 fps the wake arrived in packets 10 m apart, which
+    // is the string of separate puffs the trail became. Spread across the frame
+    // it is a column. The spread in entrainment SPEED is narrower too — a
+    // 0.75-1.25 spread stretches a packet over 60% of its own travel, which
+    // tears the same holes from the other end.
+    const n = Math.min(60*wf, Math.round(60*dt*(26 + 104*I)*wf));
+    emitStream(n, dt, vC, () => {
       const back = Math.pow(Math.random(), 0.65)*(16*I + 2.5);
       const spread = rp*(1.0 + back*0.13);
       const th = Math.random()*6.2832;
-      spawn(V.add(V.sub(es.pos, V.scale(es.vdir, back)),
-                  V.add(ring(spread*Math.sqrt(Math.random()), th), jit(0.08))),
-            V.add(rel((55 + 250*I)*(0.75 + rnd(0.5))),
-                  V.add(V.scale(ring(1, th), (2 + 8*I)*Math.random()), jit(2.5))),
-            rnd(0.40, 0.16), (0.16 + 0.34*I)*rnd(1.3, 0.7), 0.9*I + 0.3, 4);
-    }
+      return { p: V.add(V.sub(es.pos, V.scale(es.vdir, back)),
+                        V.add(ring(spread*Math.sqrt(Math.random()), th), jit(0.08))),
+               v: V.add(rel((55 + 250*I)*(0.86 + rnd(0.28))),
+                        V.add(V.scale(ring(1, th), (2 + 8*I)*Math.random()), jit(2.5))),
+               life: rnd(0.40, 0.16), size: (0.16 + 0.34*I)*rnd(1.3, 0.7),
+               grow: 0.9*I + 0.3, kind: 4 };
+    });
     // wake smoke: non-buoyant while hypersonic, otherwise it climbs away
     // from the trail instead of following it
     if (Math.random() < 60*dt*0.9)
@@ -4585,6 +4682,14 @@ function drawWorldMeshes(sc, proj, inCab) {
   // apertures in the pressure shell become real openings onto the world
   const skip = s => secGone[s.name] ||
     (s.name === 'cabin' ? !inCab : s.name === 'glass' ? inCab : false);
+  // What the outside light must not reach. The fit-out always; and, once the
+  // camera is inside, the pressure shell too — from in here you are looking at
+  // the INNER face of an insulated hull, not at the ablator a shock is sitting
+  // on, and lighting it with the stagnation term flooded the whole cabin
+  // yellow through a wall that exists precisely to stop that.
+  const shielded = s => s.name === 'cabin' || (inCab && s.name === 'pod');
+  const drawSec = (s, m, proj) =>
+    (shielded(s) ? drawRangeInside : drawRange)(m, proj, s.first, s.count);
 
   if (sc.world === 'pad') {
     // The pad world runs all the way to orbit insertion, but the complex is
@@ -4600,7 +4705,7 @@ function drawWorldMeshes(sc, proj, inCab) {
     bindMeshBuf(rocketBuf);
     for (const s of secDraw) {
       if (skip(s)) continue;
-      drawRange(rocketM, proj, s.first, s.count);
+      drawSec(s, rocketM, proj);
     }
     for (const d of debris) {
       const dbz = [0,0,1], dby = V.cross(dbz, d.bx);
@@ -4616,7 +4721,8 @@ function drawWorldMeshes(sc, proj, inCab) {
     // stage is jettisoned ahead of entry interface
     for (const s of secDraw) {
       if (s.name === 'pod' || s.name === 'cabin' || s.name === 'glass') {
-        if (!skip(s)) drawRange(stackM, proj, s.first, s.count);
+        if (!skip(s))
+          drawSec(s, stackM, proj);
         continue;
       }
       if (s.name !== LASTST) continue;
@@ -4644,17 +4750,31 @@ function drawWorldMeshes(sc, proj, inCab) {
     bindMeshBuf(rocketBuf);
     for (const s of secDraw)
       if ((s.name === 'pod' || s.name === 'cabin' || s.name === 'glass') && !skip(s))
-        drawRange(podM, proj, s.first, s.count);
-    // parachutes: canopy axis opposite the velocity, scale-in on deploy
-    const drawChute = (buf, n, t0, lineLen) => {
+        drawSec(s, podM, proj);
+    // Parachutes: canopy axis opposite the velocity, scaling in on deploy.
+    //
+    // The canopy's stand-off and the suspension lines' model length used to be
+    // set independently, so the risers ended in mid-air above the capsule and
+    // the chute floated free of the vehicle it was holding up. Place the canopy
+    // from where the lines have to LAND instead: the tips sit at the model's
+    // x = skirt - lineLen, everything scales by `sc`, so putting the canopy at
+    // apex + (lineLen - skirt)*sc lands them on the apex at every stage of the
+    // opening. The pod is anchored with its shield apex at es.pos, which is
+    // what makes the attach point a station on the capsule and not a guess.
+    const pr = podRange();
+    const cs2 = pr ? capStations(pr.x0) : null;
+    // craftM shifts the model by -xb, so a capsule station X lands at
+    // es.pos + bx*(X - xb); the cone top is at xb + xtop, hence xtop exactly.
+    const attach = cs2 ? Math.max(0.4, cs2.xtop) : 2.2;
+    const drawChute = (buf, n, t0, lineLen, R) => {
       if (!isFinite(t0) || simT < t0) return;
-      const s = Math.min(1, (simT - t0)/1.2);
+      const f = Math.min(1, (simT - t0)/1.2), sc = 0.15 + 0.85*f;
       const cx = V.scale(es.vdir, -1), cz = [0,0,1], cyv = V.cross(cz, cx);
-      const cp = V.add(es.pos, V.scale(cx, 2.2 + lineLen*s));
-      drawWhole(buf, n, mBasis(cx, cyv, cz, cp, 0.15 + 0.85*s), proj);
+      const cp = V.add(es.pos, V.scale(cx, attach + (lineLen - 0.27*R)*sc));
+      drawWhole(buf, n, mBasis(cx, cyv, cz, cp, sc), proj);
     };
-    if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2);
-    else drawChute(mainBuf, mainN, tMain, 8.5);
+    if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2, 1.15);
+    else drawChute(mainBuf, mainN, tMain, 8.5, 4.6);
   }
 }
 
@@ -4663,7 +4783,7 @@ function drawScene(sc) {
   const w = cv.clientWidth*dpr | 0, h = cv.clientHeight*dpr | 0;
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   const cam = sc.cam, asp = w/h;
-  const inCab = cam.mode === 'cabin' || cam.mode === 'window';
+  const inCab = cam.mode === 'cabin';
   const sun = sc.sun || SUN;
   const view = mLookAt(cam.eye, cam.look, cam.up);
   // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
@@ -4893,6 +5013,10 @@ function drawHUD(sc, ph) {
     rows.push(['WHEELS', RCS.rate > 3e-4
       ? `${n(d[2])} ${n(d[1])} ${n(d[0])} °/s` : 'READY · WASD QE']);
   }
+  if (CAB.live) {
+    const s = V.len(CAB.v);
+    rows.push(['ZERO G', s > 0.005 ? s.toFixed(2) + ' m/s' : 'SHIFT + WASD QE']);
+  }
   if (perfShow) {
     // FPS is the smoothed live rate; FRAME is the median the scaler last ruled
     // on — they disagree exactly when something just changed, which is the
@@ -4962,7 +5086,7 @@ function jumpTo(t) {
   simT = Math.max(-15, Math.min(t, tEnd - 0.5));
   for (const q of toasts) q.done = simT >= q.t;
   parts.length = 0; debris.length = 0;
-  rcsReset();                        // a hand-flown attitude does not survive a seek
+  rcsReset(); cabReset();            // hand-flown state does not survive a seek
   splashed = simT >= tSplash;
   warpCur = 1;
   ended = false;
@@ -5027,7 +5151,7 @@ function initControls() {
       +s.slice(1).replace('k', '000');
   };
   chipRow($('speed'), sp, 'auto', setSpeed);
-  const inside = () => camMode === 'cabin' || camMode === 'window';
+  const inside = () => camMode === 'cabin';
   cv.addEventListener('pointerdown', e => {
     if (camMode !== 'free' && !inside()) return;
     cv.setPointerCapture(e.pointerId);
@@ -5079,18 +5203,26 @@ function initControls() {
     // Reaction wheels. Held, a key is a torque; released, the wheels spend the
     // same torque nulling the rate they built, so the stack stops where it is
     // instead of tumbling on. X kills rotation outright.
+    // Held with shift inside the cabin the same keys push the CREW instead of
+    // the vehicle — one set of controls for the two things you can move.
     const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
-    if (RCS_KEYS[kk]) { RCS.keys[kk] = true; e.preventDefault(); }
-    if (kk === 'x') { RCS.w = [0, 0, 0]; RCS.rate = 0; }
+    if (RCS_KEYS[kk]) {
+      (e.shiftKey && CAB.live ? CAB : RCS).keys[kk] = true;
+      e.preventDefault();
+    }
+    if (kk === 'x') { RCS.w = [0, 0, 0]; RCS.rate = 0; CAB.v = [0, 0, 0]; }
   });
   window.addEventListener('keyup', e => {
     if ((e.key === 'ArrowRight' && scrubDir === 1) ||
         (e.key === 'ArrowLeft' && scrubDir === -1)) scrubDir = 0;
+    // clear BOTH: shift may have been let go before the key it modified
     const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
-    if (RCS_KEYS[kk]) RCS.keys[kk] = false;
+    if (RCS_KEYS[kk]) { RCS.keys[kk] = false; CAB.keys[kk] = false; }
   });
   // released keys can be missed entirely when the window loses focus mid-hold
-  window.addEventListener('blur', () => { scrubDir = 0; RCS.keys = {}; });
+  window.addEventListener('blur', () => {
+    scrubDir = 0; RCS.keys = {}; CAB.keys = {};
+  });
 }
 
 function showEndCard() {
@@ -5399,6 +5531,10 @@ window.__selftest = function () {
   eq('a single particle still sits at the nozzle', () =>
      emitted(1, 1/30, [0,0,0])[0].p[0], 0);
   eq('and the emitted count is untouched', () => emitted(9, 1/30, [0,0,0]).length, 9);
+  // a clock that steps backwards must not walk the bell index off its array
+  eq('the round-robin never indexes below zero', () => rrIdx(-1, 6), 5);
+  eq('nor past the end', () => rrIdx(13, 6), 1);
+  eq('and survives an empty emitter list', () => rrIdx(-3, 0), 0);
 
   // --- strap-on separation. A set is one mesh section but N bodies, and each
   // has to leave along its own radius rather than the whole raft drifting off
@@ -5487,7 +5623,7 @@ window.__pumpFrames = function (n, dtMs) {
 // it together with earthPct, which is the ground truth.
 window.__cameraAudit = function (times, modes) {
   const TS = times || [562261, 567300];
-  const MS = modes || ['auto','wide','chase','onboard','cabin','window','free'];
+  const MS = modes || ['auto','wide','chase','onboard','cabin','free'];
   // camMode/simT/running are the obvious three, and they are not enough:
   // buildScene ALSO advances state, so an audit does not merely read the page,
   // it moves it. The pad cameras step their tilt-lag filter (CS.ly toward

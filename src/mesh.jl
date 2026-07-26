@@ -539,6 +539,67 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
         push!(cab, _arc_slab(x2r, x3r, 0.68rin(x3r), 0.96rin(x3r),
                              a0 + 0.08, a1 - 0.08; nseg = 8))
     end
+
+    # --- fit-out ------------------------------------------------------------
+    # Wall lining, in two bands that deliberately stop short of the glazing:
+    # the panes sit on cone cells 5-7, so a liner from the deck to 0.32 Lc and
+    # another from 0.60 Lc upward leaves every viewport clear while giving the
+    # pressure shell an inside face of its own. Without it the cabin is read
+    # through the back of the outer cone, which is why it looked like a tent.
+    xw0, xw1 = xb0 + 0.32Lc, xb0 + 0.60Lc
+    for (xa_, xb_) in ((xfl + 0.05rp, xw0), (xw1, xtop - 0.10rp))
+        # the profile has to CLOSE — lathe_mesh sweeps a loop, and an open one
+        # is a surface with a seam, not a solid: its signed volume is garbage
+        ro, ri = 0.985rin(xb_), 0.945rin(xb_)
+        push!(cab, lathe_mesh(Tuple{Float64,Float64}[
+            (xa_, ro), (xa_, ri), (xb_, ri), (xb_, ro), (xa_, ro)]; nseg = nc))
+    end
+    # Handrails. A crew member in zero g moves by pulling on these, so they run
+    # the full height of the cabin and stand proud of the wall by a hand's
+    # width. Placed on the rolls between the viewports, the side hatch and the
+    # equipment racks, which is the only clear real estate there is.
+    for a in (deg2rad(34.0), deg2rad(90.0), deg2rad(270.0), deg2rad(326.0))
+        for (x0h, x1h) in ((xa + 0.05rp, xw0 - 0.03rp), (xw1 + 0.03rp, xtop - 0.14rp))
+            # size every radius off the NARROW end: the wall tapers along the
+            # rail, so a radius taken at the middle punches out through the top
+            rr = 0.88rin(x1h)
+            push!(cab, _place_mesh(box_mesh((x0h, rr - 0.018rp, -0.018rp),
+                                            (x1h, rr + 0.018rp, 0.018rp));
+                                   roll = a))
+            for xs in (x0h, x1h)                       # stand-offs to the wall
+                push!(cab, _place_mesh(box_mesh((xs - 0.014rp, rr, -0.012rp),
+                                                (xs + 0.014rp, 0.96rin(xs + 0.02rp),
+                                                 0.012rp));
+                                       roll = a))
+            end
+        end
+    end
+    # Overhead stowage: lockers ringing the upper cone where it narrows toward
+    # the tunnel, with a recessed door face so they read as lockers and not as
+    # a band of wall.
+    for a0 in (deg2rad(6.0), deg2rad(78.0), deg2rad(150.0), deg2rad(222.0),
+               deg2rad(294.0))
+        a1 = a0 + deg2rad(56.0)
+        xl0, xl1 = xtop - 0.36rp, xtop - 0.13rp
+        push!(cab, _arc_slab(xl0, xl1, 0.70rin(xl1), 0.96rin(xl1), a0, a1; nseg = 7))
+        push!(cab, _arc_slab(xl0 - 0.018rp, xl0, 0.74rin(xl1), 0.92rin(xl1),
+                             a0 + 0.05, a1 - 0.05; nseg = 6))
+    end
+    # Inner hatch surround on the wall the outside hatch is cut into, and a
+    # grab loop over the tunnel where the crew pull themselves through.
+    let ah = pi, dh = deg2rad(38.0), xh0 = xb0 + 0.26Lc, xh1 = xb0 + 0.72Lc
+        push!(cab, _arc_slab(xh0, xh1, 0.93rin(xh1), 0.985rin(xh1),
+                             ah - dh, ah - dh + 0.09; nseg = 3))
+        push!(cab, _arc_slab(xh0, xh1, 0.93rin(xh1), 0.985rin(xh1),
+                             ah + dh - 0.09, ah + dh; nseg = 3))
+    end
+    # the tunnel mouth necks the wall down to 0.21 rp, so the loops live well
+    # inside that or they come out through the forward bulkhead
+    for a in (0.0, 0.5pi, 1.0pi, 1.5pi)
+        push!(cab, _place_mesh(box_mesh((xtop - 0.10rp, 0.105rp, -0.016rp),
+                                        (xtop - 0.02rp, 0.180rp, 0.016rp));
+                               roll = a))
+    end
     (ext, glass, cab, hgt)
 end
 
