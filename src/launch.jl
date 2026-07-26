@@ -439,7 +439,11 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
 
     nst = length(lv.stages)
     prop_left = [s.mprop for s in lv.stages]
-    ctx = AscentCtx(1, :vertical, 0.0, NaN, NaN, true, true, length(lv.boosters))
+    # A stack with no fairing has nothing to jettison, and arming the jettison
+    # anyway meant a bare vehicle still announced a FAIRING JETTISON at 120 km
+    # and dropped zero kilograms doing it.
+    ctx = AscentCtx(1, :vertical, 0.0, NaN, NaN, lv.fairing_mass > 0, true,
+                    length(lv.boosters))
     events = AscentEvent[]
     L = AscentLog()
     r_site0 = r0

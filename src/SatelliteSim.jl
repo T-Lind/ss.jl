@@ -112,6 +112,7 @@ export
     frontal_area, core_diameter, pad_thrust,
     stage_burn_time, stage_dv, liftoff_mass, stack_mass_above,
     stage_volume, stage_diameter,
+    LV_CD_TABLE, LV_CD_BARE_DELTA, bare_payload_cd, stack_sref,
     # moon
     MU_MOON, R_MOON, A_MOON, N_MOON,
     CircularMoonEphemeris, coplanar_moon, moon_position, moon_velocity,

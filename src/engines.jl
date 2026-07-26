@@ -137,6 +137,20 @@ const ENGINES = Dict{Symbol,Engine}(
     :aj10          => engine(:aj10;          prop = :hypergolic,
                              thrust_vac_kn = 26.7, isp_vac = 316.0,
                              mass = 118.0, throttle_min = 1.0),
+    # The Apollo pair. Neither throttles: the F-1 ran wide open and the S-IC
+    # limited its acceleration by shutting the centre engine down early, and the
+    # J-2 had two mixture-ratio settings rather than a throttle. `throttle_min =
+    # 1` is the honest way to say a fixed engine, and it is what the aj10 and
+    # the RL10B-2 already say.
+    :f1            => engine(:f1;            prop = :kerolox,
+                             thrust_vac_kn = 7770.0, isp_vac = 304.0,
+                             isp_sl = 263.0, mass = 8400.0, throttle_min = 1.0),
+    # Vacuum-only, by this catalogue's convention (isp_sl = 0 means no pressure
+    # correction): the J-2 first lit above 60 km on the S-II and in orbit on the
+    # S-IVB, and it never saw sea-level backpressure in flight.
+    :j2            => engine(:j2;            prop = :hydrolox,
+                             thrust_vac_kn = 1033.1, isp_vac = 421.0,
+                             mass = 1788.0, throttle_min = 1.0),
 )
 
 lookup_engine(name::Symbol) = get(ENGINES, name) do

@@ -85,15 +85,22 @@ function load_mission(path::AbstractString)
         d = _getf(vd, "diameter_m", 1.8)
         stages = [_stage_from(s, d) for s in get(vd, "stage", Any[])]
         isempty(stages) && error("[vehicle] block needs at least one [[vehicle.stage]]")
+        # `fairing = false` flies the spacecraft in the open, the way a crewed
+        # stack usually does: no shroud mass, a blunt nose in the wave drag, and
+        # the capsule itself setting the reference area if it is the widest
+        # thing on the vehicle. Defaults true, so an existing spec is unchanged.
+        fair = Bool(get(vd, "fairing", true))
+        pod_d = 2 * pod_radius(pod)
+        sref = stack_sref((stage_diameter(s, d) for s in stages), pod_d, fair)
         LaunchVehicle(
             name = String(get(vd, "name", "vehicle")),
             stages = stages,
-            fairing_mass = _getf(vd, "fairing_kg", 150.0),
+            fairing_mass = fair ? _getf(vd, "fairing_kg", 150.0) : 0.0,
             payload_mass = pod,
             # drag acts on the widest cross-section in the stack; strap-ons
             # add their own on top while they are attached
-            sref = pi * (maximum(stage_diameter(s, d) for s in stages) / 2)^2,
-            cd = LV_CD_TABLE,
+            sref = sref,
+            cd = fair ? LV_CD_TABLE : bare_payload_cd(pod_d, sref),
             boosters = [_booster_from(b, d) for b in get(vd, "booster", Any[])],
         )
     end

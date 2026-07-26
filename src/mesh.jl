@@ -1023,6 +1023,7 @@ function rocket_mesh(; diameter::Float64 = 1.8,
                      boosters::Vector = NamedTuple[],
                      payload_mass::Float64 = 350.0,
                      fairing_len::Float64 = 2.2 * last(diameters),
+                     fairing::Bool = true,
                      nseg::Int = 48)
     length(prop_masses) == length(densities) ||
         throw(ArgumentError("prop_masses and densities length mismatch"))
@@ -1132,6 +1133,14 @@ function rocket_mesh(; diameter::Float64 = 1.8,
     place!(:glass, pglass)
     place!(:cabin, pcab)
     #= fairing follows =#
+    # Unless there isn't one. A crewed stack routinely flies its spacecraft in
+    # the open — Apollo under an escape tower, Dragon and Starliner on the nose,
+    # a Starship whose payload is the ship — and for those the shroud is not a
+    # part that happens to weigh nothing, it is a part that is not there. Every
+    # section below is emitted the same either way, so a viewer that culls by
+    # name simply never sees a `:fairing`, and `sections` stays sorted by x0
+    # because this is the only thing that would have gone here.
+    if fairing
     # fairing: closed shell — cylindrical shoulder, power-law ogive, eased tip.
     # It has to ENCLOSE the capsule rather than merely match the stage: a pod
     # sized by its mass can be wider than the barrel it sits on, and a shroud
@@ -1150,6 +1159,7 @@ function rocket_mesh(; diameter::Float64 = 1.8,
     push!(prof, (x0f + 0.985 * flen, 0.055rF))
     push!(prof, (x0f + flen, 0.0))
     finish!(:fairing, x0f, x0f + flen, TriMesh[lathe_mesh(prof; nseg = nseg)])
+    end
 
     # --- strap-on boosters ------------------------------------------------
     # Clustered around the first stage, standing on the same plane, each a
@@ -1193,6 +1203,9 @@ needs a three-times longer tank — the vehicle visibly grows.
 rocket_mesh(lv::LaunchVehicle; diameter::Float64 = 2 * sqrt(lv.sref / pi),
             kwargs...) =
     rocket_mesh(; diameter = diameter, payload_mass = lv.payload_mass,
+                # a vehicle that carries no fairing mass carries no fairing;
+                # the two would be a contradiction to let drift apart
+                fairing = lv.fairing_mass > 0,
                 prop_masses = [s.mprop for s in lv.stages],
                 densities = [bulk_density(s.prop) for s in lv.stages],
                 n_engines = [s.n_engines for s in lv.stages],

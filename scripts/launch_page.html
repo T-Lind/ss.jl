@@ -1336,6 +1336,7 @@ let SEPS = [], NST = 0, LASTST = null, dropT = {};
 // Burnout and separation are different instants — a set with a sep_delay is
 // carried as dead weight in between — and the flame belongs to the first.
 let BNAMES = [], BSEP = [], BIGN = [], BOUT = [];
+let tLOI = NaN, tDOI = NaN, tPDI = NaN;
 let tTLI = NaN, tCut = NaN, tPeri = NaN, tHand = NaN, tEI = NaN, tDrog = NaN,
     tMain = NaN, tSplash = NaN, tEnd = 0;
 let PH = [];   // phase table
@@ -1413,6 +1414,12 @@ function buildData() {
     if (isFinite(EV[nm + '_ignition']))
       BURNW.push([EV[nm + '_ignition'], EV[nm + '_cutoff'] ?? EV[nm + '_ignition'] + 60]);
   tPeri = EV.perilune ?? NaN;
+  // A landing mission's lunar arrival is a BURN, not a flyby: it has no
+  // perilune event because it never coasts past the Moon. Its own three are
+  // what break the coast up — without them the whole seventy-one hours from
+  // TLI cutoff to powered descent was a single phase called LUNAR ORBIT, which
+  // is wrong for about sixty-nine of them.
+  tLOI = EV.loi ?? NaN; tDOI = EV.doi ?? NaN; tPDI = EV.pdi ?? NaN;
   tHand = EV.entry_handoff ?? (hasCis ? C.t[C.t.length-1] : NaN);
   tEI = EV.entry_interface ?? NaN;
   // the first of several deploys is the drogue, the last is the main; a lone
@@ -1558,7 +1565,20 @@ function buildData() {
       add('TRANSLUNAR', tPeri - win, 'eci', { pace: 26 });
       add('FLYBY', tPeri + win, 'eci', { pace: 45 });
     }
-    if (MS) add('LUNAR ORBIT', MS.t_pdi - 25, 'eci', { pace: 12 });
+    if (MS) {
+      // A landing arrives under power, so its coast is bounded by burns rather
+      // than by a closest approach: cruise out to the braking burn, then the
+      // hours in lunar orbit that set up the descent, then the descent itself.
+      // Every one of these is guarded, so a run that is missing an event gets
+      // one fewer phase rather than a phase running to NaN.
+      const loiLead = isFinite(tLOI) ? tLOI - 900 : NaN;
+      add('TRANSLUNAR', isFinite(loiLead) ? loiLead : MS.t_pdi - 25, 'eci',
+          { pace: 26 });
+      // DOI is a small burn most of a revolution before PDI; naming the leg
+      // after it is what tells you the low pass is deliberate and not a decay.
+      if (isFinite(tDOI)) add('LUNAR ORBIT', tDOI + 60, 'eci', { pace: 14 });
+      add('DESCENT ORBIT', MS.t_pdi - 25, 'eci', { pace: 10 });
+    }
     else add('RETURN', hasEnt && isFinite(tEI) ? Math.min(tEI - 20, cisEnd) : cisEnd,
              'eci', { pace: 26 });
   }
@@ -3155,6 +3175,12 @@ function buildStatics() {
   cloudBuf = buffer(new Float32Array(c));
 
   // parachutes: gored canopies (alternating panels) + suspension lines
+  //
+  // The model runs along +x: the skirt (radius R) sits at x = 0, the crown at
+  // x = 0.96R, and the eight suspension lines run from the skirt band at
+  // x = 0.27R down to a single convergence ON THE AXIS at x = -lineLen. That
+  // convergence is the riser confluence — the point that has to end up on the
+  // capsule's apex, because it is the only part of the chute that touches it.
   const mkChute = (R, cols, lines) => {
     const out = [];
     lathe(out, [[R*1.00, 0.001], [R*0.93, R*0.42], [R*0.72, R*0.80],
@@ -3167,11 +3193,27 @@ function buildStatics() {
     }
     return out;
   };
+  // (the chute's own placement rule lives beside the mesh that fixes it — see
+  // chuteStandoff)
   const dg = mkChute(1.15, [[0.80,0.79,0.75],[0.45,0.44,0.42]], 3.2);
   drogueBuf = buffer(new Float32Array(dg)); drogueN = dg.length/VST;
   const mn = mkChute(4.6, [[0.92,0.44,0.14],[0.94,0.93,0.90]], 8.5);
   mainBuf = buffer(new Float32Array(mn)); mainN = mn.length/VST;
 }
+
+// Where a chute's ORIGIN has to sit for its risers to land on the capsule.
+// The whole chute scales about that origin by `sc` as it opens, so the
+// confluence — model x = -lineLen — ends up at origin - lineLen*sc, and the
+// origin therefore has to be exactly that far beyond the attach station at
+// every stage of the opening.
+//
+// This used to subtract 0.27R instead, which is the distance to the wrong END
+// of the suspension line: the line's UPPER end is at x = +0.27R and its lower
+// end is the confluence. On the 4.6 m main that put the confluence 1.24 m
+// BELOW the apex it hangs from — which on a capsule this size is below the
+// heat shield, so the risers ran down through the hull and met in a spike
+// underneath the vehicle they were supposed to be holding up.
+function chuteStandoff(attach, lineLen, sc) { return attach + lineLen*sc; }
 
 const quadBuf = () => buffer(new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]));
 let skyBuf, partDyn;
@@ -5891,15 +5933,8 @@ function drawWorldMeshes(sc, proj, inCab) {
       if ((s.name === 'pod' || s.name === 'cabin' || s.name === 'glass') && !skip(s))
         drawSec(s, podM, proj);
     // Parachutes: canopy axis opposite the velocity, scaling in on deploy.
-    //
-    // The canopy's stand-off and the suspension lines' model length used to be
-    // set independently, so the risers ended in mid-air above the capsule and
-    // the chute floated free of the vehicle it was holding up. Place the canopy
-    // from where the lines have to LAND instead: the tips sit at the model's
-    // x = skirt - lineLen, everything scales by `sc`, so putting the canopy at
-    // apex + (lineLen - skirt)*sc lands them on the apex at every stage of the
-    // opening. The pod is anchored with its shield apex at es.pos, which is
-    // what makes the attach point a station on the capsule and not a guess.
+    // The pod is anchored with its shield apex at es.pos, which is what makes
+    // the attach point a station on the capsule and not a guess.
     const pr = podRange();
     const cs2 = pr ? capStations(pr.x0) : null;
     // craftM shifts the model by -xb, so a capsule station X lands at
@@ -5909,7 +5944,7 @@ function drawWorldMeshes(sc, proj, inCab) {
       if (!isFinite(t0) || simT < t0) return;
       const f = Math.min(1, (simT - t0)/1.2), sc = 0.15 + 0.85*f;
       const cx = V.scale(es.vdir, -1), cz = [0,0,1], cyv = V.cross(cz, cx);
-      const cp = V.add(es.pos, V.scale(cx, attach + (lineLen - 0.27*R)*sc));
+      const cp = V.add(es.pos, V.scale(cx, chuteStandoff(attach, lineLen, sc)));
       drawWhole(buf, n, mBasis(cx, cyv, cz, cp, sc), proj);
     };
     if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2, 1.15);
@@ -6125,12 +6160,41 @@ function cabScreenInit() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 }
 // the quads, in vehicle model space, sitting just proud of each recessed face
+// A display bay's own frame, in the capsule's coordinates: where the panel
+// sits, how big it is, and how a point on its CANVAS lands in the world.
+//
+// One function, and that is the point of it. The quad builder below, the soft
+// keys' pick volumes and the painter that draws their labels all ask this — so
+// a key you press is under the label you read by CONSTRUCTION, rather than by
+// three sets of numbers being kept in agreement by hand. The three limits on
+// the inscribed rectangle are the bay's: its bottom edge inside the opening's
+// inner radius, its bottom corners inside the roll span (the sector is
+// narrowest there), its top corners inside the outer radius; then trimmed to
+// the canvas aspect so nothing is stretched.
+function scrFrame(K, k) {
+  const rcin = K.rcone(K.xcon) - 0.05*K.rp;
+  const b = SCR_BAYS[k];
+  const a0 = b[0]*Math.PI/180 + 0.030, a1 = b[1]*Math.PI/180 - 0.030;
+  const ac = (a0 + a1)/2, half = (a1 - a0)/2;
+  const r0 = 0.485*rcin, r1 = 0.755*rcin, rc = (r0 + r1)/2;
+  let H = rc - r0 - 0.014*rcin;
+  let S = Math.min((rc - H)*Math.tan(half),
+                   Math.sqrt(Math.max(r1*r1 - (rc + H)*(rc + H), 0)));
+  if (S/H > SCR_W/SCR_H) S = H*SCR_W/SCR_H; else H = S*SCR_H/SCR_W;
+  const up = [0, Math.cos(ac), Math.sin(ac)];        // radial at the bay centre
+  const rt = [0, -Math.sin(ac), Math.cos(ac)];       // and along the arc
+  const x = K.xb + K.xcon - 0.031*K.rp;        // a hair in front of the recess
+  // canvas (u, v), both 0..1 with v down, to a model-space point
+  const at = (u, v) => {
+    const t = rc + (0.5 - v)*2*H, s = (u - 0.5)*2*S;
+    return [x, t*up[1] + s*rt[1], t*up[2] + s*rt[2]];
+  };
+  return { x, rc, S, H, up, rt, at };
+}
 function cabScreenBuild() {
   const pr = podRange();
   if (!pr) return;
   const K = capStations(pr.x0);
-  const rcin = K.rcone(K.xcon) - 0.05*K.rp;
-  const x = K.xb + K.xcon - 0.031*K.rp;        // a hair in front of the recess
   const out = [];
   // A FLAT panel per bay, not a curved one.
   //
@@ -6146,25 +6210,13 @@ function cabScreenBuild() {
   // outward like the wing panels of a real console. Upright in the CREW's frame
   // is not available: an outboard bay is a slanted band and the largest upright
   // rectangle inside it is a fifth of the area.
-  SCR_BAYS.forEach(([d0, d1], k) => {
-    const a0 = d0*Math.PI/180 + 0.030, a1 = d1*Math.PI/180 - 0.030;
-    const ac = (a0 + a1)/2, half = (a1 - a0)/2;
-    const r0 = 0.485*rcin, r1 = 0.755*rcin, rc = (r0 + r1)/2;
-    // The three limits on an inscribed rectangle: its bottom edge must stay
-    // inside the opening's inner radius, its bottom corners inside the roll
-    // span (the sector is narrowest there), and its top corners inside the
-    // outer radius. Then trim to the canvas aspect so nothing is stretched.
-    let H = rc - r0 - 0.014*rcin;
-    let S = Math.min((rc - H)*Math.tan(half),
-                     Math.sqrt(Math.max(r1*r1 - (rc + H)*(rc + H), 0)));
-    if (S/H > SCR_W/SCR_H) S = H*SCR_W/SCR_H; else H = S*SCR_H/SCR_W;
-    const up = [0, Math.cos(ac), Math.sin(ac)];        // radial at the bay centre
-    const rt = [0, -Math.sin(ac), Math.cos(ac)];       // and along the arc
-    const P = (s, t) => [x, rc*up[1] + t*up[1] + s*rt[1],
-                            rc*up[2] + t*up[2] + s*rt[2]];
+  SCR_BAYS.forEach((_, k) => {
+    const F = scrFrame(K, k);
     const u0 = k/3, u1 = (k + 1)/3;
-    const v = [[P(-S, -H), u0, 1], [P(S, -H), u1, 1],
-               [P(S, H), u1, 0], [P(-S, H), u0, 0]];
+    // corners in the frame's own canvas coordinates, so the quad and the pick
+    // volumes cannot disagree about where the panel is
+    const v = [[F.at(0, 1), u0, 1], [F.at(1, 1), u1, 1],
+               [F.at(1, 0), u1, 0], [F.at(0, 0), u0, 0]];
     for (const t of [[0,1,2],[0,2,3]])
       for (const j of t)
         out.push(v[j][0][0], v[j][0][1], v[j][0][2],
@@ -7302,6 +7354,29 @@ window.__selftest = function () {
     return back;
   }, 0);
 
+  // --- the parachutes hang FROM the capsule. The confluence is the lowest
+  // point on the whole chute, so the invariant is one number: at every stage of
+  // the opening and for both canopies, nothing the chute draws reaches below
+  // the station it is attached to. Broken, it does not look like a chute a
+  // little out of place — the risers go through the hull and meet in a spike
+  // under the heat shield, which is what the 0.27R term produced.
+  eq('nothing on a chute reaches below the apex it hangs from', () => {
+    const apex = 2.0;
+    let low = Infinity;
+    for (const [L, R] of [[3.2, 1.15], [8.5, 4.6]])
+      for (const sc of [0.15, 0.3, 0.6, 1.0])
+        low = Math.min(low, chuteStandoff(apex, L, sc) - L*sc - apex);
+    return low;
+  }, 0, 1e-12);
+  eq('and the confluence sits ON it, at every stage of the opening', () => {
+    let worst = 0;
+    for (const sc of [0.15, 0.5, 1.0])
+      worst = Math.max(worst, Math.abs(chuteStandoff(1.9, 8.5, sc) - 8.5*sc - 1.9));
+    return worst;
+  }, 0, 1e-12);
+  eq('a fuller canopy stands further off, never closer',
+     () => chuteStandoff(2, 8.5, 1.0) > chuteStandoff(2, 8.5, 0.15), true);
+
   // --- the coast camera holds still. It used to advance its own yaw by a fixed
   // step every FRAME, which makes the rate a function of the frame time: the
   // same coast turned at one speed while the background scaler was happy and
@@ -7618,9 +7693,51 @@ window.__selftest = function () {
   // upright. These pin both halves of that.
   const fwdOf = p => V.norm(V.sub(p.look, p.eye));
   const SEAT = cabinPose('seat', 0, CK);
-  eq('the seat looks up the axis at the console', () => fwdOf(SEAT)[0] > 0.80, true);
-  eq('so the console face is near square on to it', () =>
-     Math.acos(Math.abs(V.dot(fwdOf(SEAT), [-1,0,0])))*180/Math.PI < 32, true);
+  // These two used to read "the seat looks up the axis at the console", which
+  // is a property of a couch ON the axis and not of a couch. The reference
+  // vehicle carries one crew member, so the centre couch was the only one ever
+  // measured, and both assertions failed the first time a three-crew capsule
+  // was flown through them — on geometry that had been like that all along.
+  //
+  // What is actually true is per-couch: each aims at ITS OWN bay. The incidence
+  // that leaves is a RATIO, not a size — the couch offset and the console
+  // stand-off both scale with rp — so an outboard station reads its screen at
+  // the same 42 degrees in a 1.5 m capsule and in a 6 m one. That is oblique
+  // and it is the honest number: square-on for three abreast would need the
+  // bays moved out to the rolls the couches actually sit at, which is a console
+  // redesign rather than a constant, and every cap, placard and legend on that
+  // face is keyed to where the bays are now.
+  const CAP_SIZES = [0.75, 0.95, 1.10, 1.40, 1.95, 3.0];
+  const eachCouch = fn => {
+    for (const rp of CAP_SIZES) {
+      const K = capStations(0, rp);
+      for (let i = 0; i < cabCrew(K); i++) {
+        const bad = fn(K, i, rp);
+        if (bad) return bad;
+      }
+    }
+    return 'ok';
+  };
+  eq('every couch aims at its own screen bay, at every capsule size', () =>
+     eachCouch((K, i, rp) => {
+       const p = cabinPose('seat', i, K), b = SCR_BAYS[cabSeatBay(K, i)];
+       const roll = Math.atan2(p.look[2], p.look[1])*180/Math.PI;
+       return (roll >= b[0] - 1e-6 && roll <= b[1] + 1e-6) ? null
+              : `rp ${rp} couch ${i} aims at ${roll.toFixed(1)} deg`;
+     }), 'ok');
+  eq('and reads it at an angle a screen survives', () =>
+     eachCouch((K, i, rp) => {
+       const a = Math.acos(Math.abs(V.dot(fwdOf(cabinPose('seat', i, K)),
+                                          [-1,0,0])))*180/Math.PI;
+       return a < 45 ? null : `rp ${rp} couch ${i} at ${a.toFixed(1)} deg`;
+     }), 'ok');
+  // and the commander's couch, which IS on the axis, still meets the original
+  // standard — that is the one this cabin was designed around
+  eq('the commander is on the axis and square on to the console', () => {
+    const K = capStations(0, 1.40), f = fwdOf(cabinPose('seat', cabSeatHome(K), K));
+    return f[0] > 0.80 &&
+           Math.acos(Math.abs(V.dot(f, [-1,0,0])))*180/Math.PI < 32;
+  }, true);
   // the screen band is the +y sector of the annulus, so +y is the direction its
   // writing runs up in; a seat whose up is anything else reads it on the skew
   eq('and the seat is the right way up to the screens', () =>

@@ -252,17 +252,26 @@ function lv_from_params(p)
                           thrust_kn = d.thrust * f, isp = d.isp, ae = d.ae * f,
                           ptype = d.ptype, nedef = d.ne)
     end
+    # Whether the stack carries a payload shroud at all. Off, the spacecraft
+    # flies in the open the way Apollo, Dragon and Starship do — which is three
+    # separate consequences and not one: no mass to carry or drop, no ogive on
+    # the nose (so a blunt capsule sets the wave drag), and if the capsule is
+    # wider than anything under it, it is what the flow sees.
+    fair = getb(p, "fairing_on", true)
+    pod = getf(p, "pod_mass", 350.0)
+    pod_d = 2 * pod_radius(pod)
+    sref = stack_sref((stage_diameter(s, dia) for s in stages), pod_d, fair)
     LaunchVehicle(
         # the page sends the name of whatever preset is loaded, so the livery
         # and the launch view say what you are actually flying
         name = gets(p, "vname", "Sable (panel)"),
         stages = stages,
-        fairing_mass = getf(p, "fairing", 150.0),
-        payload_mass = getf(p, "pod_mass", 350.0),
+        fairing_mass = fair ? getf(p, "fairing", 150.0) : 0.0,
+        payload_mass = pod,
         # drag acts on the widest cross-section in the stack; strap-ons add
         # their own frontal area on top, but only while they are attached
-        sref = pi * (maximum(stage_diameter(s, dia) for s in stages) / 2)^2,
-        cd = SatelliteSim.LV_CD_TABLE,
+        sref = sref,
+        cd = fair ? SatelliteSim.LV_CD_TABLE : bare_payload_cd(pod_d, sref),
         boosters = boosters_from_params(p, dia),
     )
 end
@@ -804,9 +813,27 @@ function panel_mission(p)::Dict{String,Any}
         # TLI still "flies", but the result is not the requested mission)
         hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3
         hp_ret = getf(p, "hp_return_km", 50.0) * 1e3
-        metrics["on_target"] = ent !== nothing &&
-            abs(cis.perilune_alt - hp_moon) <= max(0.05 * hp_moon, 50e3) &&
-            abs(cis.vac_perigee_alt - hp_ret) <= 20e3
+        # The perilune band scales with the target and its floor is 300 m, not
+        # 50 km: a flat 50 km band passes anything from the surface to a
+        # hundred times a 500 m target, which is not a check, it is a rubber
+        # stamp. 8% is comfortably outside the designer's own 2% acceptance, so
+        # a converged design is never reported off target by rounding.
+        # A grazing flyby is a DIFFERENT MISSION and is judged as one. Below
+        # about 10 km no free return comes home — the Moon turns the trajectory
+        # so hard that the return leg's perigee is underground — so the designer
+        # stops shooting at it and flies the flyby instead. Scoring that against
+        # a return corridor it deliberately gave up would report every grazing
+        # pass as a failure. Everything else is scored on both ends as before.
+        graze = hp_moon < 10e3
+        peri_ok = abs(cis.perilune_alt - hp_moon) <= max(0.08 * hp_moon, 300.0)
+        metrics["on_target"] = graze ? peri_ok :
+            (ent !== nothing && peri_ok &&
+             abs(cis.vac_perigee_alt - hp_ret) <= 20e3)
+        # `grazing` also says the altitude is above the MEAN SPHERE, which below
+        # 10 km stops being the same question as "above the ground": lunar
+        # relief runs to roughly +/- 8 km, so this is a clearance against a
+        # smooth Moon and the real one has mountains in it.
+        metrics["grazing"] = graze
         push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
         push!(events, Dict("phase" => "cislunar", "name" => "tli_cutoff",
                            "t" => cis.t_tli + cis.burn_duration))

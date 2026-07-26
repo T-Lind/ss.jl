@@ -167,6 +167,62 @@ const LV_CD_TABLE = Table1D(
 )
 
 """
+Drag INCREMENT for flying with the payload exposed instead of inside a shroud,
+on the same Mach abscissa as `LV_CD_TABLE`.
+
+A fairing is an ogive: a sharp nose that puts an oblique shock on the flow. A
+crew capsule is the opposite of that on purpose — a spherical cap on a 32.5
+degree afterbody, shaped to stand a detached bow shock off itself during entry.
+Flown nose-first up through the atmosphere, that same bluntness is pure wave
+drag, and it costs most exactly where wave drag peaks: through the transonic
+and the first stretch of supersonic. Above about Mach 4 the two noses converge,
+because by then the whole stack is a slender body and its base and skin
+friction dominate whatever is on the front of it.
+
+These are increments on the coefficient, not a coefficient: the payload is
+usually narrower than the core it sits on, so it only owns the part of the
+frontal area it actually presents. See [`bare_payload_cd`].
+"""
+const LV_CD_BARE_DELTA = Table1D(
+    [0.0, 0.6, 0.9, 1.05, 1.2, 1.6, 2.5, 4.0, 6.0, 10.0, 25.0],
+    [0.06, 0.09, 0.22, 0.34, 0.32, 0.24, 0.16, 0.11, 0.09, 0.08, 0.07],
+)
+
+"""
+    bare_payload_cd(pod_diameter, sref; base=LV_CD_TABLE) -> Table1D
+
+`base` with the blunt-nose increment of `LV_CD_BARE_DELTA` weighted by the
+fraction of `sref` the exposed payload presents. A 1.5 m capsule on a 10 m core
+is 2% of the frontal area and changes essentially nothing; an Apollo command
+module on an S-IVB is a third of it and changes the ascent; a payload as wide
+as the stack owns the whole increment.
+
+The weight is an AREA ratio and not a diameter ratio because drag is a force on
+an area, and using the diameter would trip a 1.5 m capsule on a 10 m core into
+a 15% drag rise it has no way to cause.
+"""
+function bare_payload_cd(pod_diameter::Real, sref::Real; base::Table1D = LV_CD_TABLE)
+    dref = 2 * sqrt(max(float(sref), 1e-9) / pi)
+    frac = clamp((float(pod_diameter) / dref)^2, 0.0, 1.0)
+    Table1D(base.x, base.y .+ frac .* LV_CD_BARE_DELTA.y)
+end
+
+"""
+    stack_sref(stage_diameters, pod_diameter, fairing) -> Float64
+
+Reference area [m^2] for a stack. With a fairing the shroud is sized around the
+payload and tucks inside the stack's own envelope, so the widest stage sets it.
+Without one the payload is out in the wind on its own, and if it is wider than
+anything under it — a capsule on a narrow kick stage — then IT is the widest
+cross-section and the one the flow sees.
+"""
+function stack_sref(stage_diameters, pod_diameter::Real, fairing::Bool)
+    d = maximum(stage_diameters)
+    fairing || (d = max(d, float(pod_diameter)))
+    pi * (d / 2)^2
+end
+
+"""
     starship_expendable(; payload = 12500.0)
 
 A Starship-class two-stage methalox vehicle, flown expendably: a 9 m core

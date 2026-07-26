@@ -108,7 +108,14 @@
         <div><label for="diameter">core diameter [m]</label><input id="diameter" value="1.8"></div>
       </div>
       <div class="row">
-        <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
+        <div><label for="fairing" title="off flies the spacecraft in the open, the
+             way Apollo, Dragon and Starship do: no shroud mass to carry or drop,
+             and a blunt capsule on the nose instead of an ogive — which costs
+             drag through the transonic in proportion to how much of the stack's
+             frontal area the capsule actually is">fairing
+          <input type="checkbox" id="fairing_on" checked
+                 style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label>
+          <input id="fairing" value="150"></div>
         <div><label for="pod_mass" title="the crew capsule IS the payload — this
              mass is what re-enters, and it sets how big the capsule is drawn">
           payload / capsule [kg]</label><input id="pod_mass" value="350"></div>
@@ -434,6 +441,7 @@ function params() {
   u.set('nboost', nBoost());
   for (const id of ['diameter', 'fairing', 'pod_mass', 'kick_deg']) u.set(id, $(id).value);
   u.set('opt_kick', $('opt_kick').checked ? '1' : '0');
+  u.set('fairing_on', $('fairing_on').checked ? '1' : '0');
   const fields = [];
   for (let k = 1; k <= NSTAGES; k++) fields.push(...STAGE_FIELDS.map(f => `s${k}_${f}`));
   if (nBoost()) fields.push(...BOOST_FIELDS.map(f => `b_${f}`));
@@ -446,7 +454,7 @@ function params() {
 // the keys this page owns; everything else in an inbound query is mission
 // state that passes through untouched
 const own = k => k === 'nstages' || k === 'nboost' || k === 'vname' ||
-  k === 'diameter' || k === 'fairing' || k === 'pod_mass' ||
+  k === 'diameter' || k === 'fairing' || k === 'fairing_on' || k === 'pod_mass' ||
   k === 'kick_deg' || k === 'opt_kick' || /^s\d+_/.test(k) || /^b_/.test(k);
 // The wire to mission control: every good edit lands in localStorage, and
 // the panel (in any other tab) applies it on its storage event — so the
@@ -752,9 +760,29 @@ const VEHICLES = {
     s3_engine: 'aj10', s3_engines: 1, s3_prop: 2200, s3_dry_auto: true,
       s3_diameter: 2.4,
   },
+  // The one vehicle in here that was actually built to land on the Moon, at
+  // its real masses: a 2,077 t S-IC on five F-1s, a 451 t S-II on five J-2s,
+  // and a 107 t S-IVB on one — which is the stage that does TLI, so it is the
+  // kick stage. Dry masses are given rather than estimated: the conceptual
+  // sizing curve is calibrated around a Falcon-class first stage and a 2,000 t
+  // one is two orders of magnitude outside it.
+  //
+  // No fairing. Apollo flew its spacecraft exposed, under an escape tower,
+  // with the lander in an adapter below it — which is exactly the case the
+  // fairing switch exists for.
+  'Saturn V (Apollo)': {
+    nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 4,
+    opt_kick: true, pod_mass: 45000,
+    s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000,
+      s1_diameter: 10.1,
+    s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000,
+      s2_diameter: 10.1,
+    s3_engine: 'j2', s3_engines: 1, s3_prop: 106600, s3_dry: 13500,
+      s3_diameter: 6.6,
+  },
   'Starship (expendable)': {
-    nstages: 2, nboost: 0, diameter: 9.0, fairing: 0, kick_deg: 5, opt_kick: true,
-    pod_mass: 50000,
+    nstages: 2, nboost: 0, diameter: 9.0, fairing_on: false, kick_deg: 5,
+    opt_kick: true, pod_mass: 50000,
     s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
       s1_diameter: 9.0,
     s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
@@ -781,6 +809,9 @@ function applyPreset(name) {
   for (const id of ['diameter', 'fairing', 'kick_deg', 'pod_mass'])
     if (o[id] !== undefined) $(id).value = o[id];
   $('opt_kick').checked = !!o.opt_kick;
+  // a preset states only what it changes, and a shroud is the default — so
+  // this reads "unless the preset says otherwise", not "unless it says yes"
+  $('fairing_on').checked = o.fairing_on !== false;
   podNote();
   // reset to the role defaults, then lay the preset's own keys over them —
   // a preset states only what it changes
@@ -857,7 +888,8 @@ async function boot() {
   buildBoost(vals);
   setVals(vals);           // vname/diameter/fairing/pod_mass/kick + anything missed
   initPresets();
-  for (const id of ['vname', 'diameter', 'fairing', 'pod_mass', 'kick_deg', 'opt_kick'])
+  for (const id of ['vname', 'diameter', 'fairing', 'fairing_on', 'pod_mass',
+                    'kick_deg', 'opt_kick'])
     $(id).addEventListener('change', () => fetchGeo());
   // the core diameter carries stage diameters that were tracking it, as on
   // the panel
