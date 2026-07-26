@@ -74,18 +74,8 @@
   .chip.on { background: rgba(242,193,78,.22); border-color: var(--acc); }
   #seek { position: fixed; left: 20px; bottom: 2px; width: calc(100% - 40px);
           height: 18px; z-index: 2; cursor: pointer; }
-  /* the console screen: a DOM panel pinned to where the console actually
-     projects, so it reads as glass in the capsule rather than as another HUD */
-  #cabdisp { position: fixed; z-index: 2; pointer-events: none;
-             transform: translate(-50%, -50%); font: 11px ui-monospace, monospace;
-             color: #7fe3c4; background: rgba(4,14,12,.82); line-height: 1.55;
-             border: 1px solid rgba(127,227,196,.35); border-radius: 4px;
-             padding: 6px 9px; min-width: 132px; letter-spacing: .4px;
-             box-shadow: 0 0 14px rgba(60,200,160,.20) inset; }
-  #cabdisp_h { color: #cfe9df; letter-spacing: 2.4px; font-size: 9.5px;
-               border-bottom: 1px solid rgba(127,227,196,.25);
-               padding-bottom: 3px; margin-bottom: 4px; }
-  #cabdisp i { color: #cfe9df; font-style: normal; float: right; padding-left: 10px; }
+  /* the label for whichever console switch is under the cursor, placed where
+     that switch is — the readouts themselves are on the console's own screens */
   #cabtip { position: fixed; z-index: 2; pointer-events: none;
             transform: translate(-50%, -140%); font: 10.5px system-ui;
             letter-spacing: 1.6px; color: var(--acc);
@@ -118,11 +108,10 @@
   <div><b>w</b> <b>a</b> <b>s</b> <b>d</b> pitch/yaw · <b>q</b> <b>e</b> roll · <b>x</b> kill rotation — reaction wheels, coasting at &times;1</div>
   <div><b>shift</b> + those keys pushes off a surface and floats you round the cabin — you can only push while you are touching something, then you coast until you catch the next one</div>
   <div>drag to look around in free and cabin views</div>
-  <div>in the cabin, <b>click</b> the console switches — lights and display page (<b>right click</b> steps back)</div>
+  <div>in the cabin the console runs three live displays; <b>click</b> its switches for lights and the centre page (<b>right click</b> steps back)</div>
 </div>
 <div class="hud" id="cams"></div>
 <div class="hud" id="speed"></div>
-<div id="cabdisp" class="hidden"><div id="cabdisp_h"></div><div id="cabdisp_b"></div></div>
 <div id="cabtip" class="hidden"></div>
 <canvas id="seek"></canvas>
 <div id="overlay">
@@ -2243,15 +2232,42 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
     // radius is a rack at the bottom and thin air at the top.
     const K = capStations(s.x0), u = cx - K.xb;
     const rin = K.rcone(u) - 0.05*K.rp, f = rad/Math.max(rin, 1e-6);
-    const ctl = u > K.xcon - 0.12*K.rp && u < K.xcon &&
-                f > 0.42 && f < 0.85 &&
-                (angNear(Math.atan2(cz, cy), -0.559, 0.30) ||
-                 angNear(Math.atan2(cz, cy),  0.559, 0.30));
+    // The crew switches, and ONLY them. This band used to be +-17 deg about
+    // +-32, which is where two of the five instrument boxes are, so it painted
+    // instruments as switches — a fan of gold across the middle of the console
+    // instead of two amber paddles on its flanks. They live at +-100 now, the
+    // first roll clear of the instrument fan, and the band is theirs alone.
+    const a = Math.atan2(cz, cy);
+    const ctl = u > K.xcon - 0.115*K.rp && u < K.xcon - 0.010*K.rp &&
+                f > 0.45 && f < 0.85 &&
+                (angNear(a, -1.745, 0.35) || angNear(a, 1.745, 0.35));
     if (u < K.xa + 0.01*K.rp) c = [0.40,0.43,0.41];               // deck
     else if (ctl) c = [0.95,0.74,0.30];                           // crew switches
     else if (u > K.xcon) c = [0.16,0.17,0.19];                    // console panel
-    else if (u > K.xcon - 0.07*K.rp) c = [0.11,0.27,0.31];        // instruments
-    else if (u > K.xcon - 0.17*K.rp && f > 0.70) c = [0.96,0.95,0.86]; // light coves
+    // Everything standing on the console face, read by the radial band it is
+    // laid out in — the same bands pod_mesh builds them in. The button caps
+    // vary by a hash of their own cell so a grid reads as a panel of separate
+    // switches rather than as one grey slab, and reads the SAME way every
+    // frame, because the hash is of position and not of anything running.
+    else if (u > K.xcon - 0.07*K.rp) {
+      const rcin = K.rcone(K.xcon) - 0.05*K.rp, g = rad/Math.max(rcin, 1e-6);
+      if (g > 0.82) c = [0.66,0.66,0.62];                         // rocker switches
+      else if (g > 0.43)
+        c = u < K.xcon - 0.034*K.rp ? [0.02,0.05,0.05]            // screen face
+                                    : [0.10,0.11,0.13];           // bezel
+      else {
+        const cell = (Math.floor(a*40/Math.PI)*13 + Math.floor(g*22)) >>> 0;
+        const pick = ((cell*2654435761) >>> 0) % 10;
+        c = pick < 6 ? [0.26,0.27,0.30] : pick < 8 ? [0.72,0.70,0.62]
+          : pick === 8 ? [0.90,0.68,0.22] : [0.25,0.62,0.45];
+      }
+    }
+    // The light coves are a band UNDER the console, and this rule had no upper
+    // bound in u — so it ran on up the cone and painted the overhead lockers
+    // bright cream, which is the pair of glowing white slabs hanging over the
+    // cabin. They are a band, so they are bounded like one.
+    else if (u > K.xcon - 0.175*K.rp && u < K.xcon - 0.075*K.rp && f > 0.70)
+      c = [0.96,0.95,0.86];                                       // light coves
     else if (f > 0.925) c = [0.62,0.62,0.58];                     // liner + ribs
     else if (f > 0.60) c = [0.52,0.50,0.42];                      // racks, lockers
     else c = [0.29,0.32,0.38];                                    // crew couch
@@ -3745,7 +3761,9 @@ function cabPt(K, u, fr, aDeg) {
 }
 // Rolls that are free of fittings: the racks own 100-136 and 224-260, the
 // handrails 34/90/270/326, the windows 0 and +-68, the hatch 180.
-const CAB_ROLL_EYE = 198, CAB_ROLL_HEAD = 282;
+const CAB_ROLL_EYE = 200, CAB_ROLL_HEAD = 282;
+// The switch rolls, mirrored from pod_mesh — clear of the instrument fan.
+const CAB_ROLL_CTL = 100;
 
 // Camera stations inside the crew capsule, in vehicle model coordinates.
 // These mirror pod_mesh's layout (heat-shield sagitta, 32.5 deg afterbody,
@@ -3761,10 +3779,15 @@ function cabinPose(aim, roll, Kin) {
   if (aim === 'console')
     return { eye: head, look: [K.xb + K.xcon, 0.06*ln, 0], up: [0,1,0],
              fov: 1.25 };
-  // wide interior: looking across the cabin so couch, console and the
-  // window wall are all in frame, with the capsule axis as up
-  return { eye:  cabPt(K, K.xb0 + 0.30*Lc, 0.50, CAB_ROLL_EYE),
-           look: cabPt(K, K.xb0 + 0.44*Lc, 0.30, 0), up: [1,0,0], fov: 1.45 };
+  // Wide interior: looking ACROSS the cabin at the main window wall, with the
+  // capsule axis as up — so the frame is a viewport with the console above it
+  // and the couch below, which is a room. Aimed up the axis instead it was a
+  // close-up of the underside of the console with the docking tunnel behind it
+  // and nothing to give any of it scale, through an 83-degree lens that bent
+  // every panel. The window at roll 0 spans cone cells 5-7, which is why the
+  // look point is at 0.45 Lc and hard over toward the wall.
+  return { eye:  cabPt(K, K.xb0 + 0.34*Lc, 0.62, CAB_ROLL_EYE),
+           look: cabPt(K, K.xb0 + 0.45*Lc, 0.92, 0), up: [1,0,0], fov: 1.18 };
 }
 // ---------------------------------------------------- floating in the cabin --
 // Zero g inside the pressure shell: a push-off, a drift, and a wall. There is
@@ -3892,8 +3915,8 @@ function cabStep(dt, active, Kin) {
 // right click steps back, which is the only sensible use for the second button
 // on a two-position and a three-position switch.
 const CAB_CTL = [
-  { key: 'lights', roll: -32, label: 'CABIN LIGHTS' },
-  { key: 'page',   roll:  32, label: 'DISPLAY' },
+  { key: 'lights', roll: -CAB_ROLL_CTL, label: 'CABIN LIGHTS' },
+  { key: 'page',   roll:  CAB_ROLL_CTL, label: 'DISPLAY' },
 ];
 const CAB_PAGES = ['FLIGHT', 'TRAJECTORY', 'SYSTEMS'];
 let cabPage = 0, cabHover = null;
@@ -4997,6 +5020,10 @@ function drawWorldMeshes(sc, proj, inCab) {
     if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2, 1.15);
     else drawChute(mainBuf, mainN, tMain, 8.5, 4.6);
   }
+  // The console's displays, last: they bring their own vertex buffer and their
+  // own texture, and doing that inside the section loop would leave the next
+  // section drawing the screens' geometry with the rocket's ranges.
+  if (inCab) drawCabScreens(sc, proj);
 }
 
 function drawScene(sc) {
@@ -5173,6 +5200,202 @@ function drawClouds(sc, view, proj, fogCol, fogDen, deck) {
   gl.disable(gl.BLEND);
 }
 
+// ---------------------------------------------------- the console screens --
+// Three real displays in the three screen bays pod_mesh builds, drawn as
+// textured quads sitting in the recesses. One canvas holds all three panes side
+// by side and every quad's UVs pick its own third of it, so the whole console
+// is one texture, one buffer and one draw.
+//
+// The mesh shader's decal path is what puts a texture on a mesh, and it is
+// gated on the paint weight and samples uLiv — so these vertices carry pw = 1
+// and the screen texture is bound in uLiv's slot for this draw alone. Their UVs
+// are explicit rather than the cylindrical (station, roll) the livery uses,
+// which a flat panel facing +x is degenerate in.
+const SCR_W = 512, SCR_H = 320;              // one pane
+let scrCv = null, scrCx = null, scrTex = null, scrBuf = null, scrN = 0, scrT = -1e9;
+const SCR_BAYS = [[-46, -18], [-15, 15], [18, 46]];   // roll spans, mirroring pod_mesh
+function cabScreenInit() {
+  if (scrCv) return;
+  scrCv = document.createElement('canvas');
+  scrCv.width = SCR_W*3; scrCv.height = SCR_H;
+  scrCx = scrCv.getContext('2d');
+  scrTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, scrTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+// the quads, in vehicle model space, sitting just proud of each recessed face
+function cabScreenBuild() {
+  const pr = podRange();
+  if (!pr) return;
+  const K = capStations(pr.x0);
+  const rcin = K.rcone(K.xcon) - 0.05*K.rp;
+  const x = K.xb + K.xcon - 0.031*K.rp;        // a hair in front of the recess
+  const out = [];
+  SCR_BAYS.forEach(([d0, d1], k) => {
+    const a0 = d0*Math.PI/180 + 0.045, a1 = d1*Math.PI/180 - 0.045;
+    const r0 = 0.485*rcin, r1 = 0.755*rcin;
+    // The pane is subdivided across the roll so it follows the annulus instead
+    // of chording across it — four cells is enough at this size, and a flat
+    // quad would stand off the console by a visible gap at the ends.
+    const N = 4;
+    for (let i = 0; i < N; i++) {
+      const b0 = a0 + (a1 - a0)*i/N, b1 = a0 + (a1 - a0)*(i + 1)/N;
+      const u0 = (k + i/N)/3, u1 = (k + (i + 1)/N)/3;
+      const P = (r, b) => [x, r*Math.cos(b), r*Math.sin(b)];
+      const v = [[P(r0, b0), u0, 1], [P(r0, b1), u1, 1],
+                 [P(r1, b1), u1, 0], [P(r1, b0), u0, 0]];
+      for (const t of [[0,1,2],[0,2,3]])
+        for (const j of t)
+          out.push(v[j][0][0], v[j][0][1], v[j][0][2],
+                   -1, 0, 0,                    // faces the crew, down the axis
+                   1, 1, 1,                     // white: the texture is the colour
+                   v[j][1], v[j][2], 1);        // uv + paint weight
+    }
+  });
+  scrBuf = buffer(new Float32Array(out));
+  scrN = out.length/VST;
+}
+// --- what is actually on them -------------------------------------------
+const SCR_INK = '#7fe3c4', SCR_DIM = '#3f7f6c', SCR_HI = '#dff3ea';
+function scrPane(k, title, rows, extra) {
+  const g = scrCx, x0 = k*SCR_W;
+  g.save();
+  g.translate(x0, 0);
+  g.fillStyle = '#03100d'; g.fillRect(0, 0, SCR_W, SCR_H);
+  g.strokeStyle = SCR_DIM; g.lineWidth = 2;
+  g.strokeRect(6, 6, SCR_W-12, SCR_H-12);
+  g.fillStyle = SCR_HI; g.font = '600 26px ui-monospace, monospace';
+  g.fillText(title, 22, 46);
+  g.strokeStyle = SCR_DIM; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(20, 60); g.lineTo(SCR_W-20, 60); g.stroke();
+  g.font = '24px ui-monospace, monospace';
+  rows.forEach(([a, b], i) => {
+    const y = 100 + i*38;
+    g.fillStyle = SCR_DIM; g.fillText(a, 24, y);
+    g.fillStyle = SCR_INK;
+    g.fillText(b, SCR_W - 26 - g.measureText(b).width, y);
+  });
+  if (extra) extra(g);
+  g.restore();
+}
+// a tape: a moving scale with the current value under a fixed pointer
+function scrTape(g, x, y, w, h, val, span, unit) {
+  g.save();
+  g.beginPath(); g.rect(x, y, w, h); g.clip();
+  g.fillStyle = '#061a15'; g.fillRect(x, y, w, h);
+  const step = span/6, mid = y + h/2;
+  const base = Math.floor(val/step)*step;
+  g.font = '17px ui-monospace, monospace';
+  for (let i = -4; i <= 4; i++) {
+    const v = base + i*step;
+    const py = mid + (val - v)/span*h;
+    if (py < y - 8 || py > y + h + 8) continue;
+    g.strokeStyle = SCR_DIM; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x + w - 16, py); g.lineTo(x + w, py); g.stroke();
+    g.fillStyle = SCR_DIM;
+    g.fillText(String(Math.round(v)), x + 8, py + 6);
+  }
+  g.restore();
+  g.strokeStyle = SCR_INK; g.lineWidth = 2;
+  g.strokeRect(x, y, w, h);
+  g.fillStyle = SCR_HI; g.font = '600 20px ui-monospace, monospace';
+  g.fillText(unit, x + 4, y - 8);
+}
+function cabScreenPaint(sc) {
+  const st = sc.st, cs = sc.cs, es = sc.es;
+  const km = m => !isFinite(m) ? '—' :
+    Math.abs(m) < 1e4 ? m.toFixed(0) + ' m' : (m/1000).toFixed(1) + ' km';
+  const alt = st ? st.h : es ? es.h : cs ? cs.rE - RE : 0;
+  const spd = st ? st.v : es ? es.v : cs ? cs.speed : 0;
+
+  // left: the flight tape — altitude and speed as moving scales, which is what
+  // a crew reads at a glance rather than a number they have to parse
+  scrPane(0, 'FLIGHT', [], g => {
+    scrTape(g, 40, 96, 150, 190, alt/1000, 60, 'ALT km');
+    scrTape(g, 300, 96, 150, 190, spd, 2000, 'VEL m/s');
+    g.fillStyle = SCR_HI; g.font = '600 22px ui-monospace, monospace';
+    g.fillText(fmtClock(simT), 40, 306);
+  });
+
+  // centre: the page the DISPLAY switch is on
+  // TRAJECTORY gives half its pane to the profile plot, so it shows two rows
+  // rather than five — five would be drawn straight through the graph
+  const page = CAB_PAGES[cabPage];
+  const rows = cabRows(sc, page);
+  scrPane(1, page, page === 'TRAJECTORY' ? rows.slice(0, 2) : rows,
+          page !== 'TRAJECTORY' ? null : g => {
+    // the flown profile: altitude against downrange
+    if (!A || !A.h || !A.dr || A.h.length < 3) return;
+    const x0 = 30, y0 = SCR_H - 34, w = SCR_W - 60, h = 132;
+    const hm = Math.max(...A.h), dm = Math.max(...A.dr, 1);
+    g.strokeStyle = SCR_DIM; g.lineWidth = 1;
+    g.strokeRect(x0, y0 - h, w, h);
+    g.strokeStyle = SCR_INK; g.lineWidth = 2;
+    g.beginPath();
+    for (let i = 0; i < A.h.length; i++) {
+      const px = x0 + A.dr[i]/dm*w, py = y0 - A.h[i]/hm*h;
+      i ? g.lineTo(px, py) : g.moveTo(px, py);
+    }
+    g.stroke();
+  });
+
+  // right: systems, with a dot per line, because a status list is how a
+  // spacecraft says "everything is fine" without anyone having to read it
+  const lit = CAB_LIGHTS[cabLight].n;
+  scrPane(2, 'SYSTEMS', [], g => {
+    const items = [
+      ['CABIN PRESS', 'NOMINAL', 1], ['O2 / CO2', 'NOMINAL', 1],
+      ['POWER', 'NOMINAL', 1], ['COMMS', 'LOCKED', 1],
+      ['LIGHTS', lit, cabLight === 2 ? 0 : 1],
+      ['REACTION WHEELS', RCS.live ? 'ARMED' : 'STOWED', RCS.live ? 1 : 2],
+      ['THERMAL', sc.world === 'entry' ? 'ENTRY' : 'NOMINAL',
+       sc.world === 'entry' ? 2 : 1],
+    ];
+    g.font = '21px ui-monospace, monospace';
+    items.forEach(([a, b, ok], i) => {
+      const y = 96 + i*31;
+      g.fillStyle = ok === 1 ? '#49d69a' : ok === 2 ? '#e0b447' : '#5d6a68';
+      g.beginPath(); g.arc(32, y - 7, 6, 0, 6.2832); g.fill();
+      g.fillStyle = SCR_DIM; g.fillText(a, 50, y);
+      g.fillStyle = SCR_INK;
+      g.fillText(b, SCR_W - 26 - g.measureText(b).width, y);
+    });
+  });
+
+  // No flip, matching the livery texture — the UVs above are written to suit,
+  // and toggling the unpack state per texture is how one of them ends up
+  // upside down the first frame after the other is rebuilt.
+  gl.bindTexture(gl.TEXTURE_2D, scrTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, scrCv);
+}
+// Drawn with the cabin's own lighting turned all the way up: a screen is a
+// light source, not a surface that happens to be pale, and shading it like the
+// wall next to it is what makes a display look like a sticker.
+function drawCabScreens(sc, proj) {
+  if (!scrBuf || !scrN || !sc.craftM) return;
+  if (simT - scrT > 0.16 || scrT > simT) { cabScreenPaint(sc); scrT = simT; }
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, scrTex);
+  gl.uniform1i(MESH.u.uLiv, 1);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1f(MESH.u.uHeat, 0);
+  gl.uniform1f(MESH.u.uEngI, 0);
+  gl.uniform1f(MESH.u.uAmb, 1.35);
+  bindMeshBuf(scrBuf);
+  drawRange(sc.craftM, proj, 0, scrN);
+  gl.uniform1f(MESH.u.uAmb, meshAmb);
+  gl.uniform1f(MESH.u.uHeat, meshHeat);
+  gl.uniform1f(MESH.u.uEngI, meshEngI);
+  if (livTex) {                                  // hand the livery slot back
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, livTex);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+}
+
 // ----------------------------------------------------- the console screen --
 // A live display pinned to where the console actually projects. It is DOM and
 // not a texture on purpose: the mesh shader's decal path wraps cylindrically in
@@ -5189,26 +5412,13 @@ function projectPt(view, proj, p, wCss, hCss) {
   if (Math.abs(x) > 1.6 || Math.abs(y) > 1.6) return null;
   return [(x*0.5 + 0.5)*wCss, (0.5 - y*0.5)*hCss];
 }
+// The readouts are on the console's own screens now, so the only thing left for
+// the DOM to do in here is name the switch under the cursor — and it names it
+// where the switch is, rather than in a corner.
 function cabinPanel(sc, view, proj, wCss, hCss) {
-  const el = $('cabdisp'), tip = $('cabtip');
-  const pr = sc.cam.mode === 'cabin' && sc.craftM ? podRange() : null;
-  if (!pr) { el.classList.add('hidden'); tip.classList.add('hidden'); return; }
-  const K = capStations(pr.x0);
-  const scr = projectPt(view, proj,
-    mApply(sc.craftM, [K.xb + K.xcon - 0.01*K.rp, 0.42*cabRin(K, K.xcon), 0]),
-    wCss, hCss);
-  el.classList.toggle('hidden', !scr);
-  if (scr) {
-    el.style.left = scr[0].toFixed(1) + 'px';
-    el.style.top  = scr[1].toFixed(1) + 'px';
-    const page = CAB_PAGES[cabPage];
-    const rows = cabRows(sc, page);
-    $('cabdisp_h').textContent = page + '  ' + (cabPage + 1) + '/' + CAB_PAGES.length;
-    $('cabdisp_b').innerHTML =
-      rows.map(r => `${r[0]}<i>${r[1]}</i>`).join('<br>');
-  }
-  // the hovered switch names itself where it is, rather than in a corner
-  const hov = cabHover && cabControls().find(c => c.key === cabHover);
+  const tip = $('cabtip');
+  const live = sc.cam.mode === 'cabin' && sc.craftM;
+  const hov = live && cabHover && cabControls().find(c => c.key === cabHover);
   const hp = hov && projectPt(view, proj, mApply(sc.craftM, hov.p), wCss, hCss);
   tip.classList.toggle('hidden', !hp);
   if (hp) {
@@ -5937,8 +6147,15 @@ window.__selftest = function () {
      () => cabBox(CK, eyeAtAim('console')).hit, false);
   eq('and it too is inboard of the racks',
      () => rfrac(eyeAtAim('console')) < 0.68, true);
-  eq('the wide shot looks at the cabin, not through it',
-     () => cabBox(CK, cabinPose('wide', 0, CK).look).hit, false);
+  // The wide shot deliberately aims AT the window wall — that is the picture —
+  // so its look point is not in the free volume. What it must not do is aim
+  // through the hull, which would frame the outside of a wall.
+  eq('the wide shot aims at the wall, not through it', () => {
+    const lk = cabinPose('wide', 0, CK).look;
+    return rfrac(lk) < 1.0;
+  }, true);
+  eq('and it aims outboard of the eye, so the frame is the room', () =>
+     rfrac(cabinPose('wide', 0, CK).look) > rfrac(cabinPose('wide', 0, CK).eye), true);
   eq('a push into the wall is caught', () =>
      cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]).hit, true);
   eq('and lands inboard of the racks', () =>
@@ -5977,9 +6194,11 @@ window.__selftest = function () {
   eq('mid-air input does nothing at all', () =>
      V.len(floatRun(0.15, { w: 1, s: 1, a: 1, d: 1, q: 1, e: 1 },
                     { v: [0.4, 0, 0], touch: false, n: null }).v), 0.4, 1e-12);
+  // measured early in the shove: the cabin is half a metre across on a small
+  // capsule, and a full push crosses it
   eq('opposite keys push opposite ways', () =>
-     V.dot(V.norm(floatRun(CAB_PUSH_T, { w: 1 }).v),
-           V.norm(floatRun(CAB_PUSH_T, { s: 1 }).v)) < -0.9, true);
+     V.dot(V.norm(floatRun(0.10, { w: 1 }).v),
+           V.norm(floatRun(0.10, { s: 1 }).v)) < -0.99, true);
   cabReset();
   eq('the floor is the couch tops, not the deck',
      () => cabXLo(CK) > CK.xa + 0.15*CK.rp, true);
@@ -6010,6 +6229,17 @@ window.__selftest = function () {
   eq('grazing it still counts', () =>
      raySphere([0,0,0], [1,0,0], [10,2,0], 2.0001) < Infinity, true);
   // the two switches are distinct places, and both sit on the console face
+  // The three screen bays are mirrored from pod_mesh by hand — one list in
+  // Julia, one here — so the cheap thing to pin is that they are still three,
+  // still in order, and still not on top of each other.
+  eq('three screen bays', () => SCR_BAYS.length, 3);
+  eq('in order and clear of one another', () =>
+     SCR_BAYS.every((b, i) => b[1] > b[0] && (i === 0 || b[0] > SCR_BAYS[i-1][1])),
+     true);
+  eq('and the centre one is the widest', () =>
+     SCR_BAYS[1][1] - SCR_BAYS[1][0] >= SCR_BAYS[0][1] - SCR_BAYS[0][0], true);
+  eq('the switches are clear of the instrument fan', () =>
+     CAB_ROLL_CTL > 46 + 12, true);
   eq('there are two switches', () => CAB_CTL.length, 2);
   eq('and they are not the same one', () => CAB_CTL[0].roll !== CAB_CTL[1].roll, true);
   // cycling wraps in both directions — right click is the only sensible use
@@ -6259,6 +6489,8 @@ async function boot() {
     buildData();
     buildLiveryTex();
     buildRocket();
+    cabScreenInit();
+    cabScreenBuild();     // needs the sections buildRocket just measured
     buildStatics();
     buildLandTex();
     if (MS) {

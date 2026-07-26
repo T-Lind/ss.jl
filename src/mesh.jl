@@ -541,18 +541,59 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
                                  zc + sg * hw * 0.8 + 0.022rp)))       # struts
         end
     end
-    # main display console: an annular panel facing the crew, with instruments
+    # --- main display console ----------------------------------------------
+    # An annular panel facing the crew, carrying what a spacecraft console
+    # actually carries. Three SCREEN BAYS, each a raised bezel with a face set
+    # back inside it — the viewer draws live displays into those recesses, so
+    # the bezel is the thing that makes a screen read as a screen. Under them,
+    # grids of push-button caps; along the inner edge, rocker switches; and on
+    # the flanks, rows of circuit breakers. It was five dark boxes before, which
+    # is a shape where a console goes rather than a console.
+    #
+    # Everything on the face is laid out in (radius, roll) on the annulus,
+    # because that is the surface, and in bands the viewer can colour by:
+    #   0.22-0.42 rcin  button grids       0.44-0.80  screen bays
+    #   0.82-0.92       rocker switches    flanks     circuit breakers
     xcon = xb0 + 0.62Lc
     rcin = rin(xcon)
+    xf = xcon                                    # the console's crew-side face
     push!(cab, lathe_mesh(Tuple{Float64,Float64}[
         (xcon, 0.20rcin), (xcon, 0.92rcin), (xcon + 0.05rp, 0.92rcin),
         (xcon + 0.05rp, 0.20rcin), (xcon, 0.20rcin)]; nseg = nc))
-    for (k, a) in enumerate(range(-1.05, 1.05; length = 5))
-        cy, cz = 0.58rcin * cos(a), 0.58rcin * sin(a)
-        push!(cab, box_mesh((xcon - 0.035rp, cy - 0.10rcin, cz - 0.13rcin),
-                            (xcon,           cy + 0.10rcin, cz + 0.13rcin)))
-        isodd(k) && push!(cab, _arc_slab(xcon - 0.020rp, xcon, 0.26rcin, 0.35rcin,
-                                         a - 0.16, a + 0.16; nseg = 6))
+
+    # the three screen bays, in roll. Centre is the wide one — it is the display
+    # the crew fly on, and the one the DISPLAY switch pages.
+    for (a0, a1) in ((deg2rad(-46.0), deg2rad(-18.0)),
+                     (deg2rad(-15.0), deg2rad(15.0)),
+                     (deg2rad(18.0), deg2rad(46.0)))
+        push!(cab, _arc_slab(xf - 0.055rp, xf, 0.44rcin, 0.80rcin, a0, a1; nseg = 7))
+        # the face, set back inside the bezel by a bezel's own depth
+        push!(cab, _arc_slab(xf - 0.030rp, xf - 0.022rp,
+                             0.48rcin, 0.76rcin, a0 + 0.045, a1 - 0.045; nseg = 7))
+        # button grid under the bay: two rows of four caps, standing proud
+        for i in 0:3, j in 0:1
+            b0 = a0 + (a1 - a0) * (0.10 + 0.26i)
+            b1 = b0 + (a1 - a0) * 0.17
+            r0 = (0.24 + 0.09j) * rcin
+            push!(cab, _arc_slab(xf - 0.042rp, xf, r0, r0 + 0.062rcin, b0, b1; nseg = 3))
+        end
+        # rocker switches along the outer edge of the bay
+        for i in 0:2
+            b0 = a0 + (a1 - a0) * (0.12 + 0.32i)
+            push!(cab, _arc_slab(xf - 0.036rp, xf, 0.83rcin, 0.905rcin,
+                                 b0, b0 + (a1 - a0) * 0.20; nseg = 3))
+        end
+    end
+    # Circuit-breaker rows on the flanks, where a real panel puts them: out of
+    # the crew's line of sight to the displays and still inside arm's reach.
+    for sg in (-1.0, 1.0), row in 0:2
+        for i in 0:4
+            a0 = sg * deg2rad(58.0 + 13.0i)
+            r0 = (0.30 + 0.19row) * rcin
+            push!(cab, _arc_slab(xf - 0.028rp, xf, r0, r0 + 0.115rcin,
+                                 min(a0, a0 + sg * deg2rad(9.0)),
+                                 max(a0, a0 + sg * deg2rad(9.0)); nseg = 3))
+        end
     end
     # equipment racks against the cabin wall, clear of the couches
     for (a0, a1) in ((deg2rad(100.0), deg2rad(136.0)), (deg2rad(224.0), deg2rad(260.0)))
@@ -634,10 +675,10 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # capsule turning around you. One rib every 12 degrees on the two liner
     # bands, standing a centimetre proud.
     for (xa_, xb_) in ((xfl + 0.05rp, xw0), (xw1, xtop - 0.10rp))
-        for a in range(0.0, 2pi; length = 31)[1:end-1]
+        for a in range(0.0, 2pi; length = 17)[1:end-1]
             rr = 0.945rin(xb_)
-            push!(cab, _place_mesh(box_mesh((xa_ + 0.01rp, rr - 0.012rp, -0.010rp),
-                                            (xb_ - 0.01rp, rr + 0.004rp, 0.010rp));
+            push!(cab, _place_mesh(box_mesh((xa_ + 0.01rp, rr - 0.010rp, -0.009rp),
+                                            (xb_ - 0.01rp, rr + 0.003rp, 0.009rp));
                                    roll = a))
         end
     end
@@ -686,11 +727,15 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
                                         (0.5(x0s + x1s) + 0.02rp, 0.76rin(x1s), 0.018rp));
                                roll = 0.5(a0 + a1)))
     end
-    # Two crew controls on the console face, on the rolls the couches look
-    # along. The viewer picks against these by name and cycles the cabin
-    # lighting and the console page from them, so they are switches and not
-    # decoration — see CAB_CTL in the launch view.
-    for (k, a) in enumerate((deg2rad(-32.0), deg2rad(32.0)))
+    # Two crew controls on the console face. Out at +-100 deg, which is the
+    # first roll clear of the instrument fan: the instruments sit at -60..60 in
+    # 30 deg steps and are 13 deg wide, so a switch at 32 deg is 1.9 deg from
+    # one of them — the first cut of these was drawn INSIDE an instrument, and
+    # the colour rule that was supposed to mark the switches marked the
+    # instruments too. The viewer picks against these by name and cycles the
+    # cabin lighting and the console page from them, so they are switches and
+    # not decoration — see CAB_CTL in the launch view.
+    for (k, a) in enumerate((deg2rad(-100.0), deg2rad(100.0)))
         rc = 0.62rin(xcon)
         push!(cab, _place_mesh(box_mesh((xcon - 0.075rp, rc - 0.075rp, -0.075rp),
                                         (xcon - 0.020rp, rc + 0.075rp, 0.075rp));
