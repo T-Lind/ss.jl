@@ -240,6 +240,14 @@ function boosters_from_params(p, dia::Float64)
                 core_throttle = clamp(getf(p, "b_throttle", 100.0) / 100, 0.2, 1.0))]
 end
 
+"""
+The capsule's diameter [m]: whatever the form states, or the mass fit when it
+states nothing. Zero and blank both mean "work it out", so an untouched form
+behaves exactly as it did before the field existed.
+"""
+pod_diameter(p, pod_mass) =
+    (d = getf(p, "pod_dia", 0.0); d > 0 ? d : 2 * pod_radius(pod_mass))
+
 "Build a LaunchVehicle from panel parameters."
 function lv_from_params(p)
     dia = getf(p, "diameter", 1.8)
@@ -259,7 +267,11 @@ function lv_from_params(p)
     # wider than anything under it, it is what the flow sees.
     fair = getb(p, "fairing_on", true)
     pod = getf(p, "pod_mass", 350.0)
-    pod_d = 2 * pod_radius(pod)
+    # A stated capsule diameter wins over the mass fit, here as well as in the
+    # mesh — the number the flow sees and the number that is drawn have to be
+    # the same number, or a bare Orion flies the drag of a capsule two metres
+    # narrower than the one on the screen.
+    pod_d = pod_diameter(p, pod)
     sref = stack_sref((stage_diameter(s, dia) for s in stages), pod_d, fair)
     LaunchVehicle(
         # the page sends the name of whatever preset is loaded, so the livery
@@ -928,7 +940,8 @@ propellant density and the bells from its engine count.
 function rocket_geometry(p)::Dict{String,Any}
     d = getf(p, "diameter", 1.8)
     lv = lv_from_params(p)
-    mesh, secs = rocket_mesh(lv; diameter = d, nseg = 36)
+    mesh, secs = rocket_mesh(lv; diameter = d, nseg = 36,
+                             pod_diameter = getf(p, "pod_dia", 0.0))
     nst = length(lv.stages)
     # Static performance, so a bad stack is obvious before it is flown: the
     # mass each stage actually pushes is everything above it (the fairing

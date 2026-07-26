@@ -1009,6 +1009,7 @@ function rocket_mesh(; diameter::Float64 = 1.8,
                      diameters::Vector{Float64} = fill(diameter, length(prop_masses)),
                      boosters::Vector = NamedTuple[],
                      payload_mass::Float64 = 350.0,
+                     pod_diameter::Float64 = 0.0,
                      fairing_len::Float64 = 2.2 * last(diameters),
                      fairing::Bool = true,
                      nseg::Int = 48)
@@ -1110,7 +1111,16 @@ function rocket_mesh(; diameter::Float64 = 1.8,
     # routinely overhangs its upper stage and is judged against the core: Dragon
     # is 4.0 m on a 3.7 m Falcon, and reading its 1.7 m kick stage instead would
     # cut it in half.
-    rp = min(pod_radius(payload_mass), 1.25 * maximum(diameters) / 2)
+    #
+    # A STATED diameter is used exactly as stated. The clamp above exists to
+    # flag a mismatch nobody chose — a capsule that came out three times its
+    # launcher because of what it weighs — and applying it to a number the
+    # operator typed would quietly ignore the choice instead: an Orion picked
+    # onto the reference 1.8 m stack would be cut from 5.02 m to 1.1 and drawn
+    # as something else entirely. The mass fit is a guess and gets a guard; a
+    # stated dimension is not a guess.
+    rp = pod_diameter > 0 ? pod_diameter / 2 :
+         min(pod_radius(payload_mass), 1.25 * maximum(diameters) / 2)
     xb = x + 0.13D + 0.02                        # a hair off the adapter face
     phull, pglass, pcab, lp = pod_mesh(; radius = rp, nseg = max(20, nseg ÷ 2))
     shift = (xb, 0.0, 0.0)

@@ -276,6 +276,10 @@
       <div class="row" style="margin-top:6px">
         <div style="flex:1"><label for="pod_mass">payload / capsule [kg]</label>
           <input id="pod_mass" value="350"></div>
+        <div style="flex:1"><label for="pod_dia" title="the capsule's body diameter;
+             blank works it out from the mass. The builder has the flown ones.">
+          capsule &oslash; [m]</label>
+          <input id="pod_dia" value="" placeholder="auto"></div>
       </div>
       <div class="row" style="margin-top:6px">
         <div style="flex:1"><label style="display:flex;gap:6px;align-items:center"
@@ -424,7 +428,7 @@
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
-const BASE_FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
+const BASE_FIELDS = ['pod_mass','pod_dia','h_park_km','incl_deg','hp_moon_km','hp_return_km',
   'fairing','fairing_on','diameter','nstages','nboost','opt_kick','kick_deg',
   'tli_mag_err_pct','tli_point_err_deg'];
 // the landing mission adds a lander and a descent plan; everything else — the
