@@ -4730,6 +4730,29 @@ const CAB_PAGES = ['FLIGHT', 'TRAJECTORY', 'SYSTEMS'];
 // downrange, which is the shape of an ascent or an entry. Neither answers the
 // other's question, so it is a switch rather than a choice made once.
 const TRAJ_VIEWS = ['ORBIT', 'PROFILE'];
+// What the ORBIT view is looking at. Zoom is a multiplier on the automatic fit
+// rather than an absolute scale, so it means the same thing on a parking orbit
+// and on a translunar arc six orders of magnitude larger; pan is in fractions
+// of the pane, for the same reason. `coast` overlays the osculating conic —
+// where you would END UP from here with the engines cold, which is a different
+// curve from the flown path the moment the flight plan still has a burn in it.
+const TRJ = { zoom: 1, px: 0, py: 0, coast: false };
+const TRJ_ZMAX = 64;
+function trjHome() { TRJ.zoom = 1; TRJ.px = 0; TRJ.py = 0; }
+// Soft keys along the bottom of the centre display, in its CANVAS coordinates.
+// The plot box ends at v = 0.76, so these sit in the strip below it and cost
+// the plot nothing. Two rows, because eight keys across one row of a 420 px
+// canvas would be 52 px each and the pick spheres would overlap on the panel.
+const SOFT_KEYS = [
+  { key: 'trjout',  lab: '−',      u: 0.125, v: 0.848, tip: 'ZOOM OUT' },
+  { key: 'trjin',   lab: '+',           u: 0.375, v: 0.848, tip: 'ZOOM IN' },
+  { key: 'trjhome', lab: '⌂',      u: 0.625, v: 0.848, tip: 'RESET VIEW' },
+  { key: 'trjco',   lab: '◌',      u: 0.875, v: 0.848, tip: 'COAST ORBIT' },
+  { key: 'trjl',    lab: '←',      u: 0.125, v: 0.950, tip: 'PAN LEFT' },
+  { key: 'trjr',    lab: '→',      u: 0.375, v: 0.950, tip: 'PAN RIGHT' },
+  { key: 'trju',    lab: '↑',      u: 0.625, v: 0.950, tip: 'PAN UP' },
+  { key: 'trjd',    lab: '↓',      u: 0.875, v: 0.950, tip: 'PAN DOWN' },
+];
 let cabPage = 0, cabTraj = 0, cabHover = null;
 // --- sitting down, and getting up ----------------------------------------
 // A couch is a place you can be, and it is the only place in here the console
@@ -4817,6 +4840,23 @@ function cabControls() {
     out.push({ key: fn.key, label: fn.label, r: 0.020*K.rp,
                p: [K.xb + K.xcon - 0.021*K.rp, rr*Math.cos(ac), rr*Math.sin(ac)] });
   }
+  // Soft keys, on the face of the centre display itself — which is where they
+  // belong, because what they do depends on what the display is showing and
+  // their labels are drawn by the same thing that draws the plot. They exist
+  // ONLY while the plot does: a key that does nothing is worse than no key, and
+  // the alternative is eight dead buttons on the SYSTEMS page.
+  //
+  // The positions come from scrFrame's own canvas mapping, the same one the
+  // quad is built on, so a key is under its label by construction. A little
+  // proud of the panel (0.006 rp) so the sphere is not half-buried in it.
+  if (CAB_PAGES[cabPage] === 'TRAJECTORY' && trajView() === 'ORBIT') {
+    const F = scrFrame(K, 1);
+    for (const s of SOFT_KEYS) {
+      const p = F.at(s.u, s.v);
+      out.push({ key: s.key, label: s.tip, soft: true, r: softKeyR(K, F),
+                 p: [p[0] - 0.006*K.rp, p[1], p[2]] });
+    }
+  }
   return out;
 }
 // Last frame's camera and craft transform, so a click can be turned into a ray
@@ -4897,6 +4937,28 @@ function cabActivate(hit, back) {
     else cabSit(nxt);
   } else if (key === 'warpup' || key === 'warpdn') {
     cabToast(`CLOCK · ${warpStep(key === 'warpup' ? 1 : -1)}`);
+  } else if (key && key.startsWith('trj')) {
+    // Pan is in fractions of the PANE and zoom is a multiplier on the automatic
+    // fit, so both mean the same thing whether you are looking at a parking
+    // orbit or at a translunar arc a million times larger. Panning steps by a
+    // fifth of the pane divided by the zoom, so a step is the same distance ON
+    // SCREEN however far in you are — which is the only version that stays
+    // usable once you are at 64x.
+    const d = 0.20/TRJ.zoom;
+    if (key === 'trjin')  TRJ.zoom = Math.min(TRJ_ZMAX, TRJ.zoom*1.6);
+    else if (key === 'trjout') TRJ.zoom = Math.max(1, TRJ.zoom/1.6);
+    else if (key === 'trjhome') trjHome();
+    else if (key === 'trjco') TRJ.coast = !TRJ.coast;
+    else if (key === 'trjl') TRJ.px -= d;
+    else if (key === 'trjr') TRJ.px += d;
+    else if (key === 'trju') TRJ.py += d;
+    else if (key === 'trjd') TRJ.py -= d;
+    // zooming back out drags the view home with it, so you can never end up
+    // fully zoomed out and looking at nothing
+    if (TRJ.zoom <= 1.0001) { TRJ.px = 0; TRJ.py = 0; }
+    cabToast(key === 'trjco' ? `COAST ORBIT ${TRJ.coast ? 'SHOWN' : 'HIDDEN'}`
+             : key === 'trjhome' ? 'VIEW RESET'
+             : `TRAJECTORY ×${TRJ.zoom.toFixed(TRJ.zoom < 10 ? 1 : 0)}`);
   } else if (key === 'audio') {
     audioMute(!muted);
     cabToast(`AUDIO ${muted ? 'MUTED' : 'ON'}`);
@@ -6146,6 +6208,19 @@ function drawClouds(sc, view, proj, fogCol, fogDen, deck) {
 // canvas on it would be squeezed to half its width.
 const SCR_W = 420, SCR_H = 400;
 let scrCv = null, scrCx = null, scrTex = null, scrBuf = null, scrN = 0, scrT = -1e9;
+// The displays repaint on a simT interval, which is exactly right for data that
+// moves with the clock and exactly wrong for everything the CREW changes. With
+// the clock stopped simT does not move, so a soft key pressed while paused had
+// no visible effect at all until time was started again — and paused, looking
+// at the trajectory, is precisely when you reach for the zoom.
+//
+// So: everything the operator can change goes in this signature, and a change
+// to it repaints on the very next frame whatever the clock is doing. It is a
+// string rather than a set of remembered fields because the alternative is a
+// list to keep in step with the controls, and this one is read in one place.
+let scrKey = '';
+const scrSig = () => `${cabPage}|${cabTraj}|${cabLight}|${TRJ.zoom}|` +
+                     `${TRJ.px}|${TRJ.py}|${TRJ.coast}`;
 const SCR_BAYS = [[-46, -18], [-15, 15], [18, 46]];   // roll spans, mirroring pod_mesh
 function cabScreenInit() {
   if (scrCv) return;
@@ -6191,6 +6266,23 @@ function scrFrame(K, k) {
   };
   return { x, rc, S, H, up, rt, at };
 }
+// A soft key's pick radius: 40% of the smaller key PITCH. The keys are 0.25 of
+// the canvas apart across (0.5 S) and 0.12 down (0.24 H), so the down pitch is
+// the binding one, and taking a fraction of it is the only form that cannot
+// overlap however the panel is proportioned.
+//
+// Two things this deliberately is not. It is not sized off S alone — that put
+// the two rows' spheres through each other, which is a click landing on the key
+// above the one you aimed at. And it has no floor in capsule radii: a floor
+// does not shrink with the display, so on a small console it grew straight past
+// the spacing and reintroduced the same overlap from the other direction. A key
+// on a smaller display IS smaller; the crew is also closer to it.
+//
+// One function, so the assertion that they do not overlap measures the radius
+// the picker actually uses rather than a copy of it that can drift.
+function softKeyR(K, F) {
+  return 0.40*Math.min(0.5*F.S, 0.24*F.H);
+}
 function cabScreenBuild() {
   const pr = podRange();
   if (!pr) return;
@@ -6229,6 +6321,9 @@ function cabScreenBuild() {
 }
 // --- what is actually on them -------------------------------------------
 const SCR_INK = '#7fe3c4', SCR_DIM = '#3f7f6c', SCR_HI = '#dff3ea';
+// amber, because the coast conic is the one thing on this display that is a
+// PREDICTION rather than a plan — it must not read as another leg of the route
+const SCR_WARN = '#e0a94a';
 function scrPane(k, title, rows, extra) {
   const g = scrCx, x0 = k*SCR_W;
   g.save();
@@ -6286,7 +6381,12 @@ function trajView() {
 // all three are plane curves and the only thing that differs is how far out
 // they go — which the fit takes care of.
 function scrOrbit(g) {
-  const x0 = 24, y0 = 72, w = SCR_W - 48, h = SCR_H - 96;
+  // The box stops above the soft keys rather than running under them. It used
+  // to end at 376 of a 400 px canvas, which put the lower key row through the
+  // plot's own bottom edge and the scale readout straight across it — a plot
+  // and its controls sharing pixels, which is two things being drawn and one
+  // being read.
+  const x0 = 24, y0 = 56, w = SCR_W - 48, h = SCR_H - 136;
   g.strokeStyle = SCR_DIM; g.lineWidth = 1;
   g.strokeRect(x0, y0, w, h);
   const n = V.norm(CIS.nrm);
@@ -6313,9 +6413,25 @@ function scrOrbit(g) {
                            by0 = Math.min(by0, p[1] - r); by1 = Math.max(by1, p[1] + r); };
   for (const [p] of pts) grow(p, 0);
   if (moon) grow(moon, RM);
-  const s = Math.min(w/Math.max(bx1 - bx0, 1), h/Math.max(by1 - by0, 1))*0.92;
-  const cx = x0 + w/2 - (bx0 + bx1)/2*s, cy = y0 + h/2 + (by0 + by1)/2*s;
+  const s = Math.min(w/Math.max(bx1 - bx0, 1), h/Math.max(by1 - by0, 1))*0.92
+            * TRJ.zoom;
+  // Zoom moves the centre from the whole trajectory toward WHERE YOU ARE.
+  // At the fitted scale the pane is the bounding box, which is the right thing
+  // to see first; zoomed in about that same centre, a 390,000 km arc walks
+  // straight out of the pane and six times magnification shows you empty space
+  // next to the route. The blend is 1 - 1/zoom, so the fitted view is untouched
+  // and by the second press you are looking at the vehicle.
+  const f = 1 - 1/TRJ.zoom;
+  const ccx = (bx0 + bx1)/2*(1 - f) + here[0]*f;
+  const ccy = (by0 + by1)/2*(1 - f) + here[1]*f;
+  // The pan is applied in PIXELS, after the fit and after the zoom, because it
+  // is a screen gesture: a step means a fifth of the pane wherever you are, and
+  // expressing it in metres would make it a different distance at every zoom.
+  const cx = x0 + w/2 - ccx*s - TRJ.px*w,
+        cy = y0 + h/2 + ccy*s + TRJ.py*h;
   const X = p => cx + p[0]*s, Y = p => cy - p[1]*s;
+  g.save();
+  g.beginPath(); g.rect(x0, y0, w, h); g.clip();   // zoomed-out ink stays in
   // Earth, to scale — with a floor, because at lunar distance the planet is
   // 1.6% of the frame and a disc that small is not a planet, it is a dot
   g.fillStyle = '#0d2b3a'; g.strokeStyle = SCR_INK; g.lineWidth = 1.5;
@@ -6340,19 +6456,105 @@ function scrOrbit(g) {
     }
     g.stroke();
   }
+  // The COAST orbit: the conic you are on RIGHT NOW, which is where you end up
+  // with the engines cold. It is a different curve from the flown path the
+  // moment the flight plan still has a burn in it, and the difference between
+  // the two IS the plan — a translunar arc that would fall back without its
+  // mid-course, an orbit that would decay without its circularisation. Drawn
+  // from the osculating elements rather than by propagating anything, because a
+  // conic is a closed form and this is a display, not a simulation.
+  const rn = [samp(CIS.t, CIS.x, simT), samp(CIS.t, CIS.y, simT),
+              samp(CIS.t, CIS.z, simT)];
+  const vn = cisState(simT).vel;
+  if (TRJ.coast) {
+    const con = coastConic(rn, vn, e1, e2);
+    if (con) {
+      g.strokeStyle = SCR_WARN; g.lineWidth = 1.5;
+      g.setLineDash([6, 5]);
+      g.beginPath();
+      con.forEach((p, i) => i ? g.lineTo(X(p), Y(p)) : g.moveTo(X(p), Y(p)));
+      g.stroke();
+      g.setLineDash([]);
+    }
+  }
   g.fillStyle = SCR_HI;
   g.beginPath(); g.arc(X(here), Y(here), 4.5, 0, 6.2832); g.fill();
-  // the two numbers the shape does not tell you, inside the frame rather than
-  // above it — the plot wants the whole pane
-  const ap = apsides([samp(CIS.t, CIS.x, simT), samp(CIS.t, CIS.y, simT),
-                      samp(CIS.t, CIS.z, simT)], cisState(simT).vel);
+  g.restore();
+  // the numbers the shape does not tell you, inside the frame rather than above
+  // it — the plot wants the whole pane
+  const ap = apsides(rn, vn);
   g.font = '16px ui-monospace, monospace';
   g.fillStyle = SCR_DIM;
-  g.fillText(((bx1 - bx0)/1000).toFixed(0) + ' km across', x0 + 9, y0 + h - 11);
+  g.fillText(`${((bx1 - bx0)/1000/TRJ.zoom).toFixed(0)} km across`, x0 + 9, y0 + h - 11);
+  // The magnification goes at the TOP of the box, not beside the width — the
+  // two readouts along the bottom already fill it, and at x6.6 the zoom ran
+  // straight into the apoapsis figure with no space between them.
+  if (TRJ.zoom > 1.0001) {
+    g.fillStyle = SCR_HI;
+    g.fillText(`×${TRJ.zoom.toFixed(TRJ.zoom < 10 ? 1 : 0)}`, x0 + 9, y0 + 20);
+  }
   if (ap) {
     const t = `AP ${((ap.ra - RE)/1000).toFixed(0)}  PE ${((ap.rp - RE)/1000).toFixed(0)} km`;
     g.fillText(t, x0 + w - 9 - g.measureText(t).width, y0 + h - 11);
+  } else {
+    const t = 'HYPERBOLIC';
+    g.fillText(t, x0 + w - 9 - g.measureText(t).width, y0 + h - 11);
   }
+  scrSoftKeys(g);
+}
+// The osculating conic through (r, v), sampled in the plot's own plane basis.
+// Elliptical orbits close; hyperbolic ones are cut at the true anomaly where
+// the radius runs past the pane, because the asymptotes go to infinity and a
+// display that follows them draws two lines off the edge and nothing else.
+function coastConic(r, v, e1, e2) {
+  const rr = V.len(r), v2 = V.dot(v, v);
+  if (!(rr > 1) || !isFinite(v2)) return null;
+  // eccentricity vector: the direction of periapsis, and its length is e
+  const ev = V.scale(V.sub(V.scale(r, v2 - MU_E/rr), V.scale(v, V.dot(r, v))),
+                     1/MU_E);
+  const e = V.len(ev);
+  const h = V.cross(r, v), p = V.dot(h, h)/MU_E;
+  if (!(p > 0)) return null;
+  // periapsis direction in the plot's plane; a circular orbit has no defined
+  // one, so fall back to the current position, which is as good as any
+  const pd = e > 1e-8 ? ev : r;
+  const a0 = Math.atan2(V.dot(pd, e2), V.dot(pd, e1));
+  // which way round the orbit goes, so the samples run in flight order
+  const sgn = V.dot(V.cross(r, v), V.cross(e1, e2)) >= 0 ? 1 : -1;
+  const lim = e > 1 ? Math.acos(-1/e) - 0.06 : Math.PI;   // the asymptote
+  const out = [];
+  const N = 180;
+  for (let i = 0; i <= N; i++) {
+    const th = -lim + 2*lim*i/N;
+    const den = 1 + e*Math.cos(th);
+    if (den <= 1e-6) continue;
+    const rad = p/den;
+    if (rad > 3.0e9) continue;                 // well past lunar distance
+    const a = a0 + sgn*th;
+    out.push([rad*Math.cos(a), rad*Math.sin(a)]);
+  }
+  return out.length > 3 ? out : null;
+}
+// The soft keys, drawn where cabControls puts their pick volumes — both read
+// SOFT_KEYS and scrFrame, so the label and the button are the same object seen
+// two ways rather than two sets of coordinates kept in step by hand.
+function scrSoftKeys(g) {
+  const kw = SCR_W*0.20, kh = SCR_H*0.070;
+  g.font = '600 26px ui-monospace, monospace';
+  g.textBaseline = 'middle';
+  for (const s of SOFT_KEYS) {
+    const cx = s.u*SCR_W, cy = s.v*SCR_H;
+    const on = s.key === 'trjco' ? TRJ.coast
+             : s.key === 'trjhome' ? (TRJ.zoom > 1.0001 || TRJ.px || TRJ.py)
+             : false;
+    g.fillStyle = on ? 'rgba(80,190,150,0.22)' : 'rgba(255,255,255,0.06)';
+    g.fillRect(cx - kw/2, cy - kh/2, kw, kh);
+    g.strokeStyle = on ? SCR_HI : SCR_DIM; g.lineWidth = 1.5;
+    g.strokeRect(cx - kw/2, cy - kh/2, kw, kh);
+    g.fillStyle = on ? SCR_HI : SCR_INK;
+    g.fillText(s.lab, cx - g.measureText(s.lab).width/2, cy + 1);
+  }
+  g.textBaseline = 'alphabetic';
 }
 // altitude against downrange: the shape of an ascent, and of an entry
 function scrProfile(g) {
@@ -6677,7 +6879,9 @@ function drawCabDecals(sc, proj) {
 // wall next to it is what makes a display look like a sticker.
 function drawCabScreens(sc, proj) {
   if (!scrBuf || !scrN || !sc.craftM) return;
-  if (simT - scrT > 0.16 || scrT > simT) { cabScreenPaint(sc); scrT = simT; }
+  if (simT - scrT > 0.16 || scrT > simT || scrKey !== scrSig()) {
+    cabScreenPaint(sc); scrT = simT; scrKey = scrSig();
+  }
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, scrTex);
   gl.uniform1i(MESH.u.uLiv, 1);
@@ -6740,6 +6944,12 @@ function cabinPanel(sc, view, proj, wCss, hCss) {
       hov.key === 'nullr'   ? 'NULL RATES' :
       hov.key === 'level'   ? 'LEVEL THE CREW' :
       hov.key === 'help'    ? `CHECKLIST · ${helpShow ? 'SHOWN' : 'PRESS H'}` :
+      // a soft key already carries its own name; what it needs to add is the
+      // state it is about to change
+      hov.soft              ? hov.label + (
+          hov.key === 'trjco'   ? ` · ${TRJ.coast ? 'SHOWN' : 'HIDDEN'}`
+        : hov.key === 'trjhome' ? ''
+        : ` · ×${TRJ.zoom.toFixed(TRJ.zoom < 10 ? 1 : 0)}`) :
       hov.seat === CAB.seat ? `${hov.label} · RIGHT CLICK TO UNBUCKLE`
                             : `${hov.label} · RIGHT CLICK TO SIT`;
   }
@@ -7353,6 +7563,113 @@ window.__selftest = function () {
     }
     return back;
   }, 0);
+
+  // --- the trajectory display's soft keys. The whole design rests on one
+  // claim — that a key is under its own label — and that holds only because
+  // cabControls and scrSoftKeys both read SOFT_KEYS through scrFrame's canvas
+  // mapping. Assert the mapping instead of the pixels: the frame's corners
+  // must land on the panel it is inscribed in, and every key inside it.
+  eq('every soft key lands on the centre display', () => {
+    const K = capStations(0, 1.40), F = scrFrame(K, 1);
+    const rcin = K.rcone(K.xcon) - 0.05*K.rp;
+    for (const s of SOFT_KEYS) {
+      const p = F.at(s.u, s.v), r = Math.hypot(p[1], p[2]);
+      const roll = Math.atan2(p[2], p[1])*180/Math.PI;
+      // inside the bay's opening: 0.485..0.755 rcin, and its roll span
+      if (!(r > 0.485*rcin - 1e-9 && r < 0.755*rcin + 1e-9)) return `${s.key} r`;
+      if (!(roll > SCR_BAYS[1][0] && roll < SCR_BAYS[1][1])) return `${s.key} roll`;
+    }
+    return 'ok';
+  }, 'ok');
+  eq('and no two of them overlap', () => {
+    const K = capStations(0, 1.40), F = scrFrame(K, 1);
+    const rad = softKeyR(K, F);
+    for (let i = 0; i < SOFT_KEYS.length; i++)
+      for (let j = i + 1; j < SOFT_KEYS.length; j++) {
+        const a = F.at(SOFT_KEYS[i].u, SOFT_KEYS[i].v);
+        const b = F.at(SOFT_KEYS[j].u, SOFT_KEYS[j].v);
+        if (V.len(V.sub(a, b)) < 2*rad) return `${SOFT_KEYS[i].key}/${SOFT_KEYS[j].key}`;
+      }
+    return 'ok';
+  }, 'ok');
+  // measured against the plot box's BOTTOM (y0 + h), which is what a key would
+  // actually be drawn through — not against h, which is only its height
+  eq('the keys sit below the plot rather than through it',
+     () => SOFT_KEYS.every(s => s.v*SCR_H - SCR_H*0.035 > 56 + (SCR_H - 136)), true);
+  // zoom is bounded at both ends and pan comes home with it, so there is no
+  // way to end up zoomed out and looking at empty space
+  eq('zooming out all the way recentres the view', () => {
+    TRJ.zoom = 4; TRJ.px = 0.5; TRJ.py = -0.3;
+    for (let i = 0; i < 12; i++) cabActivate({ key: 'trjout' }, false);
+    const r = TRJ.zoom === 1 && TRJ.px === 0 && TRJ.py === 0;
+    trjHome();
+    return r;
+  }, true);
+  eq('and zooming in stops', () => {
+    for (let i = 0; i < 40; i++) cabActivate({ key: 'trjin' }, false);
+    const z = TRJ.zoom; trjHome();
+    return z <= TRJ_ZMAX;
+  }, true);
+  // Every control the crew has over a display must move that display's repaint
+  // signature, or pressing it while the clock is stopped does nothing you can
+  // see — which is the state you are in whenever you have paused to look at the
+  // thing you are trying to zoom.
+  // Each control is exercised from a state where it CAN act — zoomed in, which
+  // is the only state in which panning means anything, because at the fitted
+  // scale there is nothing outside the pane to pan to. "Every key does
+  // something from anywhere" is not the invariant and asserting it just
+  // rediscovers that zoom-out and pan are correctly inert at home.
+  eq('every trajectory control repaints the display it changes', () => {
+    const dead = new Set();
+    for (const k of ['trjin', 'trjout', 'trjl', 'trjr', 'trju', 'trjd', 'trjco']) {
+      trjHome(); TRJ.coast = false;
+      if (k !== 'trjin') { TRJ.zoom = 4; }        // room to move in every sense
+      const s0 = scrSig();
+      cabActivate({ key: k }, false);
+      if (scrSig() === s0) dead.add(k);
+    }
+    trjHome(); TRJ.coast = false;
+    return dead.size ? [...dead].join(',') : 'ok';
+  }, 'ok');
+  // and the inertness at home is itself the rule, so it is stated rather than
+  // left as a thing the test above happens to route around
+  eq('panning is inert at the fitted scale, where there is nowhere to pan', () => {
+    trjHome();
+    cabActivate({ key: 'trjl' }, false);
+    cabActivate({ key: 'trju' }, false);
+    return TRJ.px === 0 && TRJ.py === 0;
+  }, true);
+  eq('and so does turning the page', () => {
+    const p = cabPage, s0 = scrSig();
+    cabPage = (cabPage + 1) % CAB_PAGES.length;
+    const moved = scrSig() !== s0;
+    cabPage = p;
+    return moved;
+  }, true);
+
+  // --- the coast conic. It is the osculating orbit, so a circular one has to
+  // come back to itself and a hyperbolic one must NOT be drawn to infinity.
+  eq('a circular orbit closes on itself', () => {
+    const r = [RE + 400e3, 0, 0], v = [0, Math.sqrt(MU_E/(RE + 400e3)), 0];
+    const c = coastConic(r, v, [1,0,0], [0,1,0]);
+    if (!c) return 'null';
+    const d = V.len(V.sub([c[0][0], c[0][1], 0], [c[c.length-1][0], c[c.length-1][1], 0]));
+    const rad = Math.hypot(c[0][0], c[0][1]);
+    return d < 1e-6*rad && Math.abs(rad - (RE + 400e3)) < 1 ? 'ok' : `d ${d} r ${rad}`;
+  }, 'ok');
+  eq('an escape trajectory is cut, not followed to infinity', () => {
+    const rr = RE + 400e3;
+    const c = coastConic([rr, 0, 0], [0, 1.6*Math.sqrt(MU_E/rr), 0], [1,0,0], [0,1,0]);
+    return c && c.every(p => Math.hypot(p[0], p[1]) <= 3.0e9);
+  }, true);
+  eq('and the conic passes through the state it was taken from', () => {
+    const rr = RE + 800e3, r = [rr*0.6, rr*0.8, 0];
+    const v = [-0.8*Math.sqrt(MU_E/rr)*1.05, 0.6*Math.sqrt(MU_E/rr)*1.05, 0];
+    const c = coastConic(r, v, [1,0,0], [0,1,0]);
+    let best = Infinity;
+    for (const p of c) best = Math.min(best, V.len(V.sub([p[0], p[1], 0], r)));
+    return best < 0.004*rr;
+  }, true);
 
   // --- the parachutes hang FROM the capsule. The confluence is the lowest
   // point on the whole chute, so the invariant is one number: at every stage of
