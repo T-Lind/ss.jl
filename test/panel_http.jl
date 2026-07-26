@@ -169,6 +169,44 @@ end
         @test st == 200
         @test occursin("\"ok\":true", bod)
 
+        # --- the dry-mass estimate the builder shows against what it flies --
+        # A stage that sizes itself must agree with its own estimate, or the
+        # builder flags a correct stage as wrong: dry_estimate has to recognise
+        # the catalogue engine from the stage it built, not fall back to a
+        # generic thrust-to-weight. A hand-entered stage has no such engine and
+        # is judged against the generic figure, which still has to be sane.
+        # every value of one key, in the order the stages array emits them
+        nums(b, k) = [parse(Float64, m[1]) for m in
+                      eachmatch(Regex("\"" * k * "\":\\s*([-0-9.eE+]+)"), b)]
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port,
+                             body = "nstages=3&nboost=0&diameter=3.7" *
+                                    "&s1_engine=merlin_1d&s1_engines=9" *
+                                    "&s1_prop=411000&s1_dry_auto=1&s1_diameter=3.7")
+        @test st == 200
+        dry, est, frac = nums(bod, "dry_kg"), nums(bod, "dry_est_kg"),
+                         nums(bod, "dry_frac")
+        @test length(dry) == 3 && length(est) == 3
+        @test est[1] > 0
+        @test abs(dry[1] - est[1]) <= 1e-6 * est[1]
+        # a Falcon-class first stage is ~25 t dry on 411 t of kerolox
+        @test 20_000 <= dry[1] <= 32_000
+        @test 0.04 <= frac[1] <= 0.09
+
+        # 140 kg of structure under 9.5 t of propellant is not buildable, and
+        # the estimate has to say so loudly enough for the page to flag it
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port,
+                             body = "nstages=3&nboost=0&s3_engine=manual" *
+                                    "&s3_dry=140&s3_prop=9500&s3_isp=315" *
+                                    "&s3_thrust_kn=15")
+        @test st == 200
+        dry, est, frac = nums(bod, "dry_kg"), nums(bod, "dry_est_kg"),
+                         nums(bod, "dry_frac")
+        @test dry[3] == 140
+        @test est[3] > 3 * dry[3]
+        @test frac[3] < 0.02
+
         # --- the builder page and the engine-mixture rule -------------------
         st, hdrs, bod = http("GET", "/build"; port = port)
         @test st == 200

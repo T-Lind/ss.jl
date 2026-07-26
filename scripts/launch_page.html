@@ -3272,9 +3272,31 @@ function anchorMat(latD, lonD) {
 const PMAX = 4200;
 const parts = [];
 const partArr = new Float32Array(PMAX*6);
-function spawn(p, v, life, size, grow, kind) {
+function spawn(p, v, life, size, grow, kind, age) {
   if (parts.length >= PMAX) parts.shift();
-  parts.push({ p: p.slice(), v: v.slice(), life, age: 0, size, grow, kind });
+  parts.push({ p: p.slice(), v: v.slice(), life, age: age || 0, size, grow, kind });
+}
+// Emit a frame's worth of particles ACROSS the frame instead of all at one
+// point. Every particle of a frame used to be born at the same place, so a
+// plume was never a stream — it was one clump per frame, spaced by the
+// relative exhaust speed times the frame time. High up that recession runs
+// 500-600 m/s, which at 30 fps puts 19 m between clumps of 2 m puffs, and the
+// exhaust reads as a string of separate white beads rather than a column.
+//
+// Each particle is instead placed as if it had been emitted its own fraction
+// of the way through the frame: backed down its velocity RELATIVE to the
+// vehicle (the nozzle was further back then, and the absolute velocity carries
+// that motion already), and aged by the same fraction so it has grown and
+// faded by exactly the right amount. The particle count is untouched, so this
+// costs nothing and holds at any frame rate.
+function emitStream(n, dt, vveh, make) {
+  for (let i = 0; i < n; i++) {
+    const q = make(i);
+    const a = (n > 1 ? i/n : 0)*dt;
+    const rel = vveh ? V.sub(q.v, vveh) : q.v;
+    spawn(V.add(q.p, V.scale(rel, a)), q.v, q.life, q.size + q.grow*a,
+          q.grow, q.kind, a);
+  }
 }
 const rnd = (a=1, b=0) => b + (a-b)*Math.random();
 const jit = s => [rnd(s,-s), rnd(s,-s), rnd(s,-s)];
@@ -4342,22 +4364,38 @@ function spawnAscent(dt, st, rocketVel, noz, bnoz, coreBells) {
   }
   const E = 1 + 3.4*(1 - Math.exp(-st.h/42000));
   const tn = Math.min(1, st.thr/9.5e5);
-  const nf = Math.round(16*Math.sqrt(tn)*Math.min(2, 60*dt));
+  // The floor matters more than the slope. Scaling purely off thrust gave a
+  // 15 kN kick stage TWO particles a frame, and two puffs cannot be a plume
+  // however they are placed; a stream needs enough of them to close up. Seven
+  // a frame is ~180 alive at this lifetime, a twentieth of the cap.
+  const nf = Math.round(Math.max(7, 16*Math.sqrt(tn))*Math.min(2, 60*dt));
   // One emitter per BELL, round-robin so the total particle budget stays
   // what it was — a 33-engine stage must not spawn 33x the particles and
   // evict its own smoke column off the 4200 cap. Per-bell plumes are
   // narrower than the old centreline blob: sized to the bell, not the hull.
   const emit = (coreBells && coreBells.length)
              ? coreBells : [{ p: noz, bs: 0.105*DIA }];
-  for (let i = 0; i < nf; i++) {
-    const b = emit[i % emit.length];
-    const vex = V.add(V.add(rocketVel,
-                      V.scale(st.dir, -(95+rnd(45))*Math.min(E, 2.2) - 0.12*st.v)),
-                      jit(7*E));
-    spawn(V.add(b.p, jit(0.8*b.bs)), vex, rnd(0.42, 0.18),
-          Math.max(2*b.bs, 0.22*DIA)*(1.1 + rnd(0.6))*E,
-          Math.max(4*b.bs, 1.2*DIA)*E, 0);
-  }
+  // The round-robin CARRIES between frames. Restarting it at zero every frame
+  // meant a stage with more bells than particles-per-frame only ever lit the
+  // first few: a 33-engine booster showed sixteen torches and seventeen cold
+  // nozzles, no matter how long you watched it.
+  const rr = spawnAscent._rr | 0;
+  emitStream(nf, dt, rocketVel, i => {
+    const b = emit[(rr + i) % emit.length];
+    // Sideways scatter must NOT ride the altitude factor. At E = 4.4 a jit(7E)
+    // is +-31 m/s across the column, which over a particle's life throws it
+    // +-13 m off axis and tears holes in the very trail the expansion is
+    // supposed to be filling. A vacuum plume does widen enormously — that is
+    // what `grow` is for, and it widens the puffs instead of scattering them.
+    return { p: V.add(b.p, jit(0.8*b.bs)),
+             v: V.add(V.add(rocketVel,
+                      V.scale(st.dir, -(105+rnd(25))*Math.min(E, 2.2) - 0.12*st.v)),
+                      jit(4 + 1.4*E)),
+             life: rnd(0.42, 0.18),
+             size: Math.max(2*b.bs, 0.22*DIA)*(1.1 + rnd(0.6))*E,
+             grow: Math.max(4*b.bs, 1.2*DIA)*E, kind: 0 };
+  });
+  spawnAscent._rr = rr + nf;
   if (st.h < 300 && st.thr > 1e5) {
     // The trench decides where the smoke goes: the deflector turns the plume
     // and it leaves the mouth at grade, carrying the deluge steam with it.
@@ -4377,13 +4415,13 @@ function spawnAscent(dt, st, rocketVel, noz, bnoz, coreBells) {
   }
   // one plume per lit strap-on, shorter and narrower than the core's
   for (const bn of (bnoz || [])) {
-    for (let i = 0; i < Math.max(1, Math.round(nf*0.45)); i++) {
-      const vex = V.add(V.add(rocketVel,
-                        V.scale(st.dir, -(80+rnd(38))*Math.min(E, 2.2) - 0.12*st.v)),
-                        jit(6*E));
-      spawn(V.add(bn, jit(0.22*DIA)), vex, rnd(0.34, 0.15),
-            DIA*(0.34+rnd(0.20))*E, DIA*1.5*E, 0);
-    }
+    emitStream(Math.max(1, Math.round(nf*0.45)), dt, rocketVel, () => ({
+      p: V.add(bn, jit(0.22*DIA)),
+      v: V.add(V.add(rocketVel,
+               V.scale(st.dir, -(80+rnd(38))*Math.min(E, 2.2) - 0.12*st.v)),
+               jit(3.5 + 1.2*E)),
+      life: rnd(0.34, 0.15),
+      size: DIA*(0.34+rnd(0.20))*E, grow: DIA*1.5*E, kind: 0 }));
   }
   if (st.mach > 0.92 && st.mach < 1.08 && st.q > 12) spawnVapor(st, rocketVel);
 }
@@ -4402,19 +4440,22 @@ function spawnTli(dt, cs) {
   // is the difference between a Starship showing six torches and one.
   const ls = secDraw.find(s => s.name === LASTST);
   const kb = BELLS.length ? BELLS[BELLS.length - 1] : null;
-  const n = Math.min(12, Math.round(60*dt*10));
-  for (let i = 0; i < n; i++) {
+  const n = Math.max(7, Math.min(14, Math.round(60*dt*10)));
+  const rr = spawnTli._rr | 0;
+  emitStream(n, dt, cs.vel, i => {
     let p, bs;
     if (kb && kb.pts.length && ls) {
-      const pt = kb.pts[i % kb.pts.length];
+      const pt = kb.pts[(rr + i) % kb.pts.length];
       bs = pt[2];
       p = V.add(V.add(cs.pos, V.scale(cs.bx, kb.exitX - ls.x0)),
                 V.add(V.scale(cs.by, pt[0]), V.scale(cs.bz, pt[1])));
     } else { bs = 0.35; p = V.add(cs.pos, V.scale(cs.bx, -0.4)); }
-    spawn(V.add(p, jit(0.7*bs)),
-          V.add(cs.vel, V.add(V.scale(cs.bx, -(40 + rnd(60))), jit(7))),
-          rnd(0.35, 0.15), Math.max(0.4, bs*(1.2 + rnd(0.8))), 2.6, 0);
-  }
+    return { p: V.add(p, jit(0.7*bs)),
+             v: V.add(cs.vel, V.add(V.scale(cs.bx, -(40 + rnd(60))), jit(7))),
+             life: rnd(0.35, 0.15),
+             size: Math.max(0.4, bs*(1.2 + rnd(0.8))), grow: 2.6, kind: 0 };
+  });
+  spawnTli._rr = rr + n;
 }
 function spawnEntry(dt, es) {
   const I = Math.min(1, es.q/120);
@@ -5331,6 +5372,33 @@ window.__selftest = function () {
   eq('an unrotated piece sits exactly where it was drawn', () =>
      V.len(V.sub(xf(mSpin(mIdent(), [40,0,0], [0,0,1], 0), [40, 2, 0]), [40, 2, 0])),
      0, 1e-12);
+
+  // --- plume emission. Every particle of a frame used to be born at the same
+  // point, so exhaust was not a stream but one clump per frame, with the
+  // relative exhaust speed times the frame time of empty sky between clumps.
+  const emitted = (n, dt, vveh) => {
+    const keep = parts.splice(0, parts.length);
+    emitStream(n, dt, vveh, () => ({ p: [0,0,0], v: [-500,0,0], life: 1,
+                                     size: 2, grow: 8, kind: 0 }));
+    const out = parts.splice(0, parts.length);
+    parts.push.apply(parts, keep);
+    return out;
+  };
+  eq('the first particle of a frame is at the nozzle', () =>
+     emitted(4, 1/30, [0,0,0])[0].p[0], 0);
+  eq('and the last is three quarters of a frame down the trail', () =>
+     emitted(4, 1/30, [0,0,0])[3].p[0], -500*0.75/30, 1e-9);
+  eq('each is aged by the fraction it has already flown', () =>
+     emitted(4, 1/30, [0,0,0])[3].age, 0.75/30, 1e-12);
+  eq('and grown by that much too', () =>
+     emitted(4, 1/30, [0,0,0])[3].size, 2 + 8*0.75/30, 1e-12);
+  // the offset follows the RELATIVE velocity: the nozzle was further back a
+  // moment ago, and the absolute velocity already carries the vehicle's motion
+  eq('the vehicle\'s own motion is not counted twice', () =>
+     emitted(4, 1/30, [100, 0, 0])[3].p[0], -600*0.75/30, 1e-9);
+  eq('a single particle still sits at the nozzle', () =>
+     emitted(1, 1/30, [0,0,0])[0].p[0], 0);
+  eq('and the emitted count is untouched', () => emitted(9, 1/30, [0,0,0]).length, 9);
 
   // --- strap-on separation. A set is one mesh section but N bodies, and each
   // has to leave along its own radius rather than the whole raft drifting off
