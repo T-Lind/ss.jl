@@ -127,10 +127,8 @@
       <h2>Presets</h2>
       <div class="sub" style="margin:8px 0 3px">mission</div>
       <div id="presets"></div>
-      <div class="sub" style="margin:8px 0 3px">vehicle</div>
-      <div id="vpresets"></div>
-      <div class="sub" style="margin:4px 0 0">one click configures + runs —
-        then tweak any knob below</div>
+      <div class="sub" style="margin:4px 0 0">one click configures + runs.
+        Vehicle presets live in the builder.</div>
     </div>
 
     <div class="card" id="card_flyby">
@@ -188,9 +186,15 @@
     </div>
 
     <div class="card" id="card_launcher">
-      <h2 class="fold">Launcher <span class="count" id="lv_count"></span>
+      <h2>Launcher <span class="count" id="lv_count"></span>
         <span class="chip" id="buildbtn" style="float:right;font-weight:normal"
               title="open the vehicle builder — key B">&#128736; vehicle builder</span></h2>
+      <div class="sub" style="margin:8px 0 0">the vehicle is configured in the
+        builder and syncs here live — this page just flies it</div>
+      <!-- The whole launcher form still exists and still feeds params() and
+           the presets; it is only no longer ON SCREEN. The visible editor is
+           /build, and its state arrives here through localStorage. -->
+      <div id="lv_form" class="hidden">
       <div class="row">
         <div><label for="nstages">stages</label>
           <select id="nstages">
@@ -200,7 +204,9 @@
           <select id="nboost">
             <option value="0" selected>none</option>
             <option value="2">2</option><option value="3">3</option>
-            <option value="4">4</option><option value="6">6</option></select></div>
+            <option value="4">4</option><option value="5">5</option>
+            <option value="6">6</option><option value="7">7</option>
+            <option value="8">8</option></select></div>
       </div>
       <!-- stage blocks are generated from the stage count -->
       <div id="stagebox"></div>
@@ -214,11 +220,7 @@
           <input type="checkbox" id="opt_kick" style="width:auto;margin:0">
           search for the best pitch-over kick</label></div>
       </div>
-      <div class="sub" style="margin:2px 0 0">the kick is the one guidance
-        number that does not scale: 8° suits the reference vehicle, a
-        Starship-class stack wants about 5°, and anything with strap-ons lofts
-        on either. The search tries a ladder of angles and keeps whichever
-        puts the most mass in orbit — a few seconds, often several tonnes.</div>
+      </div>
     </div>
 
     <div class="card runbar">
@@ -1771,13 +1773,8 @@ function initPresets() {
       fetchGeo(); doRun();
     });
   renderMissionPresets();
-  chips('vpresets', Object.keys(VEHICLES), k => {
-    VNAME = k.replace(/\s*\(.*\)$/, '');
-    applyPreset(VEHICLES[k], { reset: true });
-    for (const el of $('vpresets').querySelectorAll('.chip'))
-      el.classList.toggle('sel', el.dataset.p === k);
-    fetchGeo(); doRun();
-  });
+  // vehicle presets moved to the builder page with the rest of the vehicle
+  // editing; VEHICLES stays because the landing-mode boot still applies one
 }
 let renderMissionPresets = () => {};
 
@@ -1968,11 +1965,38 @@ for (const hd of document.querySelectorAll('h2.fold'))
   };
 for (const c of document.querySelectorAll('.card')) {
   try {
-    if (c.id && sessionStorage.getItem('fold:' + c.id) === 'true')
+    // only cards that still HAVE a fold header can be restored closed — a
+    // stale stored state must not permanently hide a card that lost its fold
+    if (c.id && c.querySelector('h2.fold') &&
+        sessionStorage.getItem('fold:' + c.id) === 'true')
       c.classList.add('closed');
   } catch (e) {}
 }
 
+// The vehicle is EDITED on /build and FLOWN from here; localStorage is the
+// wire between them. The builder writes the whole vehicle as a query string
+// under this key on every change; this page applies it into the (hidden)
+// launcher form, so params(), the presets, and the geometry card all keep
+// reading the fields they always read — they just show the builder's truth.
+const VEHICLE_KEY = 'ssjl.vehicle';
+function applyVehicleConfig(qs) {
+  if (!qs) return false;
+  const q = new URLSearchParams(qs);
+  if (![...q.keys()].length) return false;
+  if (q.has('nstages')) setField('nstages', q.get('nstages'));
+  if (q.has('nboost')) setField('nboost', q.get('nboost'));
+  buildStages();
+  for (const [k, v] of q) {
+    if (k === 'nstages' || k === 'nboost') continue;
+    if (k === 'vname') { VNAME = v; continue; }
+    setField(k, v);
+  }
+  // strap-ons loft the stack off the reference kick; mirror the rule the
+  // visible nboost control applied when it lived on this page
+  if (nBoost() > 0) $('opt_kick').checked = true;
+  syncSizeBy();
+  return true;
+}
 requestAnimationFrame(tick);
 // catalogues first: the stage form has no options until they arrive
 fillCatalogues().then(() => {
@@ -1984,11 +2008,11 @@ fillCatalogues().then(() => {
     VNAME = 'Starship';
     applyPreset(VEHICLES['Starship (expendable)'], { reset: true });
   }
-  // Rehydrate the whole form from an inbound query — this is how a vehicle
-  // configured on /build comes back to mission control. Stack shape first,
-  // because nstages/nboost decide which stage fields exist to fill, and only
-  // AFTER the landing preset above, which this deliberately overrides: an
-  // explicit configuration in the URL outranks a mode default.
+  // Rehydrate from an inbound query first — an explicit configuration in the
+  // URL outranks everything, including the landing preset above. With no
+  // vehicle in the URL, the builder's stored vehicle applies instead (unless
+  // the landing preset just configured Starship, which stays the mode's own
+  // default until the builder writes again).
   const q = new URLSearchParams(location.search);
   if ([...q.keys()].some(k => k !== 'mode' && k !== 'zoom')) {
     if (q.has('nstages')) setField('nstages', q.get('nstages'));
@@ -2000,9 +2024,19 @@ fillCatalogues().then(() => {
       setField(k, v);
     }
     syncSizeBy();
+  } else if (!landing()) {
+    try { applyVehicleConfig(localStorage.getItem(VEHICLE_KEY)); } catch (e) {}
   }
   fetchGeo();
   doRun();
+});
+// live sync: the builder saves on every edit, and a storage event fires in
+// every OTHER tab on the same origin — so the geometry card follows the
+// builder as you drag its numbers, without this page polling anything
+window.addEventListener('storage', e => {
+  if (e.key !== VEHICLE_KEY || !e.newValue) return;
+  applyVehicleConfig(e.newValue);
+  fetchGeo();
 });
 </script>
 </body>
