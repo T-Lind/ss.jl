@@ -187,7 +187,7 @@ end
 
 "Commanded thrust direction (unit, ECI) for the current guidance phase."
 # how far below and above the local horizon the closed-loop law may point
-const PITCH_CMD_MIN = -10.0 * pi / 180
+const PITCH_CMD_MIN = -25.0 * pi / 180
 const PITCH_CMD_MAX = 85.0 * pi / 180
 
 """
@@ -393,7 +393,12 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
         # so a flight that had already crashed went on being integrated as if
         # it were flying. It ends where it hits, and how hard it hit is the
         # event's own velocity — a few m/s is a landing, anything else is not.
-        if t > 5.0 && d.h <= 0.0
+        # Only once the engines are done. Truncating a POWERED trajectory here
+        # changes what tune_ascent sees from its trial parameters, and the
+        # tuner then walks to a different solution for vehicles that were
+        # perfectly fine — a fix for crashed flights has no business moving
+        # the ones that fly.
+        if !ctx.burning && t > 5.0 && d.h <= 0.0
             h_cut = 0.0; gam_cut = d.gamma
             ctx.burning = false; ctx.phase = :coast
             reached = false
