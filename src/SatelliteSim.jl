@@ -63,6 +63,7 @@ include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
 include("earthorbit.jl")
+include("suborbital.jl")
 include("landingnav.jl")
 include("landing.jl")
 include("lunarreturn.jl")
@@ -134,6 +135,8 @@ export
     Entry6Result, Entry6Log, simulate_entry6,
     # earth orbit
     OrbitTarget, ORBITS, EarthOrbitResult, earthorbit,
+    # suborbital
+    SuborbitalResult, suborbital,
     # translunar
     CislunarResult, fly_cislunar, tli_burn, design_free_return, seed_free_return,
     design_tcm, fly_cislunar_tcm,
@@ -161,7 +164,8 @@ export
     cw_stm, cw_propagate, cw_two_impulse,
     # mesh & panel aero
     TriMesh, read_stl, write_stl, mesh_area, mesh_volume, mass_properties,
-    lathe_mesh, box_mesh, merge_meshes, rocket_mesh, pod_mesh, interstage_length,
+    lathe_mesh, box_mesh, merge_meshes, rocket_mesh, pod_mesh, pod_radius,
+    interstage_length,
     PanelAero, panel_aero, cp_max_newtonian, trim_alpha,
     # config
     MissionSpec, load_mission, run_mission,

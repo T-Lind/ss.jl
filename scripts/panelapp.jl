@@ -273,9 +273,13 @@ opt_kick(p) = gets(p, "opt_kick", "0") in ("1", "true", "on")
 "Pitch-over kick angle [rad] — the one guidance number a big stack has to change."
 kick_rad(p) = deg2rad_(clamp(getf(p, "kick_deg", 8.0), 0.5, 30.0))
 
-"Which mission the panel is flying: Earth orbit, the free-return flyby, or a landing."
+"""
+Which mission the panel is flying: a suborbital hop or shot, an Earth orbit, the
+free-return flyby, or a lunar landing.
+"""
 mission_mode(p) = (m = gets(p, "mode", "flyby");
-                   m == "landing" ? :landing : m == "orbit" ? :orbit : :flyby)
+                   m == "landing" ? :landing : m == "orbit" ? :orbit :
+                   m == "suborbital" ? :suborbital : :flyby)
 
 "Build the lander from the panel's `l_*` fields."
 lander_from_params(p) = Lander(
@@ -650,9 +654,89 @@ function panel_orbit(p)::Dict{String,Any}
     out
 end
 
+"""
+Fly a suborbital mission for the panel: a hop that closes on an apogee, or a
+ballistic shot that closes on a ground range. There is no cislunar leg — the
+whole flight is an ascent and an arc — so the payload carries `asc3d`, `ascent`
+and the entry blocks and simply omits `cis`, which every consumer already
+handles (an ascent that fails to reach orbit produces the same shape).
+"""
+function panel_suborbital(p)::Dict{String,Any}
+    prof = gets(p, "sub_profile", "hop") == "downrange" ? :downrange : :hop
+    sb = suborbital(
+        profile = prof,
+        lv = lv_from_params(p),
+        pod_mass = getf(p, "pod_mass", 350.0),
+        apogee = clamp(getf(p, "sub_apogee_km", 100.0), 5.0, 3000.0) * 1e3,
+        downrange = clamp(getf(p, "sub_range_km", 400.0), 10.0, 12000.0) * 1e3,
+        loft = deg2rad_(clamp(getf(p, "sub_loft_deg", 40.0), 5.0, 85.0)),
+        azimuth = deg2rad_(clamp(getf(p, "sub_azimuth_deg", 90.0), 0.0, 360.0)),
+        kick_angle = kick_rad(p),
+        strict = false,
+    )
+    asc, ent = sb.ascent, sb.entry
+    sc = scene_payload(asc, nothing)
+    events = ascent_events(asc)
+
+    metrics = Dict{String,Any}(
+        "liftoff_t" => liftoff_mass(sb.lv) / 1e3,
+        "apogee_km" => sb.apogee / 1e3,
+        "target_apogee_km" => sb.target_apogee / 1e3,
+        "range_km" => sb.range / 1e3,
+        "target_range_km" => sb.target_range / 1e3,
+        "t_apogee_s" => sb.t_apogee - asc.t,
+        "cutoff_h_km" => asc.h_cut / 1e3,
+        "cutoff_gamma_deg" => rad2deg_(asc.gamma_cut),
+        "prop_margin_kg" => sum(asc.prop_left),
+        # what it was asked for against what it did, as one number each way
+        "apogee_err_km" => (sb.apogee - sb.target_apogee) / 1e3,
+        "range_err_km" => isnan(sb.target_range) ? NaN :
+                          (sb.range - sb.target_range) / 1e3,
+    )
+    metrics["t_days"] = (ent !== nothing ? ent.t_splash : asc.t) / 86400
+
+    out = Dict{String,Any}(
+        "ok" => true, "mode" => "suborbital",
+        "outcome" => sb.outcome === :splashdown ? "nominal" : string(sb.outcome),
+        "metrics" => metrics,
+        "asc3d" => sc.asc3d,
+        "ascent" => sc.ascent,
+        "events" => events,
+        "sites" => Dict{String,Any}(
+            "launch_lat" => rad2deg_(sb.guid.site_lat),
+            "launch_lon" => rad2deg_(sb.guid.site_lon),
+        ),
+        "suborbital" => Dict{String,Any}(
+            "profile" => String(sb.profile),
+            "apogee_km" => sb.apogee / 1e3,
+            "range_km" => sb.range / 1e3,
+        ),
+    )
+    if ent !== nothing
+        entry_payload!(out, metrics, events, ent)
+        # The arc starts below the entry interface and going UP, so the entry
+        # simulator never crosses 120 km downward from outside and never emits
+        # the event the viewers frame their ENTRY phase on. It is still a real
+        # instant — it is where the capsule comes back through 120 km — so it is
+        # found in the log rather than left missing. A hop that never gets that
+        # high hands over at apogee instead, which is the same idea: the point
+        # after which the only thing left is coming down.
+        EL = ent.log
+        top = argmax(EL.h)
+        ei = findfirst(i -> i > top && EL.h[i] <= 120.0e3, eachindex(EL.h))
+        if !any(e -> e["name"] == "entry_interface", events)
+            push!(events, Dict("phase" => "entry", "name" => "entry_interface",
+                               "t" => EL.t[ei === nothing ? top : ei]))
+        end
+        push!(events, Dict("phase" => "entry", "name" => "apogee", "t" => EL.t[top]))
+    end
+    out
+end
+
 function panel_mission(p)::Dict{String,Any}
     mission_mode(p) === :landing && return panel_landing(p)
     mission_mode(p) === :orbit && return panel_orbit(p)
+    mission_mode(p) === :suborbital && return panel_suborbital(p)
     ms = moonshot(
         pod_mass = getf(p, "pod_mass", 350.0),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
@@ -748,6 +832,15 @@ const SOLVE_METRICS = ["prop_margin_kg", "perilune_km", "vac_perigee_km",
                        "peak_g", "peak_q_wcm2", "t_days", "liftoff_t",
                        "park_apogee_km", "v_splash", "tli_dv", "heat_mj"]
 
+"""
+Metrics a suborbital flight can be solved against. Deliberately its own list:
+half of SOLVE_METRICS is about an orbit that a suborbital flight never has, and
+offering `park_apogee_km` on a hop would only ever return NaN.
+"""
+const SUBORBITAL_METRICS = ["apogee_km", "range_km", "peak_g", "peak_q_wcm2",
+                            "v_splash", "heat_mj", "prop_margin_kg",
+                            "liftoff_t", "cutoff_h_km", "t_apogee_s"]
+
 "Metrics a landing mission can be solved against."
 const LANDING_METRICS = ["prop_left_kg", "hover_s", "descent_dv", "loi_dv",
                          "touchdown_v", "touchdown_vh", "downrange_km",
@@ -756,7 +849,9 @@ const LANDING_METRICS = ["prop_left_kg", "hover_s", "descent_dv", "loi_dv",
                          "ground_elev_m", "redesignate_m", "nav_alt_err_m"]
 
 "The metric list for whichever mission the panel is configured for."
-solve_metrics(p) = mission_mode(p) === :landing ? LANDING_METRICS : SOLVE_METRICS
+solve_metrics(p) = mission_mode(p) === :landing ? LANDING_METRICS :
+                   mission_mode(p) === :suborbital ? SUBORBITAL_METRICS :
+                   SOLVE_METRICS
 
 """
 Lock every field but one and solve it so a mission metric hits a target —
@@ -884,6 +979,9 @@ sweepable(p) = vcat(
     mission_mode(p) === :landing ?
         ["l_dry", "l_prop", "l_thrust_kn", "l_isp", "l_throttle_min",
          "h_moon_park_km", "h_pdi_km", "n_rev"] : String[],
+    mission_mode(p) === :suborbital ?
+        ["sub_apogee_km", "sub_range_km", "sub_loft_deg", "sub_azimuth_deg"] :
+        String[],
     ["s$(k)_$f" for k in 1:n_stages(p)
                 for f in ("prop", "dry", "isp", "thrust_kn", "engines")],
     n_boosters(p) == 0 ? String[] :
@@ -948,6 +1046,7 @@ catalogue_payload() = Dict{String,Any}(
                  for (k, v) in sort(collect(ORBITS), by = first)],
     "solve_metrics" => SOLVE_METRICS,
     "landing_metrics" => LANDING_METRICS,
+    "suborbital_metrics" => SUBORBITAL_METRICS,
     "max_stages" => 5)
 
 """

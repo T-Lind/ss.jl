@@ -1231,6 +1231,181 @@ end
     @test length(pod_mesh(; radius = 0.55)[3]) < length(pod_mesh(; radius = 1.20)[3])
     @test length(pod_mesh(; radius = 0.55, ncrew = 3)[3]) ==
           length(pod_mesh(; radius = 1.20, ncrew = 3)[3])
+
+    # The clear volume the launch view bounds its camera and its zero-g float
+    # by must contain no fitting at all. It is a CYLINDER, not a scaled cone:
+    # every fitting is sized off the narrow end of its own taper (it has to be,
+    # or it comes out through the top), so each one cuts furthest inboard at
+    # its LOW end and a clear radius taken as a fraction of the local wall is
+    # widest exactly where the racks are deepest. Getting this wrong is not
+    # cosmetic — the eye ends up inside an equipment rack, which is a wall of
+    # khaki filling the frame and nothing else visible at all.
+    for rp in (0.55, 0.75, 1.996)
+        _, _, cab, _ = pod_mesh(; radius = rp, nseg = 24)
+        ta = tan(deg2rad_(32.5))
+        xb0 = 2.4rp - sqrt((2.4rp)^2 - rp^2) + 0.05rp
+        Lc = (rp - 0.26rp) / ta
+        rwall(x) = rp - ta * (x - xb0) - 0.050rp
+        xa = xb0 + 0.04rp + 0.045rp                  # couch station
+        lo, hi = xa + 0.16rp, xb0 + 0.62Lc - 0.14rp  # cabXLo, cabXHi in the viewer
+        rclear = 0.60 * rwall(hi)                    # CAB_RFRAC
+        @test hi > lo
+        @test all(hypot(v[2], v[3]) >= rclear
+                  for m in cab for t in m.tris for v in t if lo <= v[1] <= hi)
+    end
+    # And the capsule is sized by what it weighs. The law is a MEAN fit
+    # (k = 0.086 in r = k·m^(1/3)) to a set whose own k runs 0.073 to 0.110, so
+    # it lands on the middle of the set closely and on the ends to within that
+    # spread: Apollo is the densest capsule ever flown and comes out 22% small,
+    # which is the honest error of a one-constant law and not a bug to tune out.
+    for (m, d) in ((1400.0, 1.89),      # Mercury
+                   (3850.0, 2.30),      # Gemini
+                   (2950.0, 2.20),      # Soyuz descent module
+                   (5560.0, 3.90),      # Apollo CM
+                   (12500.0, 4.00))     # Dragon 2
+        @test 0.70 < 2 * pod_radius(m) / d < 1.30
+    end
+    # --- and the crew can SEE the displays. This is the invariant the console
+    # shipped without: the screen bays were built with a filled slab for a
+    # bezel, so the recess and everything the viewer draws into it sat inside a
+    # solid block. Every check that existed passed — the recess was in the right
+    # place, the quads were in the recess, the UVs were right — because none of
+    # them asked whether a line from the crew's eye reaches the face. Ray-cast
+    # from each couch to its own screen bay and count what gets through.
+    for rp in (0.75, 1.40)
+        _, _, cab, _ = pod_mesh(; radius = rp, nseg = 24)
+        tris = [t for m in cab for t in m.tris]
+        ta = tan(deg2rad_(32.5))
+        xb0 = 2.4rp - sqrt((2.4rp)^2 - rp^2) + 0.05rp
+        Lc = (rp - 0.26rp) / ta
+        rinw(x) = rp - ta * (x - xb0) - 0.050rp
+        xa = xb0 + 0.085rp
+        xcon = xb0 + 0.62Lc
+        rcin = rinw(xcon)
+        ln = 0.60 * rinw(xa + 0.07rp)
+        crew = rp >= 1.10 ? 3 : rp >= 0.85 ? 2 : 1
+        zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] : [-0.44rp, 0.0, 0.44rp]
+        bays = [(-46.0, -18.0), (-15.0, 15.0), (18.0, 46.0)]
+        # Moller-Trumbore, front faces and back alike: a wall stops light either way
+        function thit(o, d, a, b, c)
+            e1 = b .- a; e2 = c .- a
+            h = (d[2]*e2[3]-d[3]*e2[2], d[3]*e2[1]-d[1]*e2[3], d[1]*e2[2]-d[2]*e2[1])
+            det = sum(e1 .* h); abs(det) < 1e-12 && return Inf
+            f = 1/det; s = o .- a; u = f*sum(s .* h)
+            (u < -1e-9 || u > 1 + 1e-9) && return Inf
+            q = (s[2]*e1[3]-s[3]*e1[2], s[3]*e1[1]-s[1]*e1[3], s[1]*e1[2]-s[2]*e1[1])
+            v = f*sum(d .* q); (v < -1e-9 || u + v > 1 + 1e-9) && return Inf
+            t = f*sum(e2 .* q); t > 1e-7 ? t : Inf
+        end
+        for (si, zc) in enumerate(zs)
+            eye = (xa + 0.30rp, 0.26ln, zc)
+            mine = crew == 1 ? 2 : crew == 2 ? (si == 1 ? 1 : 3) : si
+            (d0, d1) = bays[mine]
+            seen = 0; tot = 0
+            for fr in 0.1:0.2:0.9, fa in 0.1:0.2:0.9
+                r = (0.485 + (0.755 - 0.485)*fr) * rcin
+                ang = deg2rad_(d0) + 0.045 +
+                      (deg2rad_(d1) - 0.045 - deg2rad_(d0) - 0.045)*fa
+                p = (xcon - 0.031rp, r*cos(ang), r*sin(ang))
+                dir = p .- eye; L = sqrt(sum(dir .^ 2)); dir = dir ./ L
+                tot += 1
+                blocked = any(tt -> thit(eye, dir, tt[1], tt[2], tt[3]) < L - 1e-6, tris)
+                blocked || (seen += 1)
+            end
+            # The commander's couch sees all of its own bay; an outboard couch
+            # sees ~85% of its own, the far edge clipped by the near rim of a
+            # recessed bezel at 42 degrees of incidence, which is what a
+            # recessed display does. The bug this guards scored ZERO — the
+            # bezel was a filled slab and no ray reached any face at all.
+            @test seen >= 0.80 * tot
+        end
+    end
+    @test isapprox(2 * pod_radius(12500.0), 4.00; atol = 0.10)   # Dragon, on the nose
+    @test isapprox(2 * pod_radius(1400.0), 1.89; atol = 0.15)    # and Mercury
+    @test pod_radius(20.0) == pod_radius(1.0) == 0.30   # clamped at the bottom
+    @test pod_radius(1e9) == 3.0                        # and at the top
+    # a heavier payload really is a bigger capsule in the mesh, not just here
+    @test maximum(hypot(v[2], v[3]) for m in pod_mesh(; radius = pod_radius(12500.0))[1]
+                  for t in m.tris for v in t) >
+          maximum(hypot(v[2], v[3]) for m in pod_mesh(; radius = pod_radius(350.0))[1]
+                  for t in m.tris for v in t)
+end
+
+@testset "suborbital" begin
+    lv = default_moon_rocket(payload = 350.0)
+
+    # --- a hop: straight up, closing on an apogee -------------------------
+    hop = suborbital(profile = :hop, apogee = 100.0e3, lv = lv, strict = false)
+    @test hop.outcome === :splashdown
+    @test abs(hop.apogee - 100.0e3) < 4.0e3          # within 4 km of the ask
+    # and it comes down where it went up. A gravity turn is unstable to lateral
+    # perturbation by construction — the thrust follows the velocity, so any
+    # tip compounds — and flying a "vertical" launch in one walked it 38 km
+    # downrange by 40 km of altitude on Coriolis alone. Holding the commanded
+    # vertical instead is what keeps this number small.
+    @test hop.range < 15.0e3
+    @test any(e -> e.name === :pitch_hold, hop.ascent.events)
+    @test any(e -> e.name === :seco, hop.ascent.events)
+    @test !hop.ascent.reached_orbit                  # it is not an orbit
+    @test hop.ascent.h_cut < hop.apogee              # it coasts up after cutoff
+    @test sum(hop.ascent.prop_left) > 0              # cutoff, not depletion
+    @test hop.entry.v_splash < 12.0                  # the chutes did their job
+
+    # a taller hop asks more of the vehicle and reaches higher
+    tall = suborbital(profile = :hop, apogee = 200.0e3, lv = lv, strict = false)
+    @test tall.apogee > hop.apogee + 80.0e3
+    @test sum(tall.ascent.prop_left) < sum(hop.ascent.prop_left)
+    @test tall.entry.peak_gload > hop.entry.peak_gload   # steeper, faster entry
+
+    # --- a shot: lofted, closing on a ground range ------------------------
+    shot = suborbital(profile = :downrange, downrange = 400.0e3, lv = lv,
+                      strict = false)
+    @test shot.outcome === :splashdown
+    @test abs(shot.range - 400.0e3) < 20.0e3
+    @test shot.range > 20 * hop.range                # it went somewhere
+    far = suborbital(profile = :downrange, downrange = 900.0e3, lv = lv,
+                     strict = false)
+    @test far.range > shot.range + 300.0e3
+    @test far.apogee > shot.apogee                   # further needs higher
+
+    # --- the two predicates the cutoffs are built on ----------------------
+    # A purely radial climb has no angular momentum, so its eccentricity goes
+    # to one and a(1+e) goes to 2a — which is exactly the radius that energy
+    # reaches straight up. The formula has to hold in that limit or a hop
+    # cannot use it at all.
+    r0 = (SatelliteSim.RE_MEAN + 1.0e3, 0.0, 0.0)
+    for vv in (1000.0, 2000.0, 3000.0)
+        rad = SatelliteSim._apogee_radius(r0, (vv, 0.0, 0.0))
+        eps = 0.5vv^2 - SatelliteSim.MU_EARTH / SatelliteSim.vnorm(r0)
+        @test isapprox(rad, -SatelliteSim.MU_EARTH / eps; rtol = 1e-9)
+    end
+    @test SatelliteSim._apogee_radius(r0, (0.0, 12.0e3, 0.0)) == Inf   # escaping
+    # a circular orbit never comes down, so it has no ballistic range
+    rc = SatelliteSim.RE_MEAN + 400.0e3
+    vc = sqrt(SatelliteSim.MU_EARTH / rc)
+    @test SatelliteSim._ballistic_range((rc, 0.0, 0.0), (0.0, vc, 0.0)) == Inf
+    # and a lofted arc's range grows with speed, monotonically
+    rr = (SatelliteSim.RE_MEAN + 60.0e3, 0.0, 0.0)
+    rng(s) = SatelliteSim._ballistic_range(rr, (s*sind(40), s*cosd(40), 0.0))
+    @test rng(2000.0) < rng(2600.0) < rng(3200.0) < Inf
+
+    # --- guidance plumbing ------------------------------------------------
+    # _reguid must carry every field: the tuner rebuilds guidance twice per
+    # Newton step, and a dropped field there is a silently different vehicle
+    g = AscentGuidance(cutoff = :apogee, apogee_target = 123.0e3,
+                       pitch_hold = 0.4, azimuth = 1.1)
+    g2 = SatelliteSim._reguid(g; pitch0 = 0.9)
+    @test g2.pitch0 == 0.9
+    @test g2.cutoff === :apogee && g2.apogee_target == 123.0e3
+    @test g2.pitch_hold == 0.4 && g2.azimuth == 1.1
+    @test SatelliteSim._with_kick(g, 0.2).kick_angle == 0.2
+    @test SatelliteSim._with_kick(g, 0.2).apogee_target == 123.0e3
+    # an orbital ascent is untouched by any of this
+    _, orb = tune_ascent(lv, AscentGuidance())
+    @test orb.reached_orbit && abs(orb.h_cut - 200.0e3) < 2.0e3
+
+    @test_throws ArgumentError suborbital(profile = :sideways, lv = lv)
+    @test_throws ArgumentError suborbital(profile = :hop, apogee = -1.0, lv = lv)
 end
 
 @testset "lifting entry (lunar return corridor)" begin

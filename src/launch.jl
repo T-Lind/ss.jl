@@ -33,7 +33,29 @@ Base.@kwdef struct AscentGuidance
     h_target::Float64 = 200.0e3            # parking-orbit altitude [m]
     fairing_alt::Float64 = 120.0e3         # fairing jettison altitude [m]
     stage_gap::Float64 = 4.0               # coast between stages [s]
+    # --- suborbital ------------------------------------------------------
+    # An orbit is cut off on ENERGY, because energy is what an orbit is. A
+    # suborbital flight is not going to orbit, so neither of those is the
+    # quantity to close on: a hop closes on the apogee it wants and a ballistic
+    # shot closes on where it wants to come down. `cutoff` picks which, and the
+    # two targets below feed it. `pitch_hold`, when set, replaces the
+    # linear-tangent law with a constant commanded pitch — a sounding rocket
+    # holds an attitude, it does not fly a law tuned to arrive horizontal.
+    cutoff::Symbol = :energy               # :energy | :apogee | :range
+    apogee_target::Float64 = NaN           # [m] above RE_MEAN, for :apogee
+    range_target::Float64 = NaN            # [m] great-circle ground range, for :range
+    pitch_hold::Float64 = NaN              # [rad] above the local horizon
 end
+
+"""
+A copy of `g` with named fields replaced. Guidance is a plain positional struct
+and it now carries fifteen fields; spelling them all out at each call site is
+exactly how one of them ends up silently dropped, which is what the two
+rebuilders in the tuner used to do.
+"""
+_reguid(g::AscentGuidance; kw...) =
+    AscentGuidance(; (f => get(kw, f, getfield(g, f))
+                      for f in fieldnames(AscentGuidance))...)
 
 "Launch azimuth [rad] that yields inclination `inc` from latitude `lat` (prograde)."
 launch_azimuth(inc::Float64, lat::Float64) =
@@ -209,6 +231,63 @@ end
 # an insertion whose perigee is below this is a suborbital arc, not an orbit
 const SECO_HP_MIN = 100.0e3
 
+"""
+Apogee radius of the osculating trajectory through this state [m], or `Inf` if
+it is not coming back. This is what a hop closes on, and it is right for a
+straight-up flight too: as the angular momentum goes to zero the eccentricity
+goes to one and `a(1+e)` goes to `2a`, which is exactly the radius a purely
+radial climb of that energy reaches.
+"""
+function _apogee_radius(r::V3, v::V3)
+    rr = vnorm(r)
+    eps = 0.5 * vdot(v, v) - MU_EARTH / rr
+    eps >= 0.0 && return Inf
+    hv = vcross(r, v)
+    a = -MU_EARTH / (2 * eps)
+    e = sqrt(max(0.0, 1 + 2 * eps * vdot(hv, hv) / MU_EARTH^2))
+    a * (1 + e)
+end
+
+"""
+Great-circle ground range [m] the free-flight arc through this state will cover
+before its radius comes back to `RE_MEAN`, or `Inf` if it never does (an orbit,
+an escape, or a trajectory whose perigee is above the surface).
+
+This is the exact Keplerian answer rather than the textbook free-flight range
+equation: take the true anomaly now, take the true anomaly where the radius is
+back to the surface, and sweep forward through apogee between them. Written that
+way there are no quadrant special cases and the lofted and depressed solutions
+come out of the same expression.
+"""
+function _ballistic_range(r::V3, v::V3)
+    el = elements_from_state(r, v)
+    (el.e >= 1.0 || el.a <= 0.0) && return Inf
+    el.rp >= RE_MEAN && return Inf                 # it stays up: not a shot
+    p = el.a * (1 - el.e^2)
+    cnu = clamp((p / RE_MEAN - 1) / el.e, -1.0, 1.0)
+    nu_i = acos(cnu)                               # ascending-side solution
+    # forward from where we are, out through apogee (pi), down to 2pi - nu_i
+    psi = (2pi - nu_i) - el.nu
+    psi <= 0.0 && return 0.0
+    RE_MEAN * psi
+end
+
+"""
+Has the suborbital target been met? `:apogee` closes on the apogee of the
+current osculating arc, `:range` on where that arc comes down. Both are pure
+functions of the state, so they hold under any steering and at any stage.
+"""
+function _suborbital_cut(guid::AscentGuidance, r::V3, v::V3, dr::Float64)
+    if guid.cutoff === :apogee
+        isnan(guid.apogee_target) && return false
+        return _apogee_radius(r, v) >= RE_MEAN + guid.apogee_target
+    elseif guid.cutoff === :range
+        isnan(guid.range_target) && return false
+        return dr + _ballistic_range(r, v) >= guid.range_target
+    end
+    false
+end
+
 function _steer(guid::AscentGuidance, ctx::AscentCtx, r::V3, v::V3, t::Float64,
                 theta_g0::Float64)
     rhat = vunit(r)
@@ -231,6 +310,20 @@ function _steer(guid::AscentGuidance, ctx::AscentCtx, r::V3, v::V3, t::Float64,
         return vunit(vrel)
     else # :closed_loop — linear tangent in the instantaneous orbital plane
         that = vunit(vsub(v, vscale(rhat, vdot(v, rhat))))   # horizontal along-track (inertial)
+        # A commanded attitude, when one is given: sounding rockets and
+        # ballistic shots hold a pitch, they do not fly a law whose whole
+        # purpose is to arrive horizontal at a target altitude. Held straight
+        # up the horizontal component vanishes and `that` is whatever is left
+        # of a numerically zero vector, so the pure-vertical case is taken
+        # explicitly rather than left to a normalise of noise.
+        if !isnan(guid.pitch_hold)
+            th = clamp(guid.pitch_hold, -0.5pi, 0.5pi)
+            sh, ch = sincos(th)
+            ch < 1e-6 && return rhat
+            vh = vsub(v, vscale(rhat, vdot(v, rhat)))
+            vnorm(vh) < 1.0 && return rhat
+            return vadd(vscale(vunit(vh), ch), vscale(rhat, sh))
+        end
         tt = tan(guid.pitch0) - guid.pitch_rate * (t - ctx.t_loop0)
         # The linear-tangent law has no floor of its own: tan(theta) falls
         # without limit, so any burn that outlasts the window it was tuned for
@@ -382,6 +475,21 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
             ctx.phase = :gravity_turn
             ev!(:gravity_turn)
         end
+        # A commanded attitude takes over from the gravity turn when the turn
+        # has brought the vehicle down to it. That is the whole relationship
+        # between the two: you fly the gravity turn because it costs no angle of
+        # attack, and you stop flying it once it has delivered the attitude you
+        # wanted. A hop commands the vertical, is already there, and so never
+        # enters the turn at all — which matters, because a gravity turn is
+        # unstable to lateral perturbation by construction (the thrust follows
+        # the velocity, so any tip compounds), and left in one a vertical launch
+        # walked 38 km downrange by 40 km of altitude on Coriolis alone.
+        if ctx.phase === :gravity_turn && !isnan(guid.pitch_hold) &&
+           d.gamma_rel <= guid.pitch_hold + 1e-9
+            ctx.phase = :closed_loop
+            isnan(ctx.t_loop0) && (ctx.t_loop0 = t)
+            ev!(:pitch_hold)
+        end
         if ctx.fairing_on && d.h >= guid.fairing_alt
             ctx.fairing_on = false
             x[7] -= lv.fairing_mass
@@ -450,8 +558,23 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
                     break
                 end
             end
+            # suborbital cutoff: on the apogee wanted, or on where the arc comes
+            # down. Checked at any phase and any stage, unlike the orbital
+            # cutoff — a sounding rocket can meet its apogee inside the first
+            # stage's burn and never reach a closed-loop phase at all.
+            if ctx.burning && guid.cutoff !== :energy && d.h > 200.0 &&
+               _suborbital_cut(guid, (x[1], x[2], x[3]), (x[4], x[5], x[6]),
+                               d.downrange)
+                st = lv.stages[ctx.stage]
+                prop_left[ctx.stage] = st.mprop - ctx.burned
+                ctx.burning = false; ctx.phase = :coast
+                reached = false
+                h_cut = d.h; gam_cut = d.gamma
+                ev!(:seco)
+                break
+            end
             # exoatmospheric closed-loop cutoff at target energy
-            if ctx.burning && ctx.phase === :closed_loop
+            if ctx.burning && ctx.phase === :closed_loop && guid.cutoff === :energy
                 eps_now = 0.5 * d.vin^2 - MU_EARTH / vnorm((x[1], x[2], x[3]))
                 if eps_now >= e_target
                     st = lv.stages[ctx.stage]
@@ -538,6 +661,11 @@ function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0
     rhat = vunit(r)
     vin = vnorm(v)
     gamma = vin > 1 ? asin(clamp(vdot(rhat, vscale(v, 1 / vin)), -1.0, 1.0)) : pi / 2
+    # The flight path angle relative to the ATMOSPHERE, which is the one an
+    # attitude is judged against: a rocket standing still on the pad is flying
+    # straight up by this measure and at 62 degrees by the inertial one, because
+    # inertially it is already going 400 m/s sideways with the planet.
+    gamma_rel = Vr > 1 ? asin(clamp(vdot(rhat, vscale(vrel, 1 / Vr)), -1.0, 1.0)) : pi / 2
     # logged thrust is what the stack is actually producing: the throttled
     # core plus every strap-on still burning
     thrust = ctx.burning && ctx.stage >= 1 ?
@@ -547,7 +675,8 @@ function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0
     end
     # downrange: great-circle from the launch site's inertial position
     dr = RE_MEAN * acos(clamp(vdot(vunit(r_site0), rhat), -1.0, 1.0))
-    (h = h, vrel = Vr, vin = vin, gamma = gamma, mach = Vr / asnd, qbar = qbar,
+    (h = h, vrel = Vr, vin = vin, gamma = gamma, gamma_rel = gamma_rel,
+     mach = Vr / asnd, qbar = qbar,
      lat = lat, lon = lon, thrust = thrust, downrange = dr)
 end
 
@@ -580,9 +709,7 @@ function tune_ascent(lv::LaunchVehicle, guid::AscentGuidance;
         r = simulate_ascent(lv, g; kwargs...)
         (r.h_cut - g.h_target, r.gamma_cut, r)
     end
-    rebuild(p1, p2) = AscentGuidance(guid.site_lat, guid.site_lon, guid.azimuth,
-        guid.v_pitchover, guid.kick_angle, guid.kick_duration,
-        p1, p2, guid.h_target, guid.fairing_alt, guid.stage_gap)
+    rebuild(p1, p2) = _reguid(guid; pitch0 = p1, pitch_rate = p2)
     for it in 1:max_iter
         g = rebuild(p1, p2)
         f1, f2, res = resid(g)
@@ -608,11 +735,8 @@ function tune_ascent(lv::LaunchVehicle, guid::AscentGuidance;
     (g, res)
 end
 
-"Guidance with the pitch-over kick replaced (the struct is positional)."
-_with_kick(g::AscentGuidance, ka::Float64) =
-    AscentGuidance(g.site_lat, g.site_lon, g.azimuth, g.v_pitchover, ka,
-                   g.kick_duration, g.pitch0, g.pitch_rate, g.h_target,
-                   g.fairing_alt, g.stage_gap)
+"Guidance with the pitch-over kick replaced."
+_with_kick(g::AscentGuidance, ka::Float64) = _reguid(g; kick_angle = ka)
 
 """
     _tune_with_kick(lv, guid; ...) -> (guid, result)

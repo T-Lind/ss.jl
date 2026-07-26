@@ -362,6 +362,38 @@ end
         @test occursin("\"ok\":true", ba)
         @test ba == bb
 
+        # --- suborbital over the wire ---------------------------------------
+        # A suborbital run carries no cislunar leg at all, so the payload has
+        # to be the ascent-plus-entry shape every consumer already handles —
+        # and the two profiles have to close on the two different targets.
+        num(b, k) = (m = match(Regex("\"" * k * "\":\\s*([-0-9.eE+]+)"), b);
+                     m === nothing ? NaN : parse(Float64, m[1]))
+        st, hdrs, bod = http("POST", "/api/run"; port = port, timeout = 300.0,
+                             body = "mode=suborbital&sub_profile=hop&" *
+                                    "sub_apogee_km=110&pod_mass=350")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test occursin("\"mode\":\"suborbital\"", bod)
+        @test occursin("\"outcome\":\"nominal\"", bod)
+        @test !occursin("\"cis\":", bod)                # no cislunar leg
+        @test occursin("\"asc3d\"", bod) && occursin("\"ent3d\"", bod)
+        @test abs(num(bod, "apogee_km") - 110.0) < 5.0  # closed on the ask
+        @test num(bod, "range_km") < 15.0               # and came down at home
+        @test num(bod, "cutoff_h_km") < num(bod, "apogee_km")
+        @test num(bod, "v_splash") < 12.0
+        # the viewers frame their ENTRY phase on this event, and the arc starts
+        # below the interface going UP so the entry simulator never emits it
+        @test occursin("\"entry_interface\"", bod)
+        @test occursin("\"apogee\"", bod)
+
+        st, hdrs, bod = http("POST", "/api/run"; port = port, timeout = 300.0,
+                             body = "mode=suborbital&sub_profile=downrange&" *
+                                    "sub_range_km=500&pod_mass=350")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test abs(num(bod, "range_km") - 500.0) < 25.0
+        @test num(bod, "apogee_km") > 40.0              # a shot is still lofted
+
         # --- the last-resort 500 --------------------------------------------
         # `route`'s own catch is the first of the two "answer it whatever
         # happens" layers, and nothing exercised it: every shipped page file
