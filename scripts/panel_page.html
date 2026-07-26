@@ -955,6 +955,19 @@ async function doRun() {
         ? 'flown, but the ascent never reached orbit'
         : `flown, but the mission ended in "${j.outcome}"`) +
         ' — open the launch view (L) to fly what was simulated';
+    } else if (j.metrics.on_target && j.metrics.grazing) {
+      // On target, and the target is one where "above the surface" stops
+      // meaning what it usually means. Perilune here is measured against the
+      // MEAN SPHERE, and the Moon's relief runs to roughly +/- 8 km — so a
+      // clearance under about ten is a clearance over a smooth Moon, and the
+      // real one has mountains in it. Said out loud rather than left in a
+      // metric nobody reads.
+      $('status').className = 'status warn';
+      $('status').textContent =
+        `done in ${((performance.now()-t0)/1000).toFixed(1)} s — GRAZING: ` +
+        `${(j.metrics.perilune_km*1000).toFixed(0)} m is above the MEAN SPHERE, ` +
+        `and lunar relief runs to ±8 km. The free return also gives up its ` +
+        `return corridor this low.`;
     } else if (j.metrics.on_target) {
       $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
     } else if (j.mode === 'landing') {

@@ -84,6 +84,14 @@ small against the sensitivity of what it feeds.
 """
 const PERIGEE_TOL = 250.0
 
+"""
+Inside this distance of the Moon [m] the coast is logged at every integration
+step rather than at the stride. It is the encounter — a few hours out of a
+multi-day coast — and it is the only part of the track whose shape a straight
+line between samples cannot carry. Costs a few hundred extra log points.
+"""
+const CIS_LOG_NEAR = 5.0e7
+
 "Local-timescale step size [s]."
 @inline function _cis_dt(r::V3, t::Float64, eph::CircularMoonEphemeris;
                          eta::Float64 = CIS_ETA, dt_max::Float64 = 240.0)
@@ -246,7 +254,16 @@ function _coast_leg!(L::CislunarLog, r::V3, v::V3, t::Float64,
     a2 = a1 = Inf; tt2 = tt1 = NaN
     while t < t_end
         dtc = min(_cis_dt(r, t, eph; eta = eta), max(t_stop - t, 1.0e-3))
-        (kount % log_every == 0) && _cis_push!(L, t, r, v, eph, theta_g0, outbound ? 2 : 3)
+        # Every step near the Moon, the stride elsewhere. The stride is right
+        # for a coast that is a straight line for days and wrong for the hour
+        # that is not: a viewer draws CHORDS between logged points, and the
+        # chord error goes as the square of the gap. Measured at 2.4 km/s past
+        # a 1737 km body, four steps of 13 s sag 1.1 km — which is how a 500 m
+        # grazing flyby, correct to three metres, came out drawn 1.2 km inside
+        # the Moon. The propagator already tightens its own step here; this
+        # simply stops throwing three quarters of it away.
+        (kount % log_every == 0 || d_prev < CIS_LOG_NEAR) &&
+            _cis_push!(L, t, r, v, eph, theta_g0, outbound ? 2 : 3)
         kount += 1
         rn_, vn_ = _cis_step(r, v, t, dtc, eph)
         tn = t + dtc

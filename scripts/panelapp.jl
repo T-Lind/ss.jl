@@ -322,6 +322,41 @@ deci_idx(len, n) = len <= n ? collect(1:len) :
                    unique(round.(Int, range(1, len; length = n)))
 
 """
+    flyby_idx(L, n; near) -> indices
+
+Wire indices for a cislunar track, keeping the flyby at full log resolution.
+
+A uniform decimation spends its budget evenly over a coast that is mostly a
+straight line, and the one part that is not — the hyperbolic swing past the
+Moon — is where every point counts. Measured on a 500 m grazing free return:
+a uniform 1600 points leaves 104 s between samples at closest approach, which
+is 250 km of arc, and the straight line a viewer draws between two of them
+passes 1200 m BELOW the surface. The trajectory was right to within three
+metres and the picture had the vehicle inside the Moon.
+
+The chord error is `v^2 dt^2 / 8r`, so it is the STEP that has to be bounded,
+not the point count: at 2.4 km/s past a 1737 km body, 104 s of it sags 4.5 km
+and the integrator's own 13 s sags 70 m. Keeping what the propagator already
+chose to log near the Moon is therefore exactly the right resolution — it
+tightened its step there for the same reason.
+
+Two thirds of the wire is the most the flyby may take. The coast still has to
+be drawn: a track that is all encounter and no route is not a trajectory.
+"""
+function flyby_idx(L, n::Int; near::Float64 = 2.0e7)
+    m = length(L.t)
+    m <= n && return collect(1:m)
+    nearidx = [i for i in 1:m if L.d_moon[i] < near]
+    isempty(nearidx) && return deci_idx(m, n)
+    faridx = [i for i in 1:m if L.d_moon[i] >= near]
+    bnear = min(length(nearidx), max(1, (2n) ÷ 3))
+    bfar = max(2, n - bnear)
+    sel = vcat(nearidx[deci_idx(length(nearidx), bnear)],
+               isempty(faridx) ? Int[] : faridx[deci_idx(length(faridx), bfar)])
+    sort!(unique(sel))
+end
+
+"""
 Shared 3D-scene payload: the pad-to-wherever track in true ECI geometry,
 units of 1000 km, decimated for the wire. Both missions fly the same launch
 and trans-lunar legs, so both scenes are built from the same code.
@@ -335,7 +370,7 @@ function scene_payload(asc, cis)
         k = max(2, length(L.t) ÷ 3)
         nrm = SatelliteSim.vunit(SatelliteSim.vcross((L.mx[1], L.my[1], L.mz[1]),
                                                      (L.mx[k], L.my[k], L.mz[k])))
-        idx = deci_idx(length(L.t), 1600)
+        idx = flyby_idx(L, 1600)
         px = Float64[]; py = Float64[]; pz = Float64[]
         mx = Float64[]; my = Float64[]; mz = Float64[]
         tt = Float64[]; pp = Int[]
