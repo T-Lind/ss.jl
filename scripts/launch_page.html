@@ -98,6 +98,7 @@
 <div class="hud" id="backlink"><a href="/">&#8617; mission control</a></div>
 <div id="keys" class="show">
   <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub (hold to accelerate) · <b>[</b> <b>]</b> zoom · <b>m</b> mute · <b>p</b> frame time</div>
+  <div><b>w</b> <b>a</b> <b>s</b> <b>d</b> pitch/yaw · <b>q</b> <b>e</b> roll · <b>x</b> kill rotation — reaction wheels, coasting at &times;1</div>
   <div>drag to look around in free and cabin views</div>
 </div>
 <div class="hud" id="cams"></div>
@@ -148,6 +149,28 @@ function mBasis(bx, by, bz, p, s) {   // columns = body axes (optionally scaled)
   return [bx[0]*s,bx[1]*s,bx[2]*s,0, by[0]*s,by[1]*s,by[2]*s,0,
           bz[0]*s,bz[1]*s,bz[2]*s,0, p[0],p[1],p[2],1];
 }
+// An orthonormal body frame from a flight direction and a roll reference.
+// mBasis writes its three arguments straight into the matrix columns, so a
+// reference that is not perpendicular to bx does not build a rotation — it
+// builds a SHEAR, and the stack renders visibly skewed by the angle between
+// them. Projecting the reference off bx first is what keeps it a rotation.
+function orthoFrame(bx, ref) {
+  let bz = V.sub(ref, V.scale(bx, V.dot(bx, ref)));
+  if (V.dot(bz, bz) < 1e-12) {          // reference parallel to the flight path
+    const t = Math.abs(bx[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
+    bz = V.sub(t, V.scale(bx, V.dot(bx, t)));
+  }
+  bz = V.norm(bz);
+  return { bx, by: V.cross(bz, bx), bz };
+}
+// A placement, with the model spun about a point of its own choosing rather
+// than about the model origin. Everything that comes off the stack uses this:
+// the pivot is the piece's centroid, so the spin leaves the piece exactly
+// where the placement put it and the detachment reads as a detachment.
+function mAbout(place, cen, R) {
+  return mMul(mMul(place, mTrans(cen)), mMul(R, mTrans(V.scale(cen, -1))));
+}
+function mSpin(place, cen, ax, ang) { return mAbout(place, cen, mRotAxis(ax, ang)); }
 function mLookAt(eye, at, up) {
   const f = V.norm(V.sub(at, eye)), s = V.norm(V.cross(f, up)), u = V.cross(s, f);
   return [s[0],u[0],-f[0],0, s[1],u[1],-f[1],0, s[2],u[2],-f[2],0,
@@ -960,7 +983,14 @@ uniform vec3 uHeatV;          // flow direction, VIEW space, pointing upstream
 uniform vec3 uHeatC;          // pod centre, VIEW space
 uniform float uHeatR;         // pod radius, for the radial falloff scale
 void main(){
+  // Two-sided, because nothing here is culled: an interior wall seen through
+  // an open skirt or a split fairing arrives with its normal pointing away
+  // from the eye. Shading that unflipped INVERTS the light on exactly the
+  // surfaces hardest to read — an interior facing the sun goes black while one
+  // facing away lights up — and an open aft end renders as a flat black slab
+  // stuck on the side of the stack instead of a lit cavity with a bell in it.
   vec3 n = normalize(vN);
+  n = gl_FrontFacing ? n : -n;
   // livery decal wrapped cylindrically over the painted skin
   vec3 base = vC;
   if (vPw > 0.5) {
@@ -1572,7 +1602,17 @@ function cisState(t) {
   const pb = [samp(CIS.t, CIS.x, tb), samp(CIS.t, CIS.y, tb), samp(CIS.t, CIS.z, tb)];
   const vel = V.scale(V.sub(pb, pa), 1/dtv);
   const moon = [samp(CIS.t, CIS.mx, t), samp(CIS.t, CIS.my, t), samp(CIS.t, CIS.mz, t)];
-  const bx = V.norm(vel), bz = CIS.nrm, by = V.norm(V.cross(bz, bx));
+  // Roll reference: the osculating orbit normal, which is perpendicular to the
+  // velocity by construction. The payload's own `n` is the MOON's orbital
+  // plane — right for a translunar trajectory, unrelated to a 63 deg Earth
+  // orbit, and handed to mBasis unprojected it sheared the stack by the angle
+  // between them: zero at the nodes, worst a quarter of a revolution later,
+  // which is why the skew came and went over the timeline. `n` still picks the
+  // sign, so lunar framing and every camera hung off bz are unchanged.
+  let ref = V.cross(p, vel);
+  if (V.len(ref) < 1e-6) ref = CIS.nrm;
+  else if (V.dot(ref, CIS.nrm) < 0) ref = V.scale(ref, -1);
+  const { bx, by, bz } = orthoFrame(V.norm(vel), ref);
   return { pos: p, vel, speed: V.len(vel), moon, bx, by, bz,
            rE: V.len(p), rM: V.len(V.sub(p, moon)),
            burning: BURNW.some(w => t >= w[0] && t <= w[1]) };
@@ -2310,11 +2350,25 @@ function buildRocket() {
                  (p[0] - LIVX0)/(LIVX1 - LIVX0), a/(2*Math.PI) + 0.5, pw);
     }
   };
+  // Where each piece's own middle is, in model coordinates. A detached section
+  // has to tumble about THAT and not about the model origin: its geometry sits
+  // anywhere from 10 to 70 m up the stack, and spinning it about the origin
+  // swings it around the rocket on that whole lever arm instead of rotating it
+  // in place. For the fairing halves the centroid is off-axis too, which is
+  // what makes each half turn about itself as it falls away.
+  const cenOf = (v0, count) => {
+    if (!count) return [0, 0, 0];
+    let x = 0, y = 0, z = 0;
+    for (let i = v0; i < v0 + count; i++)
+      { x += verts[i*VST]; y += verts[i*VST + 1]; z += verts[i*VST + 2]; }
+    return [x/count, y/count, z/count];
+  };
   for (const s of geo.sections) {
     const v0 = verts.length/VST;
     for (let k = s.t0-1; k < s.t1; k++) pushTri(geo.tris[k], s);
-    secDraw.push({ name: s.name, first: v0, count: verts.length/VST - v0,
-                   x0: s.x0, x1: s.x1 });
+    const n = verts.length/VST - v0;
+    secDraw.push({ name: s.name, first: v0, count: n,
+                   x0: s.x0, x1: s.x1, cen: cenOf(v0, n) });
   }
   const fs = geo.sections.find(s => s.name === 'fairing');
   if (fs) {
@@ -2324,7 +2378,8 @@ function buildRocket() {
         const t = geo.tris[k];
         if (sgn*(t[2]+t[5]+t[8]) >= -1e-9) pushTri(t, fs);
       }
-      halfDraw.push({ first: v0, count: verts.length/VST - v0, sgn });
+      const n = verts.length/VST - v0;
+      halfDraw.push({ first: v0, count: n, sgn, cen: cenOf(v0, n) });
     }
   }
   rocketBuf = buffer(new Float32Array(verts));
@@ -3300,35 +3355,180 @@ function drawParticles(view, proj, fov, smoke, hot) {
 
 // ------------------------------------------------------------- detachables --
 const debris = [];
+// The rate the DRAWN position moves, which is not the log's speed. `v` is the
+// inertial speed; the pad frame's position is built from downrange and altitude
+// and advances 220-290 m/s slower once the vehicle is downrange. Handing a
+// detached piece the log speed therefore launched it at a quarter of a
+// kilometre a second relative to the rocket it had just left — eight metres of
+// lead per frame, so it appeared ahead of the vehicle and sailed past it. This
+// is the same finite difference buildScene already uses for the exhaust.
+function padVel(t) {
+  const a = state(t - 0.125), b = state(t + 0.125);
+  return V.scale(V.sub(b.pos, a.pos), 4);
+}
 function spawnDebris(kind, t) {
   // debris tumbles in the pad world only; anything shed later (the kick stage
   // at handoff) is drawn by the cruise renderer in its own frame
   if (!(t <= secoT + 5)) return;
-  const st = state(t);
+  const st = state(t), vf = padVel(t);
   if (kind === 'fairing') {
     for (const hd of halfDraw)
-      debris.push({ draw: hd, p: st.pos.slice(),
-                    v: V.add(V.scale(st.dir, st.v), [0, 0, hd.sgn*3.2]),
-                    bx: st.dir.slice(), ax: [0, 0, hd.sgn], w: 0.9, a: 0 });
+      debris.push({ draw: hd, p: st.pos.slice(), born: t,
+                    v: V.add(vf, [0, 0, hd.sgn*3.2]),
+                    bx: st.dir.slice(), ax: [0, 0, hd.sgn], w: 0.6, a: 0 });
     return;
   }
   const sec = secDraw.find(s => s.name === kind);
   if (!sec) return;
-  debris.push({ draw: sec, p: st.pos.slice(), v: V.scale(st.dir, st.v*0.985),
+  // Separation is a pusher and a few retro-rockets, not a fraction of the
+  // flight speed: 1.5% of 2.4 km/s pushed the spent stage away at 36 m/s and
+  // it crossed the frame in under a second. A few metres a second is what it
+  // really is, and the gap that opens after that is the next stage lighting.
+  debris.push({ draw: sec, p: st.pos.slice(), born: t,
+                v: V.add(vf, V.add(V.scale(st.dir, -3.0), [0, 0, 0.35])),
                 bx: st.dir.slice(), ax: V.norm([0.2, 0.1, 0.97]), w: 0.25, a: 0 });
 }
 function stepDebris(dt) {
   for (let i = debris.length-1; i >= 0; i--) {
     const d = debris[i];
-    d.v[1] -= 9.6*dt;
-    const h = Math.max(d.p[1], 0), rho = 1.22*Math.exp(-h/8500);
+    // A piece is spawned at the state it detached in, which is somewhere
+    // INSIDE the frame that noticed the separation — never at its end. Given
+    // the whole frame it would travel a step the rocket has not taken yet and
+    // come out ahead of the vehicle it just fell off: at x8 a 0.13 s step is
+    // 300 m of lead. It only ever gets the time that has actually passed.
+    const h = Math.min(dt, Math.max(0, simT - d.born));
+    if (h <= 0) continue;
+    d.v[1] -= 9.6*h;
+    const alt = Math.max(d.p[1], 0), rho = 1.22*Math.exp(-alt/8500);
     const sp = V.len(d.v);
-    if (sp > 0) d.v = V.scale(d.v, 1 - Math.min(0.9, 0.004*rho*sp*dt));
-    d.p[0] += d.v[0]*dt; d.p[1] += d.v[1]*dt; d.p[2] += d.v[2]*dt;
-    d.a += d.w*dt;
+    if (sp > 0) d.v = V.scale(d.v, 1 - Math.min(0.9, 0.004*rho*sp*h));
+    d.p[0] += d.v[0]*h; d.p[1] += d.v[1]*h; d.p[2] += d.v[2]*h;
+    d.a += d.w*h;
     if (d.p[1] < -2000) debris.splice(i, 1);
   }
 }
+
+// -------------------------------------------------------- attitude control --
+// Reaction wheels on the coasting stack. What the operator commands is a
+// TORQUE, never a rate: the rate is the torque divided by the stack's moment
+// of inertia, so a capsule answers in a second and a fuelled upper stage on a
+// 50 m lever arm takes the better part of a minute to work up to the same
+// number. That is the whole reason this is modelled instead of slewed, and it
+// is why the readout is in degrees per second and not in degrees.
+//
+// Authority is sized the way a real wheel stack is: to the vehicle it flies.
+// That part is a design choice and is written here as one — the torque grows
+// with the inertia it has to move, but SUB-linearly, on a cube root. A fixed
+// torque would be more principled and is unusable: inertia across the vehicles
+// this page can build spans about 13,000 to 1, which at fixed torque is the
+// difference between a capsule that snaps round in a third of a second and a
+// stack that needs a quarter of an hour. The cube root spreads that same range
+// over about 23 to 1, so every vehicle can be flown and no two fly alike.
+const RCS_A0 = 3*Math.PI/180;   // rad/s2 on a reference 25 t, 15 m stack
+const RCS_I0 = 5e5;             // kg m2, that stack's transverse inertia
+const RCS_AMAX = 15*Math.PI/180;   // and nothing answers faster than this
+const RCS_WMAX = 0.18;    // rad/s ceiling, a little over 10 deg/s
+const RCS = { q: [1,0,0,0], w: [0,0,0], keys: {}, live: false, rate: 0 };
+const RCS_KEYS = { w: 1, a: 1, s: 1, d: 1, q: 1, e: 1 };
+function qMul(a, b) {
+  return [a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3],
+          a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2],
+          a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1],
+          a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0]];
+}
+function qNorm(q) {
+  const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0]/l, q[1]/l, q[2]/l, q[3]/l];
+}
+// Shrink a rotation toward identity by a factor on its ANGLE — the wheels
+// unwind an attitude along the same arc they built it on.
+function qShrink(q, f) {
+  const s = Math.hypot(q[1], q[2], q[3]);
+  if (s < 1e-9) return [1, 0, 0, 0];
+  const half = Math.atan2(s, q[0])*f, k = Math.sin(half)/s;
+  return [Math.cos(half), q[1]*k, q[2]*k, q[3]*k];
+}
+function qMat(q) {
+  const w = q[0], x = q[1], y = q[2], z = q[3];
+  return [1-2*(y*y+z*z), 2*(x*y+z*w), 2*(x*z-y*w), 0,
+          2*(x*y-z*w), 1-2*(x*x+z*z), 2*(y*z+x*w), 0,
+          2*(x*z+y*w), 2*(y*z-x*w), 1-2*(x*x+y*y), 0,
+          0, 0, 0, 1];
+}
+// model-space extent of everything still attached, and its middle
+function attachedSpan() {
+  let x0 = 1e9, x1 = -1e9;
+  for (const s of secDraw) {
+    if (secGone[s.name] || /^booster/.test(s.name)) continue;
+    x0 = Math.min(x0, s.x0); x1 = Math.max(x1, s.x1);
+  }
+  return x0 > x1 ? { x0: 0, x1: Math.max(1, LEN) } : { x0, x1 };
+}
+function rcsPivot() { const s = attachedSpan(); return [(s.x0 + s.x1)/2, 0, 0]; }
+// solid cylinder about its own centre: spun on the long axis, tumbled on a
+// transverse one
+function cylI(M, L, R) { return { roll: 0.5*M*R*R, tilt: M*(3*R*R + L*L)/12 }; }
+// peak angular acceleration about each, which is the number the operator feels
+function rcsAlpha(M, L, R) {
+  const I = cylI(M, L, R);
+  const a = J => Math.min(RCS_AMAX, RCS_A0*Math.cbrt(RCS_I0/Math.max(J, 1)));
+  return { roll: a(I.roll), tilt: a(I.tilt) };
+}
+// The mass is the ascent log's, which ends with exactly what reached orbit
+// still aboard; propellant burned after that is not tracked, so the stack is
+// never modelled lighter than it really is.
+function craftInertia(t) {
+  const sp = attachedSpan();
+  const L = Math.max(1, sp.x1 - sp.x0);
+  const R = Math.max(0.3, SECR[LASTST] || (TOPD || DIA)/2);
+  const M = Math.max(500, A ? samp(A.t, A.m, Math.min(t, A.t[A.t.length-1])) : 2e4);
+  return { M, L, R };
+}
+function rcsAuth(t) {
+  const I = craftInertia(t);
+  return rcsAlpha(I.M, I.L, I.R);
+}
+// Wheels answer only while the stack is coasting at real time: under thrust
+// the trajectory owns the attitude, and above x1 a frame is a minute of
+// flight, which no hand flies.
+function rcsActive(ph) {
+  if (warpEff > 1.01) return false;
+  if (ph.w === 'eci') return !BURNW.some(b => simT >= b[0] && simT <= b[1]);
+  // an ascent that never made orbit still coasts, and it coasts in the pad
+  // world — the wheels come alive once the last engine has quit
+  if (ph.w === 'pad') return simT > secoT + 2 && state(simT).thr < 1e3;
+  return false;
+}
+function rcsStep(dt, active) {
+  RCS.live = active;
+  if (!(dt > 0)) return;
+  if (!active) {
+    // Off the wheels the stack goes back to pointing where the trajectory says
+    // it points. A burn has to start aligned or the plume leaves the bells
+    // sideways, so this is a real return to the reference attitude.
+    RCS.w = [0, 0, 0]; RCS.rate = 0;
+    RCS.q = qShrink(RCS.q, Math.exp(-dt/0.6));
+    return;
+  }
+  const k = RCS.keys;
+  const cmd = [(k.e ? 1 : 0) - (k.q ? 1 : 0),      // roll, about the long axis
+               (k.d ? 1 : 0) - (k.a ? 1 : 0),      // yaw, out of the orbit plane
+               (k.w ? 1 : 0) - (k.s ? 1 : 0)];     // pitch, within it
+  const au = rcsAuth(simT), acc = [au.roll, au.tilt, au.tilt];
+  for (let i = 0; i < 3; i++) {
+    const d = acc[i]*dt;
+    if (cmd[i])
+      RCS.w[i] = Math.max(-RCS_WMAX, Math.min(RCS_WMAX, RCS.w[i] + cmd[i]*d));
+    else if (Math.abs(RCS.w[i]) <= d) RCS.w[i] = 0;   // wheels null what they built
+    else RCS.w[i] -= Math.sign(RCS.w[i])*d;
+  }
+  const dq = qMul(RCS.q, [0, RCS.w[0], RCS.w[1], RCS.w[2]]);
+  RCS.q = qNorm([RCS.q[0] + 0.5*dq[0]*dt, RCS.q[1] + 0.5*dq[1]*dt,
+                 RCS.q[2] + 0.5*dq[2]*dt, RCS.q[3] + 0.5*dq[3]*dt]);
+  RCS.rate = Math.hypot(RCS.w[0], RCS.w[1], RCS.w[2]);
+}
+function rcsMat() { return qMat(RCS.q); }
+function rcsReset() { RCS.q = [1,0,0,0]; RCS.w = [0,0,0]; RCS.rate = 0; }
 
 // ------------------------------------------------------------------ audio --
 let AC = null, gRum = null, gCrk = null, dly = null, muted = false;
@@ -3912,6 +4112,10 @@ function frame(now) {
   }
   secGone = gone;
   if (tPrev < tSplash && simT >= tSplash) splashed = true;
+  // Attitude runs on the wall clock, not the warped one, so the wheels still
+  // answer with the clock stopped — which is when you actually want to turn
+  // the stack and look at something.
+  rcsStep(running ? dt : dtReal, rcsActive(ph));
 
   const scene = buildScene(ph);
   scene.cam.fov = fovZoom(scene.cam.fov, zoomK);
@@ -3944,11 +4148,13 @@ function buildScene(ph) {
     const rocketVel = V.scale(V.sub(st.pos, stPrev.pos), 4);
     if (st.thr > 2e5 && st.h < 50) scorch = Math.min(1, scorch + 0.4*0.016);
     const bxp = st.dir, bzp = [0,0,1];
-    const craftM = mBasis(bxp, V.cross(bzp, bxp), bzp, st.pos);
+    const byv = V.cross(bzp, bxp);
+    // the wheels turn the stack about its own middle; with none commanded
+    // rcsMat is the identity and this is the bare placement it always was
+    const craftM = mAbout(mBasis(bxp, byv, bzp, st.pos), rcsPivot(), rcsMat());
     const cam = cameraPad(simT, st, craftM);
     const tailX = attachedTailX(secGone);
     const noz = V.add(st.pos, V.scale(st.dir, tailX));
-    const byv = V.cross(bzp, bxp);
     // The exhaust leaves each BELL, not the centreline: world positions for
     // the burning stage's whole cluster, from the same layout the mesh drew.
     // Model (y,z) map to (byv, bzp) — the exact basis craftM is built on.
@@ -3993,7 +4199,8 @@ function buildScene(ph) {
     // model x = 0 at the last stage's base, so the stack sits on the track
     const ls = secDraw.find(s => s.name === LASTST);
     const base = mBasis(cs.bx, cs.by, cs.bz, cs.pos);
-    const craftM = ls ? mMul(base, mTrans([-ls.x0, 0, 0])) : base;
+    const craftM = mAbout(mMul(base, mTrans([-(ls ? ls.x0 : 0), 0, 0])),
+                          rcsPivot(), rcsMat());
     const cam = cameraEci(simT, cs, ph, craftM);
     const noz = V.add(cs.pos, V.scale(cs.bx, -0.5));
     PUP = null;                        // inertial frame: no up, no buoyancy
@@ -4292,7 +4499,8 @@ function drawWorldMeshes(sc, proj, inCab) {
     }
     for (const d of debris) {
       const dbz = [0,0,1], dby = V.cross(dbz, d.bx);
-      const m = mMul(mBasis(d.bx, dby, dbz, d.p), mRotAxis(d.ax, d.a));
+      const m = mSpin(mBasis(d.bx, dby, dbz, d.p), d.draw.cen || [0,0,0],
+                      d.ax, d.a);
       drawRange(m, proj, d.draw.first, d.draw.count);
     }
   } else if (sc.world === 'eci') {
@@ -4309,10 +4517,13 @@ function drawWorldMeshes(sc, proj, inCab) {
       if (s.name !== LASTST) continue;
       if (!(simT >= tHand)) drawRange(stackM, proj, s.first, s.count);
       else {
-        // jettisoned kick stage drifting away behind
-        const off = V.scale(cs.bx, -(3 + 0.6*(simT - tHand)));
-        const m2 = mMul(mMul(mTrans(off), stackM), mRotAxis([0,0,1], 0.05*(simT - tHand)));
-        drawRange(m2, proj, s.first, s.count);
+        // Jettisoned kick stage drifting away behind. It leaves at a metre or
+        // two a second from where it was — no standing 3 m step on the frame
+        // it detaches — and turns about its own centre, not about the capsule.
+        const dtj = simT - tHand;
+        const off = V.scale(cs.bx, -1.4*dtj);
+        drawRange(mSpin(mMul(mTrans(off), stackM), s.cen || [0,0,0],
+                        [0,0,1], 0.05*dtj), proj, s.first, s.count);
       }
     }
   } else if (sc.world === 'moon') {
@@ -4568,6 +4779,15 @@ function drawHUD(sc, ph) {
             ['HEATING', es.q.toFixed(0) + ' W/cm²'],
             ['CAMERA', sc.cam.mode.toUpperCase()]];
   }
+  // The wheels only answer while the stack coasts at real time, so the row
+  // shows up exactly when the keys will do something — and reads out the rate,
+  // because the rate is what the vehicle's mass decides.
+  if (RCS.live) {
+    const d = RCS.w.map(v => v*180/Math.PI);
+    const n = v => (v >= 0 ? '+' : '') + v.toFixed(1);
+    rows.push(['WHEELS', RCS.rate > 3e-4
+      ? `${n(d[2])} ${n(d[1])} ${n(d[0])} °/s` : 'READY · WASD QE']);
+  }
   if (perfShow) {
     // FPS is the smoothed live rate; FRAME is the median the scaler last ruled
     // on — they disagree exactly when something just changed, which is the
@@ -4637,6 +4857,7 @@ function jumpTo(t) {
   simT = Math.max(-15, Math.min(t, tEnd - 0.5));
   for (const q of toasts) q.done = simT >= q.t;
   parts.length = 0; debris.length = 0;
+  rcsReset();                        // a hand-flown attitude does not survive a seek
   splashed = simT >= tSplash;
   warpCur = 1;
   ended = false;
@@ -4750,13 +4971,21 @@ function initControls() {
     if (e.key === ']') zoomK = Math.min(8, +(zoomK*1.18).toFixed(3));
     if (e.key === '[') zoomK = Math.max(0.4, +(zoomK/1.18).toFixed(3));
     if (e.key === '\\') zoomK = 1;
+    // Reaction wheels. Held, a key is a torque; released, the wheels spend the
+    // same torque nulling the rate they built, so the stack stops where it is
+    // instead of tumbling on. X kills rotation outright.
+    const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
+    if (RCS_KEYS[kk]) { RCS.keys[kk] = true; e.preventDefault(); }
+    if (kk === 'x') { RCS.w = [0, 0, 0]; RCS.rate = 0; }
   });
   window.addEventListener('keyup', e => {
     if ((e.key === 'ArrowRight' && scrubDir === 1) ||
         (e.key === 'ArrowLeft' && scrubDir === -1)) scrubDir = 0;
+    const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
+    if (RCS_KEYS[kk]) RCS.keys[kk] = false;
   });
   // released keys can be missed entirely when the window loses focus mid-hold
-  window.addEventListener('blur', () => scrubDir = 0);
+  window.addEventListener('blur', () => { scrubDir = 0; RCS.keys = {}; });
 }
 
 function showEndCard() {
@@ -5003,6 +5232,66 @@ window.__selftest = function () {
   eq('zooming out opens it', () => fovZoom(0.42, 0.5), 0.84);
   eq('clamped tight', () => fovZoom(0.02, 8), 0.015);
   eq('clamped wide', () => fovZoom(1.2, 0.4), 1.5);
+
+  // --- the craft frame. mBasis writes its arguments into the matrix columns,
+  // so a roll reference that is not square to the flight path builds a shear
+  // and the stack renders skewed. These pin the projection that stops it.
+  const xf = (m, p) => [m[0]*p[0] + m[4]*p[1] + m[8]*p[2] + m[12],
+                        m[1]*p[0] + m[5]*p[1] + m[9]*p[2] + m[13],
+                        m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14]];
+  eq('a reference 45 deg off still squares up', () =>
+     V.dot(orthoFrame(V.norm([1,0,0]), V.norm([1,0,1])).bz, [1,0,0]), 0, 1e-12);
+  eq('and the third axis is square to both', () => {
+    const f = orthoFrame(V.norm([1,0,0]), V.norm([1,0,1]));
+    return Math.abs(V.dot(f.by, f.bx)) + Math.abs(V.dot(f.by, f.bz));
+  }, 0, 1e-12);
+  eq('the axes stay unit length', () =>
+     V.len(orthoFrame(V.norm([1,0,0]), [3,0,4]).by), 1, 1e-12);
+  eq('and right-handed', () => {
+    const f = orthoFrame([1,0,0], [0,0,1]);
+    return V.dot(V.cross(f.bx, f.by), f.bz);
+  }, 1, 1e-12);
+  eq('a reference along the flight path falls back', () =>
+     Math.abs(V.dot(orthoFrame([1,0,0], [1,0,0]).bz, [1,0,0])), 0, 1e-12);
+
+  // --- detachment. A section's geometry sits tens of metres up the model, so
+  // spinning it about the model origin swung it around the rocket on that
+  // lever arm. mSpin pivots on the piece's own centroid instead.
+  eq('a spin about the centroid leaves the centroid put', () => {
+    const c = [40, 0, 0], p = xf(mSpin(mIdent(), c, [0,0,1], 1.0), c);
+    return V.len(V.sub(p, c));
+  }, 0, 1e-9);
+  eq('where a spin about the origin threw it 38 m', () =>
+     V.len(V.sub(xf(mRotAxis([0,0,1], 1.0), [40,0,0]), [40,0,0])),
+     2*40*Math.sin(0.5), 1e-9);
+  eq('an unrotated piece sits exactly where it was drawn', () =>
+     V.len(V.sub(xf(mSpin(mIdent(), [40,0,0], [0,0,1], 0), [40, 2, 0]), [40, 2, 0])),
+     0, 1e-12);
+
+  // --- reaction wheels. The point of modelling torque over inertia is that
+  // the vehicle's own mass sets how fast it answers.
+  eq('cylinder roll inertia', () => cylI(1000, 10, 2).roll, 2000);
+  eq('cylinder transverse inertia', () => cylI(1000, 10, 2).tilt, 1000*112/12, 1e-9);
+  eq('eight times the inertia halves the angular acceleration', () =>
+     rcsAlpha(2.5e4, 15, 1.5).tilt / rcsAlpha(2e5, 15, 1.5).tilt, 2, 1e-9);
+  eq('a longer stack is slower to pitch', () =>
+     rcsAlpha(2.5e4, 45, 1.5).tilt < rcsAlpha(2.5e4, 15, 1.5).tilt, true);
+  eq('roll is livelier than pitch on a long one', () =>
+     rcsAlpha(2.5e4, 45, 1.5).roll > rcsAlpha(2.5e4, 45, 1.5).tilt, true);
+  eq('the reference stack lands on its design authority', () =>
+     rcsAlpha(2.5e4, 15, 1.5).tilt*180/Math.PI, 3.0, 0.2);
+  eq('and a light capsule is held to the ceiling', () =>
+     rcsAlpha(1.5e3, 3.6, 0.9).tilt, RCS_AMAX, 1e-12);
+  eq('identity attitude is the identity matrix', () =>
+     qMat([1,0,0,0]).reduce((s, v, i) => s + Math.abs(v - mIdent()[i]), 0), 0, 1e-12);
+  eq('a quarter turn about z takes x to y', () =>
+     qMat([Math.SQRT1_2, 0, 0, Math.SQRT1_2])[1], 1, 1e-12);
+  eq('unwinding halves the angle', () => {
+    const q = qShrink([Math.cos(0.5), 0, 0, Math.sin(0.5)], 0.5);
+    return 2*Math.atan2(Math.hypot(q[1], q[2], q[3]), q[0]);
+  }, 0.5, 1e-9);
+  eq('and runs all the way back to identity', () =>
+     qShrink([Math.cos(0.5), 0, 0, Math.sin(0.5)], 0)[0], 1, 1e-12);
 
   // the stored memory is user data read back at startup: hostile until clamped
   eq('bgMemParse survives garbage', () => bgMemParse('nonsense').air, 0.5);
