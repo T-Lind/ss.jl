@@ -1247,7 +1247,11 @@ end
         Lc = (rp - 0.26rp) / ta
         rwall(x) = rp - ta * (x - xb0) - 0.050rp
         xa = xb0 + 0.04rp + 0.045rp                  # couch station
-        lo, hi = xa + 0.16rp, xb0 + 0.62Lc - 0.14rp  # cabXLo, cabXHi in the viewer
+        # cabXLo, cabXHi in the viewer. The floor rose from 0.16 to 0.27 when the
+        # couches grew armrests with hand controllers on them: the volume the
+        # clamp calls clear has to start above the tallest thing on a couch, or
+        # a floating crew member gets pushed through a control stick.
+        lo, hi = xa + 0.27rp, xb0 + 0.62Lc - 0.14rp
         rclear = 0.60 * rwall(hi)                    # CAB_RFRAC
         @test hi > lo
         @test all(hypot(v[2], v[3]) >= rclear
@@ -1319,6 +1323,91 @@ end
             # bezel was a filled slab and no ray reached any face at all.
             @test seen >= 0.80 * tot
         end
+    end
+    # --- and nothing in here is drawn on top of anything else.
+    #
+    # Two faces at the same depth are BOTH drawn — no viewer of this mesh culls
+    # back faces — so the depth test has to choose between two surfaces it cannot
+    # separate, and it chooses differently per triangle, because the two are
+    # triangulated differently. That is the striping the crew reported across the
+    # overhead lockers, the equipment racks and the console face. It is not a
+    # near-plane problem and no near plane fixes it: the fittings were built to
+    # ABUT what they stand on, and the fix is that every one of them bites in.
+    #
+    # The condition is exact, so the test is exact: two triangles from DIFFERENT
+    # solids, near enough to parallel that their depths interleave, at the same
+    # depth to well inside what the buffer resolves, and overlapping in
+    # projection. Measured before the fix: 119 solid pairs and 1.2 rp^2 of
+    # coplanar surface. Bounding boxes alone could never have found it — they
+    # flag every intended assembly and miss a butt joint entirely.
+    function coplanar_pairs(solids, rp)
+        function prep(m)
+            out = []
+            for t in m.tris
+                e1 = t[2] .- t[1]; e2 = t[3] .- t[1]
+                nn = (e1[2]*e2[3]-e1[3]*e2[2], e1[3]*e2[1]-e1[1]*e2[3],
+                      e1[1]*e2[2]-e1[2]*e2[1])
+                L = hypot(nn[1], nn[2], nn[3]); L > 1e-12 || continue
+                n = nn ./ L
+                push!(out, (n, sum(n .* t[1]), t,
+                            ntuple(j -> min(t[1][j], t[2][j], t[3][j]), 3),
+                            ntuple(j -> max(t[1][j], t[2][j], t[3][j]), 3)))
+            end
+            out
+        end
+        P = [prep(m) for m in solids]
+        box(v) = (ntuple(j -> minimum(p[4][j] for p in v), 3),
+                  ntuple(j -> maximum(p[5][j] for p in v), 3))
+        B = [box(v) for v in P]
+        eps = 3.0e-3rp                    # solids this close can still share a face
+        sep = 1.0e-3rp                    # 0.75 mm: far under what the buffer resolves
+        hit(a, b, e) = all(j -> a[1][j] <= b[2][j] + e && b[1][j] <= a[2][j] + e, 1:3)
+        # separating axis in the shared plane's own frame. A shared EDGE is not an
+        # overlap, so every axis takes a margin.
+        function over2(A, B2)
+            for (Q, R) in ((A, B2), (B2, A)), k in 1:3
+                e = Q[mod1(k+1, 3)] .- Q[k]
+                ax = (-e[2], e[1]); L = hypot(ax[1], ax[2]); L < 1e-12 && continue
+                ax = ax ./ L
+                pa = extrema(p -> ax[1]*p[1] + ax[2]*p[2], Q)
+                pb = extrema(p -> ax[1]*p[1] + ax[2]*p[2], R)
+                (pa[1] > pb[2] - 1e-4rp || pb[1] > pa[2] - 1e-4rp) && return false
+            end
+            true
+        end
+        out = Tuple{Int,Int}[]
+        for i in 1:length(P), j in i+1:length(P)
+            hit(B[i], B[j], eps) || continue
+            found = false
+            for (n1, d1, t1, lo1, hi1) in P[i], (n2, _, t2, lo2, hi2) in P[j]
+                found && break
+                hit((lo1, hi1), (lo2, hi2), eps) || continue
+                abs(sum(n1 .* n2)) > cosd(2.0) || continue
+                maximum(v -> abs(sum(n1 .* v) - d1), t2) < sep || continue
+                u = abs(n1[1]) < 0.9 ? (1.0, 0.0, 0.0) : (0.0, 1.0, 0.0)
+                e1 = u .- n1 .* sum(u .* n1); e1 = e1 ./ hypot(e1[1], e1[2], e1[3])
+                e2 = (n1[2]*e1[3]-n1[3]*e1[2], n1[3]*e1[1]-n1[1]*e1[3],
+                      n1[1]*e1[2]-n1[2]*e1[1])
+                flat(t) = map(v -> (sum(v .* e1), sum(v .* e2)), t)
+                over2(flat(t1), flat(t2)) && (found = true)
+            end
+            found && push!(out, (i, j))
+        end
+        out
+    end
+    for rp in (0.75, 1.40)
+        ext, _, cab, _ = pod_mesh(; radius = rp, nseg = 24)
+        @test isempty(coplanar_pairs(cab, rp))
+        # The hull keeps exactly three, and they are the three window frames
+        # against the shell. A collar round an aperture shares that aperture's
+        # own rim planes with the wall it is let into, whatever depth it is sunk
+        # to, and the revolve is 15 degrees a segment so the frame's opening
+        # cannot be offset from the hull's without eating the frame. It has no
+        # visible consequence — both faces are hull metal and the viewers paint
+        # them the same colour — but it must not grow, and it must not spread.
+        hull = coplanar_pairs(ext, rp)
+        @test length(hull) == 3
+        @test all(p -> p[1] == 2 && 3 <= p[2] <= 5, hull)
     end
     @test isapprox(2 * pod_radius(12500.0), 4.00; atol = 0.10)   # Dragon, on the nose
     @test isapprox(2 * pod_radius(1400.0), 1.89; atol = 0.15)    # and Mercury
