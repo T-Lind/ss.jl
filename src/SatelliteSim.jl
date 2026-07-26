@@ -63,6 +63,7 @@ include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
 include("earthorbit.jl")
+include("suborbital.jl")
 include("landingnav.jl")
 include("landing.jl")
 include("lunarreturn.jl")
@@ -134,6 +135,8 @@ export
     Entry6Result, Entry6Log, simulate_entry6,
     # earth orbit
     OrbitTarget, ORBITS, EarthOrbitResult, earthorbit,
+    # suborbital
+    SuborbitalResult, suborbital,
     # translunar
     CislunarResult, fly_cislunar, tli_burn, design_free_return, seed_free_return,
     design_tcm, fly_cislunar_tcm,

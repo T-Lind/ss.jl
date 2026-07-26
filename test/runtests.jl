@@ -1231,6 +1231,111 @@ end
     @test length(pod_mesh(; radius = 0.55)[3]) < length(pod_mesh(; radius = 1.20)[3])
     @test length(pod_mesh(; radius = 0.55, ncrew = 3)[3]) ==
           length(pod_mesh(; radius = 1.20, ncrew = 3)[3])
+
+    # The clear volume the launch view bounds its camera and its zero-g float
+    # by must contain no fitting at all. It is a CYLINDER, not a scaled cone:
+    # every fitting is sized off the narrow end of its own taper (it has to be,
+    # or it comes out through the top), so each one cuts furthest inboard at
+    # its LOW end and a clear radius taken as a fraction of the local wall is
+    # widest exactly where the racks are deepest. Getting this wrong is not
+    # cosmetic — the eye ends up inside an equipment rack, which is a wall of
+    # khaki filling the frame and nothing else visible at all.
+    for rp in (0.55, 0.75, 1.996)
+        _, _, cab, _ = pod_mesh(; radius = rp, nseg = 24)
+        ta = tan(deg2rad_(32.5))
+        xb0 = 2.4rp - sqrt((2.4rp)^2 - rp^2) + 0.05rp
+        Lc = (rp - 0.26rp) / ta
+        rwall(x) = rp - ta * (x - xb0) - 0.050rp
+        xa = xb0 + 0.04rp + 0.045rp                  # couch station
+        lo, hi = xa + 0.16rp, xb0 + 0.62Lc - 0.14rp  # cabXLo, cabXHi in the viewer
+        rclear = 0.60 * rwall(hi)                    # CAB_RFRAC
+        @test hi > lo
+        @test all(hypot(v[2], v[3]) >= rclear
+                  for m in cab for t in m.tris for v in t if lo <= v[1] <= hi)
+    end
+    # and the capsule is sized by what it weighs, against the ones that flew
+    @test 1.85 < 2 * pod_radius(1400.0) < 2.0        # Mercury,  1.89 m
+    @test 3.7 < 2 * pod_radius(5560.0) < 4.1         # Apollo CM, 3.9 m
+    @test 3.8 < 2 * pod_radius(12500.0) < 4.2        # Dragon,    4.0 m
+    @test pod_radius(50.0) == pod_radius(1.0) == 0.30   # clamped at the bottom
+    @test pod_radius(1e9) == 3.0                        # and at the top
+end
+
+@testset "suborbital" begin
+    lv = default_moon_rocket(payload = 350.0)
+
+    # --- a hop: straight up, closing on an apogee -------------------------
+    hop = suborbital(profile = :hop, apogee = 100.0e3, lv = lv, strict = false)
+    @test hop.outcome === :splashdown
+    @test abs(hop.apogee - 100.0e3) < 4.0e3          # within 4 km of the ask
+    # and it comes down where it went up. A gravity turn is unstable to lateral
+    # perturbation by construction — the thrust follows the velocity, so any
+    # tip compounds — and flying a "vertical" launch in one walked it 38 km
+    # downrange by 40 km of altitude on Coriolis alone. Holding the commanded
+    # vertical instead is what keeps this number small.
+    @test hop.range < 15.0e3
+    @test any(e -> e.name === :pitch_hold, hop.ascent.events)
+    @test any(e -> e.name === :seco, hop.ascent.events)
+    @test !hop.ascent.reached_orbit                  # it is not an orbit
+    @test hop.ascent.h_cut < hop.apogee              # it coasts up after cutoff
+    @test sum(hop.ascent.prop_left) > 0              # cutoff, not depletion
+    @test hop.entry.v_splash < 12.0                  # the chutes did their job
+
+    # a taller hop asks more of the vehicle and reaches higher
+    tall = suborbital(profile = :hop, apogee = 200.0e3, lv = lv, strict = false)
+    @test tall.apogee > hop.apogee + 80.0e3
+    @test sum(tall.ascent.prop_left) < sum(hop.ascent.prop_left)
+    @test tall.entry.peak_gload > hop.entry.peak_gload   # steeper, faster entry
+
+    # --- a shot: lofted, closing on a ground range ------------------------
+    shot = suborbital(profile = :downrange, downrange = 400.0e3, lv = lv,
+                      strict = false)
+    @test shot.outcome === :splashdown
+    @test abs(shot.range - 400.0e3) < 20.0e3
+    @test shot.range > 20 * hop.range                # it went somewhere
+    far = suborbital(profile = :downrange, downrange = 900.0e3, lv = lv,
+                     strict = false)
+    @test far.range > shot.range + 300.0e3
+    @test far.apogee > shot.apogee                   # further needs higher
+
+    # --- the two predicates the cutoffs are built on ----------------------
+    # A purely radial climb has no angular momentum, so its eccentricity goes
+    # to one and a(1+e) goes to 2a — which is exactly the radius that energy
+    # reaches straight up. The formula has to hold in that limit or a hop
+    # cannot use it at all.
+    r0 = (SatelliteSim.RE_MEAN + 1.0e3, 0.0, 0.0)
+    for vv in (1000.0, 2000.0, 3000.0)
+        rad = SatelliteSim._apogee_radius(r0, (vv, 0.0, 0.0))
+        eps = 0.5vv^2 - SatelliteSim.MU_EARTH / vnorm(r0)
+        @test isapprox(rad, -SatelliteSim.MU_EARTH / eps; rtol = 1e-9)
+    end
+    @test SatelliteSim._apogee_radius(r0, (0.0, 12.0e3, 0.0)) == Inf   # escaping
+    # a circular orbit never comes down, so it has no ballistic range
+    rc = SatelliteSim.RE_MEAN + 400.0e3
+    vc = sqrt(SatelliteSim.MU_EARTH / rc)
+    @test SatelliteSim._ballistic_range((rc, 0.0, 0.0), (0.0, vc, 0.0)) == Inf
+    # and a lofted arc's range grows with speed, monotonically
+    rr = (SatelliteSim.RE_MEAN + 60.0e3, 0.0, 0.0)
+    rng(s) = SatelliteSim._ballistic_range(rr, (s*sind(40), s*cosd(40), 0.0))
+    @test rng(2000.0) < rng(2600.0) < rng(3200.0) < Inf
+
+    # --- guidance plumbing ------------------------------------------------
+    # _reguid must carry every field: the tuner rebuilds guidance twice per
+    # Newton step, and a dropped field there is a silently different vehicle
+    g = AscentGuidance(cutoff = :apogee, apogee_target = 123.0e3,
+                       pitch_hold = 0.4, azimuth = 1.1)
+    g2 = SatelliteSim._reguid(g; pitch0 = 0.9)
+    @test g2.pitch0 == 0.9
+    @test g2.cutoff === :apogee && g2.apogee_target == 123.0e3
+    @test g2.pitch_hold == 0.4 && g2.azimuth == 1.1
+    @test SatelliteSim._with_kick(g, 0.2).kick_angle == 0.2
+    @test SatelliteSim._with_kick(g, 0.2).apogee_target == 123.0e3
+    # an orbital ascent is untouched by any of this
+    _, orb = tune_ascent(lv, AscentGuidance())
+    @test orb.reached_orbit && abs(orb.h_cut - 200.0e3) < 2.0e3
+
+    @test_throws ArgumentError suborbital(profile = :sideways, lv = lv)
+    @test_throws ArgumentError suborbital(profile = :hop, apogee = -1.0, lv = lv)
 end
 
 @testset "lifting entry (lunar return corridor)" begin

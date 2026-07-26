@@ -116,6 +116,7 @@
     <div class="card">
       <h2>Mission</h2>
       <div class="seg" id="modeswitch">
+        <button data-mode="suborbital">suborbital</button>
         <button data-mode="orbit">Earth orbit</button>
         <button data-mode="flyby" class="on">free-return flyby</button>
         <button data-mode="landing">lunar landing</button>
@@ -130,6 +131,30 @@
       <div id="presets"></div>
       <div class="sub" style="margin:4px 0 0">one click configures + runs.
         Vehicle presets live in the builder.</div>
+    </div>
+
+    <div class="card hidden" id="card_suborbital">
+      <h2>Suborbital profile</h2>
+      <div class="seg" id="subswitch">
+        <button data-sub="hop" class="on">straight up</button>
+        <button data-sub="downrange">downrange</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label for="sub_apogee_km" title="the apogee a hop closes on">
+          apogee [km]</label><input id="sub_apogee_km" value="100"></div>
+        <div id="sub_range_wrap"><label for="sub_range_km"
+          title="great-circle ground range a shot closes on">downrange [km]</label>
+          <input id="sub_range_km" value="400"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div id="sub_loft_wrap"><label for="sub_loft_deg" title="the attitude the
+             shot holds once the gravity turn has delivered it — near 40° is
+             range-optimal; steeper trades range for altitude">loft [°]</label>
+          <input id="sub_loft_deg" value="40"></div>
+        <div><label for="sub_azimuth_deg">azimuth [°]</label>
+          <input id="sub_azimuth_deg" value="90"></div>
+      </div>
+      <div class="sub" id="sub_note" style="margin:6px 0 0"></div>
     </div>
 
     <div class="card hidden" id="card_orbit">
@@ -392,10 +417,15 @@ const BASE_FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_k
 const LANDING_FIELDS = ['l_dry','l_prop','l_thrust_kn','l_isp','l_throttle_min',
   'h_moon_park_km','h_pdi_km','n_rev','plain_moon'];
 const ORBIT_FIELDS = ['orbit','n_orbits','deorbit','hp_entry_km'];
+// a suborbital flight has no orbit to describe, only a profile and its target
+const SUB_FIELDS = ['sub_profile','sub_apogee_km','sub_range_km','sub_loft_deg',
+                    'sub_azimuth_deg'];
 let MODE = 'flyby';
 let VNAME = 'Sable';
+let SUBPROF = 'hop';
 const landing = () => MODE === 'landing';
 const orbitm = () => MODE === 'orbit';
+const subm = () => MODE === 'suborbital';
 const STAGE_FIELDS = ['prop','dry','thrust_kn','isp','propellant','engines','engine',
                       'diameter','size_by','len','dry_auto'];
 // A booster set is configured exactly like a stage, plus how it behaves in
@@ -409,7 +439,7 @@ const FIELDS = () => BASE_FIELDS.concat(
   [].concat(...Array.from({length: nStages()}, (_, i) =>
     STAGE_FIELDS.map(f => `s${i+1}_${f}`))),
   nBoost() ? BOOST_FIELDS.map(f => `b_${f}`) : [],
-  LANDING_FIELDS, ORBIT_FIELDS);
+  LANDING_FIELDS, ORBIT_FIELDS, SUB_FIELDS.filter(f => f !== 'sub_profile'));
 
 // Stage 1 is the booster, the last is the kick stage that does TLI, and
 // anything between is an upper stage — the same roles the server uses.
@@ -732,6 +762,18 @@ const ORBIT_PRESETS = {
   'GEO':          {orbit: 'geo', n_orbits: 2, deorbit: false},
   'LEO re-entry': {orbit: 'leo', n_orbits: 3, deorbit: true},
 };
+// Suborbital presets are the flights people actually name. A preset carries
+// its own PROFILE, because "the Karman line" is a hop and "downrange 1000 km"
+// is a shot, and picking one without the other is picking half a mission.
+const SUB_PRESETS = {
+  'Kármán line':   {_p: 'hop', sub_apogee_km: 100},
+  'high hop':      {_p: 'hop', sub_apogee_km: 250},
+  'sounding shot': {_p: 'hop', sub_apogee_km: 500},
+  '400 km range':  {_p: 'downrange', sub_range_km: 400, sub_loft_deg: 40},
+  '1000 km range': {_p: 'downrange', sub_range_km: 1000, sub_loft_deg: 40},
+  'depressed':     {_p: 'downrange', sub_range_km: 400, sub_loft_deg: 22},
+  'lofted':        {_p: 'downrange', sub_range_km: 400, sub_loft_deg: 62},
+};
 // Landing presets move the things a landing mission actually trades: where
 // you park, how long you loiter before starting down, and how much lander
 // there is to put down.
@@ -812,6 +854,7 @@ function params() {
   const u = new URLSearchParams();
   u.set('mode', MODE);
   u.set('vname', VNAME);
+  u.set('sub_profile', SUBPROF);
   for (const f of FIELDS()) {
     const el = $(f);
     if (!el) continue;
@@ -895,6 +938,23 @@ function renderAll() {
     [m.redesignate_m>0 ? fmt(m.redesignate_m,0)+' m' : '—','aim point moved'],
     [fmt(m.nav_alt_err_m,0)+' m','nav altitude error'],
     [fmt(m.t_days,2)+' d','pad to surface'],
+  ] : run.mode === 'suborbital' ? [
+    [fmt(m.liftoff_t,1)+' t','liftoff mass'],
+    [fmt(m.apogee_km,1)+' km','apogee reached'],
+    // what was asked for next to what it did, because on a suborbital flight
+    // the target is the whole point and the miss is the whole answer
+    [(run.suborbital||{}).profile === 'hop'
+       ? fmt(m.target_apogee_km,0)+' km' : fmt(m.target_range_km,0)+' km','asked for'],
+    [((run.suborbital||{}).profile === 'hop'
+       ? fmt(m.apogee_err_km,1) : fmt(m.range_err_km,1))+' km','miss'],
+    [fmt(m.range_km,1)+' km','ground range'],
+    [fmt(m.cutoff_h_km,1)+' km','cutoff altitude'],
+    [fmt(m.cutoff_gamma_deg,1)+'°','cutoff flight path'],
+    [fmt(m.t_apogee_s,0)+' s','coast to apogee'],
+    [fmt(m.peak_g,1)+' g','peak load'],
+    [fmt(m.peak_q_wcm2,1)+' W/cm²','peak heating'],
+    [fmt(m.prop_margin_kg,0)+' kg','propellant left'],
+    [fmt(m.v_splash,1)+' m/s','splash speed'],
   ] : run.mode === 'orbit' ? [
     [fmt(m.liftoff_t,1)+' t','liftoff mass'],
     [fmt(m.park_perigee_km,0)+'×'+fmt(m.park_apogee_km,0)+' km','parking orbit'],
@@ -1876,17 +1936,19 @@ function initPresets() {
     $(host).innerHTML = keys.map(k => `<span class="chip" data-p="${k}">${k}</span>`).join('');
     for (const el of $(host).querySelectorAll('.chip')) el.onclick = () => run(el.dataset.p);
   };
-  renderMissionPresets = () => chips('presets',
-    Object.keys(landing() ? LANDING_PRESETS : orbitm() ? ORBIT_PRESETS : PRESETS), k => {
+  const presetsFor = () => landing() ? LANDING_PRESETS : orbitm() ? ORBIT_PRESETS :
+                           subm() ? SUB_PRESETS : PRESETS;
+  renderMissionPresets = () => chips('presets', Object.keys(presetsFor()), k => {
       // a mission preset resets only mission fields — it must not undo the
       // vehicle you just picked
-      const o = (landing() ? LANDING_PRESETS : orbitm() ? ORBIT_PRESETS : PRESETS)[k];
+      const o = presetsFor()[k];
       const keep = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
                     'tli_mag_err_pct','tli_point_err_deg']
-                   .concat(LANDING_FIELDS, ORBIT_FIELDS);
+                   .concat(LANDING_FIELDS, ORBIT_FIELDS, SUB_FIELDS);
       for (const f of keep) if (DEFAULTS[f] !== undefined) setField(f, DEFAULTS[f]);
-      for (const kk in o) setField(kk, o[kk]);
-      orbitNote();
+      for (const kk in o) if (kk !== '_p') setField(kk, o[kk]);
+      if (o._p) SUBPROF = o._p;
+      orbitNote(); subNote();
       fetchGeo(); doRun();
     });
   renderMissionPresets();
@@ -1902,9 +1964,11 @@ function setMode(m) {
     b.classList.toggle('on', b.dataset.mode === m);
   $('card_flyby').classList.toggle('hidden', MODE !== 'flyby');
   $('card_orbit').classList.toggle('hidden', !orbitm());
+  $('card_suborbital').classList.toggle('hidden', !subm());
   $('card_landing').classList.toggle('hidden', !landing());
   $('card_descent').classList.toggle('hidden', !landing());
   $('moonview').classList.toggle('hidden', !landing());
+  subNote();
   // the cinematic view flies the pad-to-splashdown profile; say so rather
   // than quietly showing a different mission
   $('launchbtn').title = landing()
@@ -1914,17 +1978,39 @@ function setMode(m) {
     ? 'free return, insertion, and a powered descent — pad to lunar surface'
     : orbitm()
     ? 'ascent, transfer, and the orbit itself — configure, run, explore'
+    : subm()
+    ? 'up and back down — a hop or a ballistic shot, pad to splashdown'
     : 'circumlunar free return — configure, run, explore';
   $('modenote').textContent = landing()
     ? 'the lander stops at the Moon: insertion at perilune, a lunar parking orbit, then a guided descent to touchdown'
     : orbitm()
     ? 'the goal is a target Earth orbit — LEO, polar, Molniya, GEO — or a stay and a re-entry; the Moon is scenery'
+    : subm()
+    ? 'no orbit is attempted: the engines cut the moment the arc they have built reaches the apogee — or the ground range — you asked for, and the capsule flies the rest ballistically'
     : 'a pod around the Moon and home — nothing is left behind and nothing has to stop';
   if (landing() && moonView === null) moonView = false;
   renderMissionPresets();
   fillSolveParams();
   renderLegend();
   updateLanderNote();
+}
+// Which target the profile actually closes on. A vehicle has one degree of
+// freedom at cutoff, so it can be given one target and one only — the other
+// number comes out of the flight and is reported, not commanded. Saying that
+// plainly is the difference between a greyed-out box and a confusing one.
+function subNote() {
+  if (!$('card_suborbital')) return;
+  const hop = SUBPROF === 'hop';
+  for (const b of $('subswitch').querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.sub === SUBPROF);
+  $('sub_range_wrap').style.opacity = hop ? 0.42 : 1;
+  $('sub_loft_wrap').style.opacity = hop ? 0.42 : 1;
+  $('sub_range_km').disabled = hop;
+  $('sub_loft_deg').disabled = hop;
+  $('sub_apogee_km').disabled = !hop;
+  $('sub_note').textContent = hop
+    ? 'straight up: no pitch-over at all, the vertical held all the way, cutoff on the apogee above. Where it comes down is a consequence — a few kilometres from the pad — not a target.'
+    : 'a ballistic shot: the gravity turn hands over to the loft attitude, and the engines cut when the free-flight arc through the vehicle’s own state reaches the range above. Apogee is a consequence.';
 }
 function renderLegend() {
   const items = landing() ? [
@@ -1933,6 +2019,8 @@ function renderLegend() {
   ] : orbitm() ? [
     ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'burn'],
     ['#199e70', 'transfer'], ['#c98500', 'on orbit'], ['#d55181', 'entry'],
+  ] : subm() ? [
+    ['#8fbef0', 'ascent'], ['#d55181', 'ballistic arc + entry'],
   ] : [
     ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'TLI burn'],
     ['#199e70', 'outbound'], ['#c98500', 'return'], ['#d55181', 'entry'],
@@ -1987,6 +2075,13 @@ $('moonview').onclick = () => {
   moonView = !moonView;
   $('moonview').classList.toggle('on', moonView);
 };
+for (const b of $('subswitch').querySelectorAll('button'))
+  b.onclick = () => {
+    if (b.dataset.sub === SUBPROF) return;
+    SUBPROF = b.dataset.sub;
+    subNote();
+    doRun();
+  };
 for (const b of $('modeswitch').querySelectorAll('button'))
   b.onclick = () => {
     if (b.dataset.mode === MODE) return;
@@ -2131,7 +2226,10 @@ fillCatalogues().then(() => {
   buildStages();
   initPresets();
   const qmode = new URLSearchParams(location.search).get('mode');
-  setMode(qmode === 'landing' ? 'landing' : qmode === 'orbit' ? 'orbit' : 'flyby');
+  const qsub = new URLSearchParams(location.search).get('sub_profile');
+  if (qsub === 'downrange' || qsub === 'hop') SUBPROF = qsub;
+  setMode(qmode === 'landing' ? 'landing' : qmode === 'orbit' ? 'orbit' :
+          qmode === 'suborbital' ? 'suborbital' : 'flyby');
   if (landing()) {
     VNAME = 'Starship';
     applyPreset(VEHICLES['Starship (expendable)'], { reset: true });
