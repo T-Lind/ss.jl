@@ -165,7 +165,7 @@ export
     cw_stm, cw_propagate, cw_two_impulse,
     # mesh & panel aero
     TriMesh, read_stl, write_stl, mesh_area, mesh_volume, mass_properties,
-    lathe_mesh, box_mesh, merge_meshes, rocket_mesh, pod_mesh, probe_mesh, pod_radius,
+    lathe_mesh, box_mesh, merge_meshes, rocket_mesh, pod_mesh, probe_mesh, pod_radius, pod_crew,
     interstage_length,
     PanelAero, panel_aero, cp_max_newtonian, trim_alpha,
     # config

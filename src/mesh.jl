@@ -410,6 +410,49 @@ pod_radius(payload_mass::Real) =
     clamp(POD_R_COEFF * cbrt(max(float(payload_mass), 1.0)), 0.30, 3.0)
 
 """
+    pod_crew(rp) -> Int
+
+How many couches abreast a capsule of base radius `rp` can take.
+
+The old rule was `rp >= 1.10 ? 3 : rp >= 0.85 ? 2 : 1` — three abreast and no
+more, however wide the capsule got, because everything was a fraction of rp and
+three couches always occupied the same share of it. A six-metre capsule got
+three three-metre couches. Above Apollo size the count is now COUNTED: how many
+crew fit across at a real 0.86 m shoulder pitch, given a couch of a real width.
+
+Below 1.10 the ladder is unchanged, so nothing that flies today moves. The
+result runs 1, 2, 3 up to about 4 m of capsule, 4 at Orion's 5 m and 5 at six —
+which is roughly what those vehicles carry.
+"""
+function pod_crew(rp::Real)
+    rp = float(rp)
+    rp < 0.85 && return 1
+    rp < 1.10 && return 2
+    # usable half-width at the couch station, less the outermost couch's own
+    # half-width, divided by the pitch. 0.85 of the wall rather than all of it,
+    # because the wall is where the racks and the handrails are.
+    R = 0.85 * 0.89rp
+    hw = min(0.14rp, 0.30)
+    P = min(0.44rp, 0.86)
+    nwide = 1 + floor(Int, 2 * (R - hw) / P)
+    # And bounded by what the CONSOLE can face, which is the tighter of the two
+    # and the reason this is not simply "as many as fit". The display annulus
+    # sits high in the cone where the radius has already narrowed — about a
+    # metre across on a six-metre capsule — so it does not widen with the cabin
+    # the way the floor does. Measured: a couch at 0.44 rp off the axis reads
+    # its screen at 42 degrees of incidence at EVERY capsule size, and five
+    # abreast on a six-metre capsule puts the outermost at 53. Holding the
+    # outermost couch to 0.44 rp keeps every crew station exactly as readable
+    # as it is today and no worse.
+    #
+    # That caps a six-metre capsule at four abreast rather than five. Getting
+    # past it means moving the console outboard — a wider annulus at a lower
+    # station — which is a redesign of the whole face, not a constant.
+    nface = 1 + floor(Int, 2 * (0.44rp) / P)
+    clamp(min(nwide, nface), 3, 6)
+end
+
+"""
     pod_mesh(; radius=0.75, nseg=24, ncrew=0) -> (hull, glass, cabin, height)
 
 Apollo-proportioned crew capsule: a spherical-section ablative heat shield,
@@ -436,7 +479,7 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     xb0 = xsh + 0.05rp                            # hull base rim
     xtop = xb0 + Lc
     hgt = xtop + 0.34rp
-    crew = ncrew > 0 ? ncrew : (rp >= 1.10 ? 3 : rp >= 0.85 ? 2 : 1)
+    crew = ncrew > 0 ? ncrew : pod_crew(rp)
     ext = TriMesh[]; glass = TriMesh[]; cab = TriMesh[]
 
     # --- heat shield: spherical cap, ablator thickness, closed at the axis --
@@ -533,14 +576,37 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # every fitting is sized against the pressure wall where it actually sits,
     # so nothing punches through the cone as the capsule is scaled
     rin(x) = rcone(x) - tw
+    # --- human and equipment scale ------------------------------------------
+    # Every fitting in here used to be a fraction of rp, and that makes a six
+    # metre capsule a metre-and-a-half capsule photographed closer: the same
+    # proportions, the same share of the volume given away, the same layout.
+    # But a crew member is the same size in both. So is a handrail, a locker
+    # and an equipment rack — none of them get bigger because the pressure
+    # vessel did, and a couch three metres long is not a couch.
+    #
+    # So every human-scale dimension is now the fraction OR an absolute,
+    # whichever is SMALLER. Below the crossover the fraction is what fits and
+    # nothing changes at all; above it the fitting stops growing and everything
+    # it is no longer occupying becomes cabin. That is the difference between a
+    # capsule that is big and a capsule that is roomy.
+    #
+    # `inface` is the same idea for something mounted on the wall: its inner
+    # face is a share of the local wall, or a fixed depth back from its own
+    # outer face, whichever is the SHALLOWER of the two.
+    inface(x, fout, fin, dcap) = max(fin * rin(x), fout * rin(x) - dcap)
     xfl = xb0 + 0.04rp                            # deck
     push!(cab, lathe_mesh(Tuple{Float64,Float64}[
         (xfl, 0.0), (xfl, 0.96rin(xfl + 0.045rp)),
         (xfl + 0.045rp, 0.96rin(xfl + 0.045rp)), (xfl + 0.045rp, 0.0)]; nseg = nc))
     xa = xfl + 0.045rp
-    zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] : [-0.44rp, 0.0, 0.44rp]
-    hw = crew >= 3 ? 0.14rp : 0.17rp              # couch half-width
-    ln = 0.60 * rin(xa + 0.07rp)                  # couch half-length
+    # Couch pitch is a SHOULDER measurement: about 0.86 m centre to centre for
+    # suited crew, which is what Apollo used and what three abreast in a 3.9 m
+    # capsule comes to. One and two-crew layouts keep exactly the spacing they
+    # had, because below Apollo size the fraction is the binding constraint.
+    zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] :
+         [(i - (crew - 1) / 2) * min(0.44rp, 0.86) for i in 0:crew-1]
+    hw = min(crew >= 3 ? 0.14rp : 0.17rp, 0.30)   # couch half-width
+    ln = min(0.60 * rin(xa + 0.07rp), 0.95)       # couch half-length: a person
     for zc in zs
         push!(cab, box_mesh((xa + 0.02rp, -ln,      zc - hw),
                             (xa + 0.07rp,  0.36ln,  zc + hw)))         # back pan
@@ -651,9 +717,10 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # box stands ON the deck, so it starts BELOW the deck's top face.
     for (a0, a1) in ((deg2rad(100.0), deg2rad(136.0)), (deg2rad(224.0), deg2rad(260.0)))
         x0r, x1r = xa - 0.022rp, xa + 0.26rp     # below the deck, below the struts
-        push!(cab, _arc_slab(x0r, x1r, 0.72rin(x1r), 0.97rin(x1r), a0, a1; nseg = 8))
+        push!(cab, _arc_slab(x0r, x1r, inface(x1r, 0.97, 0.72, 0.36), 0.97rin(x1r),
+                             a0, a1; nseg = 8))
         x2r, x3r = x1r + 0.04rp, x1r + 0.30rp
-        push!(cab, _arc_slab(x2r, x3r, 0.68rin(x3r), 0.96rin(x3r),
+        push!(cab, _arc_slab(x2r, x3r, inface(x3r, 0.96, 0.68, 0.40), 0.96rin(x3r),
                              a0 + 0.08, a1 - 0.08; nseg = 8))
     end
 
@@ -687,7 +754,10 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
             # rail's own outer face landed on the locker door's to within a
             # millimetre. At 0.82 the rail passes between the door's two faces
             # with about 6 mm either side, which the depth buffer can separate.
-            rr = 0.82rin(x1h)
+            # a rail stands a hand's width off the wall, and a hand does not
+            # get wider with the capsule — so the 0.18 of the wall it used to
+            # be is capped at 20 cm of stand-off
+            rr = max(0.82rin(x1h), 0.96rin(x1h) - 0.20)
             push!(cab, _place_mesh(box_mesh((x0h, rr - 0.018rp, -0.018rp),
                                             (x1h, rr + 0.018rp, 0.018rp));
                                    roll = a))
@@ -706,11 +776,17 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
                deg2rad(294.0))
         a1 = a0 + deg2rad(56.0)
         xl0, xl1 = xtop - 0.36rp, xtop - 0.13rp
-        push!(cab, _arc_slab(xl0, xl1, 0.70rin(xl1), 0.96rin(xl1), a0, a1; nseg = 7))
-        # the door runs INTO the box it closes — abutting it at xl0 put a
-        # 7-segment face and a 6-segment face on the same plane, which is the
-        # striping the crew could see across all five lockers
-        push!(cab, _arc_slab(xl0 - 0.018rp, xl0 + 0.012rp, 0.74rin(xl1), 0.92rin(xl1),
+        # a locker is about a third of a metre deep whatever it is bolted to
+        lo, li = 0.96rin(xl1), inface(xl1, 0.96, 0.70, 0.38)
+        push!(cab, _arc_slab(xl0, xl1, li, lo, a0, a1; nseg = 7))
+        # The door is inset from the box's OWN faces rather than from a fixed
+        # fraction of the wall, so it stays a door however deep the box is —
+        # keyed to 0.70/0.96 it would have hung in mid-air the moment the box
+        # stopped being that deep. It also runs INTO the box it closes:
+        # abutting it at xl0 put a 7-segment face and a 6-segment face on the
+        # same plane, which is the striping the crew could see across all five.
+        push!(cab, _arc_slab(xl0 - 0.018rp, xl0 + 0.012rp,
+                             li + 0.15(lo - li), lo - 0.15(lo - li),
                              a0 + 0.05, a1 - 0.05; nseg = 6))
     end
     # Inner hatch surround on the wall the outside hatch is cut into, and a
@@ -797,9 +873,11 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
         # 0.70 and not 0.74: the upper liner's ribs stand in to 0.749 rin, and a
         # locker face 1 mm outside them is a surface the depth buffer cannot
         # separate from a rib
-        push!(cab, _arc_slab(x0s, x1s, 0.70rin(x1s), 0.95rin(x1s), a0, a1; nseg = 6))
-        push!(cab, _place_mesh(box_mesh((0.5(x0s + x1s) - 0.02rp, 0.64rin(x1s), -0.018rp),
-                                        (0.5(x0s + x1s) + 0.02rp, 0.73rin(x1s), 0.018rp));
+        so, si = 0.95rin(x1s), inface(x1s, 0.95, 0.70, 0.36)
+        push!(cab, _arc_slab(x0s, x1s, si, so, a0, a1; nseg = 6))
+        # the latch straddles the box's inner face, so it follows the box
+        push!(cab, _place_mesh(box_mesh((0.5(x0s + x1s) - 0.02rp, si - 0.06(so - si), -0.018rp),
+                                        (0.5(x0s + x1s) + 0.02rp, si + 0.12(so - si), 0.018rp));
                                roll = 0.5(a0 + a1)))
     end
     # There used to be two paddle switches out here on the console's flanks, at
@@ -881,6 +959,12 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     for (a0, a1) in ((deg2rad(100.0), deg2rad(136.0)), (deg2rad(224.0), deg2rad(260.0)))
         x2r, x3r = xa + 0.30rp, xa + 0.56rp
         rd = rin(x3r)
+        # The rack's OWN inner face, recomputed the same way the rack was, so
+        # the drawers stay in the rack when the rack stops being a third of the
+        # capsule deep. Keyed to a flat 0.68 rd they would have been left
+        # floating in the middle of the cabin on a wide capsule.
+        rri, rro = inface(x3r, 0.96, 0.68, 0.40), 0.96rd
+        dd = rro - rri
         for k in 0:2
             xd0 = x2r + 0.025rp + k * 0.078rp
             xd1 = xd0 + 0.060rp
@@ -889,10 +973,10 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
             # the volume the viewer lets a floating crew member into — 0.60 of
             # the wall at the top of that volume. A drawer front standing proud
             # of the rack would be something you could be pushed through.
-            push!(cab, _arc_slab(xd0, xd1, 0.690rd, 0.760rd,
+            push!(cab, _arc_slab(xd0, xd1, rri + 0.036dd, rri + 0.286dd,
                                  a0 + 0.12, a1 - 0.12; nseg = 6))
-            push!(cab, _place_mesh(box_mesh((0.5(xd0 + xd1) - 0.011rp, 0.672rd, -0.055rp),
-                                            (0.5(xd0 + xd1) + 0.011rp, 0.716rd, 0.055rp));
+            push!(cab, _place_mesh(box_mesh((0.5(xd0 + xd1) - 0.011rp, rri - 0.029dd, -0.055rp),
+                                            (0.5(xd0 + xd1) + 0.011rp, rri + 0.129dd, 0.055rp));
                                    roll = 0.5(a0 + a1)))
         end
     end

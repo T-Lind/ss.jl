@@ -1286,9 +1286,13 @@ end
         xa = xb0 + 0.085rp
         xcon = xb0 + 0.62Lc
         rcin = rinw(xcon)
-        ln = 0.60 * rinw(xa + 0.07rp)
-        crew = rp >= 1.10 ? 3 : rp >= 0.85 ? 2 : 1
-        zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] : [-0.44rp, 0.0, 0.44rp]
+        # mirrored from pod_mesh, which caps both of these at what a person is:
+        # a couch is a person long and couches are a shoulder pitch apart, and
+        # neither grows because the pressure vessel did
+        ln = min(0.60 * rinw(xa + 0.07rp), 0.95)
+        crew = pod_crew(rp)
+        zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] :
+             [(i - (crew - 1)/2) * min(0.44rp, 0.86) for i in 0:crew-1]
         bays = [(-46.0, -18.0), (-15.0, 15.0), (18.0, 46.0)]
         # Moller-Trumbore, front faces and back alike: a wall stops light either way
         function thit(o, d, a, b, c)
@@ -1303,7 +1307,10 @@ end
         end
         for (si, zc) in enumerate(zs)
             eye = (xa + 0.30rp, 0.26ln, zc)
-            mine = crew == 1 ? 2 : crew == 2 ? (si == 1 ? 1 : 3) : si
+            # couch -> bay, mirrored from cabSeatBay: with more couches than
+            # bays the neighbours share one, which is what a real console does
+            mine = crew == 1 ? 2 : crew == 2 ? (si == 1 ? 1 : 3) :
+                   min(3, 1 + round(Int, (si - 1) * 2 / (crew - 1)))
             (d0, d1) = bays[mine]
             seen = 0; tot = 0
             for fr in 0.1:0.2:0.9, fa in 0.1:0.2:0.9

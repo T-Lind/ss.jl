@@ -4450,11 +4450,22 @@ const CAMS_MOON = () => camList(CAMS_MOON_ALL);
 // clear all the way up is the one measured at the TOP of the volume.
 const CAB_RFRAC = 0.60;
 function cabRin(K, u) { return K.rcone(u) - 0.05*K.rp; }
-// clear of the couch AND of what is on it: the armrests carry hand controllers
-// now, and the tip of a stick is at xa + 0.24 rp. 0.16 was the headrests alone.
-function cabXLo(K) { return K.xa + 0.27*K.rp; }
-function cabXHi(K) { return K.xcon - 0.14*K.rp; } // under the console switches
-function cabRLim(K) { return Math.max(0.02, CAB_RFRAC*cabRin(K, cabXHi(K))); }
+// The clear volume, and it grows FASTER than the capsule now — which is the
+// whole point of sizing the fit-out by the people and the equipment in it.
+// Every bound here is what a fitting actually occupies, and a fitting stops
+// growing once it is the size of the thing it is for: a couch with a hand
+// controller on it reaches about half a metre above the pan whether the
+// capsule is 1.5 m across or 6, and an equipment rack is a third of a metre
+// deep either way. Below the crossover these are the fractions they always
+// were, so nothing that flies today moves.
+function cabXLo(K) { return K.xa + Math.min(0.27*K.rp, 0.55); }
+function cabXHi(K) { return K.xcon - Math.min(0.14*K.rp, 0.28); }
+function cabRLim(K) {
+  const r = cabRin(K, cabXHi(K));
+  // inboard of the racks: (1 - CAB_RFRAC) of the wall, or the depth a rack
+  // and its clearance actually take, whichever leaves MORE cabin
+  return Math.max(0.02, Math.min(r - 0.02, Math.max(CAB_RFRAC*r, r - 0.52)));
+}
 // A station written the only way a clamp can check: station along the cone, a
 // fraction of the clear radius, and a roll in degrees.
 function cabPt(K, u, fr, aDeg) {
@@ -4472,13 +4483,31 @@ const CAB_ROLL_EYE = 200, CAB_ROLL_HEAD = 282;
 // overhead: it is what a strapped-in crew member is looking at. How many
 // couches there are follows the same rule the mesh uses — a capsule seats what
 // its diameter can seat.
-function cabCrew(K) { return K.rp >= 1.10 ? 3 : K.rp >= 0.85 ? 2 : 1; }
-function cabSeatZ(K) {
-  const n = cabCrew(K);
-  return n === 1 ? [0] : n === 2 ? [-0.30*K.rp, 0.30*K.rp]
-                                 : [-0.44*K.rp, 0, 0.44*K.rp];
+// Mirrored from pod_crew. The old rule was three abreast and no more, however
+// wide the capsule got — which was consistent, because every fitting was a
+// fraction of rp and three couches always took the same share of it. A crew
+// member is the same size in a 1.5 m capsule and a 6 m one, so above Apollo
+// size the count is COUNTED: how many fit across at a real shoulder pitch.
+function cabCrew(K) {
+  const rp = K.rp;
+  if (rp < 0.85) return 1;
+  if (rp < 1.10) return 2;
+  const R = 0.85*0.89*rp, hw = Math.min(0.14*rp, 0.30), P = Math.min(0.44*rp, 0.86);
+  // bounded by what fits AND by what the console can face — see pod_crew: the
+  // display annulus does not widen with the cabin, so holding the outermost
+  // couch to 0.44 rp keeps every station as readable as it is today
+  const nwide = 1 + Math.floor(2*(R - hw)/P);
+  const nface = 1 + Math.floor(2*(0.44*rp)/P);
+  return Math.max(3, Math.min(6, Math.min(nwide, nface)));
 }
-function cabSeatLn(K) { return 0.60*cabRin(K, K.xa + 0.07*K.rp); }
+function cabSeatZ(K) {
+  const n = cabCrew(K), P = Math.min(0.44*K.rp, 0.86);
+  if (n === 1) return [0];
+  if (n === 2) return [-0.30*K.rp, 0.30*K.rp];
+  return Array.from({ length: n }, (_, i) => (i - (n - 1)/2)*P);
+}
+// a couch is a person long, and a person does not grow with the capsule
+function cabSeatLn(K) { return Math.min(0.60*cabRin(K, K.xa + 0.07*K.rp), 0.95); }
 // the commander's couch: the middle one, where there is a middle one
 function cabSeatHome(K) { return Math.floor((cabCrew(K) - 1)/2); }
 // Which screen bay a couch is under. The three bays run -46..-18, -15..15 and
@@ -4486,9 +4515,20 @@ function cabSeatHome(K) { return Math.floor((cabCrew(K) - 1)/2); }
 // and roll is measured z = r sin(roll) — so bay and couch are already in the
 // same order, and a crew member's own display is the one over their own seat.
 // One couch takes the centre bay, two take the outer pair, three take all.
+// With more couches than bays — a wide capsule seats five and the console has
+// three — neighbours share a display, which is what a real console does. The
+// map still runs in order, so an outboard crew member still gets an outboard
+// bay and nobody is aimed across the cabin at somebody else's screen.
 function cabSeatBay(K, i) {
-  const n = cabCrew(K);
-  return n === 1 ? 1 : n === 2 ? (i ? 2 : 0) : i;
+  const n = cabCrew(K), nb = SCR_BAYS.length;
+  if (n === 1) return (nb - 1) >> 1;
+  if (n === 2) return i ? nb - 1 : 0;
+  // Spread the couches ACROSS the bays rather than dividing them into equal
+  // blocks: floor(i*nb/n) sends four couches to [0,0,1,2], which puts the two
+  // middle crew on different bays and leaves the layout lopsided. Rounding the
+  // position instead gives [0,1,1,2] — symmetric, and the ends still get the
+  // ends. Three couches and three bays remain exactly one each.
+  return Math.min(nb - 1, Math.round(i*(nb - 1)/(n - 1)));
 }
 
 // Camera stations inside the crew capsule, in vehicle model coordinates.
@@ -7614,6 +7654,70 @@ window.__selftest = function () {
     return back;
   }, 0);
 
+  // --- a bigger capsule is a ROOMIER capsule, not the same one photographed
+  // closer. This is the assertion the whole fit-out change exists to satisfy,
+  // and the measurement that showed it was needed: the clear volume divided by
+  // rp^3 was 0.086 at EVERY size, which is what "the same shape scaled" means
+  // numerically. Fittings sized by the crew and the equipment stop growing, so
+  // the share of the capsule they occupy falls and this ratio rises.
+  const clearV = rp => {
+    const K = capStations(0, rp);
+    return Math.PI*Math.pow(cabRLim(K), 2)*Math.max(0, cabXHi(K) - cabXLo(K));
+  };
+  eq('a wider capsule gives away proportionally less of itself', () => {
+    const small = clearV(1.40)/Math.pow(1.40, 3);
+    const big = clearV(3.0)/Math.pow(3.0, 3);
+    return big > 1.5*small ? 'ok' : `${small.toFixed(3)} -> ${big.toFixed(3)}`;
+  }, 'ok');
+  eq('and the ratio never falls as the capsule grows', () => {
+    let prev = 0;
+    for (const rp of [0.75, 0.95, 1.10, 1.40, 1.955, 2.51, 3.0]) {
+      const f = clearV(rp)/Math.pow(rp, 3);
+      if (f < prev - 1e-9) return `fell at rp ${rp}`;
+      prev = f;
+    }
+    return 'ok';
+  }, 'ok');
+  // and nothing below Apollo size moved, which is what makes this safe to do
+  eq('the small capsules are untouched', () => {
+    for (const rp of [0.75, 0.95, 1.10, 1.40]) {
+      const K = capStations(0, rp);
+      if (Math.abs(cabXLo(K) - (K.xa + 0.27*rp)) > 1e-12) return `xlo ${rp}`;
+      if (Math.abs(cabXHi(K) - (K.xcon - 0.14*rp)) > 1e-12) return `xhi ${rp}`;
+    }
+    return 'ok';
+  }, 'ok');
+  // A couch is a person long. It used to be 0.60 of the local wall, which is
+  // 0.8 m in the reference capsule and 3.2 m in a six-metre one — the first is
+  // too short to lie on and the second is not a couch, it is a corridor.
+  eq('a couch never grows past a person', () => {
+    for (const rp of [0.75, 1.40, 1.955, 2.51, 3.0])
+      if (2*cabSeatLn(capStations(0, rp)) > 1.91) return `rp ${rp}`;
+    return 'ok';
+  }, 'ok');
+  eq('and a wide capsule seats more than three', () =>
+     cabCrew(capStations(0, 3.0)) > 3 && cabCrew(capStations(0, 1.40)) === 3, true);
+  eq('every couch still gets a bay that exists', () => {
+    for (const rp of [0.75, 0.95, 1.40, 2.51, 3.0]) {
+      const K = capStations(0, rp);
+      for (let i = 0; i < cabCrew(K); i++) {
+        const b = cabSeatBay(K, i);
+        if (!(b >= 0 && b < SCR_BAYS.length)) return `rp ${rp} couch ${i} -> ${b}`;
+      }
+    }
+    return 'ok';
+  }, 'ok');
+  eq('and the couches stay inside the cabin at every size', () => {
+    for (const rp of [0.95, 1.40, 1.955, 2.51, 3.0]) {
+      const K = capStations(0, rp);
+      const hw = Math.min(cabCrew(K) >= 3 ? 0.14*rp : 0.17*rp, 0.30);
+      const wall = cabRin(K, K.xa + 0.07*rp);
+      for (const z of cabSeatZ(K))
+        if (Math.abs(z) + hw > 0.97*wall) return `rp ${rp} couch at ${z.toFixed(2)}`;
+    }
+    return 'ok';
+  }, 'ok');
+
   // --- what is about to happen. The cabin could read six numbers about where
   // it was and nothing about what was coming, which is backwards for a crew.
   eq('the next event is the next one, and only ever ahead', () => {
@@ -8204,10 +8308,24 @@ window.__selftest = function () {
   }, 1 % cabSeatZ(capStations(0)).length);
   eq('every couch has a seat pose', () =>
      cabSeatZ(CK).every((z, i) => cabinPose('seat', i, CK).eye[2] === z), true);
-  eq('the capsule seats what the mesh seats it', () =>
-     cabCrew(CK), CK.rp >= 1.10 ? 3 : CK.rp >= 0.85 ? 2 : 1);
-  eq('and the commander gets a middle couch where there is one', () =>
-     cabSeatHome(CK), cabCrew(CK) === 3 ? 1 : 0);
+  // The ladder is 1, 2, 3 up to about Apollo size and then counted — this used
+  // to pin "three abreast and no more, however wide", which is what it was.
+  eq('the capsule seats what the mesh seats it', () => {
+    const want = { 0.75: 1, 0.95: 2, 1.10: 3, 1.40: 3, 1.955: 3, 2.51: 3, 3.0: 4 };
+    for (const rp in want)
+      if (cabCrew(capStations(0, +rp)) !== want[rp])
+        return `rp ${rp}: ${cabCrew(capStations(0, +rp))} not ${want[rp]}`;
+    return 'ok';
+  }, 'ok');
+  eq('and the commander gets the middle couch, wherever it is', () => {
+    for (const rp of [0.75, 0.95, 1.40, 2.51, 3.0]) {
+      const K = capStations(0, rp), n = cabCrew(K), h = cabSeatHome(K);
+      if (h !== Math.floor((n - 1)/2)) return `rp ${rp}`;
+      // and on an odd crew that couch is actually on the axis
+      if (n % 2 === 1 && Math.abs(cabSeatZ(K)[h]) > 1e-12) return `off axis at rp ${rp}`;
+    }
+    return 'ok';
+  }, 'ok');
   eq('a push into the wall is caught', () =>
      cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]).hit, true);
   eq('and lands inboard of the racks', () =>
