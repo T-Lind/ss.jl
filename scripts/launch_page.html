@@ -97,7 +97,7 @@
 <div class="hud" id="toast"></div>
 <div class="hud" id="backlink"><a href="/">&#8617; mission control</a></div>
 <div id="keys" class="show">
-  <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>m</b> mute · <b>p</b> frame time</div>
+  <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub (hold to accelerate) · <b>[</b> <b>]</b> zoom · <b>m</b> mute · <b>p</b> frame time</div>
   <div>drag to look around in free and cabin views</div>
 </div>
 <div class="hud" id="cams"></div>
@@ -2019,6 +2019,57 @@ function measureRadii() {
   });
 }
 
+// Engine cluster layout, ported from src/mesh.jl _cluster so a plume can be
+// born at the exit of the bell the mesh actually drew. Returns [y, z, exit
+// radius] per engine in vehicle model coordinates. The +pi/m half-step on
+// the ring angle is load-bearing: the mesh offsets the ring by half a slot,
+// and without it every plume sits BETWEEN the bells instead of on them.
+function clusterPts(n, rmax, rbMax) {
+  if (n <= 1) return [[0, 0, rbMax]];
+  const centre = (n % 2 === 1) && n >= 5;
+  const m = centre ? n - 1 : n;
+  const s = Math.sin(Math.PI/m);
+  const rr = rmax/(1 + s);
+  let rb = Math.min(rbMax, 0.92*rr*s);
+  if (centre) rb = Math.min(rb, 0.5*rr);
+  const out = [];
+  if (centre) out.push([0, 0, rb]);
+  for (let i = 0; i < m; i++) {
+    const th = 2*Math.PI*i/m + Math.PI/m;
+    out.push([rr*Math.cos(th), rr*Math.sin(th), rb]);
+  }
+  return out;
+}
+// BELLS[k] for core stage k (0-based): the bell exit plane [model x] and the
+// cluster. Constants mirror rocket_mesh: stage 1 exits at its section x0
+// (-0.32 D); an upper stage's bells hang BELOW its section x0 by the scaled
+// bell length, which is why the old single-point plume started visibly too
+// high on every stage but the first.
+let BELLS = [];
+function measureBells() {
+  BELLS = [];
+  const stages = geo.sections.filter(s => /^stage\d+$/.test(s.name));
+  stages.forEach((s, k) => {
+    const st = (geo.stages || [])[k] || {};
+    const D = (+st.diameter_m) || DIA, r = D/2;
+    const ne = Math.max(1, Math.round(+st.engines || 1));
+    const last = k === stages.length - 1;
+    if (k === 0) {
+      BELLS.push({ sec: s.name, exitX: s.x0, pts: clusterPts(ne, 0.80*r, 0.105*D) });
+    } else {
+      const bex = last ? 0.085*D : 0.155*D, blen = last ? 0.22*D : 0.36*D;
+      const pts = clusterPts(ne, 0.80*r, bex);
+      BELLS.push({ sec: s.name, exitX: s.x0 + 0.04*D - blen*pts[0][2]/bex, pts });
+    }
+  });
+}
+// the burning core stage is the lowest one still attached
+function burningStage() {
+  for (let k = 0; k < BELLS.length; k++)
+    if (!secGone[BELLS[k].sec]) return k;
+  return -1;
+}
+
 // capsule stations in vehicle coordinates, mirroring pod_mesh
 function capStations(secX0) {
   const D = TOPD, rp = POD_RP;
@@ -2204,6 +2255,7 @@ function buildRocket() {
   LEN = geo.length; DIA = +geo.diameter;
   sizeComplex();                     // the pad follows the vehicle, not the reverse
   measureRadii();
+  measureBells();
   const secR = SECR;                 // each section's own radius
   const verts = [];
   const pushTri = (t, sec) => {
@@ -3286,7 +3338,10 @@ function updateAudio(sc, camEye) {
   if (!AC) return;
   const d = V.len(V.sub(camEye, sc.craftPos)) + 1;
   const prox = Math.pow(Math.min(1, 320/d), 1.15);
-  let target = (muted || warpEff > 2) ? 0 : sc.loud * prox;
+  // Paused is silent. The scene keeps rebuilding at the frozen simT, so
+  // sc.loud holds whatever the thrust was at the instant of the pause — and
+  // without this gate the rumble kept playing, at full volume, forever.
+  let target = (muted || !running || warpEff > 2) ? 0 : sc.loud * prox;
   gRum.gain.setTargetAtTime(target, AC.currentTime, 0.12);
   gCrk.gain.setTargetAtTime(target*(Math.random() < 0.45 ? 0.85 : 0.2),
                             AC.currentTime, 0.03);
@@ -3783,6 +3838,10 @@ function frame(now) {
   lastNow = now;
   if (!started) return;
   perfPush(raw);
+  // The scrub applies BEFORE tPrev is captured below, so the countdown-beep
+  // crossing tests never see a scrub as a played second — dragging back and
+  // forth across T-0 stays silent instead of spamming the ignition tone.
+  scrubStep(dtReal);
 
   const ph = phaseAt(simT);
   if (frame._ph !== ph.n) {
@@ -3858,13 +3917,22 @@ function buildScene(ph) {
     const cam = cameraPad(simT, st, craftM);
     const tailX = attachedTailX(secGone);
     const noz = V.add(st.pos, V.scale(st.dir, tailX));
+    const byv = V.cross(bzp, bxp);
+    // The exhaust leaves each BELL, not the centreline: world positions for
+    // the burning stage's whole cluster, from the same layout the mesh drew.
+    // Model (y,z) map to (byv, bzp) — the exact basis craftM is built on.
+    const kb = burningStage();
+    const coreBells = kb < 0 ? [] : BELLS[kb].pts.map(([y, z, bs]) => ({
+      p: V.add(V.add(st.pos, V.scale(st.dir, BELLS[kb].exitX)),
+               V.add(V.scale(byv, y), V.scale(bzp, z))),
+      bs
+    }));
     // strap-ons burn beside the core, so they get their own plumes, placed in
     // the vehicle's own frame at each booster's stand-off radius
     const bnoz = [];
     const BSET = (geo.boosters || [])[0];
     if (BSET && !secGone.booster1 && BIGN.length && simT >= BIGN[0].t &&
         simT < (BSEP.length ? BSEP[0].t : Infinity)) {
-      const byv = V.cross(bzp, bxp);
       const R = (SECR.stage1 || DIA/2) + (+BSET.diameter_m / 2);
       for (let j = 0; j < BSET.count; j++) {
         const th = 2*Math.PI*j/BSET.count;
@@ -3886,7 +3954,7 @@ function buildScene(ph) {
       loud: Math.min(1, st.thr/9.5e5)*Math.exp(-st.h/12000),
       engI: st.thr > 0 ? Math.min(1, st.thr/9.5e5)*(0.8 + 0.4*Math.random()) : 0,
       engW: noz, engC: [1.0, 0.55, 0.22],
-      spawn: dt => spawnAscent(dt, st, rocketVel, noz, bnoz),
+      spawn: dt => spawnAscent(dt, st, rocketVel, noz, bnoz, coreBells),
     };
   }
   if (ph.w === 'eci') {
@@ -3965,7 +4033,7 @@ function buildScene(ph) {
   };
 }
 
-function spawnAscent(dt, st, rocketVel, noz, bnoz) {
+function spawnAscent(dt, st, rocketVel, noz, bnoz, coreBells) {
   if (!(st.thr > 0)) {
     if (st.mach > 0.92 && st.mach < 1.08 && st.q > 12) spawnVapor(st, rocketVel);
     return;
@@ -3973,12 +4041,20 @@ function spawnAscent(dt, st, rocketVel, noz, bnoz) {
   const E = 1 + 3.4*(1 - Math.exp(-st.h/42000));
   const tn = Math.min(1, st.thr/9.5e5);
   const nf = Math.round(16*Math.sqrt(tn)*Math.min(2, 60*dt));
+  // One emitter per BELL, round-robin so the total particle budget stays
+  // what it was — a 33-engine stage must not spawn 33x the particles and
+  // evict its own smoke column off the 4200 cap. Per-bell plumes are
+  // narrower than the old centreline blob: sized to the bell, not the hull.
+  const emit = (coreBells && coreBells.length)
+             ? coreBells : [{ p: noz, bs: 0.105*DIA }];
   for (let i = 0; i < nf; i++) {
+    const b = emit[i % emit.length];
     const vex = V.add(V.add(rocketVel,
                       V.scale(st.dir, -(95+rnd(45))*Math.min(E, 2.2) - 0.12*st.v)),
                       jit(7*E));
-    spawn(V.add(noz, jit(0.3*DIA)), vex, rnd(0.42, 0.18), DIA*(0.55+rnd(0.3))*E,
-          DIA*2.0*E, 0);
+    spawn(V.add(b.p, jit(0.8*b.bs)), vex, rnd(0.42, 0.18),
+          Math.max(2*b.bs, 0.22*DIA)*(1.1 + rnd(0.6))*E,
+          Math.max(4*b.bs, 1.2*DIA)*E, 0);
   }
   if (st.h < 300 && st.thr > 1e5) {
     // The trench decides where the smoke goes: the deflector turns the plume
@@ -4016,14 +4092,27 @@ function spawnVapor(st, rocketVel) {
           DIA*rnd(2.4, 1.4), 18, 2);
 }
 function spawnTli(dt, cs) {
-  // exhaust leaves the bell aft of the kick stage and is carried by the
-  // craft's own velocity, so what you see is the *relative* recession
-  const noz = V.add(cs.pos, V.scale(cs.bx, -0.4));
+  // Exhaust leaves the bells aft of the burning stage and is carried by the
+  // craft's own velocity, so what you see is the *relative* recession. The
+  // craft matrix puts the last stage's base at cs.pos (model x offset by
+  // -ls.x0), so each bell's world position is the cluster point in the
+  // (bx, by, bz) basis at the bell exit plane — one plume per engine, which
+  // is the difference between a Starship showing six torches and one.
+  const ls = secDraw.find(s => s.name === LASTST);
+  const kb = BELLS.length ? BELLS[BELLS.length - 1] : null;
   const n = Math.min(12, Math.round(60*dt*10));
-  for (let i = 0; i < n; i++)
-    spawn(V.add(noz, jit(0.22)),
+  for (let i = 0; i < n; i++) {
+    let p, bs;
+    if (kb && kb.pts.length && ls) {
+      const pt = kb.pts[i % kb.pts.length];
+      bs = pt[2];
+      p = V.add(V.add(cs.pos, V.scale(cs.bx, kb.exitX - ls.x0)),
+                V.add(V.scale(cs.by, pt[0]), V.scale(cs.bz, pt[1])));
+    } else { bs = 0.35; p = V.add(cs.pos, V.scale(cs.bx, -0.4)); }
+    spawn(V.add(p, jit(0.7*bs)),
           V.add(cs.vel, V.add(V.scale(cs.bx, -(40 + rnd(60))), jit(7))),
-          rnd(0.35, 0.15), rnd(1.1, 0.5), 2.6, 0);
+          rnd(0.35, 0.15), Math.max(0.4, bs*(1.2 + rnd(0.8))), 2.6, 0);
+  }
 }
 function spawnEntry(dt, es) {
   const I = Math.min(1, es.q/120);
@@ -4505,14 +4594,49 @@ seekCv.onclick = e => {
   const p = PH[i];
   seekTo(p.t0 + f*(p.t1 - p.t0));
 };
-function seekTo(t) {
+// Jump the mission clock and reset every piece of integrated state that is
+// NOT a pure function of simT. The pure ones — secGone, the swing arms, the
+// vehicle state itself — recompute on the next frame and need nothing here.
+// The impure list was assembled the hard way: scorch integrates on the pad
+// and never decays (a backward jump left the pad pre-scorched), the toast
+// caption and its fade timeout linger from the abandoned timeline, the pad
+// camera's tilt-lag filter swings in from wherever it was, and frame's phase
+// memo would misfire the transition warp snap.
+function jumpTo(t) {
   simT = Math.max(-15, Math.min(t, tEnd - 0.5));
   for (const q of toasts) q.done = simT >= q.t;
   parts.length = 0; debris.length = 0;
   splashed = simT >= tSplash;
   warpCur = 1;
-  ended = false; running = true;
-  $('overlay').classList.add('hidden');
+  ended = false;
+  if (simT < 0) scorch = 0;
+  frame._ph = undefined;
+  clearTimeout(frame._tt);
+  $('toast').style.opacity = 0;
+  CS.ly = CS.tly = 20;
+  $('overlay').classList.add('hidden');    // a jump off the end card dismisses it
+}
+function seekTo(t) {
+  jumpTo(t);
+  running = true;
+}
+// Arrow-key scrub. Steps move through the seek bar's own coordinate system —
+// fractions of a phase, not seconds — because a fixed seconds-per-second rate
+// is uselessly slow in a 250,000 s translunar coast and uselessly fast in a
+// 90 s entry. Holding the key accelerates; releasing stops dead. Pause state
+// survives the scrub: scrubbing while paused stays paused (and silent).
+let scrubDir = 0, scrubT0 = 0;
+function scrubStep(dtReal) {
+  if (!scrubDir || !PH.length) return;
+  const held = (performance.now() - scrubT0)/1000;
+  const rate = Math.min(1.8, 0.12*Math.pow(3.0, held));   // phases per second
+  const p = phaseAt(simT), i = PH.indexOf(p);
+  let f = i + Math.max(0, Math.min(1, (simT - p.t0)/(p.t1 - p.t0)))
+        + scrubDir*rate*dtReal;
+  f = Math.max(0, Math.min(PH.length - 1e-6, f));
+  const j = Math.max(0, Math.min(PH.length - 1, Math.floor(f)));
+  const q = PH[j];
+  jumpTo(q.t0 + (f - j)*(q.t1 - q.t0));
 }
 
 // --------------------------------------------------------------- controls --
@@ -4573,6 +4697,14 @@ function initControls() {
   }, { passive: false });
   window.addEventListener('keydown', e => {
     if (e.key === ' ') { running = !running; e.preventDefault(); }
+    // hold to scrub: the clock starts on the FIRST press (e.repeat re-fires
+    // keydown without a keyup, and restarting the clock there would hold the
+    // rate at its slowest forever)
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const d = e.key === 'ArrowRight' ? 1 : -1;
+      if (scrubDir !== d) { scrubDir = d; scrubT0 = performance.now(); }
+    }
     const i = +e.key;
     if (i >= 1 && i <= CAMS.length) {
       camMode = CAMS[i-1];
@@ -4588,6 +4720,12 @@ function initControls() {
     if (e.key === '[') zoomK = Math.max(0.4, +(zoomK/1.18).toFixed(3));
     if (e.key === '\\') zoomK = 1;
   });
+  window.addEventListener('keyup', e => {
+    if ((e.key === 'ArrowRight' && scrubDir === 1) ||
+        (e.key === 'ArrowLeft' && scrubDir === -1)) scrubDir = 0;
+  });
+  // released keys can be missed entirely when the window loses focus mid-hold
+  window.addEventListener('blur', () => scrubDir = 0);
 }
 
 function showEndCard() {
@@ -4809,6 +4947,25 @@ window.__selftest = function () {
   eq('entry does too', () => bgClassFor('entry'), 'air');
   eq('coast and flyby share the space scale', () => bgClassFor('eci'), 'space');
   eq('the landing as well', () => bgClassFor('moon'), 'space');
+  // --- the engine cluster port. These pin the JS layout to src/mesh.jl's
+  // _cluster: the half-slot ring offset and the centre-engine rule are the
+  // two details that would silently misalign every plume if they drifted.
+  eq('one engine sits on the axis', () => clusterPts(1, 0.72, 0.19)[0][0], 0);
+  eq('and keeps the max bell radius', () => clusterPts(1, 0.72, 0.19)[0][2], 0.19);
+  eq('six engines make a ring of six', () => clusterPts(6, 3.6, 0.765).length, 6);
+  eq('the ring is offset half a slot', () => {
+    const p = clusterPts(6, 3.6, 0.765)[0];        // first ring point at pi/6
+    return Math.atan2(p[1], p[0]);
+  }, Math.PI/6, 1e-9);
+  eq('ring radius follows rmax/(1+sin(pi/m))', () => {
+    const p = clusterPts(6, 3.6, 0.765)[0];
+    return Math.hypot(p[0], p[1]);
+  }, 3.6/(1 + Math.sin(Math.PI/6)), 1e-9);
+  eq('five engines put one in the centre', () => clusterPts(5, 0.72, 0.19)[0][1], 0);
+  eq('and four on the ring', () => clusterPts(5, 0.72, 0.19).length, 5);
+  eq('four engines have no centre', () =>
+     Math.hypot(clusterPts(4, 0.72, 0.19)[0][0], clusterPts(4, 0.72, 0.19)[0][1]) > 0.1, true);
+
   // --- the operator zoom: a magnification over the rig's lens, both ends hard
   eq('zoom 1 is the rig\'s own lens', () => fovZoom(0.42, 1), 0.42);
   eq('zoom 2 halves the fov', () => fovZoom(0.42, 2), 0.21);
