@@ -6960,45 +6960,99 @@ function apsides(pos, vel) {
   const e = Math.sqrt(Math.max(0, 1 + 2*eps*h2/(MU_E*MU_E)));
   return { ra: a*(1 + e), rp: a*(1 - e) };
 }
+// The next thing that happens, and how long until it. This is the single most
+// useful line on a real spacecraft display and the cabin did not have it: the
+// crew could read six numbers about where they were and nothing at all about
+// what was about to happen to them. Read off the same timeline the seek bar and
+// the toasts use, so it cannot disagree with either.
+function nextEv(t) {
+  let best = null;
+  for (const e of EVS)
+    if (isFinite(e.t) && e.t > t && (!best || e.t < best.t)) best = e;
+  return best;
+}
+// A countdown in the units a countdown is read in. Seconds up to a minute,
+// then minutes and seconds, then hours — because "T-9134 s" is a number you
+// have to do arithmetic on before it means anything.
+function fmtEta(dt) {
+  if (!isFinite(dt)) return '—';
+  if (dt < 60) return dt.toFixed(0) + ' s';
+  if (dt < 3600) return Math.floor(dt/60) + 'm ' + String(Math.floor(dt%60)).padStart(2,'0') + 's';
+  if (dt < 86400) return Math.floor(dt/3600) + 'h ' + String(Math.floor(dt%3600/60)).padStart(2,'0') + 'm';
+  return (dt/86400).toFixed(2) + ' d';
+}
 function cabRows(sc, page) {
   const st = sc.st, cs = sc.cs, es = sc.es;
   const km = m => !isFinite(m) ? '—' :
     Math.abs(m) < 1e4 ? m.toFixed(0) + ' m' : (m/1000).toFixed(1) + ' km';
   const deg = a => (a*180/Math.PI).toFixed(1) + '°';
+  const nx = nextEv(simT);
+  // The event's NAME is the key and the countdown is the value, which is the
+  // only split that fits. A row is about nineteen monospace characters across
+  // — "DYN PRESS" and "26.2 kPa" together are seventeen — so a value carrying
+  // both the name and the time ran straight into its own label and printed
+  // NEXTSABLE1 SEPARATION with no gap in it. Cut on a WORD, never mid-word:
+  // "SABLE1 SEPARATI" is not an abbreviation of anything, it is a display that
+  // ran out of room and did not say so.
+  // Abbreviate before truncating. Cutting "SABLE1 SEPARATION" to ten characters
+  // on a word boundary leaves "SABLE1…", which has thrown away the half that
+  // said what was about to happen; shortening the word nobody needs in full
+  // leaves "SABLE1 SEP", which is the whole sentence.
+  const EV_ABBR = [[/SEPARATION/g, 'SEP'], [/IGNITION/g, 'IGN'],
+                   [/INSERTION/g, 'INS'], [/JETTISON/g, 'JETT'],
+                   [/INTERFACE/g, 'IF'], [/DESCENT/g, 'DESC'],
+                   [/TRAJECTORY/g, 'TRAJ']];
+  let evName = nx ? nx.s.split('—')[0].trim() : '';
+  for (const [re, to] of EV_ABBR) evName = evName.replace(re, to);
+  const short = evName.length <= 10 ? evName
+                                    : evName.slice(0, 10).replace(/\s+\S*$/, '') + '…';
+  const nextRow = nx ? ['▸ ' + short, fmtEta(nx.t - simT)] : ['▸ NEXT', 'END'];
   if (page === 'SYSTEMS') {
     const rate = RCS.rate > 3e-4 ? (RCS.rate*180/Math.PI).toFixed(1) + '°/s' : 'NULL';
+    // The mass is REAL — the ascent log carries it and the coast knows what
+    // reached orbit — so it goes here instead of another word that says
+    // NOMINAL. A display that reports a system it does not model is not a
+    // display, it is a picture of one.
+    const mkg = st ? st.m : (run.metrics && run.metrics.prop_margin_kg !== undefined
+                             ? NaN : NaN);
     return [['LIGHTS', CAB_LIGHTS[cabLight].n], ['ATT RATE', rate],
             ['CLOCK', warpEff > 1.5 ? '×' + Math.round(warpEff) : 'REAL'],
             ['CREW', !CAB.live ? 'STOWED'
                      : CAB.seat !== null ? 'STRAPPED IN' : 'FREE'],
-            ['O2 / PRESS', 'NOMINAL']];
+            ['STACK', isFinite(mkg) ? (mkg/1000).toFixed(1) + ' t' :
+                      LASTST ? 'KICK + POD' : 'POD'],
+            nextRow];
   }
   if (page === 'TRAJECTORY') {
     if (cs) {
       const ap = apsides(cs.pos, cs.vel);
+      // the period is what turns two altitudes into an orbit you can plan in
+      const a = ap ? 0.5*(ap.ra + ap.rp) : NaN;
+      const per = isFinite(a) ? 2*Math.PI*Math.sqrt(a*a*a/MU_E) : NaN;
       return [['APOGEE', ap ? km(ap.ra - RE) : 'ESCAPE'],
               ['PERIGEE', ap ? km(ap.rp - RE) : '—'],
+              ['PERIOD', isFinite(per) ? fmtEta(per) : '—'],
               ['SPEED', (cs.speed/1000).toFixed(2) + ' km/s'],
-              ['MET', (simT/86400).toFixed(2) + ' d']];
+              nextRow];
     }
     if (st) return [['DOWNRANGE', km(st.dr)], ['FLIGHT PATH', deg(st.gam)],
                     ['MACH', st.h > 82000 ? '—' : st.mach.toFixed(2)],
-                    ['THRUST', (st.thr/1e3).toFixed(0) + ' kN']];
+                    ['THRUST', (st.thr/1e3).toFixed(0) + ' kN'], nextRow];
     if (es) return [['FLIGHT PATH', deg(es.gam)],
                     ['SPEED', es.v.toFixed(0) + ' m/s'],
                     ['TO SPLASH', isFinite(tSplash)
-                       ? Math.max(0, tSplash - simT).toFixed(0) + ' s' : '—']];
+                       ? fmtEta(Math.max(0, tSplash - simT)) : '—'], nextRow];
     return [['STANDBY', '—']];
   }
   if (st) return [['ALTITUDE', km(st.h)], ['VELOCITY', st.v.toFixed(0) + ' m/s'],
                   ['ACCEL', (st.m > 0 ? st.thr/st.m/9.81 : 0).toFixed(2) + ' g'],
-                  ['DYN PRESS', st.q.toFixed(1) + ' kPa']];
+                  ['DYN PRESS', st.q.toFixed(1) + ' kPa'], nextRow];
   if (es) return [['ALTITUDE', km(es.h)], ['VELOCITY', es.v.toFixed(0) + ' m/s'],
                   ['G-LOAD', es.g.toFixed(1) + ' g'],
-                  ['HEATING', es.q.toFixed(0) + ' W/cm²']];
+                  ['HEATING', es.q.toFixed(0) + ' W/cm²'], nextRow];
   if (cs) return [['EARTH', fmtDist(cs.rE - RE)], ['MOON', fmtDist(cs.rM - RM)],
                   ['VELOCITY', (cs.speed/1000).toFixed(2) + ' km/s'],
-                  ['MET', (simT/86400).toFixed(2) + ' d']];
+                  ['MET', (simT/86400).toFixed(2) + ' d'], nextRow];
   return [['STANDBY', '—']];
 }
 
@@ -7559,6 +7613,40 @@ window.__selftest = function () {
     }
     return back;
   }, 0);
+
+  // --- what is about to happen. The cabin could read six numbers about where
+  // it was and nothing about what was coming, which is backwards for a crew.
+  eq('the next event is the next one, and only ever ahead', () => {
+    if (!EVS.length) return 'ok';
+    for (const t of [-20, 0, 100, 5000, 1e5, 1e9]) {
+      const n = nextEv(t);
+      if (!n) continue;
+      if (!(n.t > t)) return `behind at ${t}`;
+      for (const e of EVS) if (isFinite(e.t) && e.t > t && e.t < n.t) return `skipped at ${t}`;
+    }
+    return 'ok';
+  }, 'ok');
+  eq('and it runs out rather than wrapping', () => nextEv(1e12), null);
+  // a countdown is read in the units it is counted in
+  eq('a countdown is seconds under a minute', () => fmtEta(42), '42 s');
+  eq('minutes and seconds under an hour', () => fmtEta(605), '10m 05s');
+  eq('hours and minutes under a day', () => fmtEta(9134), '2h 32m');
+  eq('and days beyond that', () => fmtEta(3*86400), '3.00 d');
+  eq('every cabin page carries it', () => {
+    const sc = { st: { h: 1e4, v: 300, m: 2e4, thr: 1e5, q: 30, dr: 1e4, gam: 0.5, mach: 1 } };
+    for (const p of CAB_PAGES)
+      if (!cabRows(sc, p).some(r => r[0].startsWith('▸'))) return p;
+    return 'ok';
+  }, 'ok');
+  // A row is about nineteen monospace characters across. Anything wider runs
+  // its value into its own label, which is what NEXTSABLE1 SEPARATION was.
+  eq('and no row is too wide for the pane', () => {
+    const sc = { st: { h: 1e4, v: 300, m: 2e4, thr: 1e5, q: 30, dr: 1e4, gam: 0.5, mach: 1 } };
+    for (const p of CAB_PAGES)
+      for (const [k, v] of cabRows(sc, p))
+        if (k.length + String(v).length > 19) return `${p}: ${k}/${v}`;
+    return 'ok';
+  }, 'ok');
 
   // --- an uncrewed payload has no inside, and the viewer has to agree with the
   // vehicle it was sent about that. The cabin camera is the thing that would
