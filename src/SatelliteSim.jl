@@ -62,6 +62,7 @@ include("simulation.jl")
 include("entry6.jl")
 include("scenarios.jl")
 include("mission.jl")
+include("earthorbit.jl")
 include("landingnav.jl")
 include("landing.jl")
 include("lunarreturn.jl")
@@ -131,6 +132,8 @@ export
     default_pod_rcs, default_kick_rcs, rcs_mdot,
     # 6-DOF entry
     Entry6Result, Entry6Log, simulate_entry6,
+    # earth orbit
+    OrbitTarget, ORBITS, EarthOrbitResult, earthorbit,
     # translunar
     CislunarResult, fly_cislunar, tli_burn, design_free_return, seed_free_return,
     design_tcm, fly_cislunar_tcm,

@@ -237,8 +237,9 @@ opt_kick(p) = gets(p, "opt_kick", "0") in ("1", "true", "on")
 "Pitch-over kick angle [rad] — the one guidance number a big stack has to change."
 kick_rad(p) = deg2rad_(clamp(getf(p, "kick_deg", 8.0), 0.5, 30.0))
 
-"Which mission the panel is flying: the free-return flyby or a landing."
-mission_mode(p) = gets(p, "mode", "flyby") == "landing" ? :landing : :flyby
+"Which mission the panel is flying: Earth orbit, the free-return flyby, or a landing."
+mission_mode(p) = (m = gets(p, "mode", "flyby");
+                   m == "landing" ? :landing : m == "orbit" ? :orbit : :flyby)
 
 "Build the lander from the panel's `l_*` fields."
 lander_from_params(p) = Lander(
@@ -496,8 +497,126 @@ function panel_landing(p)::Dict{String,Any}
     )
 end
 
+# the entry leg's payload blocks, shared by every mission that ends in one
+function entry_payload!(out, metrics, events, ent)
+    EL = ent.log
+    eidx = deci_idx(length(EL.t), 500)
+    # the entry log is geodetic — rebuild ECI so it joins the same scene
+    ex3 = Float64[]; ey3 = Float64[]; ez3 = Float64[]; et3 = Float64[]
+    for i in eidx
+        re_ = ecef_from_geodetic(EL.lat[i], EL.lon[i], EL.h[i])
+        th = SatelliteSim.earth_rotation_angle(0.0, EL.t[i])
+        reci = SatelliteSim.rot_z(re_, -th)
+        push!(ex3, reci[1] / 1e6); push!(ey3, reci[2] / 1e6); push!(ez3, reci[3] / 1e6)
+        push!(et3, EL.t[i])
+    end
+    ei = findfirst(e -> e.name == :entry_interface, ent.events)
+    metrics["ei_v_ms"] = ei === nothing ? NaN : ent.events[ei].vrel
+    metrics["peak_g"] = ent.peak_gload
+    metrics["peak_q_wcm2"] = ent.peak_qdot / 1e4
+    metrics["heat_mj"] = ent.heat_load / 1e6
+    metrics["splash_lat"] = rad2deg_(ent.lat_splash)
+    metrics["splash_lon"] = rad2deg_(ent.lon_splash)
+    metrics["v_splash"] = ent.v_splash
+    for e in ent.events
+        push!(events, Dict("phase" => "entry", "name" => string(e.name), "t" => e.t))
+    end
+    out["ent3d"] = Dict("t" => et3, "x" => ex3, "y" => ey3, "z" => ez3)
+    out["entry"] = Dict("t" => deci(EL.t[eidx] .- EL.t[1], 500),
+                        "h" => deci(EL.h[eidx] ./ 1e3, 500),
+                        "v" => deci(EL.vrel[eidx], 500),
+                        "g" => deci(EL.gload[eidx], 500),
+                        "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500))
+    out["sites"]["splash_lat"] = rad2deg_(ent.lat_splash)
+    out["sites"]["splash_lon"] = rad2deg_(ent.lon_splash)
+    nothing
+end
+
+"""
+Fly an Earth-orbit mission for the panel: ascent, transfer burns on the kick
+stage, `n_orbits` of the achieved orbit, and optionally a deorbit + entry.
+The trajectory is served in the same `cis` shape the lunar missions use —
+the Moon rides along as scenery — so both viewers fly it unchanged.
+"""
+function panel_orbit(p)::Dict{String,Any}
+    tkey = Symbol(gets(p, "orbit", "leo"))
+    haskey(ORBITS, tkey) || (tkey = :leo)
+    eo = earthorbit(
+        target = tkey,
+        lv = lv_from_params(p),
+        pod_mass = getf(p, "pod_mass", 350.0),
+        h_park = getf(p, "h_park_km", 200.0) * 1e3,
+        n_orbits = clamp(getf(p, "n_orbits", 2.0), 0.25, 16.0),
+        deorbit = getb(p, "deorbit", false),
+        hp_entry = getf(p, "hp_entry_km", 25.0) * 1e3,
+        kick_angle = kick_rad(p),
+        optimize_kick = opt_kick(p),
+        strict = false,
+    )
+    asc, ent = eo.ascent, eo.entry
+    el = asc.elements
+    haslog = length(eo.log.t) > 2
+    sc = scene_payload(asc, haslog ? (log = eo.log,) : nothing)
+
+    events = ascent_events(asc)
+    for b in eo.burns
+        push!(events, Dict("phase" => "orbit", "name" => "$(b.name)_ignition",
+                           "t" => b.t_ign))
+        push!(events, Dict("phase" => "orbit", "name" => "$(b.name)_cutoff",
+                           "t" => b.t_ign + b.duration))
+    end
+    ent !== nothing &&
+        push!(events, Dict("phase" => "orbit", "name" => "entry_handoff",
+                           "t" => eo.entry_scn.t0))
+
+    metrics = Dict{String,Any}(
+        "liftoff_t" => liftoff_mass(eo.lv) / 1e3,
+        "t_days" => (ent !== nothing ? ent.t_splash : eo.t) / 86400,
+        "on_target" => eo.on_target,
+        "prop_margin_kg" => eo.m - (eo.lv.stages[end].mdry + eo.lv.payload_mass),
+        "orbit_rp_km" => (eo.elements.rp - RE_MEAN) / 1e3,
+        "orbit_ra_km" => (eo.elements.ra - RE_MEAN) / 1e3,
+        "orbit_incl_deg" => rad2deg_(eo.elements.i),
+        "period_min" => eo.elements.a > 0 ?
+            2pi * sqrt(eo.elements.a^3 / MU_EARTH) / 60 : NaN,
+        "burn_dv_total" => sum(b.dv for b in eo.burns; init = 0.0),
+    )
+    if asc.reached_orbit
+        metrics["park_perigee_km"] = (el.rp - RE_MEAN) / 1e3
+        metrics["park_apogee_km"] = (el.ra - RE_MEAN) / 1e3
+        metrics["incl_deg"] = rad2deg_(el.i)
+    end
+    out = Dict{String,Any}(
+        "ok" => true, "mode" => "orbit",
+        "outcome" => eo.outcome in (:on_orbit, :splashdown) ? "nominal" :
+                     string(eo.outcome),
+        "metrics" => metrics,
+        "asc3d" => sc.asc3d,
+        "ascent" => sc.ascent,
+        "events" => events,
+        "sites" => Dict{String,Any}(
+            "launch_lat" => rad2deg_(eo.guid.site_lat),
+            "launch_lon" => rad2deg_(eo.guid.site_lon),
+        ),
+        "orbit" => Dict{String,Any}(
+            "target" => String(eo.target.name),
+            "target_rp_km" => eo.target.perigee_alt / 1e3,
+            "target_ra_km" => eo.target.apogee_alt / 1e3,
+            "target_incl_deg" => rad2deg_(eo.target.inclination),
+            "burns" => [Dict{String,Any}(
+                "name" => String(b.name), "t_ign" => b.t_ign,
+                "duration_s" => b.duration, "dv_plan" => b.dv_plan,
+                "dv" => b.dv) for b in eo.burns],
+        ),
+    )
+    haslog && (out["cis"] = sc.cis)
+    ent !== nothing && entry_payload!(out, metrics, events, ent)
+    out
+end
+
 function panel_mission(p)::Dict{String,Any}
     mission_mode(p) === :landing && return panel_landing(p)
+    mission_mode(p) === :orbit && return panel_orbit(p)
     ms = moonshot(
         pod_mass = getf(p, "pod_mass", 350.0),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
@@ -581,38 +700,7 @@ function panel_mission(p)::Dict{String,Any}
         metrics["on_target"] = false
     end
 
-    if ent !== nothing
-        EL = ent.log
-        eidx = deci_idx(length(EL.t), 500)
-        # the entry log is geodetic — rebuild ECI so it joins the same scene
-        ex3 = Float64[]; ey3 = Float64[]; ez3 = Float64[]; et3 = Float64[]
-        for i in eidx
-            re_ = ecef_from_geodetic(EL.lat[i], EL.lon[i], EL.h[i])
-            th = SatelliteSim.earth_rotation_angle(0.0, EL.t[i])
-            reci = SatelliteSim.rot_z(re_, -th)
-            push!(ex3, reci[1] / 1e6); push!(ey3, reci[2] / 1e6); push!(ez3, reci[3] / 1e6)
-            push!(et3, EL.t[i])
-        end
-        ei = findfirst(e -> e.name == :entry_interface, ent.events)
-        metrics["ei_v_ms"] = ei === nothing ? NaN : ent.events[ei].vrel
-        metrics["peak_g"] = ent.peak_gload
-        metrics["peak_q_wcm2"] = ent.peak_qdot / 1e4
-        metrics["heat_mj"] = ent.heat_load / 1e6
-        metrics["splash_lat"] = rad2deg_(ent.lat_splash)
-        metrics["splash_lon"] = rad2deg_(ent.lon_splash)
-        metrics["v_splash"] = ent.v_splash
-        for e in ent.events
-            push!(events, Dict("phase" => "entry", "name" => string(e.name), "t" => e.t))
-        end
-        out["ent3d"] = Dict("t" => et3, "x" => ex3, "y" => ey3, "z" => ez3)
-        out["entry"] = Dict("t" => deci(EL.t[eidx] .- EL.t[1], 500),
-                            "h" => deci(EL.h[eidx] ./ 1e3, 500),
-                            "v" => deci(EL.vrel[eidx], 500),
-                            "g" => deci(EL.gload[eidx], 500),
-                            "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500))
-        out["sites"]["splash_lat"] = rad2deg_(ent.lat_splash)
-        out["sites"]["splash_lon"] = rad2deg_(ent.lon_splash)
-    end
+    ent !== nothing && entry_payload!(out, metrics, events, ent)
     out
 end
 
@@ -810,6 +898,12 @@ catalogue_payload() = Dict{String,Any}(
                        "mass_kg" => v.mass,
                        "propellant" => string(v.prop.name))
                   for (k, v) in sort(collect(ENGINES), by = first)],
+    "orbits" => [Dict("name" => String(v.name),
+                      "perigee_km" => v.perigee_alt / 1e3,
+                      "apogee_km" => v.apogee_alt / 1e3,
+                      "incl_deg" => rad2deg_(v.inclination),
+                      "note" => v.note)
+                 for (k, v) in sort(collect(ORBITS), by = first)],
     "solve_metrics" => SOLVE_METRICS,
     "landing_metrics" => LANDING_METRICS,
     "max_stages" => 5)

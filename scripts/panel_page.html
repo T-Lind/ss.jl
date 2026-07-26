@@ -116,6 +116,7 @@
     <div class="card">
       <h2>Mission</h2>
       <div class="seg" id="modeswitch">
+        <button data-mode="orbit">Earth orbit</button>
         <button data-mode="flyby" class="on">free-return flyby</button>
         <button data-mode="landing">lunar landing</button>
       </div>
@@ -129,6 +130,27 @@
       <div id="presets"></div>
       <div class="sub" style="margin:4px 0 0">one click configures + runs.
         Vehicle presets live in the builder.</div>
+    </div>
+
+    <div class="card hidden" id="card_orbit">
+      <h2>Orbit target</h2>
+      <label for="orbit">target orbit</label>
+      <select id="orbit"></select>
+      <div class="sub" id="orbit_note" style="margin:4px 0 0"></div>
+      <div class="row" style="margin-top:6px">
+        <div><label for="n_orbits">revolutions on station</label><input id="n_orbits" value="2"></div>
+        <div><label for="hp_entry_km" title="vacuum perigee the deorbit burn aims for">entry perigee [km]</label><input id="hp_entry_km" value="25"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div style="flex:1"><label style="display:flex;gap:6px;align-items:center">
+          <input type="checkbox" id="deorbit" style="width:auto;margin:0">
+          deorbit and re-enter after the last revolution</label></div>
+      </div>
+      <div class="sub" style="margin:6px 0 0">the goal is the orbit itself:
+        ascent to the parking orbit, transfer burns on the kick stage where the
+        target needs them, and the achieved elements reported against the
+        request. GEO asks ~4.3 km/s of the kick stage — size it in the builder
+        or expect an honest "propellant depleted".</div>
     </div>
 
     <div class="card" id="card_flyby">
@@ -363,9 +385,11 @@ const BASE_FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_k
 // launcher, the ascent, the trans-lunar leg — is the same mission underneath
 const LANDING_FIELDS = ['l_dry','l_prop','l_thrust_kn','l_isp','l_throttle_min',
   'h_moon_park_km','h_pdi_km','n_rev','plain_moon'];
+const ORBIT_FIELDS = ['orbit','n_orbits','deorbit','hp_entry_km'];
 let MODE = 'flyby';
 let VNAME = 'Sable';
 const landing = () => MODE === 'landing';
+const orbitm = () => MODE === 'orbit';
 const STAGE_FIELDS = ['prop','dry','thrust_kn','isp','propellant','engines','engine',
                       'diameter','size_by','len','dry_auto'];
 // A booster set is configured exactly like a stage, plus how it behaves in
@@ -379,7 +403,7 @@ const FIELDS = () => BASE_FIELDS.concat(
   [].concat(...Array.from({length: nStages()}, (_, i) =>
     STAGE_FIELDS.map(f => `s${i+1}_${f}`))),
   nBoost() ? BOOST_FIELDS.map(f => `b_${f}`) : [],
-  LANDING_FIELDS);
+  LANDING_FIELDS, ORBIT_FIELDS);
 
 // Stage 1 is the booster, the last is the kick stage that does TLI, and
 // anything between is an upper stage — the same roles the server uses.
@@ -406,6 +430,20 @@ const roleAt = (k, n) => {
 let CATALOGUE = { propellants: [], engines: [], solve_metrics: [] };
 async function fillCatalogues() {
   try { CATALOGUE = await (await fetch('/api/catalogue')).json(); } catch (e) {}
+  // the orbit picker comes from the same catalogue, so the page can never
+  // offer an orbit the simulator does not fly
+  const sel = $('orbit');
+  if (sel && CATALOGUE.orbits) {
+    sel.innerHTML = CATALOGUE.orbits.map(o =>
+      `<option value="${o.name}">${o.name} · ${Math.round(o.perigee_km)}×${Math.round(o.apogee_km)} km · ${o.incl_deg.toFixed(1)}°</option>`).join('');
+    sel.value = 'leo';
+    sel.addEventListener('change', orbitNote);
+    orbitNote();
+  }
+}
+function orbitNote() {
+  const o = (CATALOGUE.orbits || []).find(x => x.name === ($('orbit') || {}).value);
+  if (o && $('orbit_note')) $('orbit_note').textContent = o.note;
 }
 // rebuild the stage form, keeping whatever the user already typed
 // whichever of propellant mass / tank length is *derived* is greyed out, so
@@ -679,6 +717,15 @@ const PRESETS = {
   'inclined 50°':   {incl_deg: 50},
   'dispersed TLI':  {tli_mag_err_pct: 0.3, tli_point_err_deg: 0.25},
 };
+// Orbit presets pick a target from the server's catalogue; "LEO re-entry"
+// is the round trip — up, a few revolutions, a deorbit burn, and home.
+const ORBIT_PRESETS = {
+  'LEO':          {orbit: 'leo', n_orbits: 2, deorbit: false},
+  'polar':        {orbit: 'polar', n_orbits: 2, deorbit: false},
+  'Molniya':      {orbit: 'molniya', n_orbits: 2, deorbit: false},
+  'GEO':          {orbit: 'geo', n_orbits: 2, deorbit: false},
+  'LEO re-entry': {orbit: 'leo', n_orbits: 3, deorbit: true},
+};
 // Landing presets move the things a landing mission actually trades: where
 // you park, how long you loiter before starting down, and how much lander
 // there is to put down.
@@ -838,6 +885,17 @@ function renderAll() {
     [m.redesignate_m>0 ? fmt(m.redesignate_m,0)+' m' : '—','aim point moved'],
     [fmt(m.nav_alt_err_m,0)+' m','nav altitude error'],
     [fmt(m.t_days,2)+' d','pad to surface'],
+  ] : run.mode === 'orbit' ? [
+    [fmt(m.liftoff_t,1)+' t','liftoff mass'],
+    [fmt(m.park_perigee_km,0)+'×'+fmt(m.park_apogee_km,0)+' km','parking orbit'],
+    [fmt(m.orbit_rp_km,0)+'×'+fmt(m.orbit_ra_km,0)+' km','achieved orbit'],
+    [fmt(m.orbit_incl_deg,2)+'°','inclination'],
+    [fmt(m.period_min,0)+' min','period'],
+    [fmt(m.burn_dv_total,0)+' m/s','transfer Δv'],
+    [fmt(m.prop_margin_kg,0)+' kg','prop margin'],
+    [fmt(m.peak_g,1)+' g','peak entry load'],
+    [fmt(m.v_splash,1)+' m/s','splash speed'],
+    [fmt(m.t_days,2)+' d','mission time'],
   ] : [
     [fmt(m.liftoff_t,1)+' t','liftoff mass'],
     [fmt(m.park_perigee_km,0)+'×'+fmt(m.park_apogee_km,0)+' km','parking orbit'],
@@ -1779,14 +1837,16 @@ function initPresets() {
     for (const el of $(host).querySelectorAll('.chip')) el.onclick = () => run(el.dataset.p);
   };
   renderMissionPresets = () => chips('presets',
-    Object.keys(landing() ? LANDING_PRESETS : PRESETS), k => {
+    Object.keys(landing() ? LANDING_PRESETS : orbitm() ? ORBIT_PRESETS : PRESETS), k => {
       // a mission preset resets only mission fields — it must not undo the
       // vehicle you just picked
-      const o = (landing() ? LANDING_PRESETS : PRESETS)[k];
+      const o = (landing() ? LANDING_PRESETS : orbitm() ? ORBIT_PRESETS : PRESETS)[k];
       const keep = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
-                    'tli_mag_err_pct','tli_point_err_deg'].concat(LANDING_FIELDS);
+                    'tli_mag_err_pct','tli_point_err_deg']
+                   .concat(LANDING_FIELDS, ORBIT_FIELDS);
       for (const f of keep) if (DEFAULTS[f] !== undefined) setField(f, DEFAULTS[f]);
       for (const kk in o) setField(kk, o[kk]);
+      orbitNote();
       fetchGeo(); doRun();
     });
   renderMissionPresets();
@@ -1800,7 +1860,8 @@ function setMode(m) {
   MODE = m;
   for (const b of $('modeswitch').querySelectorAll('button'))
     b.classList.toggle('on', b.dataset.mode === m);
-  $('card_flyby').classList.toggle('hidden', landing());
+  $('card_flyby').classList.toggle('hidden', MODE !== 'flyby');
+  $('card_orbit').classList.toggle('hidden', !orbitm());
   $('card_landing').classList.toggle('hidden', !landing());
   $('card_descent').classList.toggle('hidden', !landing());
   $('moonview').classList.toggle('hidden', !landing());
@@ -1811,9 +1872,13 @@ function setMode(m) {
     : "cinematic pad-cam liftoff, flown from this run's parameters";
   $('tagline').textContent = landing()
     ? 'free return, insertion, and a powered descent — pad to lunar surface'
+    : orbitm()
+    ? 'ascent, transfer, and the orbit itself — configure, run, explore'
     : 'circumlunar free return — configure, run, explore';
   $('modenote').textContent = landing()
     ? 'the lander stops at the Moon: insertion at perilune, a lunar parking orbit, then a guided descent to touchdown'
+    : orbitm()
+    ? 'the goal is a target Earth orbit — LEO, polar, Molniya, GEO — or a stay and a re-entry; the Moon is scenery'
     : 'a pod around the Moon and home — nothing is left behind and nothing has to stop';
   if (landing() && moonView === null) moonView = false;
   renderMissionPresets();
@@ -1825,6 +1890,9 @@ function renderLegend() {
   const items = landing() ? [
     ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'TLI burn'],
     ['#199e70', 'outbound'], ['#c98500', 'lunar orbit'], ['#d55181', 'descent'],
+  ] : orbitm() ? [
+    ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'burn'],
+    ['#199e70', 'transfer'], ['#c98500', 'on orbit'], ['#d55181', 'entry'],
   ] : [
     ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'TLI burn'],
     ['#199e70', 'outbound'], ['#c98500', 'return'], ['#d55181', 'entry'],
@@ -1895,10 +1963,12 @@ for (const b of $('modeswitch').querySelectorAll('button'))
     fetchGeo();
     doRun();
   };
-// the launch view is a flyby experience: it flies pad to splashdown
+// The landing mission's cinematic is the free-return profile (its title
+// says so); an orbit mission flies AS an orbit mission — the launch page
+// derives its phases from whatever events the run actually has.
 $('launchbtn').onclick = () => {
   const u = params();
-  u.set('mode', 'flyby');
+  u.set('mode', landing() ? 'flyby' : MODE);
   window.open('/launch?' + u, '_blank');
 };
 // the builder opens on this form's exact configuration; stopPropagation
@@ -2019,8 +2089,8 @@ requestAnimationFrame(tick);
 fillCatalogues().then(() => {
   buildStages();
   initPresets();
-  setMode(new URLSearchParams(location.search).get('mode') === 'landing'
-          ? 'landing' : 'flyby');
+  const qmode = new URLSearchParams(location.search).get('mode');
+  setMode(qmode === 'landing' ? 'landing' : qmode === 'orbit' ? 'orbit' : 'flyby');
   if (landing()) {
     VNAME = 'Starship';
     applyPreset(VEHICLES['Starship (expendable)'], { reset: true });

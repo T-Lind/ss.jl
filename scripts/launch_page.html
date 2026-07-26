@@ -1264,6 +1264,9 @@ let tTLI = NaN, tCut = NaN, tPeri = NaN, tHand = NaN, tEI = NaN, tDrog = NaN,
     tMain = NaN, tSplash = NaN, tEnd = 0;
 let PH = [];   // phase table
 let CIS = null, ENT = null, hasCis = false, hasEnt = false;
+// every engine-on window in orbit, from paired *_ignition/*_cutoff events —
+// the TLI is one of these, an orbit mission's raise/shape/deorbit are others
+let BURNW = [];
 
 // Sim event names are built from stage and parachute names, so only the
 // fixed ones can be spelled out; everything else is decoded or humanised.
@@ -1272,6 +1275,9 @@ const EVNAME = {
   meco: 'MECO', seco: 'SECO — ORBIT INSERTION',
   fairing_jettison: 'FAIRING JETTISON', tli_ignition: 'TLI IGNITION',
   tli_cutoff: 'TLI CUTOFF — GO FOR THE MOON',
+  raise_ignition: 'TRANSFER BURN IGNITION', raise_cutoff: 'TRANSFER BURN CUTOFF',
+  shape_ignition: 'CIRCULARIZATION BURN', shape_cutoff: 'ON STATION',
+  deorbit_ignition: 'DEORBIT BURN', deorbit_cutoff: 'DEORBIT CUTOFF',
   entry_handoff: 'KICK STAGE JETTISON', entry_interface: 'ENTRY INTERFACE',
   splashdown: 'SPLASHDOWN',
   loi: 'LUNAR ORBIT INSERTION', doi: 'DESCENT ORBIT INSERTION',
@@ -1325,6 +1331,10 @@ function buildData() {
   secoT = EV.seco ?? EV.meco ?? A.t[A.t.length-1];
   pitchT = EV.pitchover ?? 10;
   tTLI = EV.tli_ignition ?? NaN; tCut = EV.tli_cutoff ?? NaN;
+  BURNW = [];
+  for (const nm of ['tli', 'raise', 'shape', 'deorbit'])
+    if (isFinite(EV[nm + '_ignition']))
+      BURNW.push([EV[nm + '_ignition'], EV[nm + '_cutoff'] ?? EV[nm + '_ignition'] + 60]);
   tPeri = EV.perilune ?? NaN;
   tHand = EV.entry_handoff ?? (hasCis ? C.t[C.t.length-1] : NaN);
   tEI = EV.entry_interface ?? NaN;
@@ -1436,7 +1446,26 @@ function buildData() {
     PH.push(Object.assign({ n, t0, t1, w, warp: () => 1 }, o || {}));
   };
   add('ASCENT', secoT + 8, 'pad');
-  if (hasCis) {
+  if (hasCis && run.mode === 'orbit') {
+    // An Earth-orbit run: phases come from its burn ledger, and every add is
+    // guarded the same way as everything else here — a mission with no
+    // transfer burns is ORBIT end to end, one that deorbits gains DEORBIT
+    // and hands the rest to the ENTRY phase below.
+    const cisEnd = CIS.t[CIS.n-1];
+    const B = ((run.orbit && run.orbit.burns) || []);
+    const bt = n => { const b = B.find(x => x.name === n); return b ? b.t_ign : NaN; };
+    const bc = n => { const b = B.find(x => x.name === n); return b ? b.t_ign + b.duration_s : NaN; };
+    const tDeo = bt('deorbit');
+    const onOrbitEnd = isFinite(tDeo) ? tDeo - 8 : cisEnd;
+    if (isFinite(bt('raise'))) {
+      add('ORBIT', bt('raise') - 10, 'eci', { pace: 12 });
+      add('TRANSFER', (isFinite(bc('shape')) ? bc('shape') : bc('raise')) + 8,
+          'eci', { pace: 18 });
+    }
+    add('ON ORBIT', onOrbitEnd, 'eci', { pace: 22 });
+    if (isFinite(tDeo))
+      add('DEORBIT', isFinite(tHand) ? tHand : cisEnd, 'eci');
+  } else if (hasCis) {
     const cisEnd = CIS.t[CIS.n-1];
     add('ORBIT', isFinite(tTLI) ? tTLI - 12 : cisEnd, 'eci', { pace: 14 });
     if (isFinite(tTLI))
@@ -1546,7 +1575,7 @@ function cisState(t) {
   const bx = V.norm(vel), bz = CIS.nrm, by = V.norm(V.cross(bz, bx));
   return { pos: p, vel, speed: V.len(vel), moon, bx, by, bz,
            rE: V.len(p), rM: V.len(V.sub(p, moon)),
-           burning: t >= tTLI && t <= tCut };
+           burning: BURNW.some(w => t >= w[0] && t <= w[1]) };
 }
 // entry state in splash-anchored world
 function entState(t) {
@@ -3630,7 +3659,9 @@ function cameraPad(t, st, M) {
 function cameraEci(t, cs, ph, M) {
   const mode = camMode === 'auto' ?
     (ph.n === 'FLYBY' ? 'moonframe' : ph.n === 'TLI' ? 'chase' :
-     ph.n === 'RETURN' ? 'earthframe' : ph.n === 'ORBIT' ? 'earthframe' : 'drift')
+     ph.n === 'TRANSFER' || ph.n === 'DEORBIT' ? 'chase' :
+     ph.n === 'RETURN' ? 'earthframe' :
+     ph.n === 'ORBIT' || ph.n === 'ON ORBIT' ? 'earthframe' : 'drift')
     : camMode;
   if (mode === 'cabin' || mode === 'window') {
     // out the viewport, through whichever window faces the Moon near the
