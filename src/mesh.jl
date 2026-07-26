@@ -802,28 +802,15 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
                                         (0.5(x0s + x1s) + 0.02rp, 0.73rin(x1s), 0.018rp));
                                roll = 0.5(a0 + a1)))
     end
-    # Two crew controls on the console face, in the ONE gap the console leaves:
-    # the screen bays end at 46 deg and the first circuit-breaker column starts
-    # at 58, so +-52 is the only roll where a switch is neither drawn through a
-    # bezel nor through a breaker. At +-100 they went straight through the 97
-    # deg breaker column, and at 11 cm square they were the size of a hatch
-    # handle — two amber blocks that dominated the cabin from every angle.
-    # Sized like the paddle switches they are: 3.7 by 4 cm, standing 4 cm proud.
-    # The viewer picks against these by name and cycles the cabin lighting and
-    # the console page from them, so they are switches and not decoration —
-    # see CAB_CTL in the launch view.
-    for (k, a) in enumerate((deg2rad(-52.0), deg2rad(52.0)))
-        rc = 0.62rin(xcon)
-        # the housing runs into the panel: it stopped 1.5 cm short of it, so the
-        # switch was a block hovering in front of the console rather than one
-        # mounted through it
-        push!(cab, _place_mesh(box_mesh((xcon - 0.075rp, rc - 0.025rp, -0.026rp),
-                                        (xcon + 0.012rp, rc + 0.025rp, 0.026rp));
-                               roll = a))
-        push!(cab, _place_mesh(box_mesh((xcon - 0.100rp, rc - 0.014rp, -0.015rp),
-                                        (xcon - 0.070rp, rc + 0.014rp, 0.015rp));
-                               roll = a))
-    end
+    # There used to be two paddle switches out here on the console's flanks, at
+    # +-52 degrees, carrying the cabin lighting and the display page. They are
+    # gone, and what replaced them is two more caps in the button grid — which
+    # is where a control on a spacecraft console belongs. Standing 4 cm proud on
+    # the one wedge of bare panel the console leaves, they read as the two
+    # largest objects on the whole face from most of the cabin, which is a
+    # strange amount of visual weight for "which page is the middle screen on".
+    # The grid already has twenty-four cells, eight of them wired; these are two
+    # more of the same thing, and see CAP_FN in the launch view for where.
 
     # --- third fit-out pass: hand-scale detail ------------------------------
     # What is above is structure and stowage, and at arm's length a cabin made
