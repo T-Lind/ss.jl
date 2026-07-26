@@ -1289,7 +1289,9 @@ let run = null, geo = null;
 let A = null, EV = {}, EVS = [], tMaxQ = 0, fairT = NaN, secoT = 0, pitchT = 10;
 let SEPS = [], NST = 0, LASTST = null, dropT = {};
 // strap-on booster sets: their names, and when each set lit and was dropped
-let BNAMES = [], BSEP = [], BIGN = [];
+// Burnout and separation are different instants — a set with a sep_delay is
+// carried as dead weight in between — and the flame belongs to the first.
+let BNAMES = [], BSEP = [], BIGN = [], BOUT = [];
 let tTLI = NaN, tCut = NaN, tPeri = NaN, tHand = NaN, tEI = NaN, tDrog = NaN,
     tMain = NaN, tSplash = NaN, tEnd = 0;
 let PH = [];   // phase table
@@ -1356,6 +1358,7 @@ function buildData() {
   SEPS = byPhase('ascent', /^sep_/).filter(e => !isBoost(e));
   BSEP = byPhase('ascent', /^sep_/).filter(isBoost);
   BIGN = byPhase('ascent', /^ignition_/).filter(isBoost);
+  BOUT = byPhase('ascent', /^burnout_/).filter(isBoost);
   const DEP = byPhase('entry', /^deploy_/);
   fairT = EV.fairing_jettison ?? NaN;
   secoT = EV.seco ?? EV.meco ?? A.t[A.t.length-1];
@@ -1455,7 +1458,13 @@ function buildData() {
     dropT[stageNames[NST-2]] = secoT;
   if (LASTST && isFinite(tHand) && (hasEnt || isFinite(tEI)))
     dropT[LASTST] = tHand;
-  BSEP.forEach((e, i) => { dropT['booster' + (i+1)] = e.t; });
+  // Match each set's hardware to its OWN separation event by name. BSEP is
+  // ordered by time, so two sets on different burn times or sep delays had
+  // set 1's boosters vanishing at set 2's event and vice versa.
+  BNAMES.forEach((nm, i) => {
+    const e = BSEP.find(x => x.name.endsWith('_' + nm));
+    if (e) dropT['booster' + (i+1)] = e.t;
+  });
 
   // --- every event the run reported, plus derived max-q --------------------
   EVS = run.events.filter(e => isFinite(e.t))
@@ -2367,8 +2376,24 @@ function buildRocket() {
     const v0 = verts.length/VST;
     for (let k = s.t0-1; k < s.t1; k++) pushTri(geo.tris[k], s);
     const n = verts.length/VST - v0;
-    secDraw.push({ name: s.name, first: v0, count: n,
-                   x0: s.x0, x1: s.x1, cen: cenOf(v0, n) });
+    const rec = { name: s.name, first: v0, count: n,
+                  x0: s.x0, x1: s.x1, cen: cenOf(v0, n) };
+    // A booster SET is one section, because the set separates together — but
+    // it separates as N bodies, not as one welded raft drifting off in
+    // formation. mesh.jl appends the set body by body from the same template,
+    // so equal contiguous slices of the range ARE the individual boosters.
+    // Each then gets its own centroid, off the core axis, which is what lets
+    // it come away on its own stand-off radius.
+    const bm = /^booster(\d+)$/.exec(s.name);
+    const cnt = bm ? +(((geo.boosters || [])[+bm[1] - 1] || {}).count || 0) : 0;
+    if (cnt > 1 && n % cnt === 0) {
+      const per = n/cnt;
+      rec.bodies = [];
+      for (let j = 0; j < cnt; j++)
+        rec.bodies.push({ first: v0 + j*per, count: per,
+                          cen: cenOf(v0 + j*per, per) });
+    }
+    secDraw.push(rec);
   }
   const fs = geo.sections.find(s => s.name === 'fairing');
   if (fs) {
@@ -3366,6 +3391,16 @@ function padVel(t) {
   const a = state(t - 0.125), b = state(t + 0.125);
   return V.scale(V.sub(b.pos, a.pos), 4);
 }
+// Where a strap-on goes when its separation motors fire, from where it sits:
+// `out` is the model-space radius it stands off the core on, `ax` the axis
+// that tips its nose along that radius (x_body x out, so a positive rate
+// rotates the nose outward and never into the stack).
+function boosterKick(cen) {
+  const r = Math.hypot(cen[1], cen[2]);
+  if (r < 1e-6) return { out: [0, 1, 0], ax: [0, 0, 1] };
+  const uy = cen[1]/r, uz = cen[2]/r;
+  return { out: [0, uy, uz], ax: [0, -uz, uy] };
+}
 function spawnDebris(kind, t) {
   // debris tumbles in the pad world only; anything shed later (the kick stage
   // at handoff) is drawn by the cruise renderer in its own frame
@@ -3380,6 +3415,23 @@ function spawnDebris(kind, t) {
   }
   const sec = secDraw.find(s => s.name === kind);
   if (!sec) return;
+  if (sec.bodies) {
+    // Separation motors push a strap-on nose-out: it leaves along its own
+    // stand-off radius and pitches away from the core, which is why the set
+    // fans open instead of falling away as one rigid formation. The kick axis
+    // is model-space, perpendicular to both the body axis and that radius, so
+    // a positive rate tips the nose exactly outward.
+    const bzp = [0, 0, 1], byv = V.cross(bzp, st.dir);
+    for (const b of sec.bodies) {
+      const k = boosterKick(b.cen);
+      const outw = V.add(V.scale(byv, k.out[1]), V.scale(bzp, k.out[2]));
+      debris.push({ draw: b, p: st.pos.slice(), born: t,
+                    v: V.add(vf, V.add(V.scale(outw, 3.5),
+                                       V.scale(st.dir, -1.5))),
+                    bx: st.dir.slice(), ax: k.ax, w: 0.22, a: 0 });
+    }
+    return;
+  }
   // Separation is a pusher and a few retro-rockets, not a fraction of the
   // flight speed: 1.5% of 2.4 km/s pushed the spent stage away at 36 m/s and
   // it crossed the frame in under a second. A few metres a second is what it
@@ -4164,19 +4216,31 @@ function buildScene(ph) {
                V.add(V.scale(byv, y), V.scale(bzp, z))),
       bs
     }));
-    // strap-ons burn beside the core, so they get their own plumes, placed in
-    // the vehicle's own frame at each booster's stand-off radius
+    // Strap-ons burn beside the core, so they get their own plumes, placed in
+    // the vehicle's own frame at each booster's stand-off radius. The flame
+    // goes out at BURNOUT, not at separation: a set with a sep_delay is dead
+    // weight for those seconds, and burning it through them is what made spent
+    // strap-ons look like they were carrying more propellant than the stage
+    // they were bolted to. Every set is checked, not only the first — a
+    // vehicle with two sets used to fly the second one cold.
     const bnoz = [];
-    const BSET = (geo.boosters || [])[0];
-    if (BSET && !secGone.booster1 && BIGN.length && simT >= BIGN[0].t &&
-        simT < (BSEP.length ? BSEP[0].t : Infinity)) {
+    (geo.boosters || []).forEach((BSET, i) => {
+      const nm = BNAMES[i];
+      if (secGone['booster' + (i+1)]) return;
+      const at = (list, d) => {
+        const e = list.find(x => x.name.endsWith('_' + nm));
+        return e ? e.t : d;
+      };
+      const t0 = at(BIGN, -Infinity);
+      const t1 = at(BOUT, at(BSEP, Infinity));   // dry, else dropped, else never
+      if (!(simT >= t0 && simT < t1)) return;
       const R = (SECR.stage1 || DIA/2) + (+BSET.diameter_m / 2);
       for (let j = 0; j < BSET.count; j++) {
         const th = 2*Math.PI*j/BSET.count;
         bnoz.push(V.add(noz, V.add(V.scale(byv, R*Math.cos(th)),
                                    V.scale(bzp, R*Math.sin(th)))));
       }
-    }
+    });
     // True local up. At the pad this is [0,1,0] to within the width of the
     // complex, so it is a no-op here and a correction downrange.
     PUP = V.norm(V.sub(st.pos, [0, -RE, 0]));
@@ -5267,6 +5331,25 @@ window.__selftest = function () {
   eq('an unrotated piece sits exactly where it was drawn', () =>
      V.len(V.sub(xf(mSpin(mIdent(), [40,0,0], [0,0,1], 0), [40, 2, 0]), [40, 2, 0])),
      0, 1e-12);
+
+  // --- strap-on separation. A set is one mesh section but N bodies, and each
+  // has to leave along its own radius rather than the whole raft drifting off
+  // in formation. The kick axis must tip the nose OUT; get the sign wrong and
+  // every booster rotates into the core it just left.
+  eq('a strap-on leaves along its own radius', () =>
+     boosterKick([12, 0, 2.4]).out[2], 1, 1e-12);
+  eq('and its kick axis is square to that radius', () =>
+     V.dot(boosterKick([12, 1.7, 1.7]).out, boosterKick([12, 1.7, 1.7]).ax), 0, 1e-12);
+  eq('and square to the body axis', () => boosterKick([12, 1.7, 1.7]).ax[0], 0);
+  eq('a positive rate tips the nose outward', () => {
+    const k = boosterKick([12, 0, 2.4]);          // stood off on +z
+    const nose = xf(mRotAxis(k.ax, 0.05), [1, 0, 0]);
+    return V.dot(nose, k.out) > 0;                 // nose has moved toward +z
+  }, true);
+  eq('the axis is unit length', () =>
+     V.len(boosterKick([12, 3.1, -1.2]).ax), 1, 1e-12);
+  eq('a body on the axis degrades safely', () =>
+     V.len(boosterKick([12, 0, 0]).ax), 1, 1e-12);
 
   // --- reaction wheels. The point of modelling torque over inertia is that
   // the vehicle's own mass sets how fast it answers.
