@@ -566,10 +566,23 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     for (a0, a1) in ((deg2rad(-46.0), deg2rad(-18.0)),
                      (deg2rad(-15.0), deg2rad(15.0)),
                      (deg2rad(18.0), deg2rad(46.0)))
-        push!(cab, _arc_slab(xf - 0.055rp, xf, 0.44rcin, 0.80rcin, a0, a1; nseg = 7))
-        # the face, set back inside the bezel by a bezel's own depth
+        # The bezel is a RIM, not a slab. A filled block is what a screen bay
+        # looks like head-on and it is also a WALL: measured by ray-cast from
+        # the crew's own eye, a solid bezel hid 100 of 100 sample points on
+        # every display, so the console carried three live panels that nothing
+        # could ever see. Four bars round an opening, and the opening is the
+        # recess face's own extent less a margin, so the frame overlaps what it
+        # frames and there is no line of sight past it into the console.
+        let b0 = a0 + 0.030, b1 = a1 - 0.030
+            push!(cab, _arc_slab(xf - 0.055rp, xf, 0.44rcin, 0.48rcin, a0, a1; nseg = 7))
+            push!(cab, _arc_slab(xf - 0.055rp, xf, 0.76rcin, 0.80rcin, a0, a1; nseg = 7))
+            push!(cab, _arc_slab(xf - 0.055rp, xf, 0.48rcin, 0.76rcin, a0, b0; nseg = 2))
+            push!(cab, _arc_slab(xf - 0.055rp, xf, 0.48rcin, 0.76rcin, b1, a1; nseg = 2))
+        end
+        # the face, set back inside the bezel by a bezel's own depth, and wider
+        # than the opening so the rim laps over its edges
         push!(cab, _arc_slab(xf - 0.030rp, xf - 0.022rp,
-                             0.48rcin, 0.76rcin, a0 + 0.045, a1 - 0.045; nseg = 7))
+                             0.465rcin, 0.775rcin, a0 + 0.020, a1 - 0.020; nseg = 7))
         # button grid under the bay: two rows of four caps, standing proud
         for i in 0:3, j in 0:1
             b0 = a0 + (a1 - a0) * (0.10 + 0.26i)
@@ -700,14 +713,20 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # the viewer paints these as emissive, which is what stops the interior
     # being lit only by whatever leaks through the panes.
     for a in range(0.0, 2pi; length = 7)[1:end-1]
-        xl = xcon - 0.16rp
+        # In the SLOT behind the console rim, which is where a cove goes. The
+        # console lathe stops at 0.92 rcin and the wall is at rin, and that gap
+        # is the cove's home: from the couch the console's own edge is between
+        # the crew and the fixture, so what they see is a washed wall and not a
+        # lamp. Sat 16 cm lower and 8 cm proud of the wall, these were two white
+        # bricks wedged into the top corners of every seated shot.
+        xl = xcon - 0.10rp
         # off the NARROW end again, and with the corner of the slab allowed for:
         # a box of half-width w sitting at radius R has its corners out at
         # sqrt(R^2 + w^2), which is what put the first cut of these 7 mm through
         # the pressure wall
-        rl = 0.90rin(xl + 0.075rp)
-        push!(cab, _place_mesh(box_mesh((xl, 0.78rl, -0.055rp),
-                                        (xl + 0.075rp, rl, 0.055rp));
+        rl = rin(xl + 0.075rp)
+        push!(cab, _place_mesh(box_mesh((xl, 0.930rl, -0.060rp),
+                                        (xl + 0.075rp, 0.985rl, 0.060rp));
                                roll = a + deg2rad(26.0)))
     end
     # Foot restraints on the deck, one pair per couch: the thing a crew member
@@ -727,21 +746,23 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
                                         (0.5(x0s + x1s) + 0.02rp, 0.76rin(x1s), 0.018rp));
                                roll = 0.5(a0 + a1)))
     end
-    # Two crew controls on the console face. Out at +-100 deg, which is the
-    # first roll clear of the instrument fan: the instruments sit at -60..60 in
-    # 30 deg steps and are 13 deg wide, so a switch at 32 deg is 1.9 deg from
-    # one of them — the first cut of these was drawn INSIDE an instrument, and
-    # the colour rule that was supposed to mark the switches marked the
-    # instruments too. The viewer picks against these by name and cycles the
-    # cabin lighting and the console page from them, so they are switches and
-    # not decoration — see CAB_CTL in the launch view.
-    for (k, a) in enumerate((deg2rad(-100.0), deg2rad(100.0)))
+    # Two crew controls on the console face, in the ONE gap the console leaves:
+    # the screen bays end at 46 deg and the first circuit-breaker column starts
+    # at 58, so +-52 is the only roll where a switch is neither drawn through a
+    # bezel nor through a breaker. At +-100 they went straight through the 97
+    # deg breaker column, and at 11 cm square they were the size of a hatch
+    # handle — two amber blocks that dominated the cabin from every angle.
+    # Sized like the paddle switches they are: 3.7 by 4 cm, standing 4 cm proud.
+    # The viewer picks against these by name and cycles the cabin lighting and
+    # the console page from them, so they are switches and not decoration —
+    # see CAB_CTL in the launch view.
+    for (k, a) in enumerate((deg2rad(-52.0), deg2rad(52.0)))
         rc = 0.62rin(xcon)
-        push!(cab, _place_mesh(box_mesh((xcon - 0.075rp, rc - 0.075rp, -0.075rp),
-                                        (xcon - 0.020rp, rc + 0.075rp, 0.075rp));
+        push!(cab, _place_mesh(box_mesh((xcon - 0.075rp, rc - 0.025rp, -0.026rp),
+                                        (xcon - 0.020rp, rc + 0.025rp, 0.026rp));
                                roll = a))
-        push!(cab, _place_mesh(box_mesh((xcon - 0.105rp, rc - 0.042rp, -0.042rp),
-                                        (xcon - 0.070rp, rc + 0.042rp, 0.042rp));
+        push!(cab, _place_mesh(box_mesh((xcon - 0.100rp, rc - 0.014rp, -0.015rp),
+                                        (xcon - 0.070rp, rc + 0.014rp, 0.015rp));
                                roll = a))
     end
     (ext, glass, cab, hgt)

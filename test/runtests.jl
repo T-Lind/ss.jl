@@ -1265,6 +1265,61 @@ end
                    (12500.0, 4.00))     # Dragon 2
         @test 0.70 < 2 * pod_radius(m) / d < 1.30
     end
+    # --- and the crew can SEE the displays. This is the invariant the console
+    # shipped without: the screen bays were built with a filled slab for a
+    # bezel, so the recess and everything the viewer draws into it sat inside a
+    # solid block. Every check that existed passed — the recess was in the right
+    # place, the quads were in the recess, the UVs were right — because none of
+    # them asked whether a line from the crew's eye reaches the face. Ray-cast
+    # from each couch to its own screen bay and count what gets through.
+    for rp in (0.75, 1.40)
+        _, _, cab, _ = pod_mesh(; radius = rp, nseg = 24)
+        tris = [t for m in cab for t in m.tris]
+        ta = tan(deg2rad_(32.5))
+        xb0 = 2.4rp - sqrt((2.4rp)^2 - rp^2) + 0.05rp
+        Lc = (rp - 0.26rp) / ta
+        rinw(x) = rp - ta * (x - xb0) - 0.050rp
+        xa = xb0 + 0.085rp
+        xcon = xb0 + 0.62Lc
+        rcin = rinw(xcon)
+        ln = 0.60 * rinw(xa + 0.07rp)
+        crew = rp >= 1.10 ? 3 : rp >= 0.85 ? 2 : 1
+        zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] : [-0.44rp, 0.0, 0.44rp]
+        bays = [(-46.0, -18.0), (-15.0, 15.0), (18.0, 46.0)]
+        # Moller-Trumbore, front faces and back alike: a wall stops light either way
+        function thit(o, d, a, b, c)
+            e1 = b .- a; e2 = c .- a
+            h = (d[2]*e2[3]-d[3]*e2[2], d[3]*e2[1]-d[1]*e2[3], d[1]*e2[2]-d[2]*e2[1])
+            det = sum(e1 .* h); abs(det) < 1e-12 && return Inf
+            f = 1/det; s = o .- a; u = f*sum(s .* h)
+            (u < -1e-9 || u > 1 + 1e-9) && return Inf
+            q = (s[2]*e1[3]-s[3]*e1[2], s[3]*e1[1]-s[1]*e1[3], s[1]*e1[2]-s[2]*e1[1])
+            v = f*sum(d .* q); (v < -1e-9 || u + v > 1 + 1e-9) && return Inf
+            t = f*sum(e2 .* q); t > 1e-7 ? t : Inf
+        end
+        for (si, zc) in enumerate(zs)
+            eye = (xa + 0.30rp, 0.26ln, zc)
+            mine = crew == 1 ? 2 : crew == 2 ? (si == 1 ? 1 : 3) : si
+            (d0, d1) = bays[mine]
+            seen = 0; tot = 0
+            for fr in 0.1:0.2:0.9, fa in 0.1:0.2:0.9
+                r = (0.485 + (0.755 - 0.485)*fr) * rcin
+                ang = deg2rad_(d0) + 0.045 +
+                      (deg2rad_(d1) - 0.045 - deg2rad_(d0) - 0.045)*fa
+                p = (xcon - 0.031rp, r*cos(ang), r*sin(ang))
+                dir = p .- eye; L = sqrt(sum(dir .^ 2)); dir = dir ./ L
+                tot += 1
+                blocked = any(tt -> thit(eye, dir, tt[1], tt[2], tt[3]) < L - 1e-6, tris)
+                blocked || (seen += 1)
+            end
+            # The commander's couch sees all of its own bay; an outboard couch
+            # sees ~85% of its own, the far edge clipped by the near rim of a
+            # recessed bezel at 42 degrees of incidence, which is what a
+            # recessed display does. The bug this guards scored ZERO — the
+            # bezel was a filled slab and no ray reached any face at all.
+            @test seen >= 0.80 * tot
+        end
+    end
     @test isapprox(2 * pod_radius(12500.0), 4.00; atol = 0.10)   # Dragon, on the nose
     @test isapprox(2 * pod_radius(1400.0), 1.89; atol = 0.15)    # and Mercury
     @test pod_radius(20.0) == pod_radius(1.0) == 0.30   # clamped at the bottom

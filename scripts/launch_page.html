@@ -63,6 +63,11 @@
            font: 600 22px system-ui; letter-spacing: 3px; color: var(--acc);
            opacity: 0; transition: opacity .4s; white-space: nowrap; }
   #cams { left: 20px; bottom: 20px; display: flex; gap: 6px; }
+  /* Who the keys are flying, shown only where there are two answers. On the
+     right, above the warp chips: the bottom left is the stats panel's, and at
+     bottom 54 this sat straight on top of it. */
+  #ctl { right: 20px; bottom: 54px; display: flex; gap: 6px; align-items: center; }
+  #ctl .lab { font: 10.5px system-ui; letter-spacing: 2px; color: var(--dim); }
   #speed { right: 20px; bottom: 20px; display: flex; gap: 6px; align-items: center; }
   #backlink { top: 20px; right: 20px; font: 12px system-ui; }
   #backlink a { color: var(--dim); text-decoration: none; }
@@ -106,11 +111,12 @@
 <div id="keys" class="show">
   <div><b>1</b>–<b>7</b> cameras · <b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub (hold to accelerate) · <b>[</b> <b>]</b> zoom · <b>m</b> mute · <b>p</b> frame time</div>
   <div><b>w</b> <b>a</b> <b>s</b> <b>d</b> pitch/yaw · <b>q</b> <b>e</b> roll · <b>x</b> kill rotation — reaction wheels, coasting at &times;1</div>
-  <div><b>shift</b> + those keys pushes off a surface and floats you round the cabin — you can only push while you are touching something, then you coast until you catch the next one</div>
-  <div>drag to look around in free and cabin views</div>
+  <div>in the cabin <b>t</b> hands the same keys to the crew instead: <b>w</b> <b>a</b> <b>s</b> <b>d</b> <b>r</b> <b>f</b> move · <b>q</b> <b>e</b> roll · drag to look — you can only push while you are touching something, then you coast until you catch the next one</div>
+  <div>you start strapped into a couch, looking at the console — <b>right click</b> a couch (or <b>g</b>) to unbuckle and float, right click it again to get back in</div>
   <div>in the cabin the console runs three live displays; <b>click</b> its switches for lights and the centre page (<b>right click</b> steps back)</div>
 </div>
 <div class="hud" id="cams"></div>
+<div class="hud hidden" id="ctl"></div>
 <div class="hud" id="speed"></div>
 <div id="cabtip" class="hidden"></div>
 <canvas id="seek"></canvas>
@@ -2159,8 +2165,11 @@ function burningStage() {
 }
 
 // capsule stations in vehicle coordinates, mirroring pod_mesh
-function capStations(secX0) {
-  const D = TOPD, rp = POD_RP;
+// `rpIn` lets a caller ask for the stations of a capsule other than the one
+// this mission flies — the self-test uses it to check the cabin at sizes the
+// loaded vehicle does not happen to be.
+function capStations(secX0, rpIn) {
+  const D = TOPD, rp = rpIn || POD_RP;
   const ta = Math.tan(32.5*Math.PI/180);
   const xsh = 2.4*rp - Math.sqrt((2.4*rp)*(2.4*rp) - rp*rp);
   const xb0 = xsh + 0.05*rp, Lc = (rp - 0.26*rp)/ta;
@@ -2239,10 +2248,18 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
     // first roll clear of the instrument fan, and the band is theirs alone.
     const a = Math.atan2(cz, cy);
     const ctl = u > K.xcon - 0.115*K.rp && u < K.xcon - 0.010*K.rp &&
-                f > 0.45 && f < 0.85 &&
-                (angNear(a, -1.745, 0.35) || angNear(a, 1.745, 0.35));
+                f > 0.45 && f < 0.75 &&
+                (angNear(a, -0.908, 0.10) || angNear(a, 0.908, 0.10));
     if (u < K.xa + 0.01*K.rp) c = [0.40,0.43,0.41];               // deck
-    else if (ctl) c = [0.95,0.74,0.30];                           // crew switches
+    // A switch is a grey guard with a coloured paddle in it, not a solid amber
+    // block. The cut has to fall between the paddle's front face at -0.100 rp
+    // and the HOUSING's front face at -0.075 — the crew-facing one, and the
+    // largest single face on the switch. Cut at -0.070 and the housing front
+    // is on the paddle's side of it, which paints the whole switch amber and
+    // is the thing this was meant to stop.
+    else if (ctl)
+      c = u < K.xcon - 0.078*K.rp ? [0.95,0.74,0.30]              // paddle
+                                  : [0.44,0.45,0.44];             // guard
     else if (u > K.xcon) c = [0.16,0.17,0.19];                    // console panel
     // Everything standing on the console face, read by the radial band it is
     // laid out in — the same bands pod_mesh builds them in. The button caps
@@ -2256,8 +2273,12 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
         c = u < K.xcon - 0.034*K.rp ? [0.02,0.05,0.05]            // screen face
                                     : [0.10,0.11,0.13];           // bezel
       else {
+        // imul, not `*`: cell runs to 4e9 and the constant is 2.7e9, so the
+        // product is 1e19 — past 2^53, where a double has already thrown away
+        // the low bits that `>>> 0` is about to ask for. The hash collapsed
+        // onto a few values and the grid came out in blocks of one colour.
         const cell = (Math.floor(a*40/Math.PI)*13 + Math.floor(g*22)) >>> 0;
-        const pick = ((cell*2654435761) >>> 0) % 10;
+        const pick = (Math.imul(cell, 2654435761) >>> 0) % 10;
         c = pick < 6 ? [0.26,0.27,0.30] : pick < 8 ? [0.72,0.70,0.62]
           : pick === 8 ? [0.90,0.68,0.22] : [0.25,0.62,0.45];
       }
@@ -2266,7 +2287,11 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
     // bound in u — so it ran on up the cone and painted the overhead lockers
     // bright cream, which is the pair of glowing white slabs hanging over the
     // cabin. They are a band, so they are bounded like one.
-    else if (u > K.xcon - 0.175*K.rp && u < K.xcon - 0.075*K.rp && f > 0.70)
+    // The coves, in the slot behind the console rim. The band has to be tight
+    // enough to be theirs alone: at f > 0.70 it also caught the conduit runs
+    // and the hatch surround, which is a lot of cabin to paint the colour of a
+    // light fitting. At 0.90 of the local wall nothing else reaches.
+    else if (u > K.xcon - 0.105*K.rp && u < K.xcon - 0.015*K.rp && f > 0.90)
       c = [0.96,0.95,0.86];                                       // light coves
     else if (f > 0.925) c = [0.62,0.62,0.58];                     // liner + ribs
     else if (f > 0.60) c = [0.52,0.50,0.42];                      // racks, lockers
@@ -3565,6 +3590,9 @@ const RCS_AMAX = 15*Math.PI/180;   // and nothing answers faster than this
 const RCS_WMAX = 0.18;    // rad/s ceiling, a little over 10 deg/s
 const RCS = { q: [1,0,0,0], w: [0,0,0], keys: {}, live: false, rate: 0 };
 const RCS_KEYS = { w: 1, a: 1, s: 1, d: 1, q: 1, e: 1 };
+// The crew's set is the wheels' set plus the two the wheels have no use for:
+// a body translates on three axes and a vehicle attitude does not.
+const CAB_KEYS = { w: 1, a: 1, s: 1, d: 1, q: 1, e: 1, r: 1, f: 1 };
 function qMul(a, b) {
   return [a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3],
           a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2],
@@ -3722,7 +3750,14 @@ let zoomK = 1;
 function fovZoom(fov, k) {
   return Math.min(1.5, Math.max(0.015, fov/k));
 }
-let headYaw = 0, headPitch = 0;      // look around from inside the capsule
+// Look around from inside the capsule — and roll, which is the degree of
+// freedom this view spent its whole life without.
+let headYaw = 0, headPitch = 0, headRoll = 0;
+// Strapped into a couch a head turns about as far as a head turns. Unbuckled
+// there is nothing holding you, so the yaw runs all the way round and only the
+// pitch is bounded, short of straight up where a yaw-pitch pair goes singular.
+const headLim = () => CAB.seat !== null ? { y: 1.5, p: 1.2 }
+                                        : { y: Infinity, p: 1.52 };
 // No separate `window` station any more: it was a fixed pose pressed against
 // one pane, and now that the crew can push off and float to whichever viewport
 // they like, a camera whose whole job was to pick one for them is a worse way
@@ -3762,32 +3797,86 @@ function cabPt(K, u, fr, aDeg) {
 // Rolls that are free of fittings: the racks own 100-136 and 224-260, the
 // handrails 34/90/270/326, the windows 0 and +-68, the hatch 180.
 const CAB_ROLL_EYE = 200, CAB_ROLL_HEAD = 282;
-// The switch rolls, mirrored from pod_mesh — clear of the instrument fan.
-const CAB_ROLL_CTL = 100;
+// The switch roll, mirrored from pod_mesh: the one gap on the console face,
+// between the outermost screen bay (ends at 46) and the first circuit-breaker
+// column (starts at 58).
+const CAB_ROLL_CTL = 52;
+
+// ------------------------------------------------------------- the couches --
+// Mirrored from pod_mesh, because a seat you can sit in has to be the seat that
+// is drawn. The crew lie on their backs on a pan facing up the axis, head at
+// +y and feet at -y, which is the whole reason the console is an annulus
+// overhead: it is what a strapped-in crew member is looking at. How many
+// couches there are follows the same rule the mesh uses — a capsule seats what
+// its diameter can seat.
+function cabCrew(K) { return K.rp >= 1.10 ? 3 : K.rp >= 0.85 ? 2 : 1; }
+function cabSeatZ(K) {
+  const n = cabCrew(K);
+  return n === 1 ? [0] : n === 2 ? [-0.30*K.rp, 0.30*K.rp]
+                                 : [-0.44*K.rp, 0, 0.44*K.rp];
+}
+function cabSeatLn(K) { return 0.60*cabRin(K, K.xa + 0.07*K.rp); }
+// the commander's couch: the middle one, where there is a middle one
+function cabSeatHome(K) { return Math.floor((cabCrew(K) - 1)/2); }
+// Which screen bay a couch is under. The three bays run -46..-18, -15..15 and
+// 18..46 degrees of roll and the couches sit at negative, zero and positive z,
+// and roll is measured z = r sin(roll) — so bay and couch are already in the
+// same order, and a crew member's own display is the one over their own seat.
+// One couch takes the centre bay, two take the outer pair, three take all.
+function cabSeatBay(K, i) {
+  const n = cabCrew(K);
+  return n === 1 ? 1 : n === 2 ? (i ? 2 : 0) : i;
+}
 
 // Camera stations inside the crew capsule, in vehicle model coordinates.
 // These mirror pod_mesh's layout (heat-shield sagitta, 32.5 deg afterbody,
 // deck and couch stations) so the eye lands in the cabin, not in a wall.
-function cabinPose(aim, roll, Kin) {
+// `arg` is the couch index for the seated station and is ignored otherwise.
+function cabinPose(aim, arg, Kin) {
   const pr = Kin ? null : podRange();
   if (!Kin && !pr) return null;
   const K = Kin || capStations(pr.x0), rp = K.rp, Lc = K.Lc;
-  const ln = 0.60*cabRin(K, K.xa + 0.07*rp);   // couch half-length
+  const ln = cabSeatLn(K);                     // couch half-length
   // eye just above the headrest, set back from the wall so the viewport, the
   // console edge and the couch all fall inside a wide lens
   const head = cabPt(K, K.xa + 0.24*rp, 0.50, CAB_ROLL_HEAD);
   if (aim === 'console')
     return { eye: head, look: [K.xb + K.xcon, 0.06*ln, 0], up: [0,1,0],
              fov: 1.25 };
-  // Wide interior: looking ACROSS the cabin at the main window wall, with the
-  // capsule axis as up — so the frame is a viewport with the console above it
-  // and the couch below, which is a room. Aimed up the axis instead it was a
-  // close-up of the underside of the console with the docking tunnel behind it
-  // and nothing to give any of it scale, through an 83-degree lens that bent
-  // every panel. The window at roll 0 spans cone cells 5-7, which is why the
-  // look point is at 0.45 Lc and hard over toward the wall.
-  return { eye:  cabPt(K, K.xb0 + 0.34*Lc, 0.62, CAB_ROLL_EYE),
-           look: cabPt(K, K.xb0 + 0.45*Lc, 0.92, 0), up: [1,0,0], fov: 1.18 };
+  // Strapped into a couch, and this is where a cabin view STARTS. The reason is
+  // the console: it faces down the axis, so from anywhere beside it the panel is
+  // edge-on. Measured on the old free-float station, 76 degrees of incidence and
+  // 3% of the frame, with the writing on the displays 184 degrees off the
+  // frame's up — because that station took the capsule axis as up and the
+  // console's own up is +y, and there was no roll control to put it right. From
+  // the couch the same panel is square on: 0 degrees, a fifth of the frame, and
+  // upright. A screen you cannot read is not a screen.
+  if (aim === 'seat') {
+    const zs = cabSeatZ(K);
+    const i = Math.min(Math.max(arg | 0, 0), zs.length - 1), zc = zs[i];
+    const rcin = cabRin(K, K.xcon);
+    // Aimed at THIS couch's own screen bay rather than at the axis: the bays
+    // and the couches are laid out in the same order across the cabin, so an
+    // outboard crew member's display is the outboard one, and aiming up the
+    // centreline instead put it in a corner of their frame.
+    const b = SCR_BAYS[cabSeatBay(K, i)];
+    const a = (b[0] + b[1])/2*Math.PI/180, rb = 0.62*rcin;
+    return { eye:  [K.xb + K.xa + 0.30*rp, 0.26*ln, zc],
+             look: [K.xb + K.xcon, rb*Math.cos(a), rb*Math.sin(a)],
+             up: [0,1,0], fov: 1.15 };
+  }
+  // Unbuckled. The station is a fixed point in the clear volume — the origin
+  // CAB.p is measured from — but its ORIENTATION is the couch's, forward up the
+  // axis and +y overhead, and that is deliberate: unbuckling then changes where
+  // you are without changing which way you are facing, so leaving the seat is
+  // continuous instead of a 90-degree snap. It is also the right frame to swim
+  // a capsule in, the axis being the long way.
+  if (aim === 'float' || CAB.seat === null) {
+    const eye = cabPt(K, K.xb0 + 0.34*Lc, 0.62, CAB_ROLL_EYE);
+    return { eye, look: [eye[0] + 0.5*Lc, eye[1], eye[2]], up: [0,1,0],
+             fov: 1.18 };
+  }
+  return cabinPose('seat', CAB.seat, K);
 }
 // ---------------------------------------------------- floating in the cabin --
 // Zero g inside the pressure shell: a push-off, a drift, and a wall. There is
@@ -3806,10 +3895,18 @@ function cabinPose(aim, roll, Kin) {
 // couch, a handrail and a locker face are all the same thing to this: something
 // to push off. `n` is the inward normal of whatever you are on, or null for a
 // handhold, which lets you push any way you like.
+// `seat` is the couch you are strapped into, or null when you are floating.
 const CAB = { p: [0,0,0], v: [0,0,0], keys: {}, live: false,
-              touch: true, n: null, push: 0 };
+              touch: true, n: null, push: 0, seat: 0 };
 const CAB_ACC = 3.2;       // m/s2 while a hand or a foot is still on the surface
 const CAB_VMAX = 0.9;      // m/s, a brisk float across a 2 m cabin
+const CAB_RROLL = 1.2;     // rad/s of body roll, a brisk twist
+// Two things in this cabin move — the vehicle and the person in it — and there
+// is one set of keys. Which of them the keys drive is a SWITCH, not a modifier:
+// holding shift is fine for a nudge and useless for crossing a cabin, and while
+// the crew keys were the shifted ones there was nothing left to bind roll to.
+const CAB_MODES = ['pilot', 'crew'];
+let cabCtl = 'pilot';
 // A shove is not an instant. An arm extends over about a third of a second, and
 // that is exactly how long the surface is still there to push against — ending
 // the push the moment you start moving instead gives you one frame of contact
@@ -3818,11 +3915,19 @@ const CAB_PUSH_T = 0.35;
 function cabReset() {
   CAB.p = [0,0,0]; CAB.v = [0,0,0]; CAB.keys = {};
   CAB.touch = true; CAB.n = null; CAB.push = 0;
+  const K = cabK();
+  CAB.seat = K ? cabSeatHome(K) : 0;
+  headYaw = headPitch = headRoll = 0;
 }
 // eye-frame axes, in MODEL space, including wherever the head is turned — so
 // forward is where you are looking rather than where the couch faces
+// Six degrees of freedom, and all six measured in the frame you can SEE: the
+// yaw and pitch of the head turn and the body roll all enter here, so "up" is
+// up as it appears on the screen. Taking the station's own up instead left
+// R and F pushing you somewhere other than the top and bottom of the frame the
+// moment you rolled, which is the whole of what a roll is for.
 function cabDirs(Kin) {
-  const p = cabinPose('wide', 0, Kin);
+  const p = cabinPose('float', 0, Kin);
   if (!p) return null;
   const f0 = V.norm(V.sub(p.look, p.eye)), up0 = V.norm(p.up);
   const rt0 = V.norm(V.cross(f0, up0)), uu0 = V.cross(rt0, f0);
@@ -3830,7 +3935,10 @@ function cabDirs(Kin) {
   const cp = Math.cos(headPitch), sp = Math.sin(headPitch);
   const fwd = V.norm(V.add(V.add(V.scale(f0, cy*cp), V.scale(rt0, sy*cp)),
                            V.scale(uu0, sp)));
-  return { fwd, rt: V.norm(V.cross(fwd, up0)), up: up0 };
+  const rt1 = V.norm(V.cross(fwd, up0)), uu1 = V.cross(rt1, fwd);
+  const cr = Math.cos(headRoll), sr = Math.sin(headRoll);
+  const up = V.add(V.scale(uu1, cr), V.scale(rt1, sr));
+  return { fwd, rt: V.cross(fwd, up), up };
 }
 // the habitable volume: the fit-out's clear envelope (see cabRLim), between
 // the couch tops and the console face, with a head's worth of room kept off
@@ -3861,7 +3969,9 @@ function cabClamp(pt) {
 // is underneath the capsule.
 function cabStep(dt, active, Kin) {
   CAB.live = active;
-  if (!active) {
+  // Strapped in is strapped in: the harness holds you, so nothing you press
+  // moves or turns your body until you unbuckle.
+  if (!active || CAB.seat !== null) {
     if (CAB.v[0] || CAB.v[1] || CAB.v[2]) CAB.v = [0,0,0];
     CAB.touch = true; CAB.n = null; CAB.push = 0;   // back in the couch
     return;
@@ -3873,9 +3983,15 @@ function cabStep(dt, active, Kin) {
   const d = cabDirs(K);
   if (!d) return;
   const k = CAB.keys;
+  // Roll is free, like the yaw and the pitch of a head turn: a crew member
+  // turns by twisting and needs no handhold to do it. It is also the degree of
+  // freedom whose absence made the console unreadable — the writing on a panel
+  // is only the right way up if you can put yourself the right way up to it.
+  const rl = (k.e ? 1 : 0) - (k.q ? 1 : 0);
+  if (rl) headRoll = wrapPi(headRoll + rl*CAB_RROLL*dt);
   let cmd = V.add(V.add(V.scale(d.fwd, (k.w ? 1 : 0) - (k.s ? 1 : 0)),
                         V.scale(d.rt,  (k.d ? 1 : 0) - (k.a ? 1 : 0))),
-                  V.scale(d.up,  (k.e ? 1 : 0) - (k.q ? 1 : 0)));
+                  V.scale(d.up,  (k.r ? 1 : 0) - (k.f ? 1 : 0)));
   let l = V.len(cmd);
   // A surface can only push you AWAY from itself, so the part of the shove
   // that goes into the wall is not a shove at all — it is just leaning.
@@ -3898,7 +4014,7 @@ function cabStep(dt, active, Kin) {
     if (V.len(CAB.v) > 0.02) { CAB.touch = false; CAB.n = null; }
   }
   const want = V.add(CAB.p, V.scale(CAB.v, dt));
-  const base = cabinPose('wide', 0, K);
+  const base = cabinPose('float', 0, K);
   if (!base) return;
   const c = cabBox(K, V.add(base.eye, want));
   CAB.p = V.sub(c.p, base.eye);
@@ -3920,14 +4036,70 @@ const CAB_CTL = [
 ];
 const CAB_PAGES = ['FLIGHT', 'TRAJECTORY', 'SYSTEMS'];
 let cabPage = 0, cabHover = null;
+// --- sitting down, and getting up ----------------------------------------
+// A couch is a place you can be, and it is the only place in here the console
+// is square on to your eye — so it is worth being able to get back to. Right
+// click a couch to strap in, right click it again to unbuckle. Right, because
+// left is already a head turn and a switch throw.
+function cabK() { const pr = podRange(); return pr ? capStations(pr.x0) : null; }
+function cabSeatLabel(K, i) {
+  return cabCrew(K) === 1 ? 'CREW COUCH' : `CREW COUCH ${i + 1}`;
+}
+function cabSeats(Kin) {
+  const K = Kin || cabK();
+  if (!K) return [];
+  const ln = cabSeatLn(K);
+  // a volume over the couch, centred between the headrest and the leg rest, so
+  // the whole seat is clickable rather than one point of it
+  return cabSeatZ(K).map((zc, i) => ({
+    key: 'seat' + i, seat: i, r: Math.max(0.12*K.rp, 0.52*ln),
+    label: cabSeatLabel(K, i),
+    p: [K.xb + K.xa + 0.12*K.rp, -0.22*ln, zc],
+  }));
+}
+function cabSit(i, Kin) {
+  const K = Kin || cabK();
+  if (!K) return false;
+  CAB.seat = Math.min(Math.max(i | 0, 0), cabSeatZ(K).length - 1);
+  CAB.v = [0,0,0]; CAB.p = [0,0,0];
+  CAB.touch = true; CAB.n = null; CAB.push = 0;
+  headYaw = headPitch = headRoll = 0;         // strapping in squares you up
+  cabToast(`STRAPPED IN · ${cabSeatLabel(K, CAB.seat)}`);
+  return true;
+}
+function cabStand(Kin) {
+  const K = Kin || cabK();
+  if (!K || CAB.seat === null) return false;
+  // You leave from where you were sitting. Dropping straight to the float
+  // station instead teleports you across the cabin the instant you unbuckle.
+  const seat = cabinPose('seat', CAB.seat, K), base = cabinPose('float', 0, K);
+  CAB.p = V.sub(cabBox(K, seat.eye).p, base.eye);
+  // And you keep looking where you were looking. The station and the couch
+  // agree about which way is up by construction, so all that has to be carried
+  // across is the aim — the couch looks up at its own screen bay, the station
+  // straight up the axis, and the difference between them is a head tilt.
+  const f0 = V.norm(V.sub(base.look, base.eye)), u0 = V.norm(base.up);
+  const rt0 = V.norm(V.cross(f0, u0)), uu0 = V.cross(rt0, f0);
+  const fT = V.norm(V.sub(seat.look, seat.eye));
+  headPitch = Math.asin(Math.max(-1, Math.min(1, V.dot(fT, uu0))));
+  headYaw = Math.atan2(V.dot(fT, rt0), V.dot(fT, f0));
+  headRoll = 0;
+  CAB.seat = null; CAB.v = [0,0,0];
+  CAB.touch = true; CAB.n = null; CAB.push = 0;   // a hand still on the couch
+  cabToast('UNBUCKLED · ZERO G');
+  return true;
+}
 function cabControls() {
   const pr = podRange();
   if (!pr) return [];
   const K = capStations(pr.x0), rc = 0.62*cabRin(K, K.xcon);
   return CAB_CTL.map(c => {
     const a = c.roll*Math.PI/180;
-    return { key: c.key, label: c.label, r: 0.15*K.rp,
-             p: [K.xb + K.xcon - 0.06*K.rp, rc*Math.cos(a), rc*Math.sin(a)] };
+    // a little larger than the switch itself, so a click near it counts —
+    // but not the 0.15 rp it was, which was a sphere the size of the switch
+    // when the switch was the size of a hatch handle
+    return { key: c.key, label: c.label, r: 0.055*K.rp,
+             p: [K.xb + K.xcon - 0.048*K.rp, rc*Math.cos(a), rc*Math.sin(a)] };
   });
 }
 // Last frame's camera and craft transform, so a click can be turned into a ray
@@ -3959,37 +4131,49 @@ function raySphere(o, d, c, r) {
   if (d2 > r*r) return Infinity;
   return tca - Math.sqrt(r*r - d2);
 }
-function cabPick(cx, cy) {
+// Everything in the cabin you can point at: the switches on the console and the
+// couches on the deck. One list, one ray, so a click resolves against all of it
+// at once and the nearest thing wins.
+function cabPick(cx, cy, seats) {
   const ray = cabRay(cx, cy);
   if (!ray) return null;
+  const targets = seats ? cabControls().concat(cabSeats()) : cabControls();
   let best = null, bestT = Infinity;
-  for (const c of cabControls()) {
+  for (const c of targets) {
     const t = raySphere(ray.o, ray.d, c.p, c.r);
     if (t < bestT) { bestT = t; best = c; }
   }
   return best;
 }
-function cabActivate(key, back) {
-  if (key === 'lights')
-    cabLight = rrIdx(cabLight + (back ? -1 : 1), CAB_LIGHTS.length);
-  else if (key === 'page')
-    cabPage = rrIdx(cabPage + (back ? -1 : 1), CAB_PAGES.length);
-  else return false;
-  // same banner the mission events use, so a switch throw reads like anything
-  // else that happens on the flight
+// same banner the mission events use, so anything the crew does in here reads
+// like anything else that happens on the flight
+function cabToast(msg) {
   const el = $('toast');
-  el.textContent = key === 'lights' ? `CABIN LIGHTS ${CAB_LIGHTS[cabLight].n}`
-                                    : `DISPLAY ${CAB_PAGES[cabPage]}`;
+  el.textContent = msg;
   el.style.opacity = 1;
-  clearTimeout(cabActivate._t);
-  cabActivate._t = setTimeout(() => el.style.opacity = 0, 1800);
+  clearTimeout(cabToast._t);
+  cabToast._t = setTimeout(() => el.style.opacity = 0, 1800);
+}
+function cabActivate(hit, back) {
+  const key = hit && hit.key;
+  if (key === 'lights') {
+    cabLight = rrIdx(cabLight + (back ? -1 : 1), CAB_LIGHTS.length);
+    cabToast(`CABIN LIGHTS ${CAB_LIGHTS[cabLight].n}`);
+  } else if (key === 'page') {
+    cabPage = rrIdx(cabPage + (back ? -1 : 1), CAB_PAGES.length);
+    cabToast(`DISPLAY ${CAB_PAGES[cabPage]}`);
+  } else if (hit && hit.seat !== undefined) {
+    // the couch you are already in is the one that lets you out of it
+    return CAB.seat === hit.seat ? cabStand() : cabSit(hit.seat);
+  } else return false;
   return true;
 }
 
+const wrapPi = a => a - 2*Math.PI*Math.round(a/(2*Math.PI));
 // place a model-space pose into the world using the craft's model matrix
 function poseToWorld(pose, M, mode, noHead) {
   let eye = mApply(M, pose.eye), look = mApply(M, pose.look);
-  const up = V.sub(mApply(M, V.add(pose.eye, pose.up)), eye);
+  let up = V.sub(mApply(M, V.add(pose.eye, pose.up)), eye);
   // free head-look from the seat: drag turns the view about the eye point,
   // it does not move the camera out of the capsule
   if ((headYaw || headPitch) && !noHead) {
@@ -4000,6 +4184,15 @@ function poseToWorld(pose, M, mode, noHead) {
     const dir = V.add(V.add(V.scale(fw, cy*cp), V.scale(rt, sy*cp)),
                       V.scale(uu, sp));
     look = V.add(eye, V.scale(dir, d));
+  }
+  // The third rotational degree of freedom, about the line of sight, applied
+  // last because a roll is a roll about where you are ALREADY looking. Without
+  // it the cabin had a fixed idea of which way was up and the crew had no way
+  // to argue with it — which is exactly what an upside-down display is.
+  if (headRoll && !noHead) {
+    const fw = V.norm(V.sub(look, eye));
+    const rt = V.norm(V.cross(fw, up)), uu = V.cross(rt, fw);
+    up = V.add(V.scale(uu, Math.cos(headRoll)), V.scale(rt, Math.sin(headRoll)));
   }
   return { eye, look, up, fov: pose.fov, mode: mode || 'cabin' };
 }
@@ -4019,7 +4212,8 @@ function cabinCam(M, aim) {
   if (!M) return null;
   const p = cabinPose(aim);
   if (!p) return null;
-  if (aim === 'wide' && (CAB.p[0] || CAB.p[1] || CAB.p[2])) {
+  if (aim === 'wide' && CAB.seat === null &&
+      (CAB.p[0] || CAB.p[1] || CAB.p[2])) {
     p.eye = V.add(p.eye, CAB.p);
     p.look = V.add(p.look, CAB.p);
   }
@@ -5418,15 +5612,20 @@ function projectPt(view, proj, p, wCss, hCss) {
 function cabinPanel(sc, view, proj, wCss, hCss) {
   const tip = $('cabtip');
   const live = sc.cam.mode === 'cabin' && sc.craftM;
-  const hov = live && cabHover && cabControls().find(c => c.key === cabHover);
+  // the keys drive two different things only when there is a crew member in
+  // here to be the second one
+  $('ctl').classList.toggle('hidden', !live);
+  const hov = live && cabHover;
   const hp = hov && projectPt(view, proj, mApply(sc.craftM, hov.p), wCss, hCss);
   tip.classList.toggle('hidden', !hp);
   if (hp) {
     tip.style.left = hp[0].toFixed(1) + 'px';
     tip.style.top  = hp[1].toFixed(1) + 'px';
-    tip.textContent = hov.key === 'lights'
-      ? `CABIN LIGHTS · ${CAB_LIGHTS[cabLight].n}`
-      : `DISPLAY · ${CAB_PAGES[cabPage]}`;
+    tip.textContent =
+      hov.key === 'lights' ? `CABIN LIGHTS · ${CAB_LIGHTS[cabLight].n}` :
+      hov.key === 'page'   ? `DISPLAY · ${CAB_PAGES[cabPage]}` :
+      hov.seat === CAB.seat ? `${hov.label} · RIGHT CLICK TO UNBUCKLE`
+                            : `${hov.label} · RIGHT CLICK TO SIT`;
   }
 }
 // Osculating apsides from the state, so the TRAJECTORY page shows the orbit
@@ -5449,7 +5648,8 @@ function cabRows(sc, page) {
     const rate = RCS.rate > 3e-4 ? (RCS.rate*180/Math.PI).toFixed(1) + '°/s' : 'NULL';
     return [['LIGHTS', CAB_LIGHTS[cabLight].n], ['ATT RATE', rate],
             ['CLOCK', warpEff > 1.5 ? '×' + Math.round(warpEff) : 'REAL'],
-            ['ZERO G', CAB.live ? 'FREE' : 'STOWED'],
+            ['CREW', !CAB.live ? 'STOWED'
+                     : CAB.seat !== null ? 'STRAPPED IN' : 'FREE'],
             ['O2 / PRESS', 'NOMINAL']];
   }
   if (page === 'TRAJECTORY') {
@@ -5539,18 +5739,24 @@ function drawHUD(sc, ph) {
   // The wheels only answer while the stack coasts at real time, so the row
   // shows up exactly when the keys will do something — and reads out the rate,
   // because the rate is what the vehicle's mass decides.
+  const flying = !CAB.live || cabCtl === 'pilot';
   if (RCS.live) {
     const d = RCS.w.map(v => v*180/Math.PI);
     const n = v => (v >= 0 ? '+' : '') + v.toFixed(1);
-    rows.push(['WHEELS', RCS.rate > 3e-4
-      ? `${n(d[2])} ${n(d[1])} ${n(d[0])} °/s` : 'READY · WASD QE']);
+    rows.push(['WHEELS', RCS.rate > 3e-4 ? `${n(d[2])} ${n(d[1])} ${n(d[0])} °/s`
+                         : flying ? 'READY · WASD QE' : 'HOLDING']);
   }
   if (CAB.live) {
+    // Where the crew is and what they can do about it, which is three states
+    // and not two: strapped in, on a surface, or in the air with nothing to
+    // push off. The row says which, because which one you are in is the
+    // whole mechanic.
     const s = V.len(CAB.v);
-    // which of the two states you are in is the whole mechanic, so it is the
-    // thing the row says: on a surface you can push, in the air you cannot
-    rows.push(['ZERO G', CAB.touch ? 'CONTACT · SHIFT + WASD QE to push'
-                                   : 'DRIFTING · ' + s.toFixed(2) + ' m/s']);
+    rows.push(['CREW', CAB.seat !== null
+      ? 'STRAPPED IN · G, or right click a couch, to unbuckle'
+      : CAB.touch ? 'CONTACT · ' + (flying ? 'T for crew keys, then ' : '') +
+                    'WASD RF to push'
+                  : 'DRIFTING · ' + s.toFixed(2) + ' m/s']);
   }
   if (perfShow) {
     // FPS is the smoothed live rate; FRAME is the median the scaler last ruled
@@ -5666,8 +5872,23 @@ function chipRow(el, items, cur, cb) {
     el.appendChild(c);
   }
 }
+// The control switch, drawn only in the cabin because outside it there is only
+// one thing the keys could be flying.
+function setCtl(m, quiet) {
+  cabCtl = m;
+  const el = $('ctl');
+  el.innerHTML = '<span class="lab">KEYS</span>';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:6px';
+  el.appendChild(row);
+  chipRow(row, CAB_MODES, cabCtl, setCtl);
+  if (!quiet)
+    cabToast(m === 'crew' ? 'KEYS · CREW · WASD RF move · QE roll'
+                          : 'KEYS · PILOT · REACTION WHEELS');
+}
 function initControls() {
   chipRow($('cams'), MS ? CAMS_MOON : CAMS, 'auto', m => camMode = m);
+  setCtl(cabCtl, true);
   // the hint has done its job by the time the vehicle is off the pad
   setTimeout(() => $('keys').classList.remove('show'), 9000);
   for (const el of [$('cams'), $('speed')]) {
@@ -5691,12 +5912,16 @@ function initControls() {
   // a switch steps it back, and only then is the context menu suppressed — a
   // right click anywhere else in the page still behaves like a right click.
   cv.addEventListener('contextmenu', e => {
-    if (inside() && cabPick(e.clientX, e.clientY)) e.preventDefault();
+    if (inside() && cabPick(e.clientX, e.clientY, true)) e.preventDefault();
   });
   cv.addEventListener('pointerdown', e => {
+    // Right click reaches the couches as well as the switches, because sitting
+    // down has no forward and back for the left button to mean. Left click sees
+    // only the switches — otherwise every head turn started on a couch would
+    // strap you into it instead.
     if (inside() && e.button <= 2) {
-      const hit = cabPick(e.clientX, e.clientY);
-      if (hit) { cabActivate(hit.key, e.button === 2); e.preventDefault(); return; }
+      const hit = cabPick(e.clientX, e.clientY, e.button === 2);
+      if (hit) { cabActivate(hit, e.button === 2); e.preventDefault(); return; }
     }
     if (e.button !== 0) return;
     if (camMode !== 'free' && !inside()) return;
@@ -5704,17 +5929,19 @@ function initControls() {
     cv._drag = [e.clientX, e.clientY];
   });
   cv.addEventListener('pointermove', e => {
-    if (inside() && !cv._drag) {                 // hover, so switches announce themselves
-      const hit = cabPick(e.clientX, e.clientY);
-      cabHover = hit ? hit.key : null;
+    if (inside() && !cv._drag) {                 // hover, so things announce themselves
+      const hit = cabPick(e.clientX, e.clientY, true);
+      cabHover = hit || null;
       cv.style.cursor = hit ? 'pointer' : '';
     }
     if (!cv._drag) return;
     const dx = e.clientX - cv._drag[0], dy = e.clientY - cv._drag[1];
     if (inside()) {
       // turn your head on the couch rather than orbiting the capsule
-      headYaw = Math.min(1.5, Math.max(-1.5, headYaw + dx*0.005));
-      headPitch = Math.min(1.2, Math.max(-1.2, headPitch - dy*0.005));
+      const lm = headLim();
+      headYaw = lm.y === Infinity ? wrapPi(headYaw + dx*0.005)
+                                  : Math.min(lm.y, Math.max(-lm.y, headYaw + dx*0.005));
+      headPitch = Math.min(lm.p, Math.max(-lm.p, headPitch - dy*0.005));
     } else {
       freeYaw += dx*0.006;
       freePitch = Math.min(1.4, Math.max(-1.2, freePitch + dy*0.004));
@@ -5751,24 +5978,38 @@ function initControls() {
     if (e.key === ']') zoomK = Math.min(8, +(zoomK*1.18).toFixed(3));
     if (e.key === '[') zoomK = Math.max(0.4, +(zoomK/1.18).toFixed(3));
     if (e.key === '\\') zoomK = 1;
-    // Reaction wheels. Held, a key is a torque; released, the wheels spend the
-    // same torque nulling the rate they built, so the stack stops where it is
-    // instead of tumbling on. X kills rotation outright.
-    // Held with shift inside the cabin the same keys push the CREW instead of
-    // the vehicle — one set of controls for the two things you can move.
+    // One set of keys, two things they can drive, and a switch that says which.
+    //   pilot — the reaction wheels: held, a key is a torque; released, the
+    //           wheels spend the same torque nulling the rate they built, so the
+    //           stack stops where it is instead of tumbling on.
+    //   crew  — your own body: WASD and RF translate, QE roll, and all six are
+    //           in the frame you are looking along.
+    // X kills whichever rotation is yours to kill.
     const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
-    if (RCS_KEYS[kk]) {
-      (e.shiftKey && CAB.live ? CAB : RCS).keys[kk] = true;
+    if (kk === 't' && inside()) { setCtl(cabCtl === 'crew' ? 'pilot' : 'crew');
+                                  e.preventDefault(); }
+    // the keyboard way in and out of a couch, for anyone who would rather not
+    // hunt for it with the mouse
+    if (kk === 'g' && inside()) {
+      const K = cabK();
+      if (CAB.seat !== null) cabStand();
+      else if (K) cabSit(cabSeatHome(K));
       e.preventDefault();
+    }
+    if (CAB_KEYS[kk]) {
+      const crew = cabCtl === 'crew' && CAB.live;
+      if (crew) CAB.keys[kk] = true;
+      else if (RCS_KEYS[kk]) RCS.keys[kk] = true;
+      if (crew || RCS_KEYS[kk]) e.preventDefault();
     }
     if (kk === 'x') { RCS.w = [0, 0, 0]; RCS.rate = 0; CAB.v = [0, 0, 0]; }
   });
   window.addEventListener('keyup', e => {
     if ((e.key === 'ArrowRight' && scrubDir === 1) ||
         (e.key === 'ArrowLeft' && scrubDir === -1)) scrubDir = 0;
-    // clear BOTH: shift may have been let go before the key it modified
+    // clear BOTH: the mode may have been switched while a key was held
     const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
-    if (RCS_KEYS[kk]) { RCS.keys[kk] = false; CAB.keys[kk] = false; }
+    if (CAB_KEYS[kk]) { RCS.keys[kk] = false; CAB.keys[kk] = false; }
   });
   // released keys can be missed entirely when the window loses focus mid-hold
   window.addEventListener('blur', () => {
@@ -6141,21 +6382,58 @@ window.__selftest = function () {
   const rfrac = p => Math.hypot(p[1], p[2]) / cabRin(CK, p[0] - CK.xb);
   const eyeAtAim = a => cabinPose(a, 0, CK).eye;
   eq('the clear radius is inside the racks', () => CAB_RFRAC < 0.68, true);
-  eq('the wide eye is in the clear volume', () => cabBox(CK, eyeAtAim('wide')).hit, false);
-  eq('and inboard of the racks', () => rfrac(eyeAtAim('wide')) < 0.68, true);
+  eq('the float eye is in the clear volume', () => cabBox(CK, eyeAtAim('float')).hit, false);
+  eq('and inboard of the racks', () => rfrac(eyeAtAim('float')) < 0.68, true);
   eq('the console eye is in the clear volume',
      () => cabBox(CK, eyeAtAim('console')).hit, false);
   eq('and it too is inboard of the racks',
      () => rfrac(eyeAtAim('console')) < 0.68, true);
-  // The wide shot deliberately aims AT the window wall — that is the picture —
-  // so its look point is not in the free volume. What it must not do is aim
-  // through the hull, which would frame the outside of a wall.
-  eq('the wide shot aims at the wall, not through it', () => {
-    const lk = cabinPose('wide', 0, CK).look;
-    return rfrac(lk) < 1.0;
-  }, true);
-  eq('and it aims outboard of the eye, so the frame is the room', () =>
-     rfrac(cabinPose('wide', 0, CK).look) > rfrac(cabinPose('wide', 0, CK).eye), true);
+  // --- the seat, and why the cabin starts in one. The console faces down the
+  // axis; from beside it a flat panel is edge-on and its writing is at whatever
+  // angle the station's up happens to make. From the couch it is square on and
+  // upright. These pin both halves of that.
+  const fwdOf = p => V.norm(V.sub(p.look, p.eye));
+  const SEAT = cabinPose('seat', 0, CK);
+  eq('the seat looks up the axis at the console', () => fwdOf(SEAT)[0] > 0.80, true);
+  eq('so the console face is near square on to it', () =>
+     Math.acos(Math.abs(V.dot(fwdOf(SEAT), [-1,0,0])))*180/Math.PI < 32, true);
+  // the screen band is the +y sector of the annulus, so +y is the direction its
+  // writing runs up in; a seat whose up is anything else reads it on the skew
+  eq('and the seat is the right way up to the screens', () =>
+     V.dot(V.norm(SEAT.up), [0,1,0]), 1, 1e-12);
+  eq('the seat is between the couch pan and the console', () =>
+     SEAT.eye[0] > CK.xb + CK.xa && SEAT.eye[0] < CK.xb + CK.xcon, true);
+  eq('and inside the pressure wall', () => rfrac(SEAT.eye) < 1.0, true);
+  // Unbuckling must not spin you round: the float station carries the couch's
+  // orientation exactly so that leaving the seat changes where you are and
+  // nothing else.
+  eq('the float station agrees with the couch about which way is up', () =>
+     V.dot(V.norm(cabinPose('float', 0, CK).up), V.norm(SEAT.up)), 1, 1e-12);
+  eq('and unbuckling leaves you looking where you were looking', () => {
+     cabReset(); cabSit(0, CK);
+     const want = fwdOf(cabinPose('seat', 0, CK));
+     cabStand(CK);
+     return V.dot(cabDirs(CK).fwd, want);
+  }, 1, 1e-9);
+  eq('and leaves you where you were sitting', () => {
+     cabReset(); cabSit(0, CK); cabStand(CK);
+     const at = V.add(cabinPose('float', 0, CK).eye, CAB.p);
+     return V.len(V.sub(at, cabBox(CK, cabinPose('seat', 0, CK).eye).p));
+  }, 0, 1e-12);
+  eq('and standing up is standing up', () => {
+     cabReset(); cabSit(0, CK); cabStand(CK);
+     return CAB.seat;
+  }, null);
+  eq('sitting back down puts you back in the couch', () => {
+     cabReset(); cabStand(CK); cabSit(1 % cabSeatZ(CK).length, CK);
+     return CAB.seat;
+  }, 1 % cabSeatZ(capStations(0)).length);
+  eq('every couch has a seat pose', () =>
+     cabSeatZ(CK).every((z, i) => cabinPose('seat', i, CK).eye[2] === z), true);
+  eq('the capsule seats what the mesh seats it', () =>
+     cabCrew(CK), CK.rp >= 1.10 ? 3 : CK.rp >= 0.85 ? 2 : 1);
+  eq('and the commander gets a middle couch where there is one', () =>
+     cabSeatHome(CK), cabCrew(CK) === 3 ? 1 : 0);
   eq('a push into the wall is caught', () =>
      cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]).hit, true);
   eq('and lands inboard of the racks', () =>
@@ -6174,16 +6452,23 @@ window.__selftest = function () {
   eq('and the ceiling pushes you down it', () =>
      cabBox(CK, [9e3, 0, 0]).n[0], -1);
   eq('free space has no normal to push against', () =>
-     cabBox(CK, cabinPose('wide', 0, CK).eye).n, null);
+     cabBox(CK, cabinPose('float', 0, CK).eye).n, null);
   // --- and the rule the float runs on: you can only push off something. A
   // shove works while a hand or a foot is still on the surface and ends when
   // the arm runs out; in mid-air the keys do nothing at all.
+  // On a roomy capsule, because the rule under test is the push law and not how
+  // far it is to the console. The forward axis in here is UP the cabin, and on
+  // a 0.6 m pod that is 11 cm of clearance — a full shove crosses it in a
+  // quarter second and the wall stops you, so measured on the flown capsule
+  // these would be reporting the cabin's dimensions.
+  const FK = capStations(0, 2.0);
   const floatRun = (secs, keys, seed) => {
     cabReset();
+    CAB.seat = null;                    // unbuckled: the harness holds you in
     if (seed) { CAB.v = seed.v.slice(); CAB.touch = seed.touch; CAB.n = seed.n; }
     CAB.keys = keys;
-    for (let i = 0; i < Math.round(secs*60); i++) cabStep(1/60, true, CK);
-    return { v: CAB.v.slice(), touch: CAB.touch };
+    for (let i = 0; i < Math.round(secs*60); i++) cabStep(1/60, true, FK);
+    return { v: CAB.v.slice(), touch: CAB.touch, roll: headRoll };
   };
   eq('a full shove is a real push', () =>
      V.len(floatRun(CAB_PUSH_T, { w: 1 }).v) > 0.6, true);
@@ -6192,13 +6477,48 @@ window.__selftest = function () {
   eq('the arm runs out and lets go', () =>
      floatRun(CAB_PUSH_T + 0.05, { w: 1 }).touch, false);
   eq('mid-air input does nothing at all', () =>
-     V.len(floatRun(0.15, { w: 1, s: 1, a: 1, d: 1, q: 1, e: 1 },
+     V.len(floatRun(0.15, { w: 1, s: 1, a: 1, d: 1, r: 1, f: 1 },
                     { v: [0.4, 0, 0], touch: false, n: null }).v), 0.4, 1e-12);
   // measured early in the shove: the cabin is half a metre across on a small
   // capsule, and a full push crosses it
   eq('opposite keys push opposite ways', () =>
      V.dot(V.norm(floatRun(0.10, { w: 1 }).v),
            V.norm(floatRun(0.10, { s: 1 }).v)) < -0.99, true);
+  // --- six degrees of freedom, and all six distinct. Three of translation on
+  // the axes of the frame you are looking along, three of rotation about it.
+  eq('R and F are the third translation axis', () =>
+     V.dot(V.norm(floatRun(0.10, { r: 1 }).v),
+           V.norm(floatRun(0.10, { f: 1 }).v)) < -0.99, true);
+  eq('and square to the other two', () => {
+     const u = V.norm(floatRun(0.10, { r: 1 }).v);
+     return Math.abs(V.dot(u, V.norm(floatRun(0.10, { w: 1 }).v))) < 1e-9 &&
+            Math.abs(V.dot(u, V.norm(floatRun(0.10, { d: 1 }).v))) < 1e-9;
+  }, true);
+  eq('Q and E roll, opposite ways', () => {
+     const a = floatRun(0.25, { e: 1 }).roll, b = floatRun(0.25, { q: 1 }).roll;
+     return a > 0.2 && b < -0.2 && Math.abs(a + b) < 1e-9;
+  }, true);
+  eq('and rolling is not moving', () =>
+     V.len(floatRun(0.25, { e: 1 }).v), 0, 1e-12);
+  // Rolling is free even in mid-air — a crew member twists, and needs no
+  // handhold to do it. This is the DOF whose absence left the console's
+  // writing 184 degrees off the frame's up with no way to answer.
+  eq('you can roll with nothing to push off', () =>
+     Math.abs(floatRun(0.25, { e: 1 }, { v: [0,0,0], touch: false, n: null }).roll)
+       > 0.2, true);
+  eq('a roll actually turns the frame over', () => {
+     cabReset(); headRoll = Math.PI;
+     const d = cabDirs(FK);
+     cabReset();
+     return V.dot(d.up, cabDirs(FK).up);
+  }, -1, 1e-9);
+  // --- and the couch: strapped in, the harness holds you
+  eq('strapped in, the keys move nothing', () => {
+    cabReset();                                   // cabReset seats you
+    CAB.keys = { w: 1, r: 1, e: 1 };
+    for (let i = 0; i < 60; i++) cabStep(1/60, true, FK);
+    return V.len(CAB.v) + V.len(CAB.p) + Math.abs(headRoll);
+  }, 0, 1e-12);
   cabReset();
   eq('the floor is the couch tops, not the deck',
      () => cabXLo(CK) > CK.xa + 0.15*CK.rp, true);
@@ -6238,10 +6558,19 @@ window.__selftest = function () {
      true);
   eq('and the centre one is the widest', () =>
      SCR_BAYS[1][1] - SCR_BAYS[1][0] >= SCR_BAYS[0][1] - SCR_BAYS[0][0], true);
-  eq('the switches are clear of the instrument fan', () =>
-     CAB_ROLL_CTL > 46 + 12, true);
+  // The console face is fully booked in roll: bays out to 46, breaker columns
+  // from 58. A switch has exactly one place to be, and being drawn through
+  // either neighbour is the bug this pins — it has happened twice.
+  eq('the switches clear the outermost screen bay', () =>
+     CAB_ROLL_CTL > SCR_BAYS[2][1], true);
+  eq('and clear the first breaker column', () => CAB_ROLL_CTL < 58, true);
   eq('there are two switches', () => CAB_CTL.length, 2);
   eq('and they are not the same one', () => CAB_CTL[0].roll !== CAB_CTL[1].roll, true);
+  // and the pick volume is a switch's worth, not a hatch's
+  eq('the pick volume is the size of the switch', () => {
+     const c = cabControls();
+     return c.length === 0 || c[0].r < 0.09*capStations(0).rp;
+  }, true);
   // cycling wraps in both directions — right click is the only sensible use
   // for the second button on a three-position switch
   eq('lights cycle forward', () => rrIdx(0 + 1, CAB_LIGHTS.length), 1);
