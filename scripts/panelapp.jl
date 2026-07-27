@@ -1120,6 +1120,14 @@ catalogue_payload() = Dict{String,Any}(
                       "incl_deg" => rad2deg_(v.inclination),
                       "note" => v.note)
                  for (k, v) in sort(collect(ORBITS), by = first)],
+    # What this BUILD understands. The pages are served fresh from disk on every
+    # request and the module is not — it is compiled into the running process —
+    # so a server left up across an edit serves a page with controls it has
+    # never heard of. The symptom is silent and baffling: the fairing switch
+    # appears, sends fairing_on=0, and the vehicle keeps its fairing, because
+    # the code that reads that field is not in the process. The pages check this
+    # list against the controls they offer and say so.
+    "features" => ["fairing_on", "crewed", "pod_dia", "grazing", "flyby_wire"],
     "solve_metrics" => SOLVE_METRICS,
     "landing_metrics" => LANDING_METRICS,
     "suborbital_metrics" => SUBORBITAL_METRICS,

@@ -918,10 +918,30 @@ function podNote() {
         'capsules below are only being used as a size reference.');
 }
 
+// The one failure mode this repo's serving model creates: pages come off disk
+// per request and the module is compiled into the process, so a server left
+// running across an edit serves a page whose controls it cannot read. Nothing
+// errors — the field is simply absent from the query the server understands,
+// and the control silently does nothing. Name it instead.
+const NEEDS = ['fairing_on', 'crewed', 'pod_dia'];
+function staleCheck() {
+  const have = (CATALOGUE && CATALOGUE.features) || [];
+  const missing = NEEDS.filter(f => !have.includes(f));
+  if (!missing.length) return;
+  const b = document.createElement('div');
+  b.className = 'status err';
+  b.style.cssText = 'padding:8px 10px;border:1px solid #e66767;border-radius:8px;margin-bottom:10px';
+  b.textContent = 'This server is older than this page — it does not understand ' +
+    missing.join(', ') + '. Those controls will do nothing until you restart it ' +
+    '(pages are re-read per request; the simulator is compiled into the process).';
+  document.querySelector('.app').prepend(b);
+}
+
 // --------------------------------------------------------------- startup --
 async function boot() {
   try {
     CATALOGUE = await (await fetch('/api/catalogue')).json();
+    staleCheck();
   } catch (e) {
     $('state').className = 'status err';
     $('state').textContent = 'no catalogue from the server: ' + e.message;

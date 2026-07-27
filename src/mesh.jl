@@ -426,8 +426,15 @@ which is roughly what those vehicles carry.
 """
 function pod_crew(rp::Real)
     rp = float(rp)
-    rp < 0.85 && return 1
-    rp < 1.10 && return 2
+    # A CREW MEMBER IS THE SAME SIZE IN EVERY CAPSULE, and below about 1.8 m
+    # across there is nowhere to put one. The smallest capsule that ever
+    # carried a person was Mercury at 1.89 m, and it carried them folded. Under
+    # that this is not a crew capsule — it is a re-entry pod with cargo in it,
+    # and it gets no couches and no cabin rather than a couch scaled down to
+    # half a metre and a console for somebody who is not there.
+    rp < 0.90 && return 0
+    rp < 1.10 && return 1            # one crew, folded, Mercury-style
+    rp < 1.30 && return 2
     # usable half-width at the couch station, less the outermost couch's own
     # half-width, divided by the pitch. 0.85 of the wall rather than all of it,
     # because the wall is where the racks and the handrails are.
@@ -603,10 +610,17 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
     # suited crew, which is what Apollo used and what three abreast in a 3.9 m
     # capsule comes to. One and two-crew layouts keep exactly the spacing they
     # had, because below Apollo size the fraction is the binding constraint.
-    zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] :
+    zs = crew <= 0 ? Float64[] :
+         crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] :
          [(i - (crew - 1) / 2) * min(0.44rp, 0.86) for i in 0:crew-1]
     hw = min(crew >= 3 ? 0.14rp : 0.17rp, 0.30)   # couch half-width
-    ln = min(0.60 * rin(xa + 0.07rp), 0.95)       # couch half-length: a person
+    # A COUCH IS A PERSON LONG. The couch runs -1.26 ln (leg rest) to +0.41 ln
+    # (headrest), so 1.67 ln is its extent and 1.14 makes that 1.90 m. Capped
+    # there, it stops growing with the hull; floored by pod_crew, no capsule
+    # that cannot hold one pretends to. In between — roughly Mercury to Apollo
+    # — it is as long as the capsule allows and the crew are folded further,
+    # which is exactly what Mercury and Gemini did.
+    ln = min(0.60 * rin(xa + 0.07rp), 1.14)       # couch half-length: a person
     for zc in zs
         push!(cab, box_mesh((xa + 0.02rp, -ln,      zc - hw),
                             (xa + 0.07rp,  0.36ln,  zc + hw)))         # back pan
@@ -1045,6 +1059,12 @@ function pod_mesh(; radius::Float64 = 0.75, nseg::Int = 24, ncrew::Int = 0)
             end
         end
     end
+    # A capsule too small to carry a person carries none: no couches, no
+    # console, no cabin at all. The hull, the windows and the heat shield are
+    # still a capsule's — it is a re-entry pod with cargo in it — but there is
+    # nothing inside to look at, and a viewer that offers an interior view by
+    # asking whether a `:cabin` exists stops offering one.
+    crew <= 0 && return (ext, glass, TriMesh[], hgt)
     (ext, glass, cab, hgt)
 end
 

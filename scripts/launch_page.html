@@ -4490,8 +4490,13 @@ const CAB_ROLL_EYE = 200, CAB_ROLL_HEAD = 282;
 // size the count is COUNTED: how many fit across at a real shoulder pitch.
 function cabCrew(K) {
   const rp = K.rp;
-  if (rp < 0.85) return 1;
-  if (rp < 1.10) return 2;
+  // A crew member is the same size in every capsule, and below about 1.8 m
+  // across there is nowhere to put one — the smallest that ever carried a
+  // person was Mercury at 1.89 m. Under that this is a re-entry pod with cargo
+  // in it, and pod_mesh emits no cabin for it.
+  if (rp < 0.90) return 0;
+  if (rp < 1.10) return 1;
+  if (rp < 1.30) return 2;
   const R = 0.85*0.89*rp, hw = Math.min(0.14*rp, 0.30), P = Math.min(0.44*rp, 0.86);
   // bounded by what fits AND by what the console can face — see pod_crew: the
   // display annulus does not widen with the cabin, so holding the outermost
@@ -4502,14 +4507,16 @@ function cabCrew(K) {
 }
 function cabSeatZ(K) {
   const n = cabCrew(K), P = Math.min(0.44*K.rp, 0.86);
+  if (n <= 0) return [];
   if (n === 1) return [0];
   if (n === 2) return [-0.30*K.rp, 0.30*K.rp];
   return Array.from({ length: n }, (_, i) => (i - (n - 1)/2)*P);
 }
 // a couch is a person long, and a person does not grow with the capsule
-function cabSeatLn(K) { return Math.min(0.60*cabRin(K, K.xa + 0.07*K.rp), 0.95); }
+// 1.14 makes the couch's own extent 1.90 m — a person. It stops there.
+function cabSeatLn(K) { return Math.min(0.60*cabRin(K, K.xa + 0.07*K.rp), 1.14); }
 // the commander's couch: the middle one, where there is a middle one
-function cabSeatHome(K) { return Math.floor((cabCrew(K) - 1)/2); }
+function cabSeatHome(K) { return Math.max(0, Math.floor((cabCrew(K) - 1)/2)); }
 // Which screen bay a couch is under. The three bays run -46..-18, -15..15 and
 // 18..46 degrees of roll and the couches sit at negative, zero and positive z,
 // and roll is measured z = r sin(roll) — so bay and couch are already in the
@@ -7690,11 +7697,18 @@ window.__selftest = function () {
   // A couch is a person long. It used to be 0.60 of the local wall, which is
   // 0.8 m in the reference capsule and 3.2 m in a six-metre one — the first is
   // too short to lie on and the second is not a couch, it is a corridor.
+  // The couch's own extent, which is what a person lies on: -1.26 ln to
+  // +0.41 ln. It reaches 1.90 m and stops — the crew member is the same size
+  // in a 4 m capsule and a 6 m one, which is the whole point.
   eq('a couch never grows past a person', () => {
-    for (const rp of [0.75, 1.40, 1.955, 2.51, 3.0])
-      if (2*cabSeatLn(capStations(0, rp)) > 1.91) return `rp ${rp}`;
+    for (const rp of [1.10, 1.40, 1.955, 2.51, 3.0])
+      if (1.67*cabSeatLn(capStations(0, rp)) > 1.905) return `rp ${rp}`;
     return 'ok';
   }, 'ok');
+  eq('and it reaches one once the capsule can hold one', () =>
+     1.67*cabSeatLn(capStations(0, 3.0)) > 1.89, true);
+  eq('a capsule too small for a person carries none', () =>
+     cabCrew(capStations(0, 0.75)) === 0 && cabCrew(capStations(0, 0.95)) === 1, true);
   eq('and a wide capsule seats more than three', () =>
      cabCrew(capStations(0, 3.0)) > 3 && cabCrew(capStations(0, 1.40)) === 3, true);
   eq('every couch still gets a bay that exists', () => {
@@ -7710,6 +7724,7 @@ window.__selftest = function () {
   eq('and the couches stay inside the cabin at every size', () => {
     for (const rp of [0.95, 1.40, 1.955, 2.51, 3.0]) {
       const K = capStations(0, rp);
+      if (cabCrew(K) <= 0) continue;
       const hw = Math.min(cabCrew(K) >= 3 ? 0.14*rp : 0.17*rp, 0.30);
       const wall = cabRin(K, K.xa + 0.07*rp);
       for (const z of cabSeatZ(K))
@@ -8214,7 +8229,12 @@ window.__selftest = function () {
   // inside a rack and no key had to be pressed. Bounding the eye by the bare
   // pressure cone could never have caught that — the cone is not the volume,
   // the fit-out is, and these pin the difference.
-  const CK = capStations(0);
+  // A CREWED capsule, and the flown one if it is bigger. The cabin testset is
+  // about a cabin, and the flown vehicle no longer always has one — a capsule
+  // under 1.8 m across carries nobody and emits no cabin at all, so pinning
+  // these to whatever is on the pad made them assert about seat poses that do
+  // not exist. The size sweeps elsewhere in here still cover the flown range.
+  const CK = capStations(0, Math.max(1.40, POD_RP));
   const rfrac = p => Math.hypot(p[1], p[2]) / cabRin(CK, p[0] - CK.xb);
   const eyeAtAim = a => cabinPose(a, 0, CK).eye;
   eq('the clear radius is inside the racks', () => CAB_RFRAC < 0.68, true);
@@ -8302,16 +8322,18 @@ window.__selftest = function () {
      cabReset(); cabSit(0, CK); cabStand(CK);
      return CAB.seat;
   }, null);
+  // both sides read CK: the expectation used to read the FLOWN capsule, which
+  // is a different vehicle the moment the flown one carries no crew
   eq('sitting back down puts you back in the couch', () => {
      cabReset(); cabStand(CK); cabSit(1 % cabSeatZ(CK).length, CK);
      return CAB.seat;
-  }, 1 % cabSeatZ(capStations(0)).length);
+  }, 1 % cabSeatZ(capStations(0, Math.max(1.40, POD_RP))).length);
   eq('every couch has a seat pose', () =>
      cabSeatZ(CK).every((z, i) => cabinPose('seat', i, CK).eye[2] === z), true);
   // The ladder is 1, 2, 3 up to about Apollo size and then counted — this used
   // to pin "three abreast and no more, however wide", which is what it was.
   eq('the capsule seats what the mesh seats it', () => {
-    const want = { 0.75: 1, 0.95: 2, 1.10: 3, 1.40: 3, 1.955: 3, 2.51: 3, 3.0: 4 };
+    const want = { 0.75: 0, 0.95: 1, 1.10: 2, 1.40: 3, 1.955: 3, 2.51: 3, 3.0: 4 };
     for (const rp in want)
       if (cabCrew(capStations(0, +rp)) !== want[rp])
         return `rp ${rp}: ${cabCrew(capStations(0, +rp))} not ${want[rp]}`;
@@ -8320,6 +8342,7 @@ window.__selftest = function () {
   eq('and the commander gets the middle couch, wherever it is', () => {
     for (const rp of [0.75, 0.95, 1.40, 2.51, 3.0]) {
       const K = capStations(0, rp), n = cabCrew(K), h = cabSeatHome(K);
+      if (n <= 0) continue;                       // nobody aboard to command
       if (h !== Math.floor((n - 1)/2)) return `rp ${rp}`;
       // and on an odd crew that couch is actually on the axis
       if (n % 2 === 1 && Math.abs(cabSeatZ(K)[h]) > 1e-12) return `off axis at rp ${rp}`;
