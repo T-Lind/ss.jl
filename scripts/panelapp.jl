@@ -995,6 +995,11 @@ function rocket_geometry(p)::Dict{String,Any}
     bdv(b) = b.count * b.stage.mprop * G0 * b.stage.isp_vac / liftoff_mass(lv)
     Dict{String,Any}(
         "ok" => true,
+        # The vehicle's own name. The launch view had no way to ask for it, so
+        # its title and the paint down the side of the booster were the literal
+        # string SABLE on every vehicle in the catalogue — press Saturn V, and
+        # what lifts off is captioned as the reference launcher.
+        "name" => String(lv.name),
         # boosters are appended after the core stack, so the tallest section
         # is not necessarily the last one
         "length" => maximum(s.x1 for s in secs),

@@ -927,6 +927,19 @@ function params() {
   return u;
 }
 
+// The server rejects an engine it has never heard of by name. That is not a
+// bad vehicle, it is an old process: this page is re-read from disk on every
+// request, but the simulator is compiled into the running server, so a page
+// can offer an engine the server behind it does not have. The bare
+// ArgumentError reads as the former; this says which it is.
+function staleHint(e) {
+  const msg = String((e && e.message) || e);
+  return /unknown engine/.test(msg)
+    ? `${msg} — this server was started before that engine existed. Restart ` +
+      `it (julia --project -t auto scripts/panel.jl) and run again.`
+    : msg;
+}
+
 async function doRun() {
   $('run').disabled = true;
   $('status').className = 'status';
@@ -981,7 +994,12 @@ async function doRun() {
     }
   } catch (e) {
     $('status').className = 'status err';
-    $('status').textContent = String(e.message || e);
+    // A server started before an engine existed rejects it by name, and the
+    // raw ArgumentError reads like the vehicle is wrong rather than the
+    // process being old. Pages are re-read from disk on every request but the
+    // simulator is compiled into the running server, so a page can offer an
+    // engine the server it is talking to has never heard of. Say which it is.
+    $('status').textContent = staleHint(e);
   }
   $('run').disabled = false;
 }
@@ -1722,7 +1740,7 @@ async function doSweep() {
       (nOk < j.runs.length ? ' (off-target runs excluded from the chart)' : '');
   } catch (e) {
     $('status').className = 'status err';
-    $('status').textContent = String(e.message || e);
+    $('status').textContent = staleHint(e);
   }
   $('sweepbtn').disabled = false;
 }

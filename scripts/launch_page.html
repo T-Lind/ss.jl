@@ -1341,6 +1341,16 @@ let tTLI = NaN, tCut = NaN, tPeri = NaN, tHand = NaN, tEI = NaN, tDrog = NaN,
     tMain = NaN, tSplash = NaN, tEnd = 0;
 let PH = [];   // phase table
 let CIS = null, ENT = null, hasCis = false, hasEnt = false;
+// The lunar-orbit coast, Moon-centred. It is a SEPARATE track because the
+// Earth-centred one genuinely stops at insertion: `fly_to_perilune` ends at
+// the LOI burn, and everything after it is flown about the Moon.
+let LO = null;
+// what is painted on the hull and announced over it
+let VEHNAME = 'SABLE';
+function vehName(s) {
+  const raw = String(s == null ? '' : s).replace(/\s*\([^)]*\)\s*$/, '').trim();
+  return (raw || 'Sable').toUpperCase();
+}
 // every engine-on window in orbit, from paired *_ignition/*_cutoff events —
 // the TLI is one of these, an orbit mission's raise/shape/deorbit are others
 let BURNW = [];
@@ -1452,6 +1462,27 @@ function buildData() {
             x: C.x.map(v => v*1e6), y: C.y.map(v => v*1e6), z: C.z.map(v => v*1e6),
             mx: C.mx.map(v => v*1e6), my: C.my.map(v => v*1e6),
             mz: C.mz.map(v => v*1e6), nrm: V.norm(C.n) };
+  }
+
+  // The parking orbit and the descent ellipse, Moon-centred inertial, in
+  // metres (payload is km). The server has always sent this; nothing read it.
+  //
+  // That was the hole. The Earth-centred track ENDS at the insertion burn, and
+  // a landing spends the next three hours — LUNAR ORBIT and DESCENT ORBIT, two
+  // phases the timeline names — on the far side of it. With no samples there
+  // the sampler clamped to the last cislunar point, and every consequence
+  // followed from that one frozen position: the craft stopped moving, the
+  // symmetric difference that makes the velocity went to zero, a zero velocity
+  // has no direction so the attitude basis came back [0,0,0], and the camera
+  // hung off that basis pointed nowhere. Measured on the Saturn V landing:
+  // 2 h 54 m of mission — a quarter of the timeline bar — reading a frozen
+  // "MOON 100.7 km, VELOCITY 0.00 km/s" over an empty black sky, 100 km above
+  // a Moon that fills 141 degrees and was not drawn at all.
+  const MO = run.moon && run.moon.orbit;
+  if (MO && MO.t && MO.t.length > 1) {
+    LO = { t: MO.t, n: MO.t.length, ph: MO.ph || [],
+           x: MO.x.map(v => v*1e3), y: MO.y.map(v => v*1e3),
+           z: MO.z.map(v => v*1e3) };
   }
 
   // entry profile: downrange integrated from h/v, positioned so splashdown
@@ -1660,21 +1691,53 @@ function state(t) {
   return { h, v, dr, gam, thr, m: samp(A.t, A.m, tc), mach: samp(A.t, A.mach, tc),
            q: samp(A.t, A.qbar, tc), pos: sm.pos, dir, up: sm.up };
 }
-// ECI craft state (orbit through return)
+// Where the Moon is, in ECI. Inside the cislunar log it is logged sample for
+// sample beside the craft. Past it — the lunar-orbit hours — it is carried
+// forward on its own osculating circle, rotated about the orbit normal so the
+// radius cannot drift. A landing spends 2.9 h there, which is 0.44% of a
+// revolution: the circle departs from the real ellipse by under 150 km in
+// 385,000, or 0.04%, and in these phases the camera is Moon-relative anyway.
+function moonEciAt(t) {
+  const at = u => [samp(CIS.t, CIS.mx, u), samp(CIS.t, CIS.my, u),
+                   samp(CIS.t, CIS.mz, u)];
+  const te = CIS.t[CIS.n-1];
+  if (t <= te) return at(t);
+  // a 600 s baseline: long enough that the log's own sampling noise cannot
+  // set the rate, short enough to still be a tangent
+  const dt = Math.min(600, Math.max(1, te - CIS.t[0]));
+  const p0 = at(te), v0 = V.scale(V.sub(p0, at(te - dt)), 1/dt);
+  const r = V.len(p0), L = V.cross(p0, v0), w = V.len(L)/(r*r || 1);
+  if (!(w > 1e-12) || !(r > 0)) return p0;
+  const k = V.norm(L), a = w*(t - te), c = Math.cos(a), s = Math.sin(a);
+  // Rodrigues about the orbit normal
+  return V.add(V.add(V.scale(p0, c), V.scale(V.cross(k, p0), s)),
+               V.scale(k, V.dot(k, p0)*(1 - c)));
+}
+// ECI craft state (orbit through return, and lunar orbit for a landing)
 function cisState(t) {
-  const p = [samp(CIS.t, CIS.x, t), samp(CIS.t, CIS.y, t), samp(CIS.t, CIS.z, t)];
+  const te = CIS.t[CIS.n-1];
+  // Past the cislunar log a landing is in orbit about the Moon, so its ECI
+  // position is where the Moon is plus where it is around the Moon.
+  const orb = !!(LO && t > te);
+  const mci = u => [samp(LO.t, LO.x, u), samp(LO.t, LO.y, u), samp(LO.t, LO.z, u)];
+  const eci = u => [samp(CIS.t, CIS.x, u), samp(CIS.t, CIS.y, u), samp(CIS.t, CIS.z, u)];
   // Short symmetric difference, clamped to the track so it degrades to a
   // one-sided difference at the ends. The baseline has to stay short: over
   // a 40 s span the TLI burn's acceleration inflates the speed by 200-400
   // m/s, and the exhaust — spawned relative to this — then outruns the
   // rocket instead of trailing it. The log is sampled at 0.5 s through the
   // burn, so 1 s resolves it exactly.
-  const ta = Math.max(CIS.t[0], t - 1), tb = Math.min(CIS.t[CIS.n-1], t + 1);
+  const t0 = orb ? LO.t[0] : CIS.t[0], t1 = orb ? LO.t[LO.n-1] : te;
+  const ta = Math.max(t0, t - 1), tb = Math.min(t1, t + 1);
   const dtv = Math.max(tb - ta, 1e-3);
-  const pa = [samp(CIS.t, CIS.x, ta), samp(CIS.t, CIS.y, ta), samp(CIS.t, CIS.z, ta)];
-  const pb = [samp(CIS.t, CIS.x, tb), samp(CIS.t, CIS.y, tb), samp(CIS.t, CIS.z, tb)];
-  const vel = V.scale(V.sub(pb, pa), 1/dtv);
-  const moon = [samp(CIS.t, CIS.mx, t), samp(CIS.t, CIS.my, t), samp(CIS.t, CIS.mz, t)];
+  const moon = moonEciAt(t);
+  // In lunar orbit the motion that matters is motion about the MOON. The ECI
+  // velocity there is mostly the Moon's own 1 km/s, and a stack pointed along
+  // that flies sideways round the Moon with its nose out of the plane.
+  const q = orb ? mci(t) : null;
+  const p = orb ? V.add(moon, q) : eci(t);
+  const vel = orb ? V.scale(V.sub(mci(tb), mci(ta)), 1/dtv)
+                  : V.scale(V.sub(eci(tb), eci(ta)), 1/dtv);
   // Roll reference: the osculating orbit normal, which is perpendicular to the
   // velocity by construction. The payload's own `n` is the MOON's orbital
   // plane — right for a translunar trajectory, unrelated to a 63 deg Earth
@@ -1682,7 +1745,7 @@ function cisState(t) {
   // between them: zero at the nodes, worst a quarter of a revolution later,
   // which is why the skew came and went over the timeline. `n` still picks the
   // sign, so lunar framing and every camera hung off bz are unchanged.
-  let ref = V.cross(p, vel);
+  let ref = V.cross(orb ? q : p, vel);
   if (V.len(ref) < 1e-6) ref = CIS.nrm;
   else if (V.dot(ref, CIS.nrm) < 0) ref = V.scale(ref, -1);
   const { bx, by, bz } = orthoFrame(V.norm(vel), ref);
@@ -2485,6 +2548,10 @@ function buildLiveryTex() {
     g.restore();
   };
   const INK = '#15171c', RED = '#c0392b', NAVY = '#1b3a6b';
+  // A longer name is painted smaller rather than off the end of the stage, so
+  // the word occupies the same run of hull whatever the vehicle is called.
+  // SABLE is five letters, so the reference livery is unchanged to the pixel.
+  const NH = Math.min(1, 5/Math.max(VEHNAME.length, 1));
   g.clearRect(0, 0, W, H);
 
   const stages = geo.sections.filter(s => /^stage\d+$/.test(s.name));
@@ -2497,8 +2564,8 @@ function buildLiveryTex() {
                             [s1.x1 - 0.13*L, s1.x1 - 0.06*L]])
       for (const f of [-0.5, 0.0]) band(xa, xb, f, f + 0.25, INK);
     band(s1.x1 - 0.045*L, s1.x1 - 0.015*L, -0.5, 0.5, RED);   // interstage trim
-    label('SABLE', s1.x0 + 0.30*L, -0.24, 1.05, INK);
-    label('SABLE', s1.x0 + 0.30*L,  0.26, 1.05, INK);
+    label(VEHNAME, s1.x0 + 0.30*L, -0.24, 1.05*NH, INK);
+    label(VEHNAME, s1.x0 + 0.30*L,  0.26, 1.05*NH, INK);
     // insignia + ensign on the flanks
     disc(s1.x0 + 0.62*L, 0.0, 0.62, NAVY);
     disc(s1.x0 + 0.62*L, 0.0, 0.44, '#f2f0e8');
@@ -2517,7 +2584,7 @@ function buildLiveryTex() {
   if (fair) {
     const L = fair.x1 - fair.x0;
     band(fair.x0 + 0.02*L, fair.x0 + 0.05*L, -0.5, 0.5, INK);
-    label('SABLE', fair.x0 + 0.18*L, 0.0, 0.85, INK);
+    label(VEHNAME, fair.x0 + 0.18*L, 0.0, 0.85*NH, INK);
     // fairing split line runs down the z = 0 plane, i.e. roll ±90 degrees
     for (const v of [-0.25, 0.25]) band(fair.x0, fair.x1, v - 0.004, v + 0.004, '#8c8c86');
   }
@@ -8733,12 +8800,63 @@ window.__selftest = function () {
   eq('and low', () => bgMemParse('{"air":0.01}').air, 0.35);
   eq('and ignores a non-number', () => bgMemParse('{"space":"x"}').space, 0.7);
 
-  console.log(`__selftest: ${out.pass} passed, ${out.fail} failed`,
-              out.failures.length ? out.failures : '');
+  // --- the vehicle's name. The launch view could not ask for one, so the
+  // title and the paint down the booster said SABLE on every rocket flown.
+  eq('a preset name drops its parenthetical',
+     () => vehName('Saturn V (Apollo)'), 'SATURN V');
+  eq('a bare name is kept', () => vehName('Starship'), 'STARSHIP');
+  eq('the builder suffix goes too', () => vehName('Sable (builder)'), 'SABLE');
+  eq('an absent name falls back', () => vehName(undefined), 'SABLE');
+  eq('an empty name falls back', () => vehName('   '), 'SABLE');
+  // a long name is painted smaller, not off the end of the stage
+  eq('SABLE sets the reference glyph height',
+     () => Math.min(1, 5/'SABLE'.length), 1);
+  eq('a longer name shrinks in proportion',
+     () => Math.min(1, 5/'SATURN V'.length), 0.625);
+
+  // --- lunar orbit. The ECI phases between insertion and powered descent used
+  // to run past the end of the cislunar track: the sampler clamped, the craft
+  // froze at the insertion point, the velocity difference went to zero and the
+  // attitude basis went to [0,0,0] with it. These only run on a landing.
+  if (LO && hasCis) {
+    const te = CIS.t[CIS.n-1], tp = LO.t[LO.n-1], mid = 0.5*(te + tp);
+    const at = t => cisState(t);
+    // insertion moves the velocity, not the vehicle: the two tracks have to
+    // describe the same point where they meet
+    eq('the lunar track starts where the cislunar one stops',
+       () => V.len(V.sub(at(te + 0.001).pos, at(te - 0.001).pos)), 0, 2000);
+    eq('the craft is still moving in lunar orbit',
+       () => at(mid).speed > 1000 && at(mid).speed < 2600, true);
+    eq('and it is somewhere over the Moon, not at the insertion point',
+       () => { const h = (at(mid).rM - RM)/1000; return h > 5 && h < 160; }, true);
+    eq('a minute of lunar orbit moves it a hundred kilometres',
+       () => V.len(V.sub(at(mid + 60).pos, at(mid).pos)) > 5e4, true);
+    eq('the attitude basis is orthonormal there', () => V.len(at(mid).bx), 1, 1e-9);
+    eq('and perpendicular to the roll reference',
+       () => V.dot(at(mid).bx, at(mid).bz), 0, 1e-9);
+    eq('nothing in the lunar-orbit state is NaN',
+       () => [].concat(at(mid).pos, at(mid).bx, at(mid).by, at(mid).bz)
+               .every(Number.isFinite), true);
+    // the Moon is carried forward on a circle, so it travels without the
+    // radius wandering
+    eq('the Moon keeps its distance while the craft orbits it',
+       () => V.len(moonEciAt(tp))/V.len(moonEciAt(te)), 1, 1e-9);
+    eq('but it does not stand still', () =>
+       V.len(V.sub(moonEciAt(tp), moonEciAt(te))) > 5e6, true);
+  }
+
+  // joined, not the array: a console read over CDP renders an array as
+  // "Array(1)" and the one thing worth reading is inside it
+  console.log(`__selftest: ${out.pass} passed, ${out.fail} failed` +
+              (out.failures.length ? ` — ${out.failures.join(' | ')}` : ''));
   return out;
 };
-if (new URLSearchParams(location.search).get('selftest') === '1')
-  setTimeout(window.__selftest, 0);
+// Run AFTER the mission has loaded, not on a zero timeout. `boot` is async and
+// awaits two fetches, so a setTimeout(0) fired first: every assertion that
+// needs a flown mission was quietly skipped for want of the data, and the one
+// that reaches for the cabin decal canvas threw because it did not exist yet.
+// The suite reported a number that looked complete and was not.
+const SELFTEST = new URLSearchParams(location.search).get('selftest') === '1';
 
 // ---------------------------------------------------------- test harness --
 // rAF does not fire in a background tab, so anything that needs the sim to
@@ -8961,6 +9079,13 @@ async function boot() {
     run = await r1.json(); geo = await r2.json();
     if (!run.ok) throw new Error(run.error || 'mission failed');
     if (!geo.ok) throw new Error(geo.error || 'geometry failed');
+    // The vehicle's own name, before anything that paints or prints it. A
+    // trailing parenthetical is a note to the person choosing the preset —
+    // "(Apollo)", "(builder)" — and not part of what the rocket is called.
+    // A server too old to send one leaves the reference name in place.
+    VEHNAME = vehName(geo.name);
+    $('ov_title').textContent = VEHNAME;
+    document.title = `${VEHNAME} — mission`;
     buildData();
     buildLiveryTex();
     buildRocket();
@@ -9023,6 +9148,7 @@ async function boot() {
       `${mass}${LEN.toFixed(1)} m — ` +
       `around the Moon and home in ${tD.toFixed(1)} days`;
     $('ov_go').classList.remove('hidden');
+    if (SELFTEST) window.__selftest();
     $('overlay').onclick = () => {
       $('overlay').classList.add('hidden');
       initAudio();
