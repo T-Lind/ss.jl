@@ -240,6 +240,14 @@ function boosters_from_params(p, dia::Float64)
                 core_throttle = clamp(getf(p, "b_throttle", 100.0) / 100, 0.2, 1.0))]
 end
 
+"""
+The capsule's diameter [m]: whatever the form states, or the mass fit when it
+states nothing. Zero and blank both mean "work it out", so an untouched form
+behaves exactly as it did before the field existed.
+"""
+pod_diameter(p, pod_mass) =
+    (d = getf(p, "pod_dia", 0.0); d > 0 ? d : 2 * pod_radius(pod_mass))
+
 "Build a LaunchVehicle from panel parameters."
 function lv_from_params(p)
     dia = getf(p, "diameter", 1.8)
@@ -252,17 +260,30 @@ function lv_from_params(p)
                           thrust_kn = d.thrust * f, isp = d.isp, ae = d.ae * f,
                           ptype = d.ptype, nedef = d.ne)
     end
+    # Whether the stack carries a payload shroud at all. Off, the spacecraft
+    # flies in the open the way Apollo, Dragon and Starship do — which is three
+    # separate consequences and not one: no mass to carry or drop, no ogive on
+    # the nose (so a blunt capsule sets the wave drag), and if the capsule is
+    # wider than anything under it, it is what the flow sees.
+    fair = getb(p, "fairing_on", true)
+    pod = getf(p, "pod_mass", 350.0)
+    # A stated capsule diameter wins over the mass fit, here as well as in the
+    # mesh — the number the flow sees and the number that is drawn have to be
+    # the same number, or a bare Orion flies the drag of a capsule two metres
+    # narrower than the one on the screen.
+    pod_d = pod_diameter(p, pod)
+    sref = stack_sref((stage_diameter(s, dia) for s in stages), pod_d, fair)
     LaunchVehicle(
         # the page sends the name of whatever preset is loaded, so the livery
         # and the launch view say what you are actually flying
         name = gets(p, "vname", "Sable (panel)"),
         stages = stages,
-        fairing_mass = getf(p, "fairing", 150.0),
-        payload_mass = getf(p, "pod_mass", 350.0),
+        fairing_mass = fair ? getf(p, "fairing", 150.0) : 0.0,
+        payload_mass = pod,
         # drag acts on the widest cross-section in the stack; strap-ons add
         # their own frontal area on top, but only while they are attached
-        sref = pi * (maximum(stage_diameter(s, dia) for s in stages) / 2)^2,
-        cd = SatelliteSim.LV_CD_TABLE,
+        sref = sref,
+        cd = fair ? SatelliteSim.LV_CD_TABLE : bare_payload_cd(pod_d, sref),
         boosters = boosters_from_params(p, dia),
     )
 end
@@ -301,6 +322,41 @@ deci_idx(len, n) = len <= n ? collect(1:len) :
                    unique(round.(Int, range(1, len; length = n)))
 
 """
+    flyby_idx(L, n; near) -> indices
+
+Wire indices for a cislunar track, keeping the flyby at full log resolution.
+
+A uniform decimation spends its budget evenly over a coast that is mostly a
+straight line, and the one part that is not — the hyperbolic swing past the
+Moon — is where every point counts. Measured on a 500 m grazing free return:
+a uniform 1600 points leaves 104 s between samples at closest approach, which
+is 250 km of arc, and the straight line a viewer draws between two of them
+passes 1200 m BELOW the surface. The trajectory was right to within three
+metres and the picture had the vehicle inside the Moon.
+
+The chord error is `v^2 dt^2 / 8r`, so it is the STEP that has to be bounded,
+not the point count: at 2.4 km/s past a 1737 km body, 104 s of it sags 4.5 km
+and the integrator's own 13 s sags 70 m. Keeping what the propagator already
+chose to log near the Moon is therefore exactly the right resolution — it
+tightened its step there for the same reason.
+
+Two thirds of the wire is the most the flyby may take. The coast still has to
+be drawn: a track that is all encounter and no route is not a trajectory.
+"""
+function flyby_idx(L, n::Int; near::Float64 = 2.0e7)
+    m = length(L.t)
+    m <= n && return collect(1:m)
+    nearidx = [i for i in 1:m if L.d_moon[i] < near]
+    isempty(nearidx) && return deci_idx(m, n)
+    faridx = [i for i in 1:m if L.d_moon[i] >= near]
+    bnear = min(length(nearidx), max(1, (2n) ÷ 3))
+    bfar = max(2, n - bnear)
+    sel = vcat(nearidx[deci_idx(length(nearidx), bnear)],
+               isempty(faridx) ? Int[] : faridx[deci_idx(length(faridx), bfar)])
+    sort!(unique(sel))
+end
+
+"""
 Shared 3D-scene payload: the pad-to-wherever track in true ECI geometry,
 units of 1000 km, decimated for the wire. Both missions fly the same launch
 and trans-lunar legs, so both scenes are built from the same code.
@@ -314,7 +370,7 @@ function scene_payload(asc, cis)
         k = max(2, length(L.t) ÷ 3)
         nrm = SatelliteSim.vunit(SatelliteSim.vcross((L.mx[1], L.my[1], L.mz[1]),
                                                      (L.mx[k], L.my[k], L.mz[k])))
-        idx = deci_idx(length(L.t), 1600)
+        idx = flyby_idx(L, 1600)
         px = Float64[]; py = Float64[]; pz = Float64[]
         mx = Float64[]; my = Float64[]; mz = Float64[]
         tt = Float64[]; pp = Int[]
@@ -804,9 +860,27 @@ function panel_mission(p)::Dict{String,Any}
         # TLI still "flies", but the result is not the requested mission)
         hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3
         hp_ret = getf(p, "hp_return_km", 50.0) * 1e3
-        metrics["on_target"] = ent !== nothing &&
-            abs(cis.perilune_alt - hp_moon) <= max(0.05 * hp_moon, 50e3) &&
-            abs(cis.vac_perigee_alt - hp_ret) <= 20e3
+        # The perilune band scales with the target and its floor is 300 m, not
+        # 50 km: a flat 50 km band passes anything from the surface to a
+        # hundred times a 500 m target, which is not a check, it is a rubber
+        # stamp. 8% is comfortably outside the designer's own 2% acceptance, so
+        # a converged design is never reported off target by rounding.
+        # A grazing flyby is a DIFFERENT MISSION and is judged as one. Below
+        # about 10 km no free return comes home — the Moon turns the trajectory
+        # so hard that the return leg's perigee is underground — so the designer
+        # stops shooting at it and flies the flyby instead. Scoring that against
+        # a return corridor it deliberately gave up would report every grazing
+        # pass as a failure. Everything else is scored on both ends as before.
+        graze = hp_moon < 10e3
+        peri_ok = abs(cis.perilune_alt - hp_moon) <= max(0.08 * hp_moon, 300.0)
+        metrics["on_target"] = graze ? peri_ok :
+            (ent !== nothing && peri_ok &&
+             abs(cis.vac_perigee_alt - hp_ret) <= 20e3)
+        # `grazing` also says the altitude is above the MEAN SPHERE, which below
+        # 10 km stops being the same question as "above the ground": lunar
+        # relief runs to roughly +/- 8 km, so this is a clearance against a
+        # smooth Moon and the real one has mountains in it.
+        metrics["grazing"] = graze
         push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
         push!(events, Dict("phase" => "cislunar", "name" => "tli_cutoff",
                            "t" => cis.t_tli + cis.burn_duration))
@@ -901,7 +975,9 @@ propellant density and the bells from its engine count.
 function rocket_geometry(p)::Dict{String,Any}
     d = getf(p, "diameter", 1.8)
     lv = lv_from_params(p)
-    mesh, secs = rocket_mesh(lv; diameter = d, nseg = 36)
+    mesh, secs = rocket_mesh(lv; diameter = d, nseg = 36,
+                             pod_diameter = getf(p, "pod_dia", 0.0),
+                             crewed = getb(p, "crewed", true))
     nst = length(lv.stages)
     # Static performance, so a bad stack is obvious before it is flown: the
     # mass each stage actually pushes is everything above it (the fairing
@@ -1044,6 +1120,14 @@ catalogue_payload() = Dict{String,Any}(
                       "incl_deg" => rad2deg_(v.inclination),
                       "note" => v.note)
                  for (k, v) in sort(collect(ORBITS), by = first)],
+    # What this BUILD understands. The pages are served fresh from disk on every
+    # request and the module is not — it is compiled into the running process —
+    # so a server left up across an edit serves a page with controls it has
+    # never heard of. The symptom is silent and baffling: the fairing switch
+    # appears, sends fairing_on=0, and the vehicle keeps its fairing, because
+    # the code that reads that field is not in the process. The pages check this
+    # list against the controls they offer and say so.
+    "features" => ["fairing_on", "crewed", "pod_dia", "grazing", "flyby_wire"],
     "solve_metrics" => SOLVE_METRICS,
     "landing_metrics" => LANDING_METRICS,
     "suborbital_metrics" => SUBORBITAL_METRICS,

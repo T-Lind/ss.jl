@@ -997,9 +997,13 @@ end
     sph2 = read_stl(path)
     @test length(sph2) == length(sph)
     @test isapprox(mesh_volume(sph2), mesh_volume(sph); rtol = 1e-6)
-    # procedural launcher: closed, positive volume, one section per stage plus
-    # the pod capsule, its cabin interior, and the fairing shell over both
-    rk, secs = rocket_mesh(diameter = 2.0, prop_masses = [10_000.0, 2_000.0])
+    # Procedural launcher: closed, positive volume, one section per stage plus
+    # the pod capsule, its cabin interior, and the fairing shell over both.
+    # `payload_mass` is stated because the DEFAULT one is a 350 kg pod, which
+    # is 1.2 m across — too small to put a person in, so it has no cabin at all
+    # (see pod_crew) and this would be testing the uncrewed case by accident.
+    rk, secs = rocket_mesh(diameter = 2.0, prop_masses = [10_000.0, 2_000.0],
+                           payload_mass = 5_560.0)
     @test mesh_volume(rk) > 0
     @test length(secs) == 6
     @test [s.name for s in secs[end-3:end]] == [:pod, :glass, :cabin, :fairing]
@@ -1016,6 +1020,14 @@ end
           mesh_volume(TriMesh(rk.tris[pod.t0:pod.t1]))
     # barrel volume actually swallows the propellant it was sized for
     @test mesh_volume(rk) > (10_000.0 + 2_000.0) / 1020.0
+    # and the uncrewed end of the same rule: a capsule too small for a person
+    # is a re-entry pod with cargo in it, and emits no cabin to look inside
+    rk0, secs0 = rocket_mesh(diameter = 2.0, prop_masses = [10_000.0, 2_000.0],
+                             payload_mass = 350.0)
+    @test !any(s -> s.name === :cabin, secs0)
+    @test any(s -> s.name === :pod, secs0)
+    @test issorted([s.x0 for s in secs0])
+    @test secs0[1].t0 == 1 && secs0[end].t1 == length(rk0)
 end
 
 @testset "scalar targeting" begin
@@ -1197,7 +1209,7 @@ end
             all(e -> get(d, (e[2], e[1]), 0) == 1, keys(d))
     end
 
-    for rp in (0.55, 0.75, 1.20)
+    for rp in (0.95, 1.10, 1.20)
         ext, glass, cab, hgt = pod_mesh(; radius = rp, nseg = 24)
         @test length(glass) == 3                     # three glazed apertures
         @test all(manifold, ext) && all(manifold, glass) && all(manifold, cab)
@@ -1240,7 +1252,7 @@ end
     # widest exactly where the racks are deepest. Getting this wrong is not
     # cosmetic — the eye ends up inside an equipment rack, which is a wall of
     # khaki filling the frame and nothing else visible at all.
-    for rp in (0.55, 0.75, 1.996)
+    for rp in (0.95, 1.20, 1.996)
         _, _, cab, _ = pod_mesh(; radius = rp, nseg = 24)
         ta = tan(deg2rad_(32.5))
         xb0 = 2.4rp - sqrt((2.4rp)^2 - rp^2) + 0.05rp
@@ -1276,7 +1288,7 @@ end
     # place, the quads were in the recess, the UVs were right — because none of
     # them asked whether a line from the crew's eye reaches the face. Ray-cast
     # from each couch to its own screen bay and count what gets through.
-    for rp in (0.75, 1.40)
+    for rp in (1.10, 1.40)
         _, _, cab, _ = pod_mesh(; radius = rp, nseg = 24)
         tris = [t for m in cab for t in m.tris]
         ta = tan(deg2rad_(32.5))
@@ -1286,9 +1298,13 @@ end
         xa = xb0 + 0.085rp
         xcon = xb0 + 0.62Lc
         rcin = rinw(xcon)
-        ln = 0.60 * rinw(xa + 0.07rp)
-        crew = rp >= 1.10 ? 3 : rp >= 0.85 ? 2 : 1
-        zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] : [-0.44rp, 0.0, 0.44rp]
+        # mirrored from pod_mesh, which caps both of these at what a person is:
+        # a couch is a person long and couches are a shoulder pitch apart, and
+        # neither grows because the pressure vessel did
+        ln = min(0.60 * rinw(xa + 0.07rp), 1.14)
+        crew = pod_crew(rp)
+        zs = crew == 1 ? [0.0] : crew == 2 ? [-0.30rp, 0.30rp] :
+             [(i - (crew - 1)/2) * min(0.44rp, 0.86) for i in 0:crew-1]
         bays = [(-46.0, -18.0), (-15.0, 15.0), (18.0, 46.0)]
         # Moller-Trumbore, front faces and back alike: a wall stops light either way
         function thit(o, d, a, b, c)
@@ -1303,7 +1319,10 @@ end
         end
         for (si, zc) in enumerate(zs)
             eye = (xa + 0.30rp, 0.26ln, zc)
-            mine = crew == 1 ? 2 : crew == 2 ? (si == 1 ? 1 : 3) : si
+            # couch -> bay, mirrored from cabSeatBay: with more couches than
+            # bays the neighbours share one, which is what a real console does
+            mine = crew == 1 ? 2 : crew == 2 ? (si == 1 ? 1 : 3) :
+                   min(3, 1 + round(Int, (si - 1) * 2 / (crew - 1)))
             (d0, d1) = bays[mine]
             seen = 0; tot = 0
             for fr in 0.1:0.2:0.9, fa in 0.1:0.2:0.9
@@ -1395,7 +1414,7 @@ end
         end
         out
     end
-    for rp in (0.75, 1.40)
+    for rp in (1.10, 1.40)
         ext, _, cab, _ = pod_mesh(; radius = rp, nseg = 24)
         @test isempty(coplanar_pairs(cab, rp))
         # The hull keeps exactly three, and they are the three window frames

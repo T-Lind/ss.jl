@@ -138,9 +138,9 @@
     <tr><td><b>g</b></td><td>unbuckle, or strap back in — which also hands the keys over</td></tr>
     <tr><td>drag</td><td>look around — a head turn in the couch, your whole body out of it</td></tr>
     <tr><td colspan="2" class="sec">The console — hover any of it to see what it is</td></tr>
-    <tr><td>paddles</td><td>the two amber switches: cabin lights, and the centre display's page</td></tr>
-    <tr><td>caps</td><td>the coloured buttons are wired — crew station, clock up and down, trajectory view, audio, null rates, level, and this list</td></tr>
-    <tr><td>click</td><td>the console switches: cabin lights, and the centre display's page. <b>Right click</b> steps a switch back, or a couch in and out of.</td></tr>
+    <tr><td>caps</td><td>the coloured buttons are wired — cabin lights, display page, crew station, clock up and down, trajectory view, audio, null rates, level, and this list</td></tr>
+    <tr><td>soft keys</td><td>on the trajectory display: zoom, pan, reset, and the coast orbit &mdash; where you end up with the engines cold</td></tr>
+    <tr><td>click</td><td>steps a control forward. <b>Right click</b> steps it back, or a couch in and out of.</td></tr>
   </table>
   <div class="hint">You can only push off while you are touching something — then you coast until you catch the next handrail. <b>h</b> closes this.</div>
 </div>
@@ -1336,6 +1336,7 @@ let SEPS = [], NST = 0, LASTST = null, dropT = {};
 // Burnout and separation are different instants — a set with a sep_delay is
 // carried as dead weight in between — and the flame belongs to the first.
 let BNAMES = [], BSEP = [], BIGN = [], BOUT = [];
+let tLOI = NaN, tDOI = NaN, tPDI = NaN;
 let tTLI = NaN, tCut = NaN, tPeri = NaN, tHand = NaN, tEI = NaN, tDrog = NaN,
     tMain = NaN, tSplash = NaN, tEnd = 0;
 let PH = [];   // phase table
@@ -1413,6 +1414,12 @@ function buildData() {
     if (isFinite(EV[nm + '_ignition']))
       BURNW.push([EV[nm + '_ignition'], EV[nm + '_cutoff'] ?? EV[nm + '_ignition'] + 60]);
   tPeri = EV.perilune ?? NaN;
+  // A landing mission's lunar arrival is a BURN, not a flyby: it has no
+  // perilune event because it never coasts past the Moon. Its own three are
+  // what break the coast up — without them the whole seventy-one hours from
+  // TLI cutoff to powered descent was a single phase called LUNAR ORBIT, which
+  // is wrong for about sixty-nine of them.
+  tLOI = EV.loi ?? NaN; tDOI = EV.doi ?? NaN; tPDI = EV.pdi ?? NaN;
   tHand = EV.entry_handoff ?? (hasCis ? C.t[C.t.length-1] : NaN);
   tEI = EV.entry_interface ?? NaN;
   // the first of several deploys is the drogue, the last is the main; a lone
@@ -1558,7 +1565,20 @@ function buildData() {
       add('TRANSLUNAR', tPeri - win, 'eci', { pace: 26 });
       add('FLYBY', tPeri + win, 'eci', { pace: 45 });
     }
-    if (MS) add('LUNAR ORBIT', MS.t_pdi - 25, 'eci', { pace: 12 });
+    if (MS) {
+      // A landing arrives under power, so its coast is bounded by burns rather
+      // than by a closest approach: cruise out to the braking burn, then the
+      // hours in lunar orbit that set up the descent, then the descent itself.
+      // Every one of these is guarded, so a run that is missing an event gets
+      // one fewer phase rather than a phase running to NaN.
+      const loiLead = isFinite(tLOI) ? tLOI - 900 : NaN;
+      add('TRANSLUNAR', isFinite(loiLead) ? loiLead : MS.t_pdi - 25, 'eci',
+          { pace: 26 });
+      // DOI is a small burn most of a revolution before PDI; naming the leg
+      // after it is what tells you the low pass is deliberate and not a decay.
+      if (isFinite(tDOI)) add('LUNAR ORBIT', tDOI + 60, 'eci', { pace: 14 });
+      add('DESCENT ORBIT', MS.t_pdi - 25, 'eci', { pace: 10 });
+    }
     else add('RETURN', hasEnt && isFinite(tEI) ? Math.min(tEI - 20, cisEnd) : cisEnd,
              'eci', { pace: 26 });
   }
@@ -2106,6 +2126,7 @@ function podRange() { return secDraw.find(s => s.name === 'pod'); }
 // measuring the mesh instead would pick up RCS pods and raceways that stand
 // proud of the barrel. TOPD is the stage the capsule and fairing ride on.
 let TOPD = 1.8, POD_RP = 0.75, SECR = {}, BAX = [];
+let HASCAB = true;             // does this vehicle have an interior to look at?
 function measureRadii() {
   const maxRad = sec => {
     let m = 0;
@@ -2128,6 +2149,12 @@ function measureRadii() {
     if (s) SECR[nm] = maxRad(s);
   }
   POD_RP = SECR.pod || Math.min(0.75, 0.85*TOPD/2);
+  // An uncrewed payload has no cabin section, because there is no cabin. That
+  // one fact is the whole switch: the interior camera, the crew stations and
+  // everything the console does exist only where there is somewhere to stand.
+  // Asked of the GEOMETRY rather than of a flag in the query, so the viewer
+  // cannot disagree with the vehicle it was sent.
+  HASCAB = geo.sections.some(x => x.name === 'cabin');
   // Strap-ons stand beside the core, so a vertex's distance from the stack
   // axis says nothing about where it sits on its own booster. Record each
   // set's stand-off radius and body radius, and the colouring works off the
@@ -2247,6 +2274,14 @@ const CAP_FN = [
   { cell: 0*8 + 2*2 + 0, key: 'warpdn',  label: 'TIME',         c: [0.62,0.44,0.20] },
   { cell: 1*8 + 3*2 + 1, key: 'traj',    label: 'TRAJECTORY VIEW', c: [0.25,0.62,0.45] },
   { cell: 1*8 + 0*2 + 1, key: 'help',    label: 'CHECKLIST',    c: [0.60,0.60,0.66] },
+  // The two that used to be paddle switches on the console's flanks. They kept
+  // their amber, because that is what a crew looks for, but they are caps now:
+  // a 4 cm block standing proud of the one bare wedge of the panel was the
+  // largest object on the face from most of the cabin, which is a strange
+  // amount of visual weight for "which page is the middle screen on". Both sit
+  // under the centre display, which is the display they are about.
+  { cell: 1*8 + 1*2 + 0, key: 'lights',  label: 'CABIN LIGHTS', c: [0.95,0.74,0.30] },
+  { cell: 1*8 + 1*2 + 1, key: 'page',    label: 'DISPLAY',      c: [0.85,0.62,0.24] },
   { cell: 2*8 + 0*2 + 1, key: 'audio',   label: 'AUDIO',        c: [0.70,0.33,0.30] },
   { cell: 2*8 + 3*2 + 1, key: 'nullr',   label: 'RATE NULL',    c: [0.34,0.56,0.64] },
   { cell: 2*8 + 3*2 + 0, key: 'level',   label: 'LEVEL',        c: [0.40,0.52,0.50] },
@@ -2315,18 +2350,11 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
     // radius is a rack at the bottom and thin air at the top.
     const K = capStations(s.x0), u = cx - K.xb;
     const rin = K.rcone(u) - 0.05*K.rp, f = rad/Math.max(rin, 1e-6);
-    // The crew switches, and ONLY them. This band used to be +-17 deg about
-    // +-32, which is where two of the five instrument boxes are, so it painted
-    // instruments as switches — a fan of gold across the middle of the console
-    // instead of two amber paddles on its flanks. They live at +-100 now, the
-    // first roll clear of the instrument fan, and the band is theirs alone.
     const a = Math.atan2(cz, cy);
-    const ctl = u > K.xcon - 0.115*K.rp && u < K.xcon - 0.010*K.rp &&
-                f > 0.45 && f < 0.75 &&
-                (angNear(a, -0.908, 0.10) || angNear(a, 0.908, 0.10));
-    // The caution and warning block shares the crew switches' roll — it is the
-    // only wedge the console leaves — so it is separated from them by radius:
-    // the switches are at 0.62 rcin and the tiles below 0.44.
+    // The caution and warning block, on the one wedge of panel the console
+    // leaves. It used to share this roll with the two crew paddle switches and
+    // be separated from them by radius; the paddles are caps in the grid now,
+    // so the wedge is the annunciators' alone.
     const cw = u > K.xcon - 0.045*K.rp && f < 0.45 &&
                (angNear(a, -0.925, 0.082) || angNear(a, 0.925, 0.082));
     // Racks are read by ROLL, not by a fraction of the local wall. They are
@@ -2340,15 +2368,6 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
                  (angNear(a, 0, 0.49) || angNear(a, 1.187, 0.367) ||
                   angNear(a, -1.187, 0.367));
     if (u < K.xa + 0.01*K.rp) c = [0.40,0.43,0.41];               // deck
-    // A switch is a grey guard with a coloured paddle in it, not a solid amber
-    // block. The cut has to fall between the paddle's front face at -0.100 rp
-    // and the HOUSING's front face at -0.075 — the crew-facing one, and the
-    // largest single face on the switch. Cut at -0.070 and the housing front
-    // is on the paddle's side of it, which paints the whole switch amber and
-    // is the thing this was meant to stop.
-    else if (ctl)
-      c = u < K.xcon - 0.078*K.rp ? [0.95,0.74,0.30]              // paddle
-                                  : [0.44,0.45,0.44];             // guard
     // Three annunciator tiles per flank, read by which radial band they are in,
     // the same way the button grid is read: a caution panel says what it is by
     // colour before anyone gets close enough to read it.
@@ -3155,6 +3174,12 @@ function buildStatics() {
   cloudBuf = buffer(new Float32Array(c));
 
   // parachutes: gored canopies (alternating panels) + suspension lines
+  //
+  // The model runs along +x: the skirt (radius R) sits at x = 0, the crown at
+  // x = 0.96R, and the eight suspension lines run from the skirt band at
+  // x = 0.27R down to a single convergence ON THE AXIS at x = -lineLen. That
+  // convergence is the riser confluence — the point that has to end up on the
+  // capsule's apex, because it is the only part of the chute that touches it.
   const mkChute = (R, cols, lines) => {
     const out = [];
     lathe(out, [[R*1.00, 0.001], [R*0.93, R*0.42], [R*0.72, R*0.80],
@@ -3167,11 +3192,27 @@ function buildStatics() {
     }
     return out;
   };
+  // (the chute's own placement rule lives beside the mesh that fixes it — see
+  // chuteStandoff)
   const dg = mkChute(1.15, [[0.80,0.79,0.75],[0.45,0.44,0.42]], 3.2);
   drogueBuf = buffer(new Float32Array(dg)); drogueN = dg.length/VST;
   const mn = mkChute(4.6, [[0.92,0.44,0.14],[0.94,0.93,0.90]], 8.5);
   mainBuf = buffer(new Float32Array(mn)); mainN = mn.length/VST;
 }
+
+// Where a chute's ORIGIN has to sit for its risers to land on the capsule.
+// The whole chute scales about that origin by `sc` as it opens, so the
+// confluence — model x = -lineLen — ends up at origin - lineLen*sc, and the
+// origin therefore has to be exactly that far beyond the attach station at
+// every stage of the opening.
+//
+// This used to subtract 0.27R instead, which is the distance to the wrong END
+// of the suspension line: the line's UPPER end is at x = +0.27R and its lower
+// end is the confluence. On the 4.6 m main that put the confluence 1.24 m
+// BELOW the apex it hangs from — which on a capsule this size is below the
+// heat shield, so the risers ran down through the hull and met in a spike
+// underneath the vehicle they were supposed to be holding up.
+function chuteStandoff(attach, lineLen, sc) { return attach + lineLen*sc; }
 
 const quadBuf = () => buffer(new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]));
 let skyBuf, partDyn;
@@ -4378,8 +4419,16 @@ function lookDrag(dx, dy, Kin) {
 // one pane, and now that the crew can push off and float to whichever viewport
 // they like, a camera whose whole job was to pick one for them is a worse way
 // of doing the same thing.
-const CAMS = ['auto','wide','chase','onboard','cabin','free'];
-const CAMS_MOON = ['auto','wide','chase','onboard','ground','free'];
+// `cabin` is dropped from both when the payload has no cabin — an uncrewed bus
+// is a solid block and a camera inside it looks at the inside of a solid block.
+const CAMS_ALL = ['auto','wide','chase','onboard','cabin','free'];
+const CAMS_MOON_ALL = ['auto','wide','chase','onboard','ground','free'];
+// Read as FUNCTIONS, not as constants: HASCAB is not known until the geometry
+// arrives, and a const evaluated at load would freeze the list before the
+// vehicle was ever seen.
+const camList = l => HASCAB ? l : l.filter(m => m !== 'cabin');
+const CAMS = () => camList(CAMS_ALL);
+const CAMS_MOON = () => camList(CAMS_MOON_ALL);
 
 // ------------------------------------------------------ the clear volume --
 // The habitable volume, and the ONE definition of it. It is NOT the pressure
@@ -4401,11 +4450,22 @@ const CAMS_MOON = ['auto','wide','chase','onboard','ground','free'];
 // clear all the way up is the one measured at the TOP of the volume.
 const CAB_RFRAC = 0.60;
 function cabRin(K, u) { return K.rcone(u) - 0.05*K.rp; }
-// clear of the couch AND of what is on it: the armrests carry hand controllers
-// now, and the tip of a stick is at xa + 0.24 rp. 0.16 was the headrests alone.
-function cabXLo(K) { return K.xa + 0.27*K.rp; }
-function cabXHi(K) { return K.xcon - 0.14*K.rp; } // under the console switches
-function cabRLim(K) { return Math.max(0.02, CAB_RFRAC*cabRin(K, cabXHi(K))); }
+// The clear volume, and it grows FASTER than the capsule now — which is the
+// whole point of sizing the fit-out by the people and the equipment in it.
+// Every bound here is what a fitting actually occupies, and a fitting stops
+// growing once it is the size of the thing it is for: a couch with a hand
+// controller on it reaches about half a metre above the pan whether the
+// capsule is 1.5 m across or 6, and an equipment rack is a third of a metre
+// deep either way. Below the crossover these are the fractions they always
+// were, so nothing that flies today moves.
+function cabXLo(K) { return K.xa + Math.min(0.27*K.rp, 0.55); }
+function cabXHi(K) { return K.xcon - Math.min(0.14*K.rp, 0.28); }
+function cabRLim(K) {
+  const r = cabRin(K, cabXHi(K));
+  // inboard of the racks: (1 - CAB_RFRAC) of the wall, or the depth a rack
+  // and its clearance actually take, whichever leaves MORE cabin
+  return Math.max(0.02, Math.min(r - 0.02, Math.max(CAB_RFRAC*r, r - 0.52)));
+}
 // A station written the only way a clamp can check: station along the cone, a
 // fraction of the clear radius, and a roll in degrees.
 function cabPt(K, u, fr, aDeg) {
@@ -4415,10 +4475,6 @@ function cabPt(K, u, fr, aDeg) {
 // Rolls that are free of fittings: the racks own 100-136 and 224-260, the
 // handrails 34/90/270/326, the windows 0 and +-68, the hatch 180.
 const CAB_ROLL_EYE = 200, CAB_ROLL_HEAD = 282;
-// The switch roll, mirrored from pod_mesh: the one gap on the console face,
-// between the outermost screen bay (ends at 46) and the first circuit-breaker
-// column (starts at 58).
-const CAB_ROLL_CTL = 52;
 
 // ------------------------------------------------------------- the couches --
 // Mirrored from pod_mesh, because a seat you can sit in has to be the seat that
@@ -4427,23 +4483,59 @@ const CAB_ROLL_CTL = 52;
 // overhead: it is what a strapped-in crew member is looking at. How many
 // couches there are follows the same rule the mesh uses — a capsule seats what
 // its diameter can seat.
-function cabCrew(K) { return K.rp >= 1.10 ? 3 : K.rp >= 0.85 ? 2 : 1; }
-function cabSeatZ(K) {
-  const n = cabCrew(K);
-  return n === 1 ? [0] : n === 2 ? [-0.30*K.rp, 0.30*K.rp]
-                                 : [-0.44*K.rp, 0, 0.44*K.rp];
+// Mirrored from pod_crew. The old rule was three abreast and no more, however
+// wide the capsule got — which was consistent, because every fitting was a
+// fraction of rp and three couches always took the same share of it. A crew
+// member is the same size in a 1.5 m capsule and a 6 m one, so above Apollo
+// size the count is COUNTED: how many fit across at a real shoulder pitch.
+function cabCrew(K) {
+  const rp = K.rp;
+  // A crew member is the same size in every capsule, and below about 1.8 m
+  // across there is nowhere to put one — the smallest that ever carried a
+  // person was Mercury at 1.89 m. Under that this is a re-entry pod with cargo
+  // in it, and pod_mesh emits no cabin for it.
+  if (rp < 0.90) return 0;
+  if (rp < 1.10) return 1;
+  if (rp < 1.30) return 2;
+  const R = 0.85*0.89*rp, hw = Math.min(0.14*rp, 0.30), P = Math.min(0.44*rp, 0.86);
+  // bounded by what fits AND by what the console can face — see pod_crew: the
+  // display annulus does not widen with the cabin, so holding the outermost
+  // couch to 0.44 rp keeps every station as readable as it is today
+  const nwide = 1 + Math.floor(2*(R - hw)/P);
+  const nface = 1 + Math.floor(2*(0.44*rp)/P);
+  return Math.max(3, Math.min(6, Math.min(nwide, nface)));
 }
-function cabSeatLn(K) { return 0.60*cabRin(K, K.xa + 0.07*K.rp); }
+function cabSeatZ(K) {
+  const n = cabCrew(K), P = Math.min(0.44*K.rp, 0.86);
+  if (n <= 0) return [];
+  if (n === 1) return [0];
+  if (n === 2) return [-0.30*K.rp, 0.30*K.rp];
+  return Array.from({ length: n }, (_, i) => (i - (n - 1)/2)*P);
+}
+// a couch is a person long, and a person does not grow with the capsule
+// 1.14 makes the couch's own extent 1.90 m — a person. It stops there.
+function cabSeatLn(K) { return Math.min(0.60*cabRin(K, K.xa + 0.07*K.rp), 1.14); }
 // the commander's couch: the middle one, where there is a middle one
-function cabSeatHome(K) { return Math.floor((cabCrew(K) - 1)/2); }
+function cabSeatHome(K) { return Math.max(0, Math.floor((cabCrew(K) - 1)/2)); }
 // Which screen bay a couch is under. The three bays run -46..-18, -15..15 and
 // 18..46 degrees of roll and the couches sit at negative, zero and positive z,
 // and roll is measured z = r sin(roll) — so bay and couch are already in the
 // same order, and a crew member's own display is the one over their own seat.
 // One couch takes the centre bay, two take the outer pair, three take all.
+// With more couches than bays — a wide capsule seats five and the console has
+// three — neighbours share a display, which is what a real console does. The
+// map still runs in order, so an outboard crew member still gets an outboard
+// bay and nobody is aimed across the cabin at somebody else's screen.
 function cabSeatBay(K, i) {
-  const n = cabCrew(K);
-  return n === 1 ? 1 : n === 2 ? (i ? 2 : 0) : i;
+  const n = cabCrew(K), nb = SCR_BAYS.length;
+  if (n === 1) return (nb - 1) >> 1;
+  if (n === 2) return i ? nb - 1 : 0;
+  // Spread the couches ACROSS the bays rather than dividing them into equal
+  // blocks: floor(i*nb/n) sends four couches to [0,0,1,2], which puts the two
+  // middle crew on different bays and leaves the layout lopsided. Rounding the
+  // position instead gives [0,1,1,2] — symmetric, and the ends still get the
+  // ends. Three couches and three bays remain exactly one each.
+  return Math.min(nb - 1, Math.round(i*(nb - 1)/(n - 1)));
 }
 
 // Camera stations inside the crew capsule, in vehicle model coordinates.
@@ -4672,22 +4764,42 @@ function cabSmooth(dt) {
   CAB.pv = V.add(CAB.pv, V.scale(V.sub(CAB.p, CAB.pv), k));
 }
 // ------------------------------------------------------- cabin controls --
-// Two switches on the console face, on the rolls the couches look along. The
-// geometry is in pod_mesh (a housing and a paddle at 0.62 rin, rolls -+32) and
-// these are the pick volumes over them, derived from the same stations — so
-// the thing you click is the thing that is drawn. Left click steps forward,
-// right click steps back, which is the only sensible use for the second button
-// on a two-position and a three-position switch.
-const CAB_CTL = [
-  { key: 'lights', roll: -CAB_ROLL_CTL, label: 'CABIN LIGHTS' },
-  { key: 'page',   roll:  CAB_ROLL_CTL, label: 'DISPLAY' },
-];
+// The cabin lighting and the display page used to be two paddle switches out
+// on the console's flanks, with their own geometry and their own pick volumes.
+// They are caps in the button grid now (see CAP_FN), which means one pick path,
+// one colour rule and one shape of control on the whole face instead of two.
+// Left click still steps forward and right click back, which is the only
+// sensible use for the second button on a three-position and a two-position
+// control.
 const CAB_PAGES = ['FLIGHT', 'TRAJECTORY', 'SYSTEMS'];
 // What the TRAJECTORY page draws. ORBIT is the path in its own plane with the
 // bodies to scale — the shape of the mission; PROFILE is altitude against
 // downrange, which is the shape of an ascent or an entry. Neither answers the
 // other's question, so it is a switch rather than a choice made once.
 const TRAJ_VIEWS = ['ORBIT', 'PROFILE'];
+// What the ORBIT view is looking at. Zoom is a multiplier on the automatic fit
+// rather than an absolute scale, so it means the same thing on a parking orbit
+// and on a translunar arc six orders of magnitude larger; pan is in fractions
+// of the pane, for the same reason. `coast` overlays the osculating conic —
+// where you would END UP from here with the engines cold, which is a different
+// curve from the flown path the moment the flight plan still has a burn in it.
+const TRJ = { zoom: 1, px: 0, py: 0, coast: false };
+const TRJ_ZMAX = 64;
+function trjHome() { TRJ.zoom = 1; TRJ.px = 0; TRJ.py = 0; }
+// Soft keys along the bottom of the centre display, in its CANVAS coordinates.
+// The plot box ends at v = 0.76, so these sit in the strip below it and cost
+// the plot nothing. Two rows, because eight keys across one row of a 420 px
+// canvas would be 52 px each and the pick spheres would overlap on the panel.
+const SOFT_KEYS = [
+  { key: 'trjout',  lab: '−',      u: 0.125, v: 0.848, tip: 'ZOOM OUT' },
+  { key: 'trjin',   lab: '+',           u: 0.375, v: 0.848, tip: 'ZOOM IN' },
+  { key: 'trjhome', lab: '⌂',      u: 0.625, v: 0.848, tip: 'RESET VIEW' },
+  { key: 'trjco',   lab: '◌',      u: 0.875, v: 0.848, tip: 'COAST ORBIT' },
+  { key: 'trjl',    lab: '←',      u: 0.125, v: 0.950, tip: 'PAN LEFT' },
+  { key: 'trjr',    lab: '→',      u: 0.375, v: 0.950, tip: 'PAN RIGHT' },
+  { key: 'trju',    lab: '↑',      u: 0.625, v: 0.950, tip: 'PAN UP' },
+  { key: 'trjd',    lab: '↓',      u: 0.875, v: 0.950, tip: 'PAN DOWN' },
+];
 let cabPage = 0, cabTraj = 0, cabHover = null;
 // --- sitting down, and getting up ----------------------------------------
 // A couch is a place you can be, and it is the only place in here the console
@@ -4750,16 +4862,9 @@ function cabStand(Kin) {
 function cabControls() {
   const pr = podRange();
   if (!pr) return [];
-  const K = capStations(pr.x0), rc = 0.62*cabRin(K, K.xcon);
-  const out = CAB_CTL.map(c => {
-    const a = c.roll*Math.PI/180;
-    // a little larger than the switch itself, so a click near it counts —
-    // but not the 0.15 rp it was, which was a sphere the size of the switch
-    // when the switch was the size of a hatch handle
-    return { key: c.key, label: c.label, r: 0.055*K.rp,
-             p: [K.xb + K.xcon - 0.048*K.rp, rc*Math.cos(a), rc*Math.sin(a)] };
-  });
-  // And the wired button caps. Each station is read back out of the same grid
+  const K = capStations(pr.x0);
+  const out = [];
+  // The wired button caps. Each station is read back out of the same grid
   // the mesh builds them on and the colour rule reads, so the cap you click is
   // the cap that is drawn and the cap that is painted the odd colour.
   const rcin = cabRin(K, K.xcon);
@@ -4774,6 +4879,23 @@ function cabControls() {
     // lower one's and a click near the join resolving by depth rather than aim
     out.push({ key: fn.key, label: fn.label, r: 0.020*K.rp,
                p: [K.xb + K.xcon - 0.021*K.rp, rr*Math.cos(ac), rr*Math.sin(ac)] });
+  }
+  // Soft keys, on the face of the centre display itself — which is where they
+  // belong, because what they do depends on what the display is showing and
+  // their labels are drawn by the same thing that draws the plot. They exist
+  // ONLY while the plot does: a key that does nothing is worse than no key, and
+  // the alternative is eight dead buttons on the SYSTEMS page.
+  //
+  // The positions come from scrFrame's own canvas mapping, the same one the
+  // quad is built on, so a key is under its label by construction. A little
+  // proud of the panel (0.006 rp) so the sphere is not half-buried in it.
+  if (CAB_PAGES[cabPage] === 'TRAJECTORY' && trajView() === 'ORBIT') {
+    const F = scrFrame(K, 1);
+    for (const s of SOFT_KEYS) {
+      const p = F.at(s.u, s.v);
+      out.push({ key: s.key, label: s.tip, soft: true, r: softKeyR(K, F),
+                 p: [p[0] - 0.006*K.rp, p[1], p[2]] });
+    }
   }
   return out;
 }
@@ -4855,6 +4977,28 @@ function cabActivate(hit, back) {
     else cabSit(nxt);
   } else if (key === 'warpup' || key === 'warpdn') {
     cabToast(`CLOCK · ${warpStep(key === 'warpup' ? 1 : -1)}`);
+  } else if (key && key.startsWith('trj')) {
+    // Pan is in fractions of the PANE and zoom is a multiplier on the automatic
+    // fit, so both mean the same thing whether you are looking at a parking
+    // orbit or at a translunar arc a million times larger. Panning steps by a
+    // fifth of the pane divided by the zoom, so a step is the same distance ON
+    // SCREEN however far in you are — which is the only version that stays
+    // usable once you are at 64x.
+    const d = 0.20/TRJ.zoom;
+    if (key === 'trjin')  TRJ.zoom = Math.min(TRJ_ZMAX, TRJ.zoom*1.6);
+    else if (key === 'trjout') TRJ.zoom = Math.max(1, TRJ.zoom/1.6);
+    else if (key === 'trjhome') trjHome();
+    else if (key === 'trjco') TRJ.coast = !TRJ.coast;
+    else if (key === 'trjl') TRJ.px -= d;
+    else if (key === 'trjr') TRJ.px += d;
+    else if (key === 'trju') TRJ.py += d;
+    else if (key === 'trjd') TRJ.py -= d;
+    // zooming back out drags the view home with it, so you can never end up
+    // fully zoomed out and looking at nothing
+    if (TRJ.zoom <= 1.0001) { TRJ.px = 0; TRJ.py = 0; }
+    cabToast(key === 'trjco' ? `COAST ORBIT ${TRJ.coast ? 'SHOWN' : 'HIDDEN'}`
+             : key === 'trjhome' ? 'VIEW RESET'
+             : `TRAJECTORY ×${TRJ.zoom.toFixed(TRJ.zoom < 10 ? 1 : 0)}`);
   } else if (key === 'audio') {
     audioMute(!muted);
     cabToast(`AUDIO ${muted ? 'MUTED' : 'ON'}`);
@@ -4869,9 +5013,10 @@ function cabActivate(hit, back) {
     // the couch you are already in is the one that lets you out of it
     return CAB.seat === hit.seat ? cabStand() : cabSit(hit.seat);
   } else return false;
-  // The two paddles are levers and everything else on that face is a cap. They
-  // do not sound alike, and which one you just pressed is worth hearing.
-  if (key === 'lights' || key === 'page') sfxSwitch(); else sfxClick();
+  // A cap and a soft key do not sound alike — one is a mechanism on a panel and
+  // the other is a membrane on a screen — and which one you just pressed is
+  // worth hearing.
+  if (key && key.startsWith('trj')) sfxTick(); else sfxClick();
   return true;
 }
 
@@ -4968,8 +5113,9 @@ function autoPickPad(t) {
   if (t < fairT - 6) return 'chase';
   if (t < fairT + 2) return 'onboard';
   // the shell splits and daylight reaches the cabin for the first time
-  if (t < fairT + 8) return 'cabin';
-  if (t < fairT + 16) return 'cabin';
+  // the director never cuts inside a vehicle with no inside
+  if (t < fairT + 8) return HASCAB ? 'cabin' : 'onboard';
+  if (t < fairT + 16) return HASCAB ? 'cabin' : 'onboard';
   if (t < secoT - 35) return 'wide';
   return 'chase';
 }
@@ -5142,8 +5288,8 @@ function cameraEci(t, cs, ph, M) {
 function autoPickEntry(t) {
   const dep = isFinite(tDrog) ? tDrog : tMain;
   if (t < tEI + 45) return 'chase';
-  if (t < tEI + 110) return 'cabin';       // peak heating, seen from inside
-  if (t < tEI + 175) return 'cabin';       // peak heating, seen from inside
+  if (t < tEI + 110) return HASCAB ? 'cabin' : 'chase';   // peak heating, from inside
+  if (t < tEI + 175) return HASCAB ? 'cabin' : 'chase';   // peak heating, from inside
   if (isFinite(dep) && t < dep - 5) return 'onboard';
   if (isFinite(tMain) && t < tMain + 25) return 'chase';
   if (isFinite(tSplash) && t < tSplash - 30) return 'onboard';
@@ -5288,8 +5434,8 @@ function drawWhole(buf, n, model, proj) { bindMeshBuf(buf); drawRange(model, pro
 // washed out with it. Inside, the only way in is an aperture, which is what the
 // window panes are: they still take the heat, and glow. The interior is lit by
 // its own cabin lighting, which is the ambient floor here.
-// Which is a switch the crew has, not a constant: the lights are on the panel
-// (see CAB_CTL) and this is what they set.
+// Which is a control the crew has, not a constant: the lights are a cap in the
+// console's button grid (see CAP_FN) and this is what it sets.
 const CAB_LIGHTS = [{ n: 'BRIGHT', amb: 0.58 }, { n: 'DIM', amb: 0.26 },
                     { n: 'OFF', amb: 0.06 }];
 let cabLight = 0;
@@ -5891,15 +6037,8 @@ function drawWorldMeshes(sc, proj, inCab) {
       if ((s.name === 'pod' || s.name === 'cabin' || s.name === 'glass') && !skip(s))
         drawSec(s, podM, proj);
     // Parachutes: canopy axis opposite the velocity, scaling in on deploy.
-    //
-    // The canopy's stand-off and the suspension lines' model length used to be
-    // set independently, so the risers ended in mid-air above the capsule and
-    // the chute floated free of the vehicle it was holding up. Place the canopy
-    // from where the lines have to LAND instead: the tips sit at the model's
-    // x = skirt - lineLen, everything scales by `sc`, so putting the canopy at
-    // apex + (lineLen - skirt)*sc lands them on the apex at every stage of the
-    // opening. The pod is anchored with its shield apex at es.pos, which is
-    // what makes the attach point a station on the capsule and not a guess.
+    // The pod is anchored with its shield apex at es.pos, which is what makes
+    // the attach point a station on the capsule and not a guess.
     const pr = podRange();
     const cs2 = pr ? capStations(pr.x0) : null;
     // craftM shifts the model by -xb, so a capsule station X lands at
@@ -5909,7 +6048,7 @@ function drawWorldMeshes(sc, proj, inCab) {
       if (!isFinite(t0) || simT < t0) return;
       const f = Math.min(1, (simT - t0)/1.2), sc = 0.15 + 0.85*f;
       const cx = V.scale(es.vdir, -1), cz = [0,0,1], cyv = V.cross(cz, cx);
-      const cp = V.add(es.pos, V.scale(cx, attach + (lineLen - 0.27*R)*sc));
+      const cp = V.add(es.pos, V.scale(cx, chuteStandoff(attach, lineLen, sc)));
       drawWhole(buf, n, mBasis(cx, cyv, cz, cp, sc), proj);
     };
     if (isFinite(tDrog) && !(simT >= tMain)) drawChute(drogueBuf, drogueN, tDrog, 3.2, 1.15);
@@ -6111,6 +6250,19 @@ function drawClouds(sc, view, proj, fogCol, fogDen, deck) {
 // canvas on it would be squeezed to half its width.
 const SCR_W = 420, SCR_H = 400;
 let scrCv = null, scrCx = null, scrTex = null, scrBuf = null, scrN = 0, scrT = -1e9;
+// The displays repaint on a simT interval, which is exactly right for data that
+// moves with the clock and exactly wrong for everything the CREW changes. With
+// the clock stopped simT does not move, so a soft key pressed while paused had
+// no visible effect at all until time was started again — and paused, looking
+// at the trajectory, is precisely when you reach for the zoom.
+//
+// So: everything the operator can change goes in this signature, and a change
+// to it repaints on the very next frame whatever the clock is doing. It is a
+// string rather than a set of remembered fields because the alternative is a
+// list to keep in step with the controls, and this one is read in one place.
+let scrKey = '';
+const scrSig = () => `${cabPage}|${cabTraj}|${cabLight}|${TRJ.zoom}|` +
+                     `${TRJ.px}|${TRJ.py}|${TRJ.coast}`;
 const SCR_BAYS = [[-46, -18], [-15, 15], [18, 46]];   // roll spans, mirroring pod_mesh
 function cabScreenInit() {
   if (scrCv) return;
@@ -6125,12 +6277,58 @@ function cabScreenInit() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 }
 // the quads, in vehicle model space, sitting just proud of each recessed face
+// A display bay's own frame, in the capsule's coordinates: where the panel
+// sits, how big it is, and how a point on its CANVAS lands in the world.
+//
+// One function, and that is the point of it. The quad builder below, the soft
+// keys' pick volumes and the painter that draws their labels all ask this — so
+// a key you press is under the label you read by CONSTRUCTION, rather than by
+// three sets of numbers being kept in agreement by hand. The three limits on
+// the inscribed rectangle are the bay's: its bottom edge inside the opening's
+// inner radius, its bottom corners inside the roll span (the sector is
+// narrowest there), its top corners inside the outer radius; then trimmed to
+// the canvas aspect so nothing is stretched.
+function scrFrame(K, k) {
+  const rcin = K.rcone(K.xcon) - 0.05*K.rp;
+  const b = SCR_BAYS[k];
+  const a0 = b[0]*Math.PI/180 + 0.030, a1 = b[1]*Math.PI/180 - 0.030;
+  const ac = (a0 + a1)/2, half = (a1 - a0)/2;
+  const r0 = 0.485*rcin, r1 = 0.755*rcin, rc = (r0 + r1)/2;
+  let H = rc - r0 - 0.014*rcin;
+  let S = Math.min((rc - H)*Math.tan(half),
+                   Math.sqrt(Math.max(r1*r1 - (rc + H)*(rc + H), 0)));
+  if (S/H > SCR_W/SCR_H) S = H*SCR_W/SCR_H; else H = S*SCR_H/SCR_W;
+  const up = [0, Math.cos(ac), Math.sin(ac)];        // radial at the bay centre
+  const rt = [0, -Math.sin(ac), Math.cos(ac)];       // and along the arc
+  const x = K.xb + K.xcon - 0.031*K.rp;        // a hair in front of the recess
+  // canvas (u, v), both 0..1 with v down, to a model-space point
+  const at = (u, v) => {
+    const t = rc + (0.5 - v)*2*H, s = (u - 0.5)*2*S;
+    return [x, t*up[1] + s*rt[1], t*up[2] + s*rt[2]];
+  };
+  return { x, rc, S, H, up, rt, at };
+}
+// A soft key's pick radius: 40% of the smaller key PITCH. The keys are 0.25 of
+// the canvas apart across (0.5 S) and 0.12 down (0.24 H), so the down pitch is
+// the binding one, and taking a fraction of it is the only form that cannot
+// overlap however the panel is proportioned.
+//
+// Two things this deliberately is not. It is not sized off S alone — that put
+// the two rows' spheres through each other, which is a click landing on the key
+// above the one you aimed at. And it has no floor in capsule radii: a floor
+// does not shrink with the display, so on a small console it grew straight past
+// the spacing and reintroduced the same overlap from the other direction. A key
+// on a smaller display IS smaller; the crew is also closer to it.
+//
+// One function, so the assertion that they do not overlap measures the radius
+// the picker actually uses rather than a copy of it that can drift.
+function softKeyR(K, F) {
+  return 0.40*Math.min(0.5*F.S, 0.24*F.H);
+}
 function cabScreenBuild() {
   const pr = podRange();
   if (!pr) return;
   const K = capStations(pr.x0);
-  const rcin = K.rcone(K.xcon) - 0.05*K.rp;
-  const x = K.xb + K.xcon - 0.031*K.rp;        // a hair in front of the recess
   const out = [];
   // A FLAT panel per bay, not a curved one.
   //
@@ -6146,25 +6344,13 @@ function cabScreenBuild() {
   // outward like the wing panels of a real console. Upright in the CREW's frame
   // is not available: an outboard bay is a slanted band and the largest upright
   // rectangle inside it is a fifth of the area.
-  SCR_BAYS.forEach(([d0, d1], k) => {
-    const a0 = d0*Math.PI/180 + 0.030, a1 = d1*Math.PI/180 - 0.030;
-    const ac = (a0 + a1)/2, half = (a1 - a0)/2;
-    const r0 = 0.485*rcin, r1 = 0.755*rcin, rc = (r0 + r1)/2;
-    // The three limits on an inscribed rectangle: its bottom edge must stay
-    // inside the opening's inner radius, its bottom corners inside the roll
-    // span (the sector is narrowest there), and its top corners inside the
-    // outer radius. Then trim to the canvas aspect so nothing is stretched.
-    let H = rc - r0 - 0.014*rcin;
-    let S = Math.min((rc - H)*Math.tan(half),
-                     Math.sqrt(Math.max(r1*r1 - (rc + H)*(rc + H), 0)));
-    if (S/H > SCR_W/SCR_H) S = H*SCR_W/SCR_H; else H = S*SCR_H/SCR_W;
-    const up = [0, Math.cos(ac), Math.sin(ac)];        // radial at the bay centre
-    const rt = [0, -Math.sin(ac), Math.cos(ac)];       // and along the arc
-    const P = (s, t) => [x, rc*up[1] + t*up[1] + s*rt[1],
-                            rc*up[2] + t*up[2] + s*rt[2]];
+  SCR_BAYS.forEach((_, k) => {
+    const F = scrFrame(K, k);
     const u0 = k/3, u1 = (k + 1)/3;
-    const v = [[P(-S, -H), u0, 1], [P(S, -H), u1, 1],
-               [P(S, H), u1, 0], [P(-S, H), u0, 0]];
+    // corners in the frame's own canvas coordinates, so the quad and the pick
+    // volumes cannot disagree about where the panel is
+    const v = [[F.at(0, 1), u0, 1], [F.at(1, 1), u1, 1],
+               [F.at(1, 0), u1, 0], [F.at(0, 0), u0, 0]];
     for (const t of [[0,1,2],[0,2,3]])
       for (const j of t)
         out.push(v[j][0][0], v[j][0][1], v[j][0][2],
@@ -6177,6 +6363,9 @@ function cabScreenBuild() {
 }
 // --- what is actually on them -------------------------------------------
 const SCR_INK = '#7fe3c4', SCR_DIM = '#3f7f6c', SCR_HI = '#dff3ea';
+// amber, because the coast conic is the one thing on this display that is a
+// PREDICTION rather than a plan — it must not read as another leg of the route
+const SCR_WARN = '#e0a94a';
 function scrPane(k, title, rows, extra) {
   const g = scrCx, x0 = k*SCR_W;
   g.save();
@@ -6234,7 +6423,12 @@ function trajView() {
 // all three are plane curves and the only thing that differs is how far out
 // they go — which the fit takes care of.
 function scrOrbit(g) {
-  const x0 = 24, y0 = 72, w = SCR_W - 48, h = SCR_H - 96;
+  // The box stops above the soft keys rather than running under them. It used
+  // to end at 376 of a 400 px canvas, which put the lower key row through the
+  // plot's own bottom edge and the scale readout straight across it — a plot
+  // and its controls sharing pixels, which is two things being drawn and one
+  // being read.
+  const x0 = 24, y0 = 56, w = SCR_W - 48, h = SCR_H - 136;
   g.strokeStyle = SCR_DIM; g.lineWidth = 1;
   g.strokeRect(x0, y0, w, h);
   const n = V.norm(CIS.nrm);
@@ -6261,9 +6455,25 @@ function scrOrbit(g) {
                            by0 = Math.min(by0, p[1] - r); by1 = Math.max(by1, p[1] + r); };
   for (const [p] of pts) grow(p, 0);
   if (moon) grow(moon, RM);
-  const s = Math.min(w/Math.max(bx1 - bx0, 1), h/Math.max(by1 - by0, 1))*0.92;
-  const cx = x0 + w/2 - (bx0 + bx1)/2*s, cy = y0 + h/2 + (by0 + by1)/2*s;
+  const s = Math.min(w/Math.max(bx1 - bx0, 1), h/Math.max(by1 - by0, 1))*0.92
+            * TRJ.zoom;
+  // Zoom moves the centre from the whole trajectory toward WHERE YOU ARE.
+  // At the fitted scale the pane is the bounding box, which is the right thing
+  // to see first; zoomed in about that same centre, a 390,000 km arc walks
+  // straight out of the pane and six times magnification shows you empty space
+  // next to the route. The blend is 1 - 1/zoom, so the fitted view is untouched
+  // and by the second press you are looking at the vehicle.
+  const f = 1 - 1/TRJ.zoom;
+  const ccx = (bx0 + bx1)/2*(1 - f) + here[0]*f;
+  const ccy = (by0 + by1)/2*(1 - f) + here[1]*f;
+  // The pan is applied in PIXELS, after the fit and after the zoom, because it
+  // is a screen gesture: a step means a fifth of the pane wherever you are, and
+  // expressing it in metres would make it a different distance at every zoom.
+  const cx = x0 + w/2 - ccx*s - TRJ.px*w,
+        cy = y0 + h/2 + ccy*s + TRJ.py*h;
   const X = p => cx + p[0]*s, Y = p => cy - p[1]*s;
+  g.save();
+  g.beginPath(); g.rect(x0, y0, w, h); g.clip();   // zoomed-out ink stays in
   // Earth, to scale — with a floor, because at lunar distance the planet is
   // 1.6% of the frame and a disc that small is not a planet, it is a dot
   g.fillStyle = '#0d2b3a'; g.strokeStyle = SCR_INK; g.lineWidth = 1.5;
@@ -6288,19 +6498,105 @@ function scrOrbit(g) {
     }
     g.stroke();
   }
+  // The COAST orbit: the conic you are on RIGHT NOW, which is where you end up
+  // with the engines cold. It is a different curve from the flown path the
+  // moment the flight plan still has a burn in it, and the difference between
+  // the two IS the plan — a translunar arc that would fall back without its
+  // mid-course, an orbit that would decay without its circularisation. Drawn
+  // from the osculating elements rather than by propagating anything, because a
+  // conic is a closed form and this is a display, not a simulation.
+  const rn = [samp(CIS.t, CIS.x, simT), samp(CIS.t, CIS.y, simT),
+              samp(CIS.t, CIS.z, simT)];
+  const vn = cisState(simT).vel;
+  if (TRJ.coast) {
+    const con = coastConic(rn, vn, e1, e2);
+    if (con) {
+      g.strokeStyle = SCR_WARN; g.lineWidth = 1.5;
+      g.setLineDash([6, 5]);
+      g.beginPath();
+      con.forEach((p, i) => i ? g.lineTo(X(p), Y(p)) : g.moveTo(X(p), Y(p)));
+      g.stroke();
+      g.setLineDash([]);
+    }
+  }
   g.fillStyle = SCR_HI;
   g.beginPath(); g.arc(X(here), Y(here), 4.5, 0, 6.2832); g.fill();
-  // the two numbers the shape does not tell you, inside the frame rather than
-  // above it — the plot wants the whole pane
-  const ap = apsides([samp(CIS.t, CIS.x, simT), samp(CIS.t, CIS.y, simT),
-                      samp(CIS.t, CIS.z, simT)], cisState(simT).vel);
+  g.restore();
+  // the numbers the shape does not tell you, inside the frame rather than above
+  // it — the plot wants the whole pane
+  const ap = apsides(rn, vn);
   g.font = '16px ui-monospace, monospace';
   g.fillStyle = SCR_DIM;
-  g.fillText(((bx1 - bx0)/1000).toFixed(0) + ' km across', x0 + 9, y0 + h - 11);
+  g.fillText(`${((bx1 - bx0)/1000/TRJ.zoom).toFixed(0)} km across`, x0 + 9, y0 + h - 11);
+  // The magnification goes at the TOP of the box, not beside the width — the
+  // two readouts along the bottom already fill it, and at x6.6 the zoom ran
+  // straight into the apoapsis figure with no space between them.
+  if (TRJ.zoom > 1.0001) {
+    g.fillStyle = SCR_HI;
+    g.fillText(`×${TRJ.zoom.toFixed(TRJ.zoom < 10 ? 1 : 0)}`, x0 + 9, y0 + 20);
+  }
   if (ap) {
     const t = `AP ${((ap.ra - RE)/1000).toFixed(0)}  PE ${((ap.rp - RE)/1000).toFixed(0)} km`;
     g.fillText(t, x0 + w - 9 - g.measureText(t).width, y0 + h - 11);
+  } else {
+    const t = 'HYPERBOLIC';
+    g.fillText(t, x0 + w - 9 - g.measureText(t).width, y0 + h - 11);
   }
+  scrSoftKeys(g);
+}
+// The osculating conic through (r, v), sampled in the plot's own plane basis.
+// Elliptical orbits close; hyperbolic ones are cut at the true anomaly where
+// the radius runs past the pane, because the asymptotes go to infinity and a
+// display that follows them draws two lines off the edge and nothing else.
+function coastConic(r, v, e1, e2) {
+  const rr = V.len(r), v2 = V.dot(v, v);
+  if (!(rr > 1) || !isFinite(v2)) return null;
+  // eccentricity vector: the direction of periapsis, and its length is e
+  const ev = V.scale(V.sub(V.scale(r, v2 - MU_E/rr), V.scale(v, V.dot(r, v))),
+                     1/MU_E);
+  const e = V.len(ev);
+  const h = V.cross(r, v), p = V.dot(h, h)/MU_E;
+  if (!(p > 0)) return null;
+  // periapsis direction in the plot's plane; a circular orbit has no defined
+  // one, so fall back to the current position, which is as good as any
+  const pd = e > 1e-8 ? ev : r;
+  const a0 = Math.atan2(V.dot(pd, e2), V.dot(pd, e1));
+  // which way round the orbit goes, so the samples run in flight order
+  const sgn = V.dot(V.cross(r, v), V.cross(e1, e2)) >= 0 ? 1 : -1;
+  const lim = e > 1 ? Math.acos(-1/e) - 0.06 : Math.PI;   // the asymptote
+  const out = [];
+  const N = 180;
+  for (let i = 0; i <= N; i++) {
+    const th = -lim + 2*lim*i/N;
+    const den = 1 + e*Math.cos(th);
+    if (den <= 1e-6) continue;
+    const rad = p/den;
+    if (rad > 3.0e9) continue;                 // well past lunar distance
+    const a = a0 + sgn*th;
+    out.push([rad*Math.cos(a), rad*Math.sin(a)]);
+  }
+  return out.length > 3 ? out : null;
+}
+// The soft keys, drawn where cabControls puts their pick volumes — both read
+// SOFT_KEYS and scrFrame, so the label and the button are the same object seen
+// two ways rather than two sets of coordinates kept in step by hand.
+function scrSoftKeys(g) {
+  const kw = SCR_W*0.20, kh = SCR_H*0.070;
+  g.font = '600 26px ui-monospace, monospace';
+  g.textBaseline = 'middle';
+  for (const s of SOFT_KEYS) {
+    const cx = s.u*SCR_W, cy = s.v*SCR_H;
+    const on = s.key === 'trjco' ? TRJ.coast
+             : s.key === 'trjhome' ? (TRJ.zoom > 1.0001 || TRJ.px || TRJ.py)
+             : false;
+    g.fillStyle = on ? 'rgba(80,190,150,0.22)' : 'rgba(255,255,255,0.06)';
+    g.fillRect(cx - kw/2, cy - kh/2, kw, kh);
+    g.strokeStyle = on ? SCR_HI : SCR_DIM; g.lineWidth = 1.5;
+    g.strokeRect(cx - kw/2, cy - kh/2, kw, kh);
+    g.fillStyle = on ? SCR_HI : SCR_INK;
+    g.fillText(s.lab, cx - g.measureText(s.lab).width/2, cy + 1);
+  }
+  g.textBaseline = 'alphabetic';
 }
 // altitude against downrange: the shape of an ascent, and of an entry
 function scrProfile(g) {
@@ -6625,7 +6921,9 @@ function drawCabDecals(sc, proj) {
 // wall next to it is what makes a display look like a sticker.
 function drawCabScreens(sc, proj) {
   if (!scrBuf || !scrN || !sc.craftM) return;
-  if (simT - scrT > 0.16 || scrT > simT) { cabScreenPaint(sc); scrT = simT; }
+  if (simT - scrT > 0.16 || scrT > simT || scrKey !== scrSig()) {
+    cabScreenPaint(sc); scrT = simT; scrKey = scrSig();
+  }
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, scrTex);
   gl.uniform1i(MESH.u.uLiv, 1);
@@ -6688,6 +6986,12 @@ function cabinPanel(sc, view, proj, wCss, hCss) {
       hov.key === 'nullr'   ? 'NULL RATES' :
       hov.key === 'level'   ? 'LEVEL THE CREW' :
       hov.key === 'help'    ? `CHECKLIST · ${helpShow ? 'SHOWN' : 'PRESS H'}` :
+      // a soft key already carries its own name; what it needs to add is the
+      // state it is about to change
+      hov.soft              ? hov.label + (
+          hov.key === 'trjco'   ? ` · ${TRJ.coast ? 'SHOWN' : 'HIDDEN'}`
+        : hov.key === 'trjhome' ? ''
+        : ` · ×${TRJ.zoom.toFixed(TRJ.zoom < 10 ? 1 : 0)}`) :
       hov.seat === CAB.seat ? `${hov.label} · RIGHT CLICK TO UNBUCKLE`
                             : `${hov.label} · RIGHT CLICK TO SIT`;
   }
@@ -6703,45 +7007,99 @@ function apsides(pos, vel) {
   const e = Math.sqrt(Math.max(0, 1 + 2*eps*h2/(MU_E*MU_E)));
   return { ra: a*(1 + e), rp: a*(1 - e) };
 }
+// The next thing that happens, and how long until it. This is the single most
+// useful line on a real spacecraft display and the cabin did not have it: the
+// crew could read six numbers about where they were and nothing at all about
+// what was about to happen to them. Read off the same timeline the seek bar and
+// the toasts use, so it cannot disagree with either.
+function nextEv(t) {
+  let best = null;
+  for (const e of EVS)
+    if (isFinite(e.t) && e.t > t && (!best || e.t < best.t)) best = e;
+  return best;
+}
+// A countdown in the units a countdown is read in. Seconds up to a minute,
+// then minutes and seconds, then hours — because "T-9134 s" is a number you
+// have to do arithmetic on before it means anything.
+function fmtEta(dt) {
+  if (!isFinite(dt)) return '—';
+  if (dt < 60) return dt.toFixed(0) + ' s';
+  if (dt < 3600) return Math.floor(dt/60) + 'm ' + String(Math.floor(dt%60)).padStart(2,'0') + 's';
+  if (dt < 86400) return Math.floor(dt/3600) + 'h ' + String(Math.floor(dt%3600/60)).padStart(2,'0') + 'm';
+  return (dt/86400).toFixed(2) + ' d';
+}
 function cabRows(sc, page) {
   const st = sc.st, cs = sc.cs, es = sc.es;
   const km = m => !isFinite(m) ? '—' :
     Math.abs(m) < 1e4 ? m.toFixed(0) + ' m' : (m/1000).toFixed(1) + ' km';
   const deg = a => (a*180/Math.PI).toFixed(1) + '°';
+  const nx = nextEv(simT);
+  // The event's NAME is the key and the countdown is the value, which is the
+  // only split that fits. A row is about nineteen monospace characters across
+  // — "DYN PRESS" and "26.2 kPa" together are seventeen — so a value carrying
+  // both the name and the time ran straight into its own label and printed
+  // NEXTSABLE1 SEPARATION with no gap in it. Cut on a WORD, never mid-word:
+  // "SABLE1 SEPARATI" is not an abbreviation of anything, it is a display that
+  // ran out of room and did not say so.
+  // Abbreviate before truncating. Cutting "SABLE1 SEPARATION" to ten characters
+  // on a word boundary leaves "SABLE1…", which has thrown away the half that
+  // said what was about to happen; shortening the word nobody needs in full
+  // leaves "SABLE1 SEP", which is the whole sentence.
+  const EV_ABBR = [[/SEPARATION/g, 'SEP'], [/IGNITION/g, 'IGN'],
+                   [/INSERTION/g, 'INS'], [/JETTISON/g, 'JETT'],
+                   [/INTERFACE/g, 'IF'], [/DESCENT/g, 'DESC'],
+                   [/TRAJECTORY/g, 'TRAJ']];
+  let evName = nx ? nx.s.split('—')[0].trim() : '';
+  for (const [re, to] of EV_ABBR) evName = evName.replace(re, to);
+  const short = evName.length <= 10 ? evName
+                                    : evName.slice(0, 10).replace(/\s+\S*$/, '') + '…';
+  const nextRow = nx ? ['▸ ' + short, fmtEta(nx.t - simT)] : ['▸ NEXT', 'END'];
   if (page === 'SYSTEMS') {
     const rate = RCS.rate > 3e-4 ? (RCS.rate*180/Math.PI).toFixed(1) + '°/s' : 'NULL';
+    // The mass is REAL — the ascent log carries it and the coast knows what
+    // reached orbit — so it goes here instead of another word that says
+    // NOMINAL. A display that reports a system it does not model is not a
+    // display, it is a picture of one.
+    const mkg = st ? st.m : (run.metrics && run.metrics.prop_margin_kg !== undefined
+                             ? NaN : NaN);
     return [['LIGHTS', CAB_LIGHTS[cabLight].n], ['ATT RATE', rate],
             ['CLOCK', warpEff > 1.5 ? '×' + Math.round(warpEff) : 'REAL'],
             ['CREW', !CAB.live ? 'STOWED'
                      : CAB.seat !== null ? 'STRAPPED IN' : 'FREE'],
-            ['O2 / PRESS', 'NOMINAL']];
+            ['STACK', isFinite(mkg) ? (mkg/1000).toFixed(1) + ' t' :
+                      LASTST ? 'KICK + POD' : 'POD'],
+            nextRow];
   }
   if (page === 'TRAJECTORY') {
     if (cs) {
       const ap = apsides(cs.pos, cs.vel);
+      // the period is what turns two altitudes into an orbit you can plan in
+      const a = ap ? 0.5*(ap.ra + ap.rp) : NaN;
+      const per = isFinite(a) ? 2*Math.PI*Math.sqrt(a*a*a/MU_E) : NaN;
       return [['APOGEE', ap ? km(ap.ra - RE) : 'ESCAPE'],
               ['PERIGEE', ap ? km(ap.rp - RE) : '—'],
+              ['PERIOD', isFinite(per) ? fmtEta(per) : '—'],
               ['SPEED', (cs.speed/1000).toFixed(2) + ' km/s'],
-              ['MET', (simT/86400).toFixed(2) + ' d']];
+              nextRow];
     }
     if (st) return [['DOWNRANGE', km(st.dr)], ['FLIGHT PATH', deg(st.gam)],
                     ['MACH', st.h > 82000 ? '—' : st.mach.toFixed(2)],
-                    ['THRUST', (st.thr/1e3).toFixed(0) + ' kN']];
+                    ['THRUST', (st.thr/1e3).toFixed(0) + ' kN'], nextRow];
     if (es) return [['FLIGHT PATH', deg(es.gam)],
                     ['SPEED', es.v.toFixed(0) + ' m/s'],
                     ['TO SPLASH', isFinite(tSplash)
-                       ? Math.max(0, tSplash - simT).toFixed(0) + ' s' : '—']];
+                       ? fmtEta(Math.max(0, tSplash - simT)) : '—'], nextRow];
     return [['STANDBY', '—']];
   }
   if (st) return [['ALTITUDE', km(st.h)], ['VELOCITY', st.v.toFixed(0) + ' m/s'],
                   ['ACCEL', (st.m > 0 ? st.thr/st.m/9.81 : 0).toFixed(2) + ' g'],
-                  ['DYN PRESS', st.q.toFixed(1) + ' kPa']];
+                  ['DYN PRESS', st.q.toFixed(1) + ' kPa'], nextRow];
   if (es) return [['ALTITUDE', km(es.h)], ['VELOCITY', es.v.toFixed(0) + ' m/s'],
                   ['G-LOAD', es.g.toFixed(1) + ' g'],
-                  ['HEATING', es.q.toFixed(0) + ' W/cm²']];
+                  ['HEATING', es.q.toFixed(0) + ' W/cm²'], nextRow];
   if (cs) return [['EARTH', fmtDist(cs.rE - RE)], ['MOON', fmtDist(cs.rM - RM)],
                   ['VELOCITY', (cs.speed/1000).toFixed(2) + ' km/s'],
-                  ['MET', (simT/86400).toFixed(2) + ' d']];
+                  ['MET', (simT/86400).toFixed(2) + ' d'], nextRow];
   return [['STANDBY', '—']];
 }
 
@@ -6967,7 +7325,7 @@ function warpStep(dir) {
   return manualWarp === 0 ? 'AUTO' : warpLabel(manualWarp).toUpperCase();
 }
 function initControls() {
-  chipRow($('cams'), MS ? CAMS_MOON : CAMS, 'auto', m => camMode = m);
+  chipRow($('cams'), MS ? CAMS_MOON() : CAMS(), 'auto', m => camMode = m);
   syncHelp();
   // the hint has done its job by the time the vehicle is off the pad
   setTimeout(() => $('keys').classList.remove('show'), 9000);
@@ -7048,9 +7406,10 @@ function initControls() {
       if (scrubDir !== d) { scrubDir = d; scrubT0 = performance.now(); }
     }
     const i = +e.key;
-    if (i >= 1 && i <= CAMS.length) {
-      camMode = CAMS[i-1];
-      chipRow($('cams'), CAMS, camMode, m => camMode = m);
+    const cl = MS ? CAMS_MOON() : CAMS();
+    if (i >= 1 && i <= cl.length) {
+      camMode = cl[i-1];
+      chipRow($('cams'), cl, camMode, m => camMode = m);
     }
     if (e.key === 'm') audioMute(!muted);
     if (e.key === 'p') perfShow = !perfShow;
@@ -7301,6 +7660,274 @@ window.__selftest = function () {
     }
     return back;
   }, 0);
+
+  // --- a bigger capsule is a ROOMIER capsule, not the same one photographed
+  // closer. This is the assertion the whole fit-out change exists to satisfy,
+  // and the measurement that showed it was needed: the clear volume divided by
+  // rp^3 was 0.086 at EVERY size, which is what "the same shape scaled" means
+  // numerically. Fittings sized by the crew and the equipment stop growing, so
+  // the share of the capsule they occupy falls and this ratio rises.
+  const clearV = rp => {
+    const K = capStations(0, rp);
+    return Math.PI*Math.pow(cabRLim(K), 2)*Math.max(0, cabXHi(K) - cabXLo(K));
+  };
+  eq('a wider capsule gives away proportionally less of itself', () => {
+    const small = clearV(1.40)/Math.pow(1.40, 3);
+    const big = clearV(3.0)/Math.pow(3.0, 3);
+    return big > 1.5*small ? 'ok' : `${small.toFixed(3)} -> ${big.toFixed(3)}`;
+  }, 'ok');
+  eq('and the ratio never falls as the capsule grows', () => {
+    let prev = 0;
+    for (const rp of [0.75, 0.95, 1.10, 1.40, 1.955, 2.51, 3.0]) {
+      const f = clearV(rp)/Math.pow(rp, 3);
+      if (f < prev - 1e-9) return `fell at rp ${rp}`;
+      prev = f;
+    }
+    return 'ok';
+  }, 'ok');
+  // and nothing below Apollo size moved, which is what makes this safe to do
+  eq('the small capsules are untouched', () => {
+    for (const rp of [0.75, 0.95, 1.10, 1.40]) {
+      const K = capStations(0, rp);
+      if (Math.abs(cabXLo(K) - (K.xa + 0.27*rp)) > 1e-12) return `xlo ${rp}`;
+      if (Math.abs(cabXHi(K) - (K.xcon - 0.14*rp)) > 1e-12) return `xhi ${rp}`;
+    }
+    return 'ok';
+  }, 'ok');
+  // A couch is a person long. It used to be 0.60 of the local wall, which is
+  // 0.8 m in the reference capsule and 3.2 m in a six-metre one — the first is
+  // too short to lie on and the second is not a couch, it is a corridor.
+  // The couch's own extent, which is what a person lies on: -1.26 ln to
+  // +0.41 ln. It reaches 1.90 m and stops — the crew member is the same size
+  // in a 4 m capsule and a 6 m one, which is the whole point.
+  eq('a couch never grows past a person', () => {
+    for (const rp of [1.10, 1.40, 1.955, 2.51, 3.0])
+      if (1.67*cabSeatLn(capStations(0, rp)) > 1.905) return `rp ${rp}`;
+    return 'ok';
+  }, 'ok');
+  eq('and it reaches one once the capsule can hold one', () =>
+     1.67*cabSeatLn(capStations(0, 3.0)) > 1.89, true);
+  eq('a capsule too small for a person carries none', () =>
+     cabCrew(capStations(0, 0.75)) === 0 && cabCrew(capStations(0, 0.95)) === 1, true);
+  eq('and a wide capsule seats more than three', () =>
+     cabCrew(capStations(0, 3.0)) > 3 && cabCrew(capStations(0, 1.40)) === 3, true);
+  eq('every couch still gets a bay that exists', () => {
+    for (const rp of [0.75, 0.95, 1.40, 2.51, 3.0]) {
+      const K = capStations(0, rp);
+      for (let i = 0; i < cabCrew(K); i++) {
+        const b = cabSeatBay(K, i);
+        if (!(b >= 0 && b < SCR_BAYS.length)) return `rp ${rp} couch ${i} -> ${b}`;
+      }
+    }
+    return 'ok';
+  }, 'ok');
+  eq('and the couches stay inside the cabin at every size', () => {
+    for (const rp of [0.95, 1.40, 1.955, 2.51, 3.0]) {
+      const K = capStations(0, rp);
+      if (cabCrew(K) <= 0) continue;
+      const hw = Math.min(cabCrew(K) >= 3 ? 0.14*rp : 0.17*rp, 0.30);
+      const wall = cabRin(K, K.xa + 0.07*rp);
+      for (const z of cabSeatZ(K))
+        if (Math.abs(z) + hw > 0.97*wall) return `rp ${rp} couch at ${z.toFixed(2)}`;
+    }
+    return 'ok';
+  }, 'ok');
+
+  // --- what is about to happen. The cabin could read six numbers about where
+  // it was and nothing about what was coming, which is backwards for a crew.
+  eq('the next event is the next one, and only ever ahead', () => {
+    if (!EVS.length) return 'ok';
+    for (const t of [-20, 0, 100, 5000, 1e5, 1e9]) {
+      const n = nextEv(t);
+      if (!n) continue;
+      if (!(n.t > t)) return `behind at ${t}`;
+      for (const e of EVS) if (isFinite(e.t) && e.t > t && e.t < n.t) return `skipped at ${t}`;
+    }
+    return 'ok';
+  }, 'ok');
+  eq('and it runs out rather than wrapping', () => nextEv(1e12), null);
+  // a countdown is read in the units it is counted in
+  eq('a countdown is seconds under a minute', () => fmtEta(42), '42 s');
+  eq('minutes and seconds under an hour', () => fmtEta(605), '10m 05s');
+  eq('hours and minutes under a day', () => fmtEta(9134), '2h 32m');
+  eq('and days beyond that', () => fmtEta(3*86400), '3.00 d');
+  eq('every cabin page carries it', () => {
+    const sc = { st: { h: 1e4, v: 300, m: 2e4, thr: 1e5, q: 30, dr: 1e4, gam: 0.5, mach: 1 } };
+    for (const p of CAB_PAGES)
+      if (!cabRows(sc, p).some(r => r[0].startsWith('▸'))) return p;
+    return 'ok';
+  }, 'ok');
+  // A row is about nineteen monospace characters across. Anything wider runs
+  // its value into its own label, which is what NEXTSABLE1 SEPARATION was.
+  eq('and no row is too wide for the pane', () => {
+    const sc = { st: { h: 1e4, v: 300, m: 2e4, thr: 1e5, q: 30, dr: 1e4, gam: 0.5, mach: 1 } };
+    for (const p of CAB_PAGES)
+      for (const [k, v] of cabRows(sc, p))
+        if (k.length + String(v).length > 19) return `${p}: ${k}/${v}`;
+    return 'ok';
+  }, 'ok');
+
+  // --- an uncrewed payload has no inside, and the viewer has to agree with the
+  // vehicle it was sent about that. The cabin camera is the thing that would
+  // otherwise put an eye inside a solid bus, so it is the thing that goes.
+  eq('the cabin camera is offered when there is a cabin', () => {
+    const h = HASCAB; HASCAB = true;
+    const ok = CAMS().includes('cabin') && CAMS_MOON().length === 6;
+    HASCAB = h;
+    return ok;
+  }, true);
+  eq('and withdrawn when there is not', () => {
+    const h = HASCAB; HASCAB = false;
+    const ok = !CAMS().includes('cabin') && !CAMS_MOON().includes('cabin') &&
+               CAMS().length === 5;
+    HASCAB = h;
+    return ok;
+  }, true);
+  eq('and the director never cuts to it either', () => {
+    const h = HASCAB; HASCAB = false;
+    const picks = new Set();
+    for (let t = -10; t < 400; t += 5) picks.add(autoPickPad(t));
+    for (let t = tEI - 20; t < tEI + 400; t += 5) picks.add(autoPickEntry(t));
+    HASCAB = h;
+    return picks.has('cabin') ? [...picks].join(',') : 'ok';
+  }, 'ok');
+  // every camera the chips offer has to be one the pickers can actually resolve
+  eq('every offered camera is a real one', () => {
+    const h = HASCAB; HASCAB = false;
+    const ok = CAMS().every(m => CAMS_ALL.includes(m));
+    HASCAB = h;
+    return ok;
+  }, true);
+
+  // --- the trajectory display's soft keys. The whole design rests on one
+  // claim — that a key is under its own label — and that holds only because
+  // cabControls and scrSoftKeys both read SOFT_KEYS through scrFrame's canvas
+  // mapping. Assert the mapping instead of the pixels: the frame's corners
+  // must land on the panel it is inscribed in, and every key inside it.
+  eq('every soft key lands on the centre display', () => {
+    const K = capStations(0, 1.40), F = scrFrame(K, 1);
+    const rcin = K.rcone(K.xcon) - 0.05*K.rp;
+    for (const s of SOFT_KEYS) {
+      const p = F.at(s.u, s.v), r = Math.hypot(p[1], p[2]);
+      const roll = Math.atan2(p[2], p[1])*180/Math.PI;
+      // inside the bay's opening: 0.485..0.755 rcin, and its roll span
+      if (!(r > 0.485*rcin - 1e-9 && r < 0.755*rcin + 1e-9)) return `${s.key} r`;
+      if (!(roll > SCR_BAYS[1][0] && roll < SCR_BAYS[1][1])) return `${s.key} roll`;
+    }
+    return 'ok';
+  }, 'ok');
+  eq('and no two of them overlap', () => {
+    const K = capStations(0, 1.40), F = scrFrame(K, 1);
+    const rad = softKeyR(K, F);
+    for (let i = 0; i < SOFT_KEYS.length; i++)
+      for (let j = i + 1; j < SOFT_KEYS.length; j++) {
+        const a = F.at(SOFT_KEYS[i].u, SOFT_KEYS[i].v);
+        const b = F.at(SOFT_KEYS[j].u, SOFT_KEYS[j].v);
+        if (V.len(V.sub(a, b)) < 2*rad) return `${SOFT_KEYS[i].key}/${SOFT_KEYS[j].key}`;
+      }
+    return 'ok';
+  }, 'ok');
+  // measured against the plot box's BOTTOM (y0 + h), which is what a key would
+  // actually be drawn through — not against h, which is only its height
+  eq('the keys sit below the plot rather than through it',
+     () => SOFT_KEYS.every(s => s.v*SCR_H - SCR_H*0.035 > 56 + (SCR_H - 136)), true);
+  // zoom is bounded at both ends and pan comes home with it, so there is no
+  // way to end up zoomed out and looking at empty space
+  eq('zooming out all the way recentres the view', () => {
+    TRJ.zoom = 4; TRJ.px = 0.5; TRJ.py = -0.3;
+    for (let i = 0; i < 12; i++) cabActivate({ key: 'trjout' }, false);
+    const r = TRJ.zoom === 1 && TRJ.px === 0 && TRJ.py === 0;
+    trjHome();
+    return r;
+  }, true);
+  eq('and zooming in stops', () => {
+    for (let i = 0; i < 40; i++) cabActivate({ key: 'trjin' }, false);
+    const z = TRJ.zoom; trjHome();
+    return z <= TRJ_ZMAX;
+  }, true);
+  // Every control the crew has over a display must move that display's repaint
+  // signature, or pressing it while the clock is stopped does nothing you can
+  // see — which is the state you are in whenever you have paused to look at the
+  // thing you are trying to zoom.
+  // Each control is exercised from a state where it CAN act — zoomed in, which
+  // is the only state in which panning means anything, because at the fitted
+  // scale there is nothing outside the pane to pan to. "Every key does
+  // something from anywhere" is not the invariant and asserting it just
+  // rediscovers that zoom-out and pan are correctly inert at home.
+  eq('every trajectory control repaints the display it changes', () => {
+    const dead = new Set();
+    for (const k of ['trjin', 'trjout', 'trjl', 'trjr', 'trju', 'trjd', 'trjco']) {
+      trjHome(); TRJ.coast = false;
+      if (k !== 'trjin') { TRJ.zoom = 4; }        // room to move in every sense
+      const s0 = scrSig();
+      cabActivate({ key: k }, false);
+      if (scrSig() === s0) dead.add(k);
+    }
+    trjHome(); TRJ.coast = false;
+    return dead.size ? [...dead].join(',') : 'ok';
+  }, 'ok');
+  // and the inertness at home is itself the rule, so it is stated rather than
+  // left as a thing the test above happens to route around
+  eq('panning is inert at the fitted scale, where there is nowhere to pan', () => {
+    trjHome();
+    cabActivate({ key: 'trjl' }, false);
+    cabActivate({ key: 'trju' }, false);
+    return TRJ.px === 0 && TRJ.py === 0;
+  }, true);
+  eq('and so does turning the page', () => {
+    const p = cabPage, s0 = scrSig();
+    cabPage = (cabPage + 1) % CAB_PAGES.length;
+    const moved = scrSig() !== s0;
+    cabPage = p;
+    return moved;
+  }, true);
+
+  // --- the coast conic. It is the osculating orbit, so a circular one has to
+  // come back to itself and a hyperbolic one must NOT be drawn to infinity.
+  eq('a circular orbit closes on itself', () => {
+    const r = [RE + 400e3, 0, 0], v = [0, Math.sqrt(MU_E/(RE + 400e3)), 0];
+    const c = coastConic(r, v, [1,0,0], [0,1,0]);
+    if (!c) return 'null';
+    const d = V.len(V.sub([c[0][0], c[0][1], 0], [c[c.length-1][0], c[c.length-1][1], 0]));
+    const rad = Math.hypot(c[0][0], c[0][1]);
+    return d < 1e-6*rad && Math.abs(rad - (RE + 400e3)) < 1 ? 'ok' : `d ${d} r ${rad}`;
+  }, 'ok');
+  eq('an escape trajectory is cut, not followed to infinity', () => {
+    const rr = RE + 400e3;
+    const c = coastConic([rr, 0, 0], [0, 1.6*Math.sqrt(MU_E/rr), 0], [1,0,0], [0,1,0]);
+    return c && c.every(p => Math.hypot(p[0], p[1]) <= 3.0e9);
+  }, true);
+  eq('and the conic passes through the state it was taken from', () => {
+    const rr = RE + 800e3, r = [rr*0.6, rr*0.8, 0];
+    const v = [-0.8*Math.sqrt(MU_E/rr)*1.05, 0.6*Math.sqrt(MU_E/rr)*1.05, 0];
+    const c = coastConic(r, v, [1,0,0], [0,1,0]);
+    let best = Infinity;
+    for (const p of c) best = Math.min(best, V.len(V.sub([p[0], p[1], 0], r)));
+    return best < 0.004*rr;
+  }, true);
+
+  // --- the parachutes hang FROM the capsule. The confluence is the lowest
+  // point on the whole chute, so the invariant is one number: at every stage of
+  // the opening and for both canopies, nothing the chute draws reaches below
+  // the station it is attached to. Broken, it does not look like a chute a
+  // little out of place — the risers go through the hull and meet in a spike
+  // under the heat shield, which is what the 0.27R term produced.
+  eq('nothing on a chute reaches below the apex it hangs from', () => {
+    const apex = 2.0;
+    let low = Infinity;
+    for (const [L, R] of [[3.2, 1.15], [8.5, 4.6]])
+      for (const sc of [0.15, 0.3, 0.6, 1.0])
+        low = Math.min(low, chuteStandoff(apex, L, sc) - L*sc - apex);
+    return low;
+  }, 0, 1e-12);
+  eq('and the confluence sits ON it, at every stage of the opening', () => {
+    let worst = 0;
+    for (const sc of [0.15, 0.5, 1.0])
+      worst = Math.max(worst, Math.abs(chuteStandoff(1.9, 8.5, sc) - 8.5*sc - 1.9));
+    return worst;
+  }, 0, 1e-12);
+  eq('a fuller canopy stands further off, never closer',
+     () => chuteStandoff(2, 8.5, 1.0) > chuteStandoff(2, 8.5, 0.15), true);
 
   // --- the coast camera holds still. It used to advance its own yaw by a fixed
   // step every FRAME, which makes the rate a function of the frame time: the
@@ -7602,7 +8229,12 @@ window.__selftest = function () {
   // inside a rack and no key had to be pressed. Bounding the eye by the bare
   // pressure cone could never have caught that — the cone is not the volume,
   // the fit-out is, and these pin the difference.
-  const CK = capStations(0);
+  // A CREWED capsule, and the flown one if it is bigger. The cabin testset is
+  // about a cabin, and the flown vehicle no longer always has one — a capsule
+  // under 1.8 m across carries nobody and emits no cabin at all, so pinning
+  // these to whatever is on the pad made them assert about seat poses that do
+  // not exist. The size sweeps elsewhere in here still cover the flown range.
+  const CK = capStations(0, Math.max(1.40, POD_RP));
   const rfrac = p => Math.hypot(p[1], p[2]) / cabRin(CK, p[0] - CK.xb);
   const eyeAtAim = a => cabinPose(a, 0, CK).eye;
   eq('the clear radius is inside the racks', () => CAB_RFRAC < 0.68, true);
@@ -7618,9 +8250,51 @@ window.__selftest = function () {
   // upright. These pin both halves of that.
   const fwdOf = p => V.norm(V.sub(p.look, p.eye));
   const SEAT = cabinPose('seat', 0, CK);
-  eq('the seat looks up the axis at the console', () => fwdOf(SEAT)[0] > 0.80, true);
-  eq('so the console face is near square on to it', () =>
-     Math.acos(Math.abs(V.dot(fwdOf(SEAT), [-1,0,0])))*180/Math.PI < 32, true);
+  // These two used to read "the seat looks up the axis at the console", which
+  // is a property of a couch ON the axis and not of a couch. The reference
+  // vehicle carries one crew member, so the centre couch was the only one ever
+  // measured, and both assertions failed the first time a three-crew capsule
+  // was flown through them — on geometry that had been like that all along.
+  //
+  // What is actually true is per-couch: each aims at ITS OWN bay. The incidence
+  // that leaves is a RATIO, not a size — the couch offset and the console
+  // stand-off both scale with rp — so an outboard station reads its screen at
+  // the same 42 degrees in a 1.5 m capsule and in a 6 m one. That is oblique
+  // and it is the honest number: square-on for three abreast would need the
+  // bays moved out to the rolls the couches actually sit at, which is a console
+  // redesign rather than a constant, and every cap, placard and legend on that
+  // face is keyed to where the bays are now.
+  const CAP_SIZES = [0.75, 0.95, 1.10, 1.40, 1.95, 3.0];
+  const eachCouch = fn => {
+    for (const rp of CAP_SIZES) {
+      const K = capStations(0, rp);
+      for (let i = 0; i < cabCrew(K); i++) {
+        const bad = fn(K, i, rp);
+        if (bad) return bad;
+      }
+    }
+    return 'ok';
+  };
+  eq('every couch aims at its own screen bay, at every capsule size', () =>
+     eachCouch((K, i, rp) => {
+       const p = cabinPose('seat', i, K), b = SCR_BAYS[cabSeatBay(K, i)];
+       const roll = Math.atan2(p.look[2], p.look[1])*180/Math.PI;
+       return (roll >= b[0] - 1e-6 && roll <= b[1] + 1e-6) ? null
+              : `rp ${rp} couch ${i} aims at ${roll.toFixed(1)} deg`;
+     }), 'ok');
+  eq('and reads it at an angle a screen survives', () =>
+     eachCouch((K, i, rp) => {
+       const a = Math.acos(Math.abs(V.dot(fwdOf(cabinPose('seat', i, K)),
+                                          [-1,0,0])))*180/Math.PI;
+       return a < 45 ? null : `rp ${rp} couch ${i} at ${a.toFixed(1)} deg`;
+     }), 'ok');
+  // and the commander's couch, which IS on the axis, still meets the original
+  // standard — that is the one this cabin was designed around
+  eq('the commander is on the axis and square on to the console', () => {
+    const K = capStations(0, 1.40), f = fwdOf(cabinPose('seat', cabSeatHome(K), K));
+    return f[0] > 0.80 &&
+           Math.acos(Math.abs(V.dot(f, [-1,0,0])))*180/Math.PI < 32;
+  }, true);
   // the screen band is the +y sector of the annulus, so +y is the direction its
   // writing runs up in; a seat whose up is anything else reads it on the skew
   eq('and the seat is the right way up to the screens', () =>
@@ -7648,16 +8322,33 @@ window.__selftest = function () {
      cabReset(); cabSit(0, CK); cabStand(CK);
      return CAB.seat;
   }, null);
+  // both sides read CK: the expectation used to read the FLOWN capsule, which
+  // is a different vehicle the moment the flown one carries no crew
   eq('sitting back down puts you back in the couch', () => {
      cabReset(); cabStand(CK); cabSit(1 % cabSeatZ(CK).length, CK);
      return CAB.seat;
-  }, 1 % cabSeatZ(capStations(0)).length);
+  }, 1 % cabSeatZ(capStations(0, Math.max(1.40, POD_RP))).length);
   eq('every couch has a seat pose', () =>
      cabSeatZ(CK).every((z, i) => cabinPose('seat', i, CK).eye[2] === z), true);
-  eq('the capsule seats what the mesh seats it', () =>
-     cabCrew(CK), CK.rp >= 1.10 ? 3 : CK.rp >= 0.85 ? 2 : 1);
-  eq('and the commander gets a middle couch where there is one', () =>
-     cabSeatHome(CK), cabCrew(CK) === 3 ? 1 : 0);
+  // The ladder is 1, 2, 3 up to about Apollo size and then counted — this used
+  // to pin "three abreast and no more, however wide", which is what it was.
+  eq('the capsule seats what the mesh seats it', () => {
+    const want = { 0.75: 0, 0.95: 1, 1.10: 2, 1.40: 3, 1.955: 3, 2.51: 3, 3.0: 4 };
+    for (const rp in want)
+      if (cabCrew(capStations(0, +rp)) !== want[rp])
+        return `rp ${rp}: ${cabCrew(capStations(0, +rp))} not ${want[rp]}`;
+    return 'ok';
+  }, 'ok');
+  eq('and the commander gets the middle couch, wherever it is', () => {
+    for (const rp of [0.75, 0.95, 1.40, 2.51, 3.0]) {
+      const K = capStations(0, rp), n = cabCrew(K), h = cabSeatHome(K);
+      if (n <= 0) continue;                       // nobody aboard to command
+      if (h !== Math.floor((n - 1)/2)) return `rp ${rp}`;
+      // and on an odd crew that couch is actually on the axis
+      if (n % 2 === 1 && Math.abs(cabSeatZ(K)[h]) > 1e-12) return `off axis at rp ${rp}`;
+    }
+    return 'ok';
+  }, 'ok');
   eq('a push into the wall is caught', () =>
      cabBox(CK, [CK.xb + CK.xb0 + 0.30*CK.Lc, 0, 9]).hit, true);
   eq('and lands inboard of the racks', () =>
@@ -7898,19 +8589,35 @@ window.__selftest = function () {
      true);
   eq('and the centre one is the widest', () =>
      SCR_BAYS[1][1] - SCR_BAYS[1][0] >= SCR_BAYS[0][1] - SCR_BAYS[0][0], true);
-  // The console face is fully booked in roll: bays out to 46, breaker columns
-  // from 58. A switch has exactly one place to be, and being drawn through
-  // either neighbour is the bug this pins — it has happened twice.
-  eq('the switches clear the outermost screen bay', () =>
-     CAB_ROLL_CTL > SCR_BAYS[2][1], true);
-  eq('and clear the first breaker column', () => CAB_ROLL_CTL < 58, true);
-  eq('there are two switches', () => CAB_CTL.length, 2);
-  eq('and they are not the same one', () => CAB_CTL[0].roll !== CAB_CTL[1].roll, true);
-  // and the pick volume is a switch's worth, not a hatch's
-  eq('the pick volume is the size of the switch', () => {
-     const c = cabControls();
-     return c.length === 0 || c[0].r < 0.09*capStations(0).rp;
-  }, true);
+  // Every control on the console is now a CAP in the grid — the two paddle
+  // switches that used to stand out on the flanks are gone, and with them the
+  // roll they occupied, the second pick path and the second colour rule. What
+  // has to hold instead is that the grid has room for all of them and that no
+  // two are the same cell, which is the failure the paddles could not have and
+  // these can.
+  eq('every wired control is a cap in the grid', () =>
+     CAP_FN.every(f => f.cell >= 0 && f.cell < SCR_BAYS.length*8), true);
+  eq('and no two share a cell', () =>
+     new Set(CAP_FN.map(f => f.cell)).size, CAP_FN.length);
+  eq('and no two share a key', () =>
+     new Set(CAP_FN.map(f => f.key)).size, CAP_FN.length);
+  eq('the lighting and the display page are among them', () =>
+     ['lights', 'page'].every(k => CAP_FN.some(f => f.key === k)), true);
+  // capCell inverts the mesh's own grid, so a cap's cell has to come back out
+  // of the position cabControls puts it at — otherwise the thing you click and
+  // the thing that is painted the odd colour are two different caps
+  eq('every cap round-trips through the grid it is drawn on', () => {
+     const K = capStations(0, 1.40), rcin = cabRin(K, K.xcon);
+     for (const fn of CAP_FN) {
+       const bay = SCR_BAYS[fn.cell >> 3];
+       const a0 = bay[0]*Math.PI/180, a1 = bay[1]*Math.PI/180;
+       const col = (fn.cell >> 1) & 3, row = fn.cell & 1;
+       const ac = a0 + (a1 - a0)*(0.185 + 0.26*col);
+       const rr = (0.24 + 0.09*row + 0.031)*rcin;
+       if (capCell(ac, rr/rcin) !== fn.cell) return `${fn.key}`;
+     }
+     return 'ok';
+  }, 'ok');
   // cycling wraps in both directions — right click is the only sensible use
   // for the second button on a three-position switch
   eq('lights cycle forward', () => rrIdx(0 + 1, CAB_LIGHTS.length), 1);

@@ -84,6 +84,14 @@ small against the sensitivity of what it feeds.
 """
 const PERIGEE_TOL = 250.0
 
+"""
+Inside this distance of the Moon [m] the coast is logged at every integration
+step rather than at the stride. It is the encounter — a few hours out of a
+multi-day coast — and it is the only part of the track whose shape a straight
+line between samples cannot carry. Costs a few hundred extra log points.
+"""
+const CIS_LOG_NEAR = 5.0e7
+
 "Local-timescale step size [s]."
 @inline function _cis_dt(r::V3, t::Float64, eph::CircularMoonEphemeris;
                          eta::Float64 = CIS_ETA, dt_max::Float64 = 240.0)
@@ -233,9 +241,29 @@ function _coast_leg!(L::CislunarLog, r::V3, v::V3, t::Float64,
     kount = 0
     gamma_end = NaN
     rdot_prev = vdot(r, v)
+    # The two previous altitude samples, so closest approach can be INTERPOLATED
+    # rather than merely sampled. Around perilune the step is tens of seconds
+    # and the vehicle is doing a couple of km/s, so consecutive samples are tens
+    # of kilometres apart and the smallest of them sits above the true minimum
+    # by v^2 dt^2 / (8 r) — about 70 m at a 13 s step past a 500 m perilune.
+    # That bias does not matter at all against a 2000 km target and is most of
+    # the answer against a 500 m one, so a target that close needs the vertex,
+    # not the sample. Three points and a parabola get it to the metre for free;
+    # the alternative is stepping the whole cislunar coast finer to fix the two
+    # minutes of it that need it.
+    a2 = a1 = Inf; tt2 = tt1 = NaN
     while t < t_end
         dtc = min(_cis_dt(r, t, eph; eta = eta), max(t_stop - t, 1.0e-3))
-        (kount % log_every == 0) && _cis_push!(L, t, r, v, eph, theta_g0, outbound ? 2 : 3)
+        # Every step near the Moon, the stride elsewhere. The stride is right
+        # for a coast that is a straight line for days and wrong for the hour
+        # that is not: a viewer draws CHORDS between logged points, and the
+        # chord error goes as the square of the gap. Measured at 2.4 km/s past
+        # a 1737 km body, four steps of 13 s sag 1.1 km — which is how a 500 m
+        # grazing flyby, correct to three metres, came out drawn 1.2 km inside
+        # the Moon. The propagator already tightens its own step here; this
+        # simply stops throwing three quarters of it away.
+        (kount % log_every == 0 || d_prev < CIS_LOG_NEAR) &&
+            _cis_push!(L, t, r, v, eph, theta_g0, outbound ? 2 : 3)
         kount += 1
         rn_, vn_ = _cis_step(r, v, t, dtc, eph)
         tn = t + dtc
@@ -246,6 +274,28 @@ function _coast_leg!(L::CislunarLog, r::V3, v::V3, t::Float64,
         if alt_m < peri_alt
             peri_alt = alt_m; t_peri = tn
         end
+        # a1 is a sampled minimum bracketed by a2 and alt_m: fit the parabola
+        # through the three and take its vertex. Guarded on curvature and on the
+        # vertex landing inside the bracket, so a flat or noisy triple leaves the
+        # sampled minimum exactly as it was.
+        if isfinite(a2) && a1 < a2 && a1 <= alt_m
+            u = tt2 - tt1; w = tn - tt1
+            den = u * w * (u - w)
+            if abs(den) > 1e-12
+                qa = ((a2 - a1) * w - (alt_m - a1) * u) / den
+                qb = ((alt_m - a1) * u * u - (a2 - a1) * w * w) / den
+                if qa > 0.0
+                    dts = -qb / (2qa)
+                    if u <= dts <= w
+                        av = a1 - qb * qb / (4qa)
+                        if av < peri_alt
+                            peri_alt = av; t_peri = tt1 + dts
+                        end
+                    end
+                end
+            end
+        end
+        a2 = a1; tt2 = tt1; a1 = alt_m; tt1 = tn
         if alt_m <= 0.0
             r, v, t = rn_, vn_, tn
             outcome = :lunar_impact
@@ -393,12 +443,28 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
                             hp_moon_target::Float64 = 2000.0e3,
                             hp_return_target::Float64 = 35.0e3,
                             perigee_tol::Float64 = PERIGEE_TOL,
-                            # inner-Newton acceptance, in km. A 2000 km flyby
-                            # is a slack target; a 100 km one is not, and a
-                            # landing mission that only needs the free return
-                            # as an abort path should not spend outer passes
-                            # polishing a perigee nobody intends to fly.
-                            tol_perilune_km::Float64 = 25.0,
+                            # Inner-Newton acceptance, in km, and it has to
+                            # SCALE with the target. A flat 25 km is a
+                            # reasonable band on a 2000 km flyby — about one
+                            # percent — and complete nonsense on a 500 m one,
+                            # where it accepts anything from the surface to
+                            # fifty times the target and calls it converged.
+                            # Two percent of the target, floored at 50 m
+                            # (below which the integrator's own step is the
+                            # limit, not the corrector's) and capped at the
+                            # old 25 km so nothing that used to converge now
+                            # spends outer passes it does not need. A landing
+                            # mission only carries the free return as an abort
+                            # path and should not be polishing a perigee
+                            # nobody intends to fly.
+                            tol_perilune_km::Float64 =
+                                clamp(0.02 * hp_moon_target / 1e3, 0.05, 25.0),
+                            # Fly the flyby that was asked for and let the
+                            # return leg be whatever the geometry gives. Only
+                            # sensible when the perilune target is so low that
+                            # no return corridor exists at it; see the block
+                            # below for the measurement that says where that is.
+                            perilune_only::Bool = hp_moon_target < 10.0e3,
                             tol_perigee_km::Float64 = 2.0,
                             outer_iter::Int = 12,
                             eta::Float64 = CIS_ETA,
@@ -496,6 +562,74 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
                                       stage = stage, m_stack = m_stack,
                                       prop_avail = prop_avail, theta_g0 = theta_g0,
                                       eta = eta)
+
+    # --- perilune priority --------------------------------------------------
+    # A single-burn free return does not let you choose both ends. Perilune
+    # altitude and the altitude the return leg comes back to are two numbers
+    # from one trajectory, and the closer the flyby the harder the Moon turns
+    # it: measured on the reference vehicle, a 2000 km perilune returns to a
+    # +50 km perigee and a 500 m one to -33 km — it comes back INTO the Earth
+    # rather than skimming the corridor. Nothing chooses that away.
+    #
+    # So when the target is a graze, the 2x2 Newton is the wrong instrument.
+    # Shooting a residual pair whose second component is 68 km out and cannot be
+    # reduced spends the whole step trying to fix it, and drags the perilune it
+    # COULD have hit off by nine hundred metres — which is how a 500 m target
+    # came back at 1397. Drop to one unknown and one target: t_ign against
+    # perilune, secant, dv held at the seed. What it costs is the return leg,
+    # which was never available at this altitude; what it buys is the flyby
+    # actually being the flyby that was asked for.
+    # BISECTION, not a secant, and the reason is that the residual is TRUNCATED:
+    # below zero altitude the propagation stops at impact, so `perilune_alt`
+    # saturates just under the surface instead of continuing down. A secant fed
+    # that flat tail walks straight through the Moon — measured, a 500 m target
+    # came back at -777 m, which is not a flyby, it is a crater. Bisection reads
+    # only the SIGN of the residual, which truncation leaves correct.
+    #
+    # The family also has a FLOOR. Perilune as a function of ignition time has a
+    # minimum (that is what the scan above found), so a target below the closest
+    # this trajectory can come is not reachable at any ignition time, and saying
+    # so beats bisecting toward it forever.
+    if perilune_only
+        pa(tg) = fly(tg, dvv).perilune_alt
+        lo = tmin
+        alo = pa(lo)
+        if alo > hp_moon_target
+            @warn("perilune target is below the closest approach this transfer reaches",
+                  closest_m = round(alo, digits = 1), target_m = hp_moon_target)
+            full = verify(lo, dvv)
+            return (lo, dvv, full)
+        end
+        # walk out to the far side of the target — later ignition crosses further
+        # ahead of the Moon and passes higher
+        hi = lo; ahi = alo
+        for k in 1:14
+            hi = lo + 30.0k
+            ahi = pa(hi)
+            ahi > hp_moon_target && break
+        end
+        if ahi <= hp_moon_target
+            @warn("no ignition time in the scan window reaches this perilune",
+                  reached_m = round(ahi, digits = 1), target_m = hp_moon_target)
+        else
+            for _ in 1:22
+                mid = 0.5 * (lo + hi)
+                am = pa(mid)
+                if am < hp_moon_target; lo, alo = mid, am
+                else; hi, ahi = mid, am
+                end
+                abs(ahi - hp_moon_target) < tol_perilune_km * 1e3 && break
+            end
+        end
+        tig = hi                          # the bracket end that is ABOVE the
+        f1 = (ahi - hp_moon_target) / 1e3 # surface, never the one below it
+        full = verify(tig, dvv)
+        verbose && @info "free-return perilune-only" f_perilune_km = f1 outcome = full.outcome
+        abs(f1) >= tol_perilune_km &&
+            @warn "grazing perilune outside tolerance" f_perilune_km = f1
+        return (tig, dvv, full)
+    end
+
     local full
     stalls = 0
     best = (Inf, tig, dvv, nothing)          # tightest residual seen so far

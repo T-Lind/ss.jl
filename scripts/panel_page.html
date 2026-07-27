@@ -258,7 +258,11 @@
       <!-- stage blocks are generated from the stage count -->
       <div id="stagebox"></div>
       <div class="row3" style="margin-top:8px">
-        <div><label for="fairing">fairing [kg]</label><input id="fairing" value="150"></div>
+        <div><label for="fairing" title="untick to fly the spacecraft in the open —
+             no shroud mass, and a blunt capsule on the nose instead of an ogive">fairing
+          <input type="checkbox" id="fairing_on" checked
+                 style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label>
+          <input id="fairing" value="150"></div>
         <div><label for="diameter">diameter [m]</label><input id="diameter" value="1.8"></div>
         <div><label for="kick_deg" title="pitch-over kick [deg]">kick [°]</label><input id="kick_deg" value="8"></div>
       </div>
@@ -272,6 +276,14 @@
       <div class="row" style="margin-top:6px">
         <div style="flex:1"><label for="pod_mass">payload / capsule [kg]</label>
           <input id="pod_mass" value="350"></div>
+        <div style="flex:1"><label for="pod_dia" title="the payload's body diameter;
+             blank works it out from the mass. The builder has the flown ones.">
+          payload &oslash; [m]</label>
+          <input id="pod_dia" value="" placeholder="auto"></div>
+        <div style="flex:1"><label for="crewed" title="off flies an uncrewed bus:
+             no cabin, and no interior view in the launch page">crew aboard
+          <input type="checkbox" id="crewed" checked
+                 style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label></div>
       </div>
       <div class="row" style="margin-top:6px">
         <div style="flex:1"><label style="display:flex;gap:6px;align-items:center"
@@ -420,8 +432,8 @@
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
-const BASE_FIELDS = ['pod_mass','h_park_km','incl_deg','hp_moon_km','hp_return_km',
-  'fairing','diameter','nstages','nboost','opt_kick','kick_deg',
+const BASE_FIELDS = ['pod_mass','pod_dia','crewed','h_park_km','incl_deg','hp_moon_km','hp_return_km',
+  'fairing','fairing_on','diameter','nstages','nboost','opt_kick','kick_deg',
   'tli_mag_err_pct','tli_point_err_deg'];
 // the landing mission adds a lander and a descent plan; everything else — the
 // launcher, the ascent, the trans-lunar leg — is the same mission underneath
@@ -767,6 +779,13 @@ const PRESETS = {
   'nominal':        {},
   'heavy pod':      {pod_mass: 420},
   'low flyby':      {hp_moon_km: 500},
+  // 500 metres, and the units are the point: this is a clearance against the
+  // MEAN SPHERE, and the Moon's relief runs to about +/- 8 km, so a real one
+  // would be flown at a longitude with nothing standing up in it. The designer
+  // takes it seriously — its acceptance band is 2% of the target rather than a
+  // flat 25 km — and closest approach is interpolated rather than sampled,
+  // because at 13 s a step the vehicle covers 30 km either side of it.
+  'grazing flyby':  {hp_moon_km: 0.5},
   'high flyby':     {hp_moon_km: 6000},
   'steep entry':    {hp_return_km: 15},
   'shallow entry':  {hp_return_km: 65},
@@ -841,8 +860,32 @@ const VEHICLES = {
     s3_engine: 'aj10', s3_engines: 1, s3_prop: 2200, s3_dry_auto: true,
       s3_diameter: 2.4,
   },
+  // The one vehicle in here that was built to land on the Moon, at its real
+  // masses: 2,077 t of S-IC on five F-1s, 451 t of S-II on five J-2s, and a
+  // 107 t S-IVB on one — which does trans-lunar injection, so it is the kick
+  // stage. Dry masses are stated rather than estimated: the conceptual sizing
+  // curve is calibrated around a Falcon-class first stage, and a 2,000 t one is
+  // two orders of magnitude outside it. No fairing — Apollo flew its spacecraft
+  // exposed under an escape tower, with the lander in an adapter below.
+  'Saturn V (Apollo)': {
+    // 1 degree, not the reference 8 and not the 4 this shipped with. At a
+    // lift-off thrust-to-weight of 1.20 this is the slowest-accelerating stack
+    // in the catalogue, and it has to stay near vertical long enough to get out
+    // of the thick air; at 2 degrees it does not insert at all. The kick search
+    // finds it now — its ladder used to start at 4 — but the number is stated
+    // so the vehicle also flies with the search turned off.
+    nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 1,
+    opt_kick: true, pod_mass: 45000,
+    s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000,
+      s1_diameter: 10.1,
+    s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000,
+      s2_diameter: 10.1,
+    s3_engine: 'j2', s3_engines: 1, s3_prop: 106600, s3_dry: 13500,
+      s3_diameter: 6.6,
+  },
   'Starship (expendable)': {
-    nstages: 2, nboost: 0, diameter: 9.0, fairing: 0, kick_deg: 5, opt_kick: true,
+    nstages: 2, nboost: 0, diameter: 9.0, fairing_on: false, kick_deg: 5,
+    opt_kick: true,
     s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
       s1_diameter: 9.0,
     s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
@@ -912,6 +955,19 @@ async function doRun() {
         ? 'flown, but the ascent never reached orbit'
         : `flown, but the mission ended in "${j.outcome}"`) +
         ' — open the launch view (L) to fly what was simulated';
+    } else if (j.metrics.on_target && j.metrics.grazing) {
+      // On target, and the target is one where "above the surface" stops
+      // meaning what it usually means. Perilune here is measured against the
+      // MEAN SPHERE, and the Moon's relief runs to roughly +/- 8 km — so a
+      // clearance under about ten is a clearance over a smooth Moon, and the
+      // real one has mountains in it. Said out loud rather than left in a
+      // metric nobody reads.
+      $('status').className = 'status warn';
+      $('status').textContent =
+        `done in ${((performance.now()-t0)/1000).toFixed(1)} s — GRAZING: ` +
+        `${(j.metrics.perilune_km*1000).toFixed(0)} m is above the MEAN SPHERE, ` +
+        `and lunar relief runs to ±8 km. The free return also gives up its ` +
+        `return corridor this low.`;
     } else if (j.metrics.on_target) {
       $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
     } else if (j.mode === 'landing') {
@@ -2121,23 +2177,27 @@ for (const b of $('modeswitch').querySelectorAll('button'))
     setMode(b.dataset.mode);
     // a landing mission needs a launcher that can throw a lander; the
     // reference vehicle cannot, and saying so with a failed run is worse
-    // than starting from one that can
+    // than starting from one that can. The Saturn V is the one vehicle in the
+    // catalogue that was actually built for this, so it is the one a landing
+    // mission starts from.
     if (landing() && +$('diameter').value < 5) {
-      VNAME = 'Starship';
-      applyPreset(VEHICLES['Starship (expendable)'], { reset: true });
+      VNAME = 'Saturn V';
+      applyPreset(VEHICLES['Saturn V (Apollo)'], { reset: true });
       for (const el of $('vpresets').querySelectorAll('.chip'))
-        el.classList.toggle('sel', el.dataset.p === 'Starship (expendable)');
+        el.classList.toggle('sel', el.dataset.p === 'Saturn V (Apollo)');
     }
     fetchGeo();
     doRun();
   };
-// The landing mission's cinematic is the free-return profile (its title
-// says so); an orbit mission flies AS an orbit mission — the launch page
-// derives its phases from whatever events the run actually has.
+// Every mission flies AS itself. The launch page derives its phases from
+// whatever the run actually contains, and a landing run contains a powered
+// descent — so downgrading `landing` to `flyby` here, which is what this used
+// to do, meant the one mission whose whole point is the last fifteen
+// kilometres was the one mission that never showed them. The page had the
+// moon world, the terrain and the lander the entire time; nothing ever asked
+// the server for a descent to put in them.
 $('launchbtn').onclick = () => {
-  const u = params();
-  u.set('mode', landing() ? 'flyby' : MODE);
-  window.open('/launch?' + u, '_blank');
+  window.open('/launch?' + params(), '_blank');
 };
 // the builder opens on this form's exact configuration; stopPropagation
 // because the chip lives inside a fold header that would otherwise collapse
@@ -2268,13 +2328,13 @@ fillCatalogues().then(() => {
   setMode(qmode === 'landing' ? 'landing' : qmode === 'orbit' ? 'orbit' :
           qmode === 'suborbital' ? 'suborbital' : 'flyby');
   if (landing()) {
-    VNAME = 'Starship';
-    applyPreset(VEHICLES['Starship (expendable)'], { reset: true });
+    VNAME = 'Saturn V';
+    applyPreset(VEHICLES['Saturn V (Apollo)'], { reset: true });
   }
   // Rehydrate from an inbound query first — an explicit configuration in the
   // URL outranks everything, including the landing preset above. With no
   // vehicle in the URL, the builder's stored vehicle applies instead (unless
-  // the landing preset just configured Starship, which stays the mode's own
+  // the landing preset just configured a Saturn V, which stays the mode's own
   // default until the builder writes again).
   const q = new URLSearchParams(location.search);
   if ([...q.keys()].some(k => k !== 'mode' && k !== 'zoom')) {

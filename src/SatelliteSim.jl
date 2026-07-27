@@ -112,6 +112,7 @@ export
     frontal_area, core_diameter, pad_thrust,
     stage_burn_time, stage_dv, liftoff_mass, stack_mass_above,
     stage_volume, stage_diameter,
+    LV_CD_TABLE, LV_CD_BARE_DELTA, bare_payload_cd, stack_sref,
     # moon
     MU_MOON, R_MOON, A_MOON, N_MOON,
     CircularMoonEphemeris, coplanar_moon, moon_position, moon_velocity,
@@ -164,7 +165,7 @@ export
     cw_stm, cw_propagate, cw_two_impulse,
     # mesh & panel aero
     TriMesh, read_stl, write_stl, mesh_area, mesh_volume, mass_properties,
-    lathe_mesh, box_mesh, merge_meshes, rocket_mesh, pod_mesh, pod_radius,
+    lathe_mesh, box_mesh, merge_meshes, rocket_mesh, pod_mesh, probe_mesh, pod_radius, pod_crew,
     interstage_length,
     PanelAero, panel_aero, cp_max_newtonian, trim_alpha,
     # config
