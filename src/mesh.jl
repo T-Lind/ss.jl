@@ -426,13 +426,12 @@ which is roughly what those vehicles carry.
 """
 function pod_crew(rp::Real)
     rp = float(rp)
-    # A CREW MEMBER IS THE SAME SIZE IN EVERY CAPSULE, and below about 1.8 m
-    # across there is nowhere to put one. The smallest capsule that ever
-    # carried a person was Mercury at 1.89 m, and it carried them folded. Under
-    # that this is not a crew capsule — it is a re-entry pod with cargo in it,
-    # and it gets no couches and no cabin rather than a couch scaled down to
-    # half a metre and a console for somebody who is not there.
-    rp < 0.90 && return 0
+    # `pod_crew` is used only for payloads explicitly marked crewed; uncrewed
+    # payloads take the separate probe mesh. Keep a hard floor for genuinely
+    # tiny recovery pods, but do not silently erase the cabin from the default
+    # small one-person capsule merely because its mass fit is below Mercury's
+    # historical diameter.
+    rp < 0.55 && return 0
     rp < 1.10 && return 1            # one crew, folded, Mercury-style
     rp < 1.30 && return 2
     # usable half-width at the couch station, less the outermost couch's own
@@ -1122,6 +1121,39 @@ function probe_mesh(; radius::Float64 = 0.75, nseg::Int = 24)
 end
 
 """
+    _lander_payload_mesh(diameter; nseg) -> (parts, length)
+
+Compact two-stage lunar lander for the launch-stack payload bay. The descent
+stage, ascent cabin, engine bell, four legs and footpads are one payload
+section; the dedicated lunar scene may replace it with its more detailed
+animated lander after separation.
+"""
+function _lander_payload_mesh(diameter::Float64; nseg::Int = 32)
+    d = diameter
+    parts = TriMesh[]
+    # descent stage and ascent cabin
+    push!(parts, lathe_mesh([(0.0, 0.0), (0.0, 0.25d), (0.08d, 0.32d),
+                            (0.38d, 0.32d), (0.48d, 0.23d), (0.52d, 0.0)];
+                           nseg = nseg))
+    push!(parts, lathe_mesh([(0.42d, 0.0), (0.42d, 0.21d), (0.73d, 0.21d),
+                            (0.84d, 0.12d), (0.88d, 0.0)]; nseg = nseg))
+    push!(parts, _bell_mesh(0.0, 0.13d, 0.10d, 0.045d, 0.0, 0.0;
+                            nseg = max(16, nseg ÷ 2)))
+    # Four landing legs and broad footpads make the payload visually and
+    # physically wider than its pressure vessels—the diameter is the envelope.
+    for sg in (-1.0, 1.0)
+        y0, y1 = sort((sg * 0.23d, sg * 0.48d))
+        push!(parts, box_mesh((0.10d, y0, -0.025d), (0.18d, y1, 0.025d)))
+        push!(parts, box_mesh((0.06d, sg * 0.48d - 0.06d, -0.08d),
+                              (0.11d, sg * 0.48d + 0.06d, 0.08d)))
+        z0, z1 = sort((sg * 0.23d, sg * 0.48d))
+        push!(parts, box_mesh((0.10d, -0.025d, z0), (0.18d, 0.025d, z1)))
+        push!(parts, box_mesh((0.06d, -0.08d, sg * 0.48d - 0.06d),
+                              (0.11d, 0.08d, sg * 0.48d + 0.06d)))
+    end
+    parts, 0.88d
+end
+"""
     rocket_mesh(; diameter, diameters, prop_masses, densities, n_engines,
                   fairing_len, nseg) -> (mesh, sections)
 
@@ -1168,6 +1200,8 @@ function rocket_mesh(; diameter::Float64 = 1.8,
                      payload_mass::Float64 = 350.0,
                      pod_diameter::Float64 = 0.0,
                      crewed::Bool = true,
+                     payload_kind::Symbol = :capsule,
+                     payload_diameter::Float64 = 0.0,
                      fairing_len::Float64 = 2.2 * last(diameters),
                      fairing::Bool = true,
                      nseg::Int = 48)
@@ -1257,43 +1291,32 @@ function rocket_mesh(; diameter::Float64 = 1.8,
         x += len + ltap
         rtop_prev = ltap > 0 ? rj : r
     end
-    D = diameters[K]                             # the capsule rides on top
+    D = diameters[K]                             # the payload rides on top
     r = D / 2
-    # pod: crew capsule seated on the adapter, inside the fairing. The cabin
-    # is its own section so a viewer can cull the hull and look inside; it
-    # shares the pod's axial extent so `sections` stays sorted by x0.
-    # Sized by what it weighs (see `pod_radius`), then held to 1.25 times the
-    # WIDEST stage — a capsule two or three times wider than its own launcher is
-    # not a capsule, it is a mismatch worth showing as one. Measured against the
-    # widest and not against the kick stage it sits on, because a real capsule
-    # routinely overhangs its upper stage and is judged against the core: Dragon
-    # is 4.0 m on a 3.7 m Falcon, and reading its 1.7 m kick stage instead would
-    # cut it in half.
-    #
-    # A STATED diameter is used exactly as stated. The clamp above exists to
-    # flag a mismatch nobody chose — a capsule that came out three times its
-    # launcher because of what it weighs — and applying it to a number the
-    # operator typed would quietly ignore the choice instead: an Orion picked
-    # onto the reference 1.8 m stack would be cut from 5.02 m to 1.1 and drawn
-    # as something else entirely. The mass fit is a guess and gets a guard; a
-    # stated dimension is not a guess.
-    rp = pod_diameter > 0 ? pod_diameter / 2 :
-         min(pod_radius(payload_mass), 1.25 * maximum(diameters) / 2)
-    xb = x + 0.13D + 0.02                        # a hair off the adapter face
-    # Crewed or not. An uncrewed payload is not a capsule with the seats taken
-    # out — it has no heat shield to be shaped by, no windows and no cabin — so
-    # it gets its own body, and the sections it does NOT emit matter as much as
-    # the one it does: no `:glass` and no `:cabin` means a viewer has nothing to
-    # put a camera inside, which is exactly right.
-    phull, pglass, pcab, lp = crewed ?
-        pod_mesh(; radius = rp, nseg = max(20, nseg ÷ 2)) :
-        probe_mesh(; radius = rp, nseg = max(20, nseg ÷ 2))
-    shift = (xb, 0.0, 0.0)
-    place!(nm, ms) = finish!(nm, x, xb + lp,
-                             TriMesh[_place_mesh(m; shift = shift) for m in ms])
-    place!(:pod, phull)
-    isempty(pglass) || place!(:glass, pglass)
-    isempty(pcab)   || place!(:cabin, pcab)
+    # A lander states its full deployed envelope. Capsules keep the existing
+    # mass fit unless the builder states a diameter explicitly.
+    rp = payload_kind === :lander ?
+         (payload_diameter > 0 ? payload_diameter / 2 : 0.45D) :
+         (pod_diameter > 0 ? pod_diameter / 2 :
+          min(pod_radius(payload_mass), 1.25 * maximum(diameters) / 2))
+    xb = x + 0.13D + 0.02                        # clear of the adapter face
+    if payload_kind === :lander
+        lparts, lp = _lander_payload_mesh(2rp; nseg = max(20, nseg ÷ 2))
+        shifted = TriMesh[_place_mesh(m; shift = (xb, 0.0, 0.0)) for m in lparts]
+        finish!(:lander, x, xb + lp, shifted)
+    else
+        # Crewed or not. An uncrewed payload is a spacecraft bus rather than a
+        # capsule with the seats removed, so it has no glass or cabin sections.
+        phull, pglass, pcab, lp = crewed ?
+            pod_mesh(; radius = rp, nseg = max(20, nseg ÷ 2)) :
+            probe_mesh(; radius = rp, nseg = max(20, nseg ÷ 2))
+        shift = (xb, 0.0, 0.0)
+        place!(nm, ms) = finish!(nm, x, xb + lp,
+                                 TriMesh[_place_mesh(m; shift = shift) for m in ms])
+        place!(:pod, phull)
+        isempty(pglass) || place!(:glass, pglass)
+        isempty(pcab)   || place!(:cabin, pcab)
+    end
     #= fairing follows =#
     # Unless there isn't one. A crewed stack routinely flies its spacecraft in
     # the open — Apollo under an escape tower, Dragon and Starliner on the nose,

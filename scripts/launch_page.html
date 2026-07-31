@@ -1324,6 +1324,14 @@ function lathe(out, prof, nseg, colFn) {
 // --------------------------------------------------------------- the app --
 const qs = location.search.slice(1);
 let run = null, geo = null;
+// What is painted on the hull and announced over it. Geometry supplies the
+// configured vehicle's name; old servers and empty builder names fall back to
+// the reference launcher.
+let VEHNAME = 'SABLE';
+function vehName(s) {
+  const raw = String(s == null ? '' : s).replace(/\s*\([^)]*\)\s*$/, '').trim();
+  return (raw || 'Sable').toUpperCase();
+}
 
 // ---------------------------------------------------- mission timeline data --
 // Nothing below is assumed about the mission: the phase table, the event
@@ -2144,7 +2152,7 @@ function measureRadii() {
   });
   const stages = geo.sections.filter(s => /^stage\d+$/.test(s.name));
   TOPD = stages.length ? 2*SECR[stages[stages.length-1].name] : DIA;
-  for (const nm of ['pod', 'glass', 'cabin', 'fairing']) {
+  for (const nm of ['pod', 'lander', 'glass', 'cabin', 'fairing']) {
     const s = geo.sections.find(x => x.name === nm);
     if (s) SECR[nm] = maxRad(s);
   }
@@ -2330,6 +2338,11 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
     else if (cx > s.x1 - 1.80*rb) c = [0.85,0.85,0.82];           // nose cone
     else if (lr < 0.55*rb) c = [0.30,0.29,0.28];                  // inside the bell
     else c = [0.66,0.64,0.60];                                    // booster skin
+  } else if (s.name === 'lander') {
+    if (cx < s.x0 + 0.18*D) c = [0.30,0.28,0.23];
+    else if (rad > 0.34*D) c = [0.76,0.62,0.30];
+    else if (cx > s.x1 - 0.35*D) c = [0.76,0.78,0.74];
+    else c = [0.67,0.57,0.34];
   } else if (s.name === 'pod') {
     const K = capStations(s.x0), u = cx - K.xb, rc = K.rcone(u), a = Math.atan2(cz, cy);
     const inWin = angNear(a, 0, 0.40) || angNear(a, 1.187, 0.28) ||
@@ -2485,6 +2498,8 @@ function buildLiveryTex() {
     g.restore();
   };
   const INK = '#15171c', RED = '#c0392b', NAVY = '#1b3a6b';
+  // Longer names shrink rather than running off the available hull station.
+  const NH = Math.min(1, 5/Math.max(VEHNAME.length, 1));
   g.clearRect(0, 0, W, H);
 
   const stages = geo.sections.filter(s => /^stage\d+$/.test(s.name));
@@ -2497,8 +2512,8 @@ function buildLiveryTex() {
                             [s1.x1 - 0.13*L, s1.x1 - 0.06*L]])
       for (const f of [-0.5, 0.0]) band(xa, xb, f, f + 0.25, INK);
     band(s1.x1 - 0.045*L, s1.x1 - 0.015*L, -0.5, 0.5, RED);   // interstage trim
-    label('SABLE', s1.x0 + 0.30*L, -0.24, 1.05, INK);
-    label('SABLE', s1.x0 + 0.30*L,  0.26, 1.05, INK);
+    label(VEHNAME, s1.x0 + 0.30*L, -0.24, 1.05*NH, INK);
+    label(VEHNAME, s1.x0 + 0.30*L,  0.26, 1.05*NH, INK);
     // insignia + ensign on the flanks
     disc(s1.x0 + 0.62*L, 0.0, 0.62, NAVY);
     disc(s1.x0 + 0.62*L, 0.0, 0.44, '#f2f0e8');
@@ -2517,7 +2532,7 @@ function buildLiveryTex() {
   if (fair) {
     const L = fair.x1 - fair.x0;
     band(fair.x0 + 0.02*L, fair.x0 + 0.05*L, -0.5, 0.5, INK);
-    label('SABLE', fair.x0 + 0.18*L, 0.0, 0.85, INK);
+    label(VEHNAME, fair.x0 + 0.18*L, 0.0, 0.85*NH, INK);
     // fairing split line runs down the z = 0 plane, i.e. roll ±90 degrees
     for (const v of [-0.25, 0.25]) band(fair.x0, fair.x1, v - 0.004, v + 0.004, '#8c8c86');
   }
@@ -3814,6 +3829,12 @@ function rcsAuth(t) {
 // 0.18 rad/s rate at x2000 is not a manoeuvre. Holding needs nothing at all.
 function rcsActive(ph) {
   if (warpEff > 1.01) return false;
+  return coastActive(ph);
+}
+// Whether the trajectory is in an unpowered, non-entry interval. Cabin motion
+// is relative to the vehicle and runs on wall time, so unlike reaction-wheel
+// commanding it remains available while the mission clock is compressed.
+function coastActive(ph) {
   if (ph.w === 'eci') return !BURNW.some(b => simT >= b[0] && simT <= b[1]);
   // an ascent that never made orbit still coasts, and it coasts in the pad
   // world — the wheels come alive once the last engine has quit
@@ -4490,11 +4511,10 @@ const CAB_ROLL_EYE = 200, CAB_ROLL_HEAD = 282;
 // size the count is COUNTED: how many fit across at a real shoulder pitch.
 function cabCrew(K) {
   const rp = K.rp;
-  // A crew member is the same size in every capsule, and below about 1.8 m
-  // across there is nowhere to put one — the smallest that ever carried a
-  // person was Mercury at 1.89 m. Under that this is a re-entry pod with cargo
-  // in it, and pod_mesh emits no cabin for it.
-  if (rp < 0.90) return 0;
+  // The payload is already explicitly marked crewed (uncrewed payloads use a
+  // different mesh). Preserve a floor for genuinely tiny recovery pods, but a
+  // default small one-person capsule must still have the cabin it was promised.
+  if (rp < 0.55) return 0;
   if (rp < 1.10) return 1;
   if (rp < 1.30) return 2;
   const R = 0.85*0.89*rp, hw = Math.min(0.14*rp, 0.30), P = Math.min(0.44*rp, 0.86);
@@ -5533,10 +5553,10 @@ function frame(now) {
   // the stack and look at something.
   const dtA = running ? dt : dtReal;
   rcsStep(dtA, rcsActive(ph), rcsMustAlign(ph));
-  // Floating is allowed exactly where hand-flying is: coasting, unpowered, at
-  // real time. Under thrust or through entry there is a g-load holding the
-  // crew in the couch, and unstrapping into it is not a thing you survive.
-  cabStep(dtA, camMode === 'cabin' && rcsActive(ph));
+  // Floating is relative to the cabin and therefore runs on wall time even
+  // when the mission clock is compressed. Burns and entry still pin the crew
+  // into the couch; an unpowered coast does not.
+  cabStep(dtReal, camMode === 'cabin' && coastActive(ph));
 
   const scene = buildScene(ph);
   scene.cam.fov = fovZoom(scene.cam.fov, zoomK);
@@ -6005,7 +6025,7 @@ function drawWorldMeshes(sc, proj, inCab) {
     // craft = whatever is still attached: kick stage + capsule, until the
     // stage is jettisoned ahead of entry interface
     for (const s of secDraw) {
-      if (s.name === 'pod' || s.name === 'cabin' || s.name === 'glass') {
+      if (s.name === 'pod' || s.name === 'lander' || s.name === 'cabin' || s.name === 'glass') {
         if (!skip(s))
           drawSec(s, stackM, proj);
         continue;
@@ -7708,7 +7728,7 @@ window.__selftest = function () {
   eq('and it reaches one once the capsule can hold one', () =>
      1.67*cabSeatLn(capStations(0, 3.0)) > 1.89, true);
   eq('a capsule too small for a person carries none', () =>
-     cabCrew(capStations(0, 0.75)) === 0 && cabCrew(capStations(0, 0.95)) === 1, true);
+     cabCrew(capStations(0, 0.50)) === 0 && cabCrew(capStations(0, 0.75)) === 1, true);
   eq('and a wide capsule seats more than three', () =>
      cabCrew(capStations(0, 3.0)) > 3 && cabCrew(capStations(0, 1.40)) === 3, true);
   eq('every couch still gets a bay that exists', () => {
@@ -8178,6 +8198,13 @@ window.__selftest = function () {
     return done;
   }, true);
   eq('a burn is preceded by a lead-in, not a snap', () => RCS_ALIGN_LEAD >= 30, true);
+  eq('cabin motion remains live at coast warp while wheel commands do not', () => {
+    const w0 = warpEff, t0 = simT, bw0 = BURNW;
+    warpEff = 100; simT = 100; BURNW = [];
+    const cabin = coastActive({ w: 'eci' }), wheels = rcsActive({ w: 'eci' });
+    warpEff = w0; simT = t0; BURNW = bw0;
+    return cabin && !wheels;
+  }, true);
   // --- the button grid. Every cap has to be ONE colour, which means the thing
   // hashed has to be the cap and not a point on it: hashing the position split
   // all 24 caps across two to four colours, in wedges.
@@ -8333,7 +8360,7 @@ window.__selftest = function () {
   // The ladder is 1, 2, 3 up to about Apollo size and then counted — this used
   // to pin "three abreast and no more, however wide", which is what it was.
   eq('the capsule seats what the mesh seats it', () => {
-    const want = { 0.75: 0, 0.95: 1, 1.10: 2, 1.40: 3, 1.955: 3, 2.51: 3, 3.0: 4 };
+    const want = { 0.50: 0, 0.75: 1, 0.95: 1, 1.10: 2, 1.40: 3, 1.955: 3, 2.51: 3, 3.0: 4 };
     for (const rp in want)
       if (cabCrew(capStations(0, +rp)) !== want[rp])
         return `rp ${rp}: ${cabCrew(capStations(0, +rp))} not ${want[rp]}`;
@@ -8733,12 +8760,14 @@ window.__selftest = function () {
   eq('and low', () => bgMemParse('{"air":0.01}').air, 0.35);
   eq('and ignores a non-number', () => bgMemParse('{"space":"x"}').space, 0.7);
 
+  window.__selftestResult = out;
   console.log(`__selftest: ${out.pass} passed, ${out.fail} failed`,
               out.failures.length ? out.failures : '');
+  if (out.failures.length)
+    console.log('__selftestFailures ' + JSON.stringify(out.failures));
   return out;
 };
-if (new URLSearchParams(location.search).get('selftest') === '1')
-  setTimeout(window.__selftest, 0);
+const SELFTEST_REQUESTED = new URLSearchParams(location.search).get('selftest') === '1';
 
 // ---------------------------------------------------------- test harness --
 // rAF does not fire in a background tab, so anything that needs the sim to
@@ -8961,6 +8990,9 @@ async function boot() {
     run = await r1.json(); geo = await r2.json();
     if (!run.ok) throw new Error(run.error || 'mission failed');
     if (!geo.ok) throw new Error(geo.error || 'geometry failed');
+    VEHNAME = vehName(geo.name);
+    $('ov_title').textContent = VEHNAME;
+    document.title = VEHNAME + ' — mission';
     buildData();
     buildLiveryTex();
     buildRocket();
@@ -9028,13 +9060,15 @@ async function boot() {
       initAudio();
       started = true; running = true;
     };
+    return true;
   } catch (e) {
     $('ov_sub').textContent = 'could not load the mission';
     $('err').textContent = String(e.message || e);
     $('err').classList.remove('hidden');
+    return false;
   }
 }
-boot();
+boot().then(ok => { if (ok && SELFTEST_REQUESTED) window.__selftest(); });
 requestAnimationFrame(frame);
 </script>
 </body>

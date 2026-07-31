@@ -162,18 +162,35 @@ AscentCtx(stage, phase, t_ign, t_kick0, t_loop0, fairing_on, burning, nb::Int = 
 "Booster sets still physically attached to the stack."
 booster_attached(ctx::AscentCtx) = [s !== :gone for s in ctx.bstate]
 
-"""
-    core_throttle(lv, ctx) -> Float64
+# Automatic axial-acceleration limiting keeps a high-thrust configuration from
+# turning the nominal pitch program into a short, violent hop. Two g is above
+# the reference launcher's natural acceleration and below typical crew limits.
+const MAX_ASCENT_ACCEL = 2.0G0
+const MIN_CORE_THROTTLE = 0.20
 
-Thrust fraction the first stage is held at. While any set that asks for a
-throttled core is burning, the core runs down to the deepest such setting;
-once the sides are away it goes back to full.
 """
-function core_throttle(lv::LaunchVehicle, ctx::AscentCtx)
-    ctx.stage == 1 || return 1.0
+    core_throttle(lv, ctx, mass, pamb) -> Float64
+
+Core thrust fraction after applying both a booster-set throttle command and an
+automatic axial-acceleration limit. Excess thrust therefore shortens neither
+the guidance window nor the useful burn: an overpowered vehicle throttles and
+keeps the surplus propellant for later manoeuvres.
+"""
+function core_throttle(lv::LaunchVehicle, ctx::AscentCtx,
+                       mass::Float64 = Inf, pamb::Float64 = 0.0)
     thr = 1.0
-    for (i, b) in enumerate(lv.boosters)
-        ctx.bstate[i] === :burning && (thr = min(thr, b.core_throttle))
+    if ctx.stage == 1
+        for (i, b) in enumerate(lv.boosters)
+            ctx.bstate[i] === :burning && (thr = min(thr, b.core_throttle))
+        end
+    end
+    if isfinite(mass) && ctx.stage >= 1 && isempty(lv.boosters) &&
+       pad_thrust(lv) / liftoff_mass(lv) > MAX_ASCENT_ACCEL
+        fixed = sum(booster_thrust(b, pamb) for (i, b) in enumerate(lv.boosters)
+                    if ctx.bstate[i] === :burning; init = 0.0)
+        core = stage_thrust(lv.stages[ctx.stage], pamb)
+        limit = (MAX_ASCENT_ACCEL * mass - fixed) / max(core, 1.0)
+        thr = min(thr, clamp(limit, MIN_CORE_THROTTLE, 1.0))
     end
     thr
 end
@@ -333,6 +350,7 @@ function _steer(guid::AscentGuidance, ctx::AscentCtx, r::V3, v::V3, t::Float64,
         # aims at the ground, and a vehicle that does is spending propellant to
         # make its own orbit worse.
         th = clamp(atan(tt), PITCH_CMD_MIN, PITCH_CMD_MAX)
+
         return vadd(vscale(that, cos(th)), vscale(rhat, sin(th)))
     end
 end
@@ -363,7 +381,7 @@ function _ascent_deriv!(dx::Vector{Float64}, x::Vector{Float64},
     # commanded direction, so thrust simply sums.
     if ctx.burning && ctx.stage >= 1
         st = lv.stages[ctx.stage]
-        thr = core_throttle(lv, ctx)
+        thr = core_throttle(lv, ctx, m, pamb)
         thrust_mag = thr * stage_thrust(st, pamb)
         dm = -thr * stage_mdot(st)
     end
@@ -500,17 +518,40 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
             ev!(:fairing_jettison)
         end
 
+        # A clearly failed orbital ascent must not keep firing while diving.
+        # Ten degrees down is far outside any insertion corridor; shut the core
+        # down and report the failed state instead of spending fuel on impact.
+        if ctx.burning && isempty(lv.boosters) && guid.cutoff === :energy && t > 60.0 &&
+           d.gamma < deg2rad_(-10.0)
+            st = lv.stages[ctx.stage]
+            prop_left[ctx.stage] = st.mprop - ctx.burned
+            ctx.burning = false; ctx.phase = :coast
+            reached = false; h_cut = d.h; gam_cut = d.gamma
+            ev!(:powered_descent_abort)
+            break
+        end
         # The ground is the floor. Nothing here stopped a trajectory that came
         # back down from carrying on through the surface and out the far side,
         # so a flight that had already crashed went on being integrated as if
         # it were flying. It ends where it hits, and how hard it hit is the
         # event's own velocity — a few m/s is a landing, anything else is not.
-        # Only once the engines are done. Truncating a POWERED trajectory here
-        # changes what tune_ascent sees from its trial parameters, and the
-        # tuner then walks to a different solution for vehicles that were
-        # perfectly fine — a fix for crashed flights has no business moving
-        # the ones that fly.
-        if !ctx.burning && t > 5.0 && d.h <= 0.0
+        # Powered or not: the surface is an unconditional terminal boundary.
+        # A bad trial must be allowed to fail, but never to tunnel through Earth.
+        if t > 0.5 && d.h <= 0.0
+            # Put the terminal state on the ellipsoid rather than leaving the
+            # final fixed step a few metres underground.
+            theta = earth_rotation_angle(theta_g0, t)
+            rs = rot_z(ecef_from_geodetic(d.lat, d.lon, 0.0), -theta)
+            x[1] = rs[1]; x[2] = rs[2]; x[3] = rs[3]
+            # The inverse ellipsoid conversion is approximate; close the final
+            # few metres explicitly so the logged state is on h = 0.
+            for _ in 1:4
+                d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
+                abs(d.h) < 1e-6 && break
+                rh = vunit((x[1], x[2], x[3]))
+                x[1] -= d.h * rh[1]; x[2] -= d.h * rh[2]; x[3] -= d.h * rh[3]
+            end
+            d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
             h_cut = 0.0; gam_cut = d.gamma
             ctx.burning = false; ctx.phase = :coast
             reached = false
@@ -595,16 +636,10 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
                     # makes those discontinuous in its own parameters — so this
                     # decides what the result is called, not when it happens.
                     rp = _perigee_radius((x[1], x[2], x[3]), (x[4], x[5], x[6]))
-                    reached = true
+                    reached = rp >= RE_MEAN + SECO_HP_MIN
                     h_cut = d.h; gam_cut = d.gamma
                     ev!(:seco)
-                    # An insertion can meet the energy target on a trajectory
-                    # that comes straight back down, and until this event
-                    # existed nothing said so. It is reported rather than
-                    # failed because the cause is upstream — tune_ascent not
-                    # converging for the vehicle — and turning a silent bad
-                    # orbit into a silent failed mission would hide it twice.
-                    rp < RE_MEAN + SECO_HP_MIN && ev!(:insertion_below_surface)
+                    !reached && ev!(:insertion_below_surface)
                     break
                 end
             end
@@ -625,7 +660,8 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
         # boundary a fixed step gets visibly wrong: overshooting it burns
         # propellant the stage does not have, so the last step of a burn is
         # trimmed to land exactly on depletion.
-        thr_now = ctx.burning && ctx.stage >= 1 ? core_throttle(lv, ctx) : 0.0
+        thr_now = ctx.burning && ctx.stage >= 1 ?
+                  core_throttle(lv, ctx, x[7], d.pamb) : 0.0
         dts = dt
         if thr_now > 0
             mdot_core = thr_now * stage_mdot(lv.stages[ctx.stage])
@@ -673,14 +709,15 @@ function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0
     # logged thrust is what the stack is actually producing: the throttled
     # core plus every strap-on still burning
     thrust = ctx.burning && ctx.stage >= 1 ?
-             core_throttle(lv, ctx) * stage_thrust(lv.stages[ctx.stage], pamb) : 0.0
+             core_throttle(lv, ctx, x[7], pamb) *
+             stage_thrust(lv.stages[ctx.stage], pamb) : 0.0
     for (i, b) in enumerate(lv.boosters)
         ctx.bstate[i] === :burning && (thrust += booster_thrust(b, pamb))
     end
     # downrange: great-circle from the launch site's inertial position
     dr = RE_MEAN * acos(clamp(vdot(vunit(r_site0), rhat), -1.0, 1.0))
     (h = h, vrel = Vr, vin = vin, gamma = gamma, gamma_rel = gamma_rel,
-     mach = Vr / asnd, qbar = qbar,
+     mach = Vr / asnd, qbar = qbar, pamb = pamb,
      lat = lat, lon = lon, thrust = thrust, downrange = dr)
 end
 
@@ -702,7 +739,7 @@ costs a few seconds, so it is opt-in.
 function tune_ascent(lv::LaunchVehicle, guid::AscentGuidance;
                      tol_h::Float64 = 1.0e3, tol_gamma::Float64 = deg2rad_(0.05),
                      max_iter::Int = 30, verbose::Bool = false,
-                     optimize_kick::Bool = false, kwargs...)
+                     optimize_kick::Bool = false, recover_kick::Bool = true, kwargs...)
     if optimize_kick
         return _tune_with_kick(lv, guid; tol_h = tol_h, tol_gamma = tol_gamma,
                                max_iter = max_iter, verbose = verbose, kwargs...)
@@ -736,6 +773,11 @@ function tune_ascent(lv::LaunchVehicle, guid::AscentGuidance;
     end
     g = rebuild(p1, p2)
     _, _, res = resid(g)
+    if recover_kick && guid.cutoff === :energy && !res.reached_orbit &&
+       pad_thrust(lv) > 1.05 * liftoff_mass(lv) * G0
+        return _tune_with_kick(lv, guid; tol_h = tol_h, tol_gamma = tol_gamma,
+                               max_iter = max_iter, verbose = verbose, kwargs...)
+    end
     (g, res)
 end
 
@@ -768,7 +810,7 @@ function _tune_with_kick(lv::LaunchVehicle, guid::AscentGuidance;
             end
             g, r = tune_ascent(lv, _with_kick(guid, ka); tol_h = tol_h,
                                tol_gamma = tol_gamma, max_iter = max_iter,
-                               optimize_kick = false, kwargs...)
+                               optimize_kick = false, recover_kick = false, kwargs...)
             ok = r.reached_orbit && abs(r.h_cut - g.h_target) < tol_h &&
                  abs(r.gamma_cut) < tol_gamma
             out[i] = ok ? (g, r) : nothing
@@ -804,5 +846,5 @@ function _tune_with_kick(lv::LaunchVehicle, guid::AscentGuidance;
     end
     best === nothing ? tune_ascent(lv, guid; tol_h = tol_h, tol_gamma = tol_gamma,
                                    max_iter = max_iter, optimize_kick = false,
-                                   kwargs...) : best
+                                    recover_kick = false, kwargs...) : best
 end

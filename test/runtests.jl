@@ -171,6 +171,32 @@ end
     @test isapprox(sep1.t, stage_burn_time(lv.stages[1]); atol = 0.05)
 end
 
+@testset "ascent safety and excess performance" begin
+    base = default_moon_rocket()
+    scaled = LaunchVehicle(
+        name = "high-thrust Sable",
+        stages = [Stage(s.name, s.mdry, s.mprop, 4s.thrust_vac, s.isp_vac,
+                        s.ae, s.prop, s.n_engines, s.diameter) for s in base.stages],
+        fairing_mass = base.fairing_mass, payload_mass = base.payload_mass,
+        sref = base.sref, cd = base.cd)
+    _, nominal = tune_ascent(base, AscentGuidance())
+    _, fast = tune_ascent(scaled, AscentGuidance())
+    @test fast.reached_orbit
+    @test 180e3 < fast.elements.rp - RE_MEAN < 220e3
+    @test 180e3 < fast.elements.ra - RE_MEAN < 220e3
+    @test sum(fast.prop_left) > sum(nominal.prop_left) + 100.0
+
+    heavy = LaunchVehicle(
+        name = "underpowered heavy Sable",
+        stages = [Stage(s.name, s.mdry, 2s.mprop, s.thrust_vac, s.isp_vac,
+                        s.ae, s.prop, s.n_engines, s.diameter) for s in base.stages],
+        fairing_mass = base.fairing_mass, payload_mass = base.payload_mass,
+        sref = base.sref, cd = base.cd)
+    _, failed = tune_ascent(heavy, AscentGuidance())
+    @test !failed.reached_orbit
+    @test :ground_impact in (e.name for e in failed.events)
+    @test minimum(failed.log.h) > -1.0
+end
 @testset "launch window" begin
     guid = AscentGuidance()
     OM = OMEGA_EARTH
@@ -345,11 +371,12 @@ end
     hs = hang.events[findfirst(e -> e.name === :sep_strap, hang.events)].t
     @test isapprox(hs - hb, 12.0; atol = 0.2)
 
-    # the kick scan turns strap-ons from a liability into a gain: at the
-    # reference kick the extra impulse is spent lofting the stack
-    _, flat = tune_ascent(lv2, AscentGuidance())
-    _, opt  = tune_ascent(lv2, AscentGuidance(); optimize_kick = true)
-    @test opt.reached_orbit && opt.m > flat.m
+    # A failed reference kick now triggers the scan automatically; explicitly
+    # requesting optimisation reaches the same valid, mass-maximising branch.
+    _, recovered = tune_ascent(lv2, AscentGuidance())
+    _, opt = tune_ascent(lv2, AscentGuidance(); optimize_kick = true)
+    @test recovered.reached_orbit && opt.reached_orbit
+    @test isapprox(recovered.m, opt.m; atol = 1.0)
     @test opt.m > tune_ascent(base, AscentGuidance())[2].m   # actually helps
     @test abs(opt.h_cut - 200e3) < 2e3
 
@@ -1000,13 +1027,18 @@ end
     # Procedural launcher: closed, positive volume, one section per stage plus
     # the pod capsule, its cabin interior, and the fairing shell over both.
     # `payload_mass` is stated because the DEFAULT one is a 350 kg pod, which
-    # is 1.2 m across — too small to put a person in, so it has no cabin at all
-    # (see pod_crew) and this would be testing the uncrewed case by accident.
+    # is 1.2 m across and explicitly crewed, so it still carries a one-person
+    # cabin (uncrewed payloads take the separate probe mesh).
     rk, secs = rocket_mesh(diameter = 2.0, prop_masses = [10_000.0, 2_000.0],
                            payload_mass = 5_560.0)
     @test mesh_volume(rk) > 0
     @test length(secs) == 6
     @test [s.name for s in secs[end-3:end]] == [:pod, :glass, :cabin, :fairing]
+    # The default 350 kg payload is explicitly crewed by default and must not
+    # silently lose the interior/cabin camera merely because its mass fit is small.
+    _, default_secs = rocket_mesh(diameter = 2.0,
+                                  prop_masses = [10_000.0, 2_000.0])
+    @test any(s -> s.name === :cabin, default_secs)
     @test issorted([s.x0 for s in secs])
     # triangle ranges tile the merged soup exactly, in order
     @test secs[1].t0 == 1 && secs[end].t1 == length(rk)
@@ -1020,10 +1052,10 @@ end
           mesh_volume(TriMesh(rk.tris[pod.t0:pod.t1]))
     # barrel volume actually swallows the propellant it was sized for
     @test mesh_volume(rk) > (10_000.0 + 2_000.0) / 1020.0
-    # and the uncrewed end of the same rule: a capsule too small for a person
-    # is a re-entry pod with cargo in it, and emits no cabin to look inside
+    # Explicitly uncrewed payloads use the probe body and emit no cabin, even
+    # when the mass and dimensions would otherwise describe a crew capsule.
     rk0, secs0 = rocket_mesh(diameter = 2.0, prop_masses = [10_000.0, 2_000.0],
-                             payload_mass = 350.0)
+                             payload_mass = 350.0, crewed = false)
     @test !any(s -> s.name === :cabin, secs0)
     @test any(s -> s.name === :pod, secs0)
     @test issorted([s.x0 for s in secs0])

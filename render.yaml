@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ss-jl
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: JULIA_NUM_THREADS
+        value: auto

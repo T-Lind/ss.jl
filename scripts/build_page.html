@@ -151,6 +151,21 @@
       </div>
     </div>
 
+    <div class="card hidden" id="lander_card">
+      <h2>Lunar lander payload</h2>
+      <div class="sub">the payload the launcher carries and the geometry shown in its adapter/bay</div>
+      <div class="row3">
+        <div><label for="l_dry">dry [kg]</label><input id="l_dry" value="3500"></div>
+        <div><label for="l_prop">propellant [kg]</label><input id="l_prop" value="9000"></div>
+        <div><label for="l_diameter">deployed ø [m]</label><input id="l_diameter" value="4.2"></div>
+      </div>
+      <div class="row3">
+        <div><label for="l_thrust_kn">thrust [kN]</label><input id="l_thrust_kn" value="45"></div>
+        <div><label for="l_isp">Isp [s]</label><input id="l_isp" value="311"></div>
+        <div><label for="l_throttle_min">min throttle [%]</label><input id="l_throttle_min" value="10"></div>
+      </div>
+      <div class="sub" id="lander_note" style="margin:6px 0 0">12.5 t wet lander</div>
+    </div>
     <div class="card">
       <h2>Stages <span class="derived" style="display:inline" id="nstages_note"></span></h2>
       <div id="stagebox"></div>
@@ -234,6 +249,7 @@ const nBoost = () => +($('nboost').value || 0);
 // query keys this page does not own (mission, kick, lander fields) ride
 // along untouched, so the round trip to mission control loses nothing
 let PASSTHRU = new URLSearchParams();
+const landingMode = () => PASSTHRU.get('mode') === 'landing';
 
 // ------------------------------------------------- pure, selftestable bits --
 function payloadFrac(pod, liftoff) {
@@ -455,7 +471,9 @@ function params() {
   u.set('vname', $('vname').value);
   u.set('nstages', NSTAGES);
   u.set('nboost', nBoost());
-  for (const id of ['diameter', 'fairing', 'pod_mass', 'pod_dia', 'kick_deg'])
+  for (const id of ['diameter', 'fairing', 'pod_mass', 'pod_dia', 'kick_deg',
+                    'l_dry', 'l_prop', 'l_diameter', 'l_thrust_kn', 'l_isp',
+                    'l_throttle_min'])
     u.set(id, $(id).value);
   u.set('opt_kick', $('opt_kick').checked ? '1' : '0');
   u.set('fairing_on', $('fairing_on').checked ? '1' : '0');
@@ -473,7 +491,7 @@ function params() {
 // state that passes through untouched
 const own = k => k === 'nstages' || k === 'nboost' || k === 'vname' ||
   k === 'diameter' || k === 'fairing' || k === 'fairing_on' || k === 'pod_mass' ||
-  k === 'pod_dia' || k === 'crewed' ||
+  k === 'pod_dia' || k === 'crewed' || /^l_/.test(k) ||
   k === 'kick_deg' || k === 'opt_kick' || /^s\d+_/.test(k) || /^b_/.test(k);
 // The wire to mission control: every good edit lands in localStorage, and
 // the panel (in any other tab) applies it on its storage event — so the
@@ -490,7 +508,7 @@ function refreshLinks() {
   const u = params();
   $('backlink').href = '/?' + u;
   const v = new URLSearchParams(u);
-  v.set('mode', 'flyby');
+  if (!v.has('mode')) v.set('mode', 'flyby');
   $('flylink').href = '/launch?' + v;
 }
 
@@ -531,7 +549,7 @@ async function doFetchGeo() {
 // ---------------------------------------------------------------- stats --
 const fmt = (x, d) => (+x).toFixed(d === undefined ? 1 : d);
 function renderStats(j) {
-  const pod = +$('pod_mass').value || 0;
+  const pod = +(j.payload || {}).mass_kg || +$('pod_mass').value || 0;
   const twr = +j.liftoff_twr, dvt = +j.total_dv_mps;
   const pf = payloadFrac(pod, +j.liftoff_mass_kg);
   $('totals').innerHTML = [
@@ -642,6 +660,7 @@ function styleOf(name) {
   if (/^booster/.test(name)) return [0.78, 0.74, 0.70];
   if (name === 'fairing')    return [0.92, 0.90, 0.86];
   if (name === 'pod')        return [0.80, 0.63, 0.48];
+  if (name === 'lander')     return [0.78, 0.62, 0.32];
   if (/^stage(\d+)/.test(name))
     return +name.slice(5) % 2 ? [0.90, 0.89, 0.86] : [0.72, 0.73, 0.76];
   return [0.8, 0.8, 0.8];
@@ -884,7 +903,8 @@ function initPresets() {
       $('pod_dia').value = el.dataset.d;      // the size it actually was
       podNote(); fetchGeo();
     };
-  for (const id of ['pod_mass', 'pod_dia']) $(id).addEventListener('input', podNote);
+  for (const id of ['pod_mass', 'pod_dia', 'l_dry', 'l_prop', 'l_diameter'])
+    $(id).addEventListener('input', podNote);
   podNote();
 }
 // Capsule radius from mass, the same r = 0.086*m^(1/3) the mesh is built on
@@ -898,6 +918,13 @@ function crewNote() {
   $('crew_note').style.color = c ? '' : '#d9a95c';
 }
 function podNote() {
+  if (landingMode()) {
+    const m = (+$('l_dry').value || 0) + (+$('l_prop').value || 0);
+    const d = +$('l_diameter').value || 4.2;
+    $('pod_note').textContent = `lunar lander ${(m/1000).toFixed(1)} t wet · ${d.toFixed(2)} m envelope`;
+    $('lander_note').textContent = `${(m/1000).toFixed(1)} t wet · ${(+$('l_prop').value || 0).toFixed(0)} kg descent propellant`;
+    return;
+  }
   const m = +$('pod_mass').value || 0, d = +$('pod_dia').value || 0;
   const near = PODS.reduce((a, b) =>
     Math.abs(Math.log(b[1]/Math.max(m,1))) < Math.abs(Math.log(a[1]/Math.max(m,1))) ? b : a);
@@ -923,7 +950,7 @@ function podNote() {
 // running across an edit serves a page whose controls it cannot read. Nothing
 // errors — the field is simply absent from the query the server understands,
 // and the control silently does nothing. Name it instead.
-const NEEDS = ['fairing_on', 'crewed', 'pod_dia'];
+const NEEDS = ['fairing_on', 'crewed', 'pod_dia', 'l_diameter'];
 function staleCheck() {
   const have = (CATALOGUE && CATALOGUE.features) || [];
   const missing = NEEDS.filter(f => !have.includes(f));
@@ -954,6 +981,7 @@ async function boot() {
   const q = new URLSearchParams(location.search);
   for (const [k, v] of q)
     if (!own(k) && k !== 'selftest') PASSTHRU.set(k, v);
+  $('lander_card').classList.toggle('hidden', !landingMode());
   let src = q;
   if (![...q.keys()].some(own)) {
     try {
@@ -974,7 +1002,8 @@ async function boot() {
   setVals(vals);           // vname/diameter/fairing/pod_mass/kick + anything missed
   initPresets();
   for (const id of ['vname', 'diameter', 'fairing', 'fairing_on', 'pod_mass',
-                    'pod_dia', 'kick_deg', 'opt_kick', 'crewed'])
+                    'pod_dia', 'kick_deg', 'opt_kick', 'crewed', 'l_dry', 'l_prop',
+                    'l_diameter', 'l_thrust_kn', 'l_isp', 'l_throttle_min'])
     $(id).addEventListener('change', () => fetchGeo());
   // An uncrewed payload is the case a shroud exists for, so unticking the crew
   // ticks the fairing back on — stated here rather than silently in the server,
