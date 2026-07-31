@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+.agents
+.codex
+docs
+geometry
+missions
+output
+test
+*.csv
+*.png
+*.stl

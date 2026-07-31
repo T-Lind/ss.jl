@@ -99,6 +99,14 @@ end
     @test eo.on_target
     @test isempty(eo.burns)                       # direct ascent, no transfer
 
+    custom = earthorbit(target = :custom, perigee_alt = 250e3,
+                        apogee_alt = 250e3, inclination = deg2rad_(40.0),
+                        strict = false)
+    @test custom.target.name === :custom
+    @test custom.on_target
+    @test abs((custom.elements.rp - RE_MEAN) / 1e3 - 250) < 15
+    @test abs(rad2deg_(custom.elements.i) - 40.0) < 1.0
+
     eo = earthorbit(target = :polar, strict = false)
     @test eo.on_target
     @test abs(rad2deg_(eo.elements.i) - 90.0) < 1.0
@@ -140,6 +148,7 @@ end
         @test occursin("propellants", bod)
         @test occursin("engines", bod)
         @test occursin("kerolox", bod)
+        @test occursin("l_diameter", bod)  # builder capability handshake
 
         # --- a request must always be answered ------------------------------
         # A malformed percent-escape makes urldecode throw. That used to
@@ -168,6 +177,21 @@ end
                              body = "nstages=3&nboost=0&diameter=1.8")
         @test st == 200
         @test occursin("\"ok\":true", bod)
+        @test occursin("\"name\":\"cabin\"", bod)
+
+        # Landing geometry carries the lander itself, not the stale capsule
+        # payload from the launcher preset.
+        st, hdrs, bod = http("POST", "/api/geometry";
+                             port = port,
+                             body = "mode=landing&nstages=3&diameter=10.1" *
+                                    "&fairing_on=0&pod_mass=45000" *
+                                    "&l_dry=3500&l_prop=9000&l_diameter=4.2")
+        @test st == 200
+        @test occursin("\"kind\":\"lander\"", bod)
+        @test occursin("\"mass_kg\":12500", bod)
+        @test occursin("\"diameter_m\":4.2", bod)
+        @test occursin("\"name\":\"lander\"", bod)
+        @test !occursin("\"name\":\"pod\"", bod)
 
         # --- the dry-mass estimate the builder shows against what it flies --
         # A stage that sizes itself must agree with its own estimate, or the
@@ -333,6 +357,20 @@ end
             @test st == 200
         end
 
+        # Production/container binding is explicit and reachable through the
+        # loopback address even though the socket itself listens on 0.0.0.0.
+        public_port = free_port()
+        public_srv = PanelApp.start_panel(public_port; public = true)
+        try
+            @test length(public_srv.listeners) == 1
+            st, _, bod = http("GET", "/api/health"; port = public_port,
+                              host = ip"127.0.0.1")
+            @test st == 200
+            @test occursin("\"ok\":true", bod)
+        finally
+            PanelApp.stop_panel(public_srv)
+        end
+
         # --- a slow request must not block the whole server -----------------
         # Guarded: with one thread there is nothing to interleave with, and
         # CI runs the suite single-threaded.
@@ -375,6 +413,7 @@ end
         @test occursin("\"ok\":true", bod)
         @test occursin("\"mode\":\"suborbital\"", bod)
         @test occursin("\"outcome\":\"nominal\"", bod)
+        @test occursin("\"on_target\":true", bod)
         @test !occursin("\"cis\":", bod)                # no cislunar leg
         @test occursin("\"asc3d\"", bod) && occursin("\"ent3d\"", bod)
         @test abs(num(bod, "apogee_km") - 110.0) < 5.0  # closed on the ask
@@ -391,6 +430,7 @@ end
                                     "sub_range_km=500&pod_mass=350")
         @test st == 200
         @test occursin("\"ok\":true", bod)
+        @test occursin("\"on_target\":true", bod)
         @test abs(num(bod, "range_km") - 500.0) < 25.0
         @test num(bod, "apogee_km") > 40.0              # a shot is still lofted
 

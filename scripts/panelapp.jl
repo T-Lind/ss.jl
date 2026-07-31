@@ -312,6 +312,21 @@ lander_from_params(p) = Lander(
     throttle_min = clamp(getf(p, "l_throttle_min", 10.0) / 100, 0.02, 1.0),
     diameter = max(0.5, getf(p, "l_diameter", 4.2)))
 
+"Build the launch vehicle that physically carries this lander."
+function landing_vehicle_from_params(p, lander::Lander = lander_from_params(p))
+    lv0 = lv_from_params(p)
+    dia = getf(p, "diameter", 1.8)
+    fair = lv0.fairing_mass > 0.0
+    sref = stack_sref((stage_diameter(s, dia) for s in lv0.stages),
+                      lander.diameter, fair)
+    LaunchVehicle(name = lv0.name, stages = lv0.stages,
+                  fairing_mass = lv0.fairing_mass,
+                  payload_mass = lander_mass(lander), sref = sref,
+                  cd = fair ? SatelliteSim.LV_CD_TABLE :
+                       bare_payload_cd(lander.diameter, sref),
+                  boosters = lv0.boosters)
+end
+
 "Decimate a vector to at most n points (keeping ends)."
 function deci(v, n)
     length(v) <= n && return collect(Float64, v)
@@ -462,12 +477,7 @@ next to a 384,000 km transfer.
 """
 function panel_landing(p)::Dict{String,Any}
     lander = lander_from_params(p)
-    lv0 = lv_from_params(p)
-    # the launcher carries the lander, whatever the pod-mass field says
-    lv = LaunchVehicle(name = lv0.name, stages = lv0.stages,
-                       fairing_mass = lv0.fairing_mass,
-                       payload_mass = lander_mass(lander),
-                       sref = lv0.sref, cd = lv0.cd, boosters = lv0.boosters)
+    lv = landing_vehicle_from_params(p, lander)
     # The real Moon by default: terrain under the vehicle, mascons around it,
     # navigation error corrected by landing radar, hazard avoidance choosing
     # the touchdown point. Untick it and the descent is flown onto a smooth
@@ -482,6 +492,7 @@ function panel_landing(p)::Dict{String,Any}
         nav = real_moon ? DescentNav() : nothing,
         hazard = real_moon ? HazardScan() : nothing,
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
+
         h_moon_park = getf(p, "h_moon_park_km", 100.0) * 1e3,
         h_pdi = getf(p, "h_pdi_km", 15.0) * 1e3,
         n_rev = clamp(round(Int, getf(p, "n_rev", 1.0)), 0, 12),
@@ -636,12 +647,18 @@ the Moon rides along as scenery — so both viewers fly it unchanged.
 """
 function panel_orbit(p)::Dict{String,Any}
     tkey = Symbol(gets(p, "orbit", "leo"))
-    haskey(ORBITS, tkey) || (tkey = :leo)
+    (haskey(ORBITS, tkey) || tkey === :custom) || (tkey = :leo)
     eo = earthorbit(
         target = tkey,
         lv = lv_from_params(p),
         pod_mass = getf(p, "pod_mass", 350.0),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
+        perigee_alt = tkey === :custom ?
+            clamp(getf(p, "orbit_perigee_km", 200.0), 100.0, 100000.0) * 1e3 : NaN,
+        apogee_alt = tkey === :custom ?
+            clamp(getf(p, "orbit_apogee_km", 200.0), 100.0, 100000.0) * 1e3 : NaN,
+        inclination = tkey === :custom ?
+            deg2rad_(clamp(getf(p, "orbit_incl_deg", 28.5), 0.0, 180.0)) : NaN,
         n_orbits = clamp(getf(p, "n_orbits", 2.0), 0.25, 16.0),
         deorbit = getb(p, "deorbit", false),
         hp_entry = getf(p, "hp_entry_km", 25.0) * 1e3,
@@ -748,6 +765,13 @@ function panel_suborbital(p)::Dict{String,Any}
         "apogee_err_km" => (sb.apogee - sb.target_apogee) / 1e3,
         "range_err_km" => isnan(sb.target_range) ? NaN :
                           (sb.range - sb.target_range) / 1e3,
+        # The designer stops at 0.4% of the commanded quantity. Report the
+        # same contract to the page instead of falling through to its flyby
+        # off-target message merely because suborbital has no perilune.
+        "on_target" => sb.outcome === :splashdown &&
+                       abs((prof === :hop ? sb.apogee - sb.target_apogee :
+                                             sb.range - sb.target_range)) <
+                       0.004 * (prof === :hop ? sb.target_apogee : sb.target_range),
     )
     metrics["t_days"] = (ent !== nothing ? ent.t_splash : asc.t) / 86400
 
@@ -796,6 +820,7 @@ function panel_mission(p)::Dict{String,Any}
     ms = moonshot(
         pod_mass = getf(p, "pod_mass", 350.0),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
+
         hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3,
         hp_return = getf(p, "hp_return_km", 50.0) * 1e3,
         inclination = deg2rad_(getf(p, "incl_deg", 28.5)),
@@ -974,10 +999,13 @@ propellant density and the bells from its engine count.
 """
 function rocket_geometry(p)::Dict{String,Any}
     d = getf(p, "diameter", 1.8)
-    lv = lv_from_params(p)
+    lander = mission_mode(p) === :landing ? lander_from_params(p) : nothing
+    lv = lander === nothing ? lv_from_params(p) : landing_vehicle_from_params(p, lander)
     mesh, secs = rocket_mesh(lv; diameter = d, nseg = 36,
                              pod_diameter = getf(p, "pod_dia", 0.0),
-                             crewed = getb(p, "crewed", true))
+                             crewed = getb(p, "crewed", true),
+                             payload_kind = lander === nothing ? :capsule : :lander,
+                             payload_diameter = lander === nothing ? 0.0 : lander.diameter)
     nst = length(lv.stages)
     # Static performance, so a bad stack is obvious before it is flown: the
     # mass each stage actually pushes is everything above it (the fairing
@@ -995,10 +1023,18 @@ function rocket_geometry(p)::Dict{String,Any}
     bdv(b) = b.count * b.stage.mprop * G0 * b.stage.isp_vac / liftoff_mass(lv)
     Dict{String,Any}(
         "ok" => true,
+        # Keep the cinematic title and hull livery tied to the same vehicle
+        # the builder and simulator are actually flying.
+        "name" => String(lv.name),
         # boosters are appended after the core stack, so the tallest section
         # is not necessarily the last one
         "length" => maximum(s.x1 for s in secs),
         "diameter" => d,
+        "payload" => Dict("kind" => lander === nothing ?
+                              (getb(p, "crewed", true) ? "capsule" : "bus") : "lander",
+                          "mass_kg" => lv.payload_mass,
+                          "diameter_m" => lander === nothing ?
+                              pod_diameter(p, lv.payload_mass) : lander.diameter),
         "liftoff_mass_kg" => liftoff_mass(lv),
         "liftoff_twr" => pad_twr,
         "total_dv_mps" => sum(dv(k) for k in 1:nst) +
@@ -1127,7 +1163,8 @@ catalogue_payload() = Dict{String,Any}(
     # appears, sends fairing_on=0, and the vehicle keeps its fairing, because
     # the code that reads that field is not in the process. The pages check this
     # list against the controls they offer and say so.
-    "features" => ["fairing_on", "crewed", "pod_dia", "grazing", "flyby_wire"],
+    "features" => ["fairing_on", "crewed", "pod_dia", "l_diameter",
+                   "grazing", "flyby_wire"],
     "solve_metrics" => SOLVE_METRICS,
     "landing_metrics" => LANDING_METRICS,
     "suborbital_metrics" => SUBORBITAL_METRICS,
@@ -1312,16 +1349,22 @@ end
 
 Bind and start accepting. Returns immediately; the accept loops run as tasks.
 """
-function start_panel(port::Int)
+function start_panel(port::Int; public::Bool = false)
     START_TIME[] = time()
-    listeners = Sockets.TCPServer[listen(IPv4(127, 0, 0, 1), port)]
+    # Render and other container hosts route traffic to 0.0.0.0:$PORT. Local
+    # development remains loopback-only unless the entry point explicitly
+    # opts in, so starting the panel never exposes it to the LAN by accident.
+    listeners = Sockets.TCPServer[listen(public ? IPv4(0, 0, 0, 0) :
+                                                  IPv4(127, 0, 0, 1), port)]
     # `localhost` resolves to ::1 before 127.0.0.1 on Windows and on most
     # modern Linux, so an IPv4-only bind makes every new connection pay for a
     # failed attempt first. Best-effort: a host without IPv6 still works.
-    try
-        push!(listeners, listen(IPv6(0, 0, 0, 0, 0, 0, 0, 1), port))
-    catch err
-        @warn "IPv6 loopback unavailable; localhost falls back to IPv4" err
+    if !public
+        try
+            push!(listeners, listen(IPv6(0, 0, 0, 0, 0, 0, 0, 1), port))
+        catch err
+            @warn "IPv6 loopback unavailable; localhost falls back to IPv4" err
+        end
     end
     acceptors = Task[]
     for l in listeners
@@ -1371,17 +1414,18 @@ end
 What `scripts/panel.jl` calls: warm the stack up so the first browser request
 is not also the first compile, then serve until interrupted.
 """
-function main(port::Int = 8137)
+function main(port::Int = 8137; public::Bool = false)
     println("warming up (first mission run compiles the stack)...")
     t0 = time()
     panel_mission(Dict{String,String}())
-    @printf("ready in %.1f s — panel at http://localhost:%d  (Ctrl-C to stop)\n",
-            time() - t0, port)
+    host = public ? "0.0.0.0" : "localhost"
+    @printf("ready in %.1f s — panel at http://%s:%d  (Ctrl-C to stop)\n",
+            time() - t0, host, port)
     Threads.nthreads() == 1 &&
         println("single-threaded: a mission in flight will block every other " *
                 "request until it finishes. Restart with `-t auto` to serve " *
                 "requests concurrently.")
-    srv = start_panel(port)
+    srv = start_panel(port; public)
     wait(srv.acceptors[1])
     srv
 end

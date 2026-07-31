@@ -623,6 +623,25 @@ julia --project scripts/make_plots.jl  # requires Plots.jl installed
 julia --project -t auto scripts/panel.jl   # then open http://localhost:8137
 ```
 
+### Deploying the panel on Render
+
+The browser pages call the Julia mission API for every run, geometry refresh,
+sweep, and solve, so this version is not a static/client-only site. The
+smallest reliable deployment is one Docker web service that serves both the
+pages and the API from the same origin. Dockerfile and render.yaml provide
+that deployment:
+
+1. In Render, choose **New → Blueprint** and connect this repository.
+2. Render reads render.yaml, builds the Julia image, checks /api/health, and
+   deploys from the repository's default branch.
+3. Open the generated onrender.com URL; /, /build, and /launch are all served
+   by the same process.
+
+The Blueprint deliberately starts on Render's free instance for a no-cost
+trial. Free services sleep when idle and Julia has a noticeable cold start;
+move the service to a paid instance before treating it as a public production
+demo. The server reads Render's PORT and binds publicly only when
+HOST=0.0.0.0; local julia ... scripts/panel.jl remains loopback-only.
 ### Mission-control panel
 
 `scripts/panel.jl` serves a local cockpit (pure stdlib — a raw-`Sockets`

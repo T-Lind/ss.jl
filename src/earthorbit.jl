@@ -285,15 +285,19 @@ function earthorbit(; target::Symbol = :leo,
                     theta_g0::Float64 = 0.0,
                     strict::Bool = true,
                     verbose::Bool = false)
-    haskey(ORBITS, target) ||
-        throw(ArgumentError("unknown orbit target $target; have $(join(sort(collect(keys(ORBITS))), ", "))"))
-    tgt0 = ORBITS[target]
-    tgt = OrbitTarget(tgt0.name,
-                      isnan(perigee_alt) ? tgt0.perigee_alt : perigee_alt,
-                      isnan(apogee_alt) ? tgt0.apogee_alt : apogee_alt,
-                      isnan(inclination) ? tgt0.inclination : inclination,
-                      tgt0.note)
-
+    haskey(ORBITS, target) || target === :custom ||
+        throw(ArgumentError("unknown orbit target $target; have custom, $(join(sort(collect(keys(ORBITS))), ", "))"))
+    tgt0 = target === :custom ?
+           OrbitTarget(:custom, 200.0e3, 200.0e3, deg2rad_(28.5),
+                       "operator-defined perigee, apogee, and inclination") :
+           ORBITS[target]
+    hp = isnan(perigee_alt) ? tgt0.perigee_alt : perigee_alt
+    ha = isnan(apogee_alt) ? tgt0.apogee_alt : apogee_alt
+    inc = isnan(inclination) ? tgt0.inclination : inclination
+    hp >= 100.0e3 || throw(ArgumentError("target perigee must be at least 100 km"))
+    ha >= hp || throw(ArgumentError("target apogee must be at or above perigee"))
+    0.0 <= inc <= pi || throw(ArgumentError("inclination must be between 0 and 180 degrees"))
+    tgt = OrbitTarget(tgt0.name, hp, ha, inc, tgt0.note)
     lv === nothing && (lv = default_moon_rocket(payload = pod_mass))
     pod_mass = lv.payload_mass
 

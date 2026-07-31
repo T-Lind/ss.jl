@@ -6,5 +6,5 @@
   Perilune        : 2000 km altitude at t=3.27 d
   Return perigee  : 50.2 km vacuum  gamma_EI-ish=-6.78°
   Entry interface : V_rel=10589 m/s  Mach 27.8  (t=6.51 d)
-  Splashdown      : lat=-16.15°  lon=-170.66°  V=4.5 m/s  (t=6.58 d)
-  Entry peak load : 6.5 g   peak q_dot 190 W/cm²   heat load 187 MJ/m²
+  Splashdown      : lat=-15.92°  lon=-171.14°  V=4.5 m/s  (t=6.57 d)
+  Entry peak load : 6.5 g   peak q_dot 191 W/cm²   heat load 186 MJ/m²

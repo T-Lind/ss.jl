@@ -10,6 +10,8 @@ __pycache__/
 
 # scratch
 *.tmp
+.claude/
+output/rendezvous*.csv
 
 # brainstorming companion
 .superpowers/

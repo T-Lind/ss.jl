@@ -13,4 +13,7 @@
 
 include(joinpath(@__DIR__, "panelapp.jl"))
 
-PanelApp.main(length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 8137)
+port = length(ARGS) >= 1 ? parse(Int, ARGS[1]) :
+       parse(Int, get(ENV, "PORT", "8137"))
+public = get(ENV, "HOST", "127.0.0.1") in ("0.0.0.0", "::")
+PanelApp.main(port; public)
