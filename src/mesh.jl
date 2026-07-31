@@ -1142,11 +1142,11 @@ function _lander_payload_mesh(diameter::Float64; nseg::Int = 32)
     # Four landing legs and broad footpads make the payload visually and
     # physically wider than its pressure vessels—the diameter is the envelope.
     for sg in (-1.0, 1.0)
-        y0, y1 = sort((sg * 0.23d, sg * 0.48d))
+        y0, y1 = minmax(sg * 0.23d, sg * 0.48d)
         push!(parts, box_mesh((0.10d, y0, -0.025d), (0.18d, y1, 0.025d)))
         push!(parts, box_mesh((0.06d, sg * 0.48d - 0.06d, -0.08d),
                               (0.11d, sg * 0.48d + 0.06d, 0.08d)))
-        z0, z1 = sort((sg * 0.23d, sg * 0.48d))
+        z0, z1 = minmax(sg * 0.23d, sg * 0.48d)
         push!(parts, box_mesh((0.10d, -0.025d, z0), (0.18d, 0.025d, z1)))
         push!(parts, box_mesh((0.06d, -0.08d, sg * 0.48d - 0.06d),
                               (0.11d, 0.08d, sg * 0.48d + 0.06d)))
