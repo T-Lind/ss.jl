@@ -4,7 +4,7 @@ authors = ["Tiernan Lindauer"]
 # Tracks the mission milestones the README names: v0.1 LEO reentry, v0.2 the
 # circumlunar free return, v0.3 the lunar landing. All three fly, so this said
 # 0.1.0 while shipping v0.3's mission.
-version = "0.3.0"
+version = "0.3.1"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
