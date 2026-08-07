@@ -33,7 +33,14 @@ PanelApp.rocket_geometry(Dict{String,String}())
 # request, so there is no reason to leave them for run time.
 PanelApp.route("GET", "/api/catalogue", "")
 PanelApp.route("GET", "/api/health", "")
+# The run store: every page load after the first goes through one of these,
+# because /launch and /analysis fetch a flown trajectory by id rather than
+# flying their own.
+PanelApp.route("GET", "/api/runs", "")
+PanelApp.route("GET", "/api/runs/r1", "")
 PanelApp.route("GET", "/static/fmt.js", "")
+PanelApp.route("GET", "/static/busy.js", "")
+PanelApp.route("GET", "/static/runs.js", "")
 PanelApp.route("GET", "/", "")
 PanelApp.route("GET", "/build", "")
 PanelApp.route("GET", "/launch", "")

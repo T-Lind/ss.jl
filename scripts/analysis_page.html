@@ -100,17 +100,29 @@
     <!-- same order on every page: the bar is only worth having if the link you
          want is in the place you last saw it -->
     <a class="navlink" href="#" aria-current="page">analysis</a>
-    <a class="navlink" id="nav_launch" href="/launch" target="_blank">launch view</a>
+    <a class="navlink" id="nav_launch" href="/launch">launch view</a>
   </span>
   <span class="appnav-end u-label" id="nav_note">analysis</span>
 </nav>
 
 <div class="wrap">
-  <div class="runhdr">
+  <div class="runhdr" id="runhdr">
     <span class="who">analysis · <span class="mode" id="hdr_mode">—</span></span>
-    <span class="facts" id="hdr_facts">flying the mission…</span>
+    <span class="facts" id="hdr_facts">loading…</span>
     <span class="act"><button id="rerun">Re-run</button></span>
   </div>
+
+  <!-- Arrived with nothing to analyse. Not an error, and not a reason to
+       invent a mission: this page reads a trajectory and there is not one
+       yet. -->
+  <section class="empty" id="empty" hidden>
+    <h2>No run to analyse yet</h2>
+    <p id="empty_lead">Analysis reads a trajectory that has already been flown.
+      Fly one from mission control and it appears here — with the ascent and
+      entry profiles, the event log, and the sweep and solve tools.</p>
+    <div class="empty-runs" id="empty_runs"></div>
+    <p><a class="chip" href="/">Go to mission control &rarr;</a></p>
+  </section>
 
   <!-- Powered descent leads on a landing mission: it is the fifteen kilometres
        the whole flight exists to fly, and burying it under six ascent and
@@ -147,7 +159,7 @@
     </div>
   </section>
 
-  <section>
+  <section id="sec_studies">
     <div class="sec-h">
       <h2>Studies</h2>
       <span class="hint">each point below flies a whole mission — these take
@@ -196,7 +208,7 @@
     </div>
   </section>
 
-  <section>
+  <section id="sec_events">
     <div class="sec-h">
       <h2>Event log</h2>
       <span class="hint" id="ev_count"></span>
@@ -209,59 +221,146 @@
 'use strict';
 import { fin, fmt } from '/static/fmt.js';
 import * as api from '/static/api.js';
-import * as vehicle from '/static/vehicle.js';
 import { drawLine, niceStep, fmtTick, fmtPeak } from '/static/charts.js';
+import { busy, fail, clearFailures, reportUncaught } from '/static/busy.js';
+import * as runs from '/static/runs.js';
 import { METRIC_LABEL, SFIELD_LABEL, PARAM_LABEL, SPARAM_LABEL, LPARAM_LABEL,
          paramLabel, metricLabel } from '/static/metrics.js';
 import { suite, report, requested } from '/static/selftest.js';
 
 const $ = id => document.getElementById(id);
+reportUncaught();
 
-// The mission arrives as a query string, exactly the way the launch view takes
-// one: mission control links here with its own params(). There is no second
-// copy of the configuration form on this page, and deliberately so — a page
-// that both analyses a run and lets you edit it is two pages.
+// How this page gets a mission, in the order it tries:
 //
-// Opened bare, this falls back to the vehicle the builder has stored and the
-// server's default mission, so the page is never a dead end.
+//   ?run=<id>   a flight that has already been flown. This is the normal
+//               case — mission control links here with the id of the run on
+//               screen, and the point is to analyse THAT run rather than a
+//               freshly computed one that merely shares its configuration.
+//   ?pod_mass=… a full configuration, which is flown. Bare links, saved
+//               URLs and this page's own selftest use it.
+//   nothing     nothing has been flown, so there is nothing to analyse. It
+//               says so and offers the history, instead of quietly flying a
+//               default mission the user never asked for.
+//
+// There is no configuration form here on purpose: a page that both analyses a
+// run and lets you edit it is two pages.
+const RUN_ID = new URLSearchParams(location.search).get('run');
 const Q = (() => {
   const q = new URLSearchParams(location.search);
   q.delete('selftest');
-  if ([...q.keys()].length) return q;
-  const stored = new URLSearchParams(vehicle.load() || '');
-  stored.set('mode', 'flyby');
-  return stored;
+  q.delete('run');
+  return q;
 })();
-const MODE = Q.get('mode') || 'flyby';
+// Not const: loading a stored run adopts ITS mode, which is only known once
+// the payload arrives. Every chart below branches on this.
+let MODE = Q.get('mode') || 'flyby';
 const landing = () => MODE === 'landing';
 const subm = () => MODE === 'suborbital';
 const orbitm = () => MODE === 'orbit';
 const nStages = () => Math.max(1, +Q.get('nstages') || 3);
 
-// carry the run's configuration to the other pages, so moving between them
-// never silently changes the vehicle
-for (const [id, base] of [['nav_home', '/'], ['nav_build', '/build'],
-                          ['nav_launch', '/launch']])
-  $(id).href = base + '?' + Q.toString();
+// Carry this run to the other pages, so moving between them never silently
+// changes which flight you are looking at. The builder gets the configuration
+// instead — it edits a vehicle, and a run id means nothing to it.
+function syncLinks() {
+  const rq = run && run.id ? '?run=' + encodeURIComponent(run.id) : '';
+  $('nav_home').href = '/' + rq;
+  $('nav_launch').href = '/launch' + rq;
+  $('nav_build').href = '/build?' + Q.toString();
+}
+// NOT called here: `run` is declared below, and reading a `let` above its
+// declaration throws — which in a module aborts everything after it, so the
+// page loaded with dead nav links and no charts. It is called once `run`
+// exists, and again whenever the run changes.
 
 const ACC = '#3987e5';
 let run = null, sweepData = null;
+syncLinks();      // now that `run` exists — see the note above
 
 // ------------------------------------------------------------- the run --
 
-async function fly() {
+/**
+ * Point the page at a run.
+ *
+ * The studies below sweep and solve from `Q`, so adopting a stored run has to
+ * adopt its parameters too — otherwise a sweep launched from a restored run
+ * would vary a field of whatever configuration happened to be in the URL and
+ * plot it against a trajectory from a different vehicle.
+ */
+function adopt(j) {
+  run = j;
+  if (j.params) {
+    for (const k of [...Q.keys()]) Q.delete(k);
+    for (const [k, v] of Object.entries(j.params)) Q.set(k, v);
+  }
+  MODE = j.mode || Q.get('mode') || 'flyby';
+}
+
+/** Show the analysis, hide the "nothing here yet" state. */
+function showRun() {
+  $('empty').hidden = true;
+  // sec_descent is included, but whether it is SEEN stays with renderCharts
+  // and its `hidden` class — only a landing run has a powered descent.
+  for (const id of ['sec_descent', 'sec_profiles', 'sec_studies', 'sec_events'])
+    $(id).hidden = false;
+  $('runhdr').hidden = false;
+}
+
+async function fly(refly = false) {
   $('rerun').disabled = true;
-  $('hdr_facts').textContent = 'flying the mission…';
+  $('hdr_facts').textContent = refly || !RUN_ID
+    ? 'flying the mission…' : 'loading the run…';
+  const done = busy($('hdr_facts').textContent);
   try {
-    run = await api.run(Q);
+    // A stored run is fetched, not re-flown. Re-flying is what made "open the
+    // analysis of this flight" produce a second, subtly different flight.
+    const j = (RUN_ID && !refly) ? await runs.get(RUN_ID) : await api.run(Q);
+    adopt(j);
+    clearFailures();
+    showRun();
     renderHeader();
     renderCharts();
     renderEvents();
+    syncLinks();
   } catch (e) {
     $('hdr_facts').innerHTML =
       `<span style="color:var(--failed)">${String(e.message || e)}</span>`;
+    fail(e, 'analysis');
+  } finally {
+    done();
+    $('rerun').disabled = false;
   }
-  $('rerun').disabled = false;
+}
+
+/**
+ * Nothing has been flown, so there is nothing to analyse.
+ *
+ * This page used to fly a default mission on arrival to have something to
+ * draw. That is seconds of simulation to answer a question nobody asked, and
+ * it made the charts look like results when they were a placeholder.
+ */
+async function showEmpty() {
+  const list = await runs.list();
+  $('runhdr').hidden = true;
+  for (const id of ['sec_descent', 'sec_profiles', 'sec_studies', 'sec_events'])
+    $(id).hidden = true;
+  $('empty').hidden = false;
+  const host = $('empty_runs');
+  if (!list.length) {
+    host.innerHTML = '';
+    return;
+  }
+  $('empty_lead').textContent = 'Pick one of the runs from this session:';
+  host.replaceChildren(...list.map((d, i) => {
+    const a = document.createElement('a');
+    a.className = 'chip hchip is-' + runs.verdict(d);
+    a.href = '/analysis?run=' + encodeURIComponent(d.id);
+    a.innerHTML = `<b>#${list.length - i}</b> <span class="hv"></span> <span class="hd"></span>`;
+    a.querySelector('.hv').textContent = d.vname || '';
+    a.querySelector('.hd').textContent = runs.describe(d);
+    return a;
+  }));
 }
 
 function renderHeader() {
@@ -519,7 +618,9 @@ function drawSolve(j) {
 }
 
 // ---------------------------------------------------------------- wire up --
-$('rerun').onclick = fly;
+// Re-run always flies, even when the page arrived by id: that is what the
+// button is for — the same configuration, simulated again.
+$('rerun').onclick = () => fly(true);
 $('sweepbtn').onclick = doSweep;
 $('sweep_metric').onchange = drawSweep;
 $('solvebtn').onclick = doSolve;
@@ -533,7 +634,19 @@ window.addEventListener('resize', () => {
 // the page is useful the moment the run lands; the catalogue only feeds the
 // study pickers, so the two are fetched together rather than in sequence
 api.catalogue().then(c => { CATALOGUE = c || CATALOGUE; fillParams(); });
-fly();
+// A run id or a configuration is something to show. Neither is the empty
+// state — never a default mission flown to fill the page.
+if (RUN_ID || [...Q.keys()].length) {
+  fly();
+} else {
+  // Opened bare: show the most recent flight if there is one, so this is not
+  // a dead end for anyone who arrives without an id. Only a session that has
+  // never flown anything gets the empty state.
+  runs.list().then(list => {
+    if (list.length) location.replace('/analysis?run=' + encodeURIComponent(list[0].id));
+    else showEmpty();
+  });
+}
 
 // A module's top-level bindings are not on `window`, which is right — but it
 // also means none of this is reachable from devtools, and this page's whole

@@ -111,6 +111,15 @@
   margin-left: 2px;
 }
 
+/* `hidden` must mean hidden.
+ *
+ * The UA rule is `[hidden] { display: none }` at attribute specificity, which
+ * ANY class that sets `display` outranks — so `.empty { display: flex }` on a
+ * `<section hidden>` left the empty state on screen underneath a fully
+ * rendered run, and `.verdict` and `.stale` were the same trap waiting. One
+ * rule here rather than a `[hidden]` variant beside every flex container. */
+[hidden] { display: none !important; }
+
 /* ------------------------------------------------------------------ verdict
  *
  * The component this app most needed and did not have. A run's outcome was a
@@ -158,6 +167,56 @@
 .verdict.is-running  { border-left-color: var(--amber);
   background: linear-gradient(90deg, var(--amber-dim), var(--surface) 60%); }
 .verdict.is-running  .verdict-state { color: var(--amber); }
+/* Nothing has been flown yet. A state worth naming, because the alternative
+   was flying a mission nobody asked for so the panel would have numbers in
+   it — seconds of simulation spent on an answer to no question. */
+.verdict.is-idle     { border-left-color: var(--line); }
+.verdict.is-idle     .verdict-state { color: var(--text-3); }
+
+/* ------------------------------------------------------------------ empty
+ *
+ * What a page says when it has nothing to show: the launch view and the
+ * analysis page both READ a trajectory and neither can invent one, so with an
+ * empty history they say so, in the middle of the space the content would
+ * occupy, and offer the two ways forward — fly one, or pick an earlier one. */
+.empty {
+  display: flex; flex-direction: column; align-items: center; gap: var(--s3);
+  padding: clamp(28px, 9vh, 76px) var(--s4); text-align: center;
+}
+.empty h2 { margin: 0; font-family: var(--sans); font-size: 19px;
+            font-weight: 600; color: var(--text); }
+.empty p { margin: 0; max-width: 46ch; font-family: var(--sans);
+           font-size: var(--t-data); line-height: 1.55; color: var(--text-2); }
+.empty .empty-runs { display: flex; flex-wrap: wrap; gap: var(--s1);
+                     justify-content: center; max-width: 70ch; }
+
+/* A link to a page that has nothing to show yet. Still a link — it opens and
+   explains itself — but it should not look like the live one. */
+.navlink.is-empty { color: var(--text-3); }
+
+/* The run on screen no longer matches the form. */
+.stale {
+  display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap;
+  margin-bottom: var(--s3); padding: 8px 12px;
+  background: var(--amber-dim); border: 1px solid var(--marginal);
+  border-radius: var(--radius-sm);
+  font-family: var(--sans); font-size: var(--t-data); color: var(--text);
+}
+.stale button {
+  margin-left: auto; padding: 4px 12px; cursor: pointer;
+  background: var(--amber); border: 0; border-radius: var(--radius-sm);
+  font-family: var(--sans); font-size: 12px; font-weight: 600; color: #17130a;
+}
+
+/* A history entry. Wider than a plain chip because it carries a verdict, a
+   vehicle and the numbers that tell two runs of the same shape apart. */
+.hchip { display: inline-flex; align-items: baseline; gap: 7px;
+         border-left-width: 3px !important; }
+.hchip .hv { font-weight: 600; }
+.hchip .hd { color: var(--text-2); font-size: 11.5px; }
+.hchip.is-nominal { border-left-color: var(--nominal) !important; }
+.hchip.is-off     { border-left-color: var(--marginal) !important; }
+.hchip.is-failed  { border-left-color: var(--failed) !important; }
 
 /* ------------------------------------------------- metrics, in flight order
  *
@@ -243,11 +302,23 @@
 
 /* ---------------------------------------------------------------------- nav
  *
- * The three pages open in separate tabs on purpose — you want mission control
- * and the launch view side by side — but "separate windows" was reading as
- * "scattered", because nothing on any page said what the other two were or
- * which one you were on. One bar, same place, same order, every page. */
+ * One bar, same place, same order, every page: nothing on any page used to say
+ * what the other three were or which one you were on.
+ *
+ * These are ordinary same-document links. They used to be `target="_blank"`,
+ * on the reasoning that you want mission control and the launch view side by
+ * side — which is true in a browser and false in the application, where a
+ * WebView2 with no NewWindowRequested handler refuses a new window and does
+ * NOTHING AT ALL. Two of the four links were dead in the shipped app. An app
+ * navigates; the bar is what makes that cheap.
+ *
+ * Sticky, because these pages are taller than the window and a navigation bar
+ * you have to scroll back up to reach is a navigation bar you stop using. */
 .appnav {
+  position: sticky;
+  top: 0;
+  /* over page content, under <dialog> and the busy overlay */
+  z-index: 40;
   display: flex;
   align-items: center;
   gap: var(--s4);

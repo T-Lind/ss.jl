@@ -756,12 +756,34 @@ as a wrapping strip of equal-weight tiles, and the handful of numbers with a
 defensible limit (propellant margin, peak g, touchdown rates) go amber or red
 when they approach it.
 
-The pages open in separate tabs on purpose — mission control and the launch
-view are meant to sit side by side — and every link between them carries the
-whole configuration in its query string, so moving between pages never
-silently changes the vehicle under you. `/analysis` and `/launch` each fly
-their own run from that query string rather than being handed one; a second
-of simulation is cheaper than shared mutable state between tabs.
+### Runs are things that happened
+
+Nothing simulates itself. Opening mission control does not fly a mission — it
+opens idle, and a trajectory appears when you ask for one: **Run mission**, a
+preset, or a change of mission type. Editing the form afterwards says so
+rather than silently leaving last run's numbers on screen.
+
+Each run the server flies is **kept, with an id** (the last twelve of the
+session, in memory). `/analysis` and `/launch` take `?run=<id>` and *read*
+that trajectory; they are views of a flight, not second places to start one.
+Mission control's history strip restores any of them — the plots and the form
+that produced them — in one click.
+
+This replaced an arrangement where every page re-flew the mission from a query
+string. That was seconds of duplicated simulation each time, and it was also
+wrong: the query string and the flight it produced were only ever as identical
+as the form's serialisation, so "show me the launch view of this run" quietly
+meant "fly something close to this run again". Opened with no run at all, both
+pages say so and offer the history instead of inventing a default mission.
+
+Links between pages are ordinary same-document navigations. They used to be
+`target="_blank"`, so that mission control and the launch view could sit side
+by side — true in a browser, and false in the desktop application, where a
+WebView2 with no `NewWindowRequested` handler refuses a new window **and
+reports nothing at all**. Two of the four nav links and three keyboard
+shortcuts did nothing whatsoever in v0.3.1. The host now handles that request
+as a backstop, and the nav bar is sticky, because a bar you have to scroll
+back up to reach is a bar you stop using.
 
 The panel logs one line per request — method, path, status, duration, bytes —
 and answers `GET /api/health` with its uptime, Julia version and thread count.

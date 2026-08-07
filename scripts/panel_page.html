@@ -94,6 +94,9 @@
                       padding: 0; border: 0; background: none; }
   .legend { display: flex; gap: 12px; font-size: 11.5px; margin: 6px 0 8px;
             flex-wrap: wrap; }
+  /* sits in the legend's place so hiding one and showing the other does not
+     move the canvas below them */
+  .scenehint { font-size: 11.5px; margin: 6px 0 8px; color: var(--text-3); }
   .legend i { display: inline-block; width: 13px; height: 3px; border-radius: 2px;
               vertical-align: middle; margin-right: 4px; }
 
@@ -166,8 +169,8 @@
   <span class="appnav-links">
     <a class="navlink" href="/" aria-current="page">mission control</a>
     <a class="navlink" id="nav_build" href="/build">vehicle builder</a>
-    <a class="navlink" id="nav_analysis" href="/analysis" target="_blank">analysis</a>
-    <a class="navlink" id="nav_launch" href="/launch" target="_blank">launch view</a>
+    <a class="navlink" id="nav_analysis" href="/analysis">analysis</a>
+    <a class="navlink" id="nav_launch" href="/launch">launch view</a>
   </span>
   <span class="appnav-end">
     <span class="u-label" id="nav_note">circumlunar free return</span>
@@ -199,7 +202,9 @@
   <div style="margin-top:14px"><button id="helpclose" class="ghost">Close</button></div>
 </dialog>
 <div class="app">
-  <div>
+  <!-- every control that describes the mission lives in here, which is what
+       lets one listener notice that the run on screen is now out of date -->
+  <div id="sideform">
 
     <div class="card">
       <h2>Mission</h2>
@@ -412,7 +417,17 @@
       <span class="verdict-state" id="verdict_state">—</span>
       <span class="verdict-why" id="verdict_why"></span>
     </div>
-    <div class="panel" style="margin-bottom:12px">
+    <!-- Nothing re-flies on its own, so something has to say when what is on
+         screen has stopped describing what the form says. Without this, the
+         cost of not auto-running is a dashboard that quietly shows the wrong
+         vehicle's numbers. -->
+    <div class="stale" id="stale" hidden>
+      <span id="stale_why">the configuration has changed since this run</span>
+      <button id="stale_run">Run it again</button>
+    </div>
+    <!-- hidden until there is a run: an empty bordered box under a "NO RUN
+         YET" verdict reads as a panel that failed to load -->
+    <div class="panel" id="tilespanel" style="margin-bottom:12px" hidden>
       <div class="mgroups" id="tiles"></div>
     </div>
 
@@ -424,6 +439,9 @@
     <div class="stage">
       <div class="card stagemain">
         <div class="legend" id="legend"></div>
+        <!-- the scene is a black rectangle before anything has flown; say why
+             rather than leaving it to be read as a broken canvas -->
+        <div class="scenehint" id="scenehint">no trajectory yet</div>
         <canvas id="scene"></canvas>
         <div class="bar">
           <button id="play" class="ghost">&#9654; play</button>
@@ -462,7 +480,7 @@
          what you read AFTER a run, not what you watch during one, and having
          them here meant the answer to "did it work" was four screens above
          the tools for asking why. -->
-    <a class="card gonext" id="analysislink" href="/analysis" target="_blank">
+    <a class="card gonext" id="analysislink" href="/analysis">
       <span class="gonext-k u-label">next</span>
       <span class="gonext-t">Analysis &rarr;</span>
       <span class="gonext-w">ascent, entry and descent profiles · the event log ·
@@ -479,7 +497,13 @@ import * as vehicle from '/static/vehicle.js';
 // The metric vocabulary and the limit table are shared with /analysis, which
 // names the same quantities in its sweep and solve pickers.
 import { V, limit } from '/static/metrics.js';
+// Loading and failure are shared surfaces: a mission takes seconds, and a
+// page that is thinking must not look like a page that is broken.
+import { busy, fail, clearFailures, reportUncaught } from '/static/busy.js';
+import * as runs from '/static/runs.js';
 import { suite, report, requested } from '/static/selftest.js';
+
+reportUncaught();
 
 const $ = id => document.getElementById(id);
 const BASE_FIELDS =['pod_mass','pod_dia','crewed','h_park_km','incl_deg','hp_moon_km','hp_return_km',
@@ -850,13 +874,16 @@ async function doRun() {
   $('status').className = 'status';
   $('status').textContent = 'designing + flying mission…';
   showVerdict('running', 'RUNNING', 'designing and flying the mission…');
+  // A mission is seven to twelve seconds of real simulation. Before this the
+  // only sign it had started was a status line at the bottom of a sidebar.
+  const done = busy('designing and flying the mission…');
   const t0 = performance.now();
   try {
     const j = await api.run(params());
     j._params = Object.fromEntries(params());
     run = j;
-    history.unshift(j);
-    if (history.length > 12) history.pop();
+    clearFailures();
+    clearStale();
     // A partial mission (ascent failed, coast timed out) is served with every
     // leg that flew; the dashboard renders what exists. A render throw on a
     // partial is survivable — the status line and the launch view are the
@@ -868,12 +895,18 @@ async function doRun() {
     }
     setVerdict(j);
     $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
+    // the server files every run it flies; re-read rather than mirror it, so
+    // one list is the truth and eviction happens in one place
+    loadHistory();
   } catch (e) {
     $('status').className = 'status err';
     $('status').textContent = String(e.message || e);
     showVerdict('failed', 'RUN FAILED', String(e.message || e));
+    fail(e, 'mission');
+  } finally {
+    done();
+    $('run').disabled = false;
   }
-  $('run').disabled = false;
 }
 
 // ------------------------------------------------------------- the verdict --
@@ -888,6 +921,43 @@ function showVerdict(kind, state, why) {
   $('verdict_state').textContent = state;
   $('verdict_why').textContent = why || '';
 }
+
+/** Before anything has been flown. Says what to press, and why it is empty. */
+function showIdle() {
+  showVerdict('idle', 'NO RUN YET',
+              history.length
+                ? 'press Run mission, or pick one of the earlier runs below'
+                : 'press Run mission — nothing is simulated until you ask');
+  $('status').className = 'status';
+  $('status').textContent = 'ready';
+  // Everything that describes a flight stays out of the way until there is
+  // one. The vehicle card is the exception and stays: the stack is real
+  // whether or not it has flown.
+  $('tilespanel').hidden = true;
+  $('legend').hidden = true;
+  $('scenehint').hidden = false;
+}
+
+/** A run is on screen: bring back everything showIdle put away. */
+function showRunUI() {
+  $('tilespanel').hidden = false;
+  $('legend').hidden = false;
+  $('scenehint').hidden = true;
+}
+
+/**
+ * The run on screen no longer matches the form.
+ *
+ * The alternative to auto-running is not "do nothing", it is "say so".
+ * Silence here would mean editing the vehicle and reading the previous
+ * vehicle's numbers without a single thing on the page having changed.
+ */
+function markStale(why) {
+  if (!run) return;                    // nothing on screen to go stale
+  $('stale_why').textContent = why;
+  $('stale').hidden = false;
+}
+function clearStale() { $('stale').hidden = true; }
 
 function setVerdict(j) {
   const m = j.metrics || {};
@@ -950,6 +1020,7 @@ function setVerdict(j) {
 
 function renderAll() {
   if (!run) return;
+  showRunUI();
   const m = run.metrics;
   const groups = run.mode === 'landing' ? [
     ['launch', [
@@ -1075,23 +1146,89 @@ function renderAll() {
   syncLinks();
 }
 
+// --------------------------------------------------------------- history --
+//
+// The server owns this list (`RUNS` in panelapp.jl) and the page reads it.
+// It used to be an array of payloads living in this tab, which meant history
+// died on every navigation — and now that the pages navigate in place rather
+// than opening tabs, that would be every time you looked at a trajectory.
+
+async function loadHistory() {
+  history = await runs.list();
+  renderHistory();
+  syncLinks();
+}
+
 function renderHistory() {
-  $('history').innerHTML = history.map((h, i) => {
-    const p = h._params, m = h.metrics;
-    const sel = h === run ? ' sel' : '';
-    const body = h.mode === 'landing'
-      ? `lander ${fmt(m.lander_wet_t,1)} t · ${fmt(m.descent_dv,0)} m/s · ` +
-        `${fmt(m.touchdown_v,1)} m/s down · ${fmt(m.prop_left_kg,0)} kg left`
-      : h.mode === 'suborbital'
-      ? `${(h.suborbital || {}).profile === 'downrange' ? 'shot' : 'hop'} · ` +
-        `${fmt(m.apogee_km,1)} km apogee · ${fmt(m.range_km,1)} km range · ` +
-        `${fmt(m.peak_g,1)} g`
-      : `pod ${p.pod_mass} kg · peri ${p.hp_moon_km} km · ` +
-        `${fmt(m.peak_g,1)} g · ${fmt(m.t_days,1)} d`;
-    return `<span class="chip${sel}" data-i="${i}">#${history.length-i} · ${body}</span>`;
-  }).join('');
-  for (const el of $('history').querySelectorAll('.chip'))
-    el.onclick = () => { run = history[+el.dataset.i]; renderAll(); };
+  const host = $('history');
+  if (!history.length) {
+    host.innerHTML = '<span class="sub">no runs yet — press ' +
+                     '<b>Run mission</b> and this fills in</span>';
+    return;
+  }
+  host.replaceChildren(...history.map((h, i) => {
+    const el = document.createElement('span');
+    // `sel` marks the run currently on screen, which after a restore is the
+    // whole point: it says WHICH of these you are looking at.
+    el.className = 'chip hchip is-' + runs.verdict(h) +
+                   (run && run.id === h.id ? ' sel' : '');
+    el.dataset.id = h.id;
+    el.title = `${runs.modeLabel(h.mode)} — ${runs.ago(h.at)}`;
+    el.innerHTML =
+      `<b>#${history.length - i}</b> <span class="hv">${h.vname || ''}</span> ` +
+      `<span class="hd"></span>`;
+    el.querySelector('.hd').textContent = runs.describe(h);
+    el.onclick = () => restore(h.id);
+    return el;
+  }));
+}
+
+/**
+ * Put an earlier run back on screen — the trajectory AND the form that made
+ * it, so the next edit starts from what you are looking at rather than from
+ * whatever the form happened to say.
+ *
+ * The full payload is fetched rather than kept: twelve trajectories is
+ * megabytes, and the server already has them.
+ */
+async function restore(id) {
+  const done = busy('loading run…');
+  try {
+    const j = await runs.get(id);
+    run = j;
+    if (j.params) applyParams(j.params);
+    clearFailures();
+    // applyParams just fired input events all over the form; the run on
+    // screen is what those values produced, so it is not stale.
+    clearStale();
+    renderAll();
+    setVerdict(j);
+    $('status').className = 'status';
+    $('status').textContent = `showing run ${id}`;
+    fetchGeo();
+  } catch (e) {
+    fail(e, 'run history');
+  } finally {
+    done();
+  }
+}
+
+/** Set the whole form from a stored run's parameters. */
+function applyParams(p) {
+  const q = new URLSearchParams(p);
+  if (q.get('mode')) setMode(q.get('mode'));
+  if (q.get('sub_profile')) { SUBPROF = q.get('sub_profile'); subNote(); }
+  if (q.has('nstages')) setField('nstages', q.get('nstages'));
+  if (q.has('nboost')) setField('nboost', q.get('nboost'));
+  buildStages();
+  for (const [k, v] of q) {
+    if (['mode', 'zoom', 'nstages', 'nboost', 'sub_profile'].includes(k)) continue;
+    if (k === 'vname') { VNAME = v; continue; }
+    setField(k, v);
+  }
+  syncSizeBy();
+  podNote();
+  updateLanderNote();
 }
 
 
@@ -1928,19 +2065,43 @@ function updateLanderNote() {
 }
 
 // ---------------------------------------------------------------- wire up --
-// The analysis page and the builder fly their own copy of whatever is
-// configured here, so every link out of this page carries the configuration.
-// Real hrefs rather than click handlers: middle-click and "open in new tab"
-// are how you end up with mission control and its plots side by side, which
-// is the point of them being separate pages at all.
+//
+// Two different things get carried out of this page, and conflating them is
+// what made the analysis and launch views re-fly a mission that had already
+// been flown, seconds after flying it.
+//
+//   * The BUILDER wants the configuration — it edits the vehicle this form
+//     describes, whether or not anything has been flown.
+//   * ANALYSIS and the LAUNCH VIEW want a RUN. They read a trajectory; they
+//     are not a second place to start one. Linked by run id, they load the
+//     flight already on screen instead of computing their own copy of it.
+//
+// With nothing flown yet the run pages are linked bare, and say so when they
+// open. That is deliberate: a launch view is a view OF something.
+//
+// Real hrefs rather than click handlers, so the browser's own affordances
+// (hover target, back button, middle click) keep working.
+function runQuery() {
+  return run && run.id ? '?run=' + encodeURIComponent(run.id) : '';
+}
 function syncLinks() {
-  const qs = '?' + params();
-  for (const [id, base] of [['nav_analysis', '/analysis'], ['analysislink', '/analysis'],
-                            ['nav_build', '/build'], ['nav_launch', '/launch']]) {
+  const cfg = '?' + params(), rq = runQuery();
+  for (const [id, base, q] of [['nav_analysis', '/analysis', rq],
+                               ['analysislink', '/analysis', rq],
+                               ['nav_launch',   '/launch',   rq],
+                               ['nav_build',    '/build',    cfg]]) {
     const el = $(id);
-    if (el) el.href = base + qs;
+    if (!el) continue;
+    el.href = base + q;
+    // Dimmed only when there is genuinely nothing to show — a bare link
+    // resolves to the most recent run, so history alone keeps it live. The
+    // link always works; this says whether it leads anywhere yet.
+    el.classList.toggle('is-empty',
+                        base !== '/build' && !run && !history.length);
   }
 }
+/** Navigate to one of the run pages, carrying the run on screen. */
+function go(base) { location.href = base + runQuery(); }
 $('run').onclick = () => { fetchGeo(); doRun(); };
 $('play').onclick = () => { geoFollow = true; togglePlay(); };
 $('scrub').oninput = e => {
@@ -2002,14 +2163,16 @@ for (const b of $('modeswitch').querySelectorAll('button'))
 // kilometres was the one mission that never showed them. The page had the
 // moon world, the terrain and the lander the entire time; nothing ever asked
 // the server for a descent to put in them.
-$('launchbtn').onclick = () => {
-  window.open('/launch?' + params(), '_blank');
-};
+//
+// `go` rather than window.open: a WebView2 with no NewWindowRequested handler
+// refuses to open one and reports nothing, so every one of these was a button
+// that did nothing at all in the shipped application. See `syncLinks`.
+$('launchbtn').onclick = () => go('/launch');
 // the builder opens on this form's exact configuration; stopPropagation
 // because the chip lives inside a fold header that would otherwise collapse
 $('buildbtn').onclick = e => {
   e.stopPropagation();
-  window.open('/build?' + params(), '_blank');
+  location.href = '/build?' + params();
 };
 for (const f of ['l_dry','l_prop','l_isp','l_thrust_kn','l_throttle_min','l_diameter'])
   $(f).addEventListener('input', updateLanderNote);
@@ -2027,7 +2190,7 @@ window.addEventListener('keydown', e => {
   else if (k === 'z') { moonView = false; autoFit = true; fitCamera(); }
   else if (k === 'l') $('launchbtn').click();
   else if (k === 'b') $('buildbtn').click();
-  else if (k === 'a') window.open('/analysis?' + params(), '_blank');
+  else if (k === 'a') go('/analysis');
   else if (k === 'm' && landing()) $('moonview').click();
   else if (e.key === '?') $('helpdlg').showModal();
 });
@@ -2168,7 +2331,19 @@ fillCatalogues().then(() => {
     applyVehicleConfig(vehicle.load());
   }
   fetchGeo();
-  doRun();
+  // NOTHING FLIES ON LOAD.
+  //
+  // This used to call doRun(), so opening mission control — including merely
+  // passing through it on the way back from the launch view — spent seven to
+  // twelve seconds simulating a mission nobody had asked for, and the page sat
+  // there looking broken while it did. A trajectory is now something you ask
+  // for: the button, a preset, a mode change, or an edit that invalidates the
+  // run on screen.
+  //
+  // `?run=<id>` is not an exception to that. It displays a flight that has
+  // already happened, which is exactly what returning from another page means.
+  const rid = new URLSearchParams(location.search).get('run');
+  loadHistory().then(() => rid ? restore(rid) : showIdle());
 });
 // live sync: the builder saves on every edit, and a storage event fires in
 // every OTHER tab on the same origin — so the geometry card follows the
@@ -2177,7 +2352,14 @@ window.addEventListener('storage', e => {
   if (e.key !== VEHICLE_KEY || !e.newValue) return;
   applyVehicleConfig(e.newValue);
   fetchGeo();
+  markStale('the vehicle changed in the builder');
 });
+// Any edit to the mission form does the same. Deliberately NOT a re-run: each
+// one is seven to twelve seconds of simulation and this fires per keystroke.
+for (const ev of ['input', 'change'])
+  $('sideform').addEventListener(ev, () =>
+    markStale('the mission has been edited since this run'));
+$('stale_run').onclick = () => { fetchGeo(); doRun(); };
 
 // -------------------------------------------------------------- selftest --
 // Load with ?selftest=1. This page had none, which is how `fmt` — the one

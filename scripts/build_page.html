@@ -101,8 +101,8 @@
   <span class="appnav-links">
     <a class="navlink" id="backlink" href="/">mission control</a>
     <a class="navlink" href="/build" aria-current="page">vehicle builder</a>
-    <a class="navlink" id="analysislink" href="/analysis" target="_blank">analysis</a>
-    <a class="navlink" id="flylink" href="/launch" target="_blank">launch view</a>
+    <a class="navlink" id="analysislink" href="/analysis">analysis</a>
+    <a class="navlink" id="flylink" href="/launch">launch view</a>
   </span>
   <!-- short on purpose: uppercase and letterspaced, this slot can carry about
        four words before it stops being a caption and starts being a headline
@@ -235,9 +235,11 @@ import { fin, fmt, fmtMass } from '/static/fmt.js';
 import * as api from '/static/api.js';
 import * as vehicle from '/static/vehicle.js';
 import { own } from '/static/vehicle.js';
+import { busy, fail, reportUncaught } from '/static/busy.js';
 import { suite, report, requested } from '/static/selftest.js';
 
 const $ = id => document.getElementById(id);
+reportUncaught();
 
 // ------------------------------------------------------------ form model --
 // The panel's exact role table, so a stage added here matches a stage the
@@ -525,14 +527,16 @@ function params() {
 // only those, is documented in /static/vehicle.js.
 function saveVehicle() { vehicle.save(params()); }
 function refreshLinks() {
-  const u = params();
-  $('backlink').href = '/?' + u;
-  const v = new URLSearchParams(u);
-  if (!v.has('mode')) v.set('mode', 'flyby');
-  $('flylink').href = '/launch?' + v;
-  // the analysis page flies its own run, so it needs a mission as well as a
-  // vehicle — same defaulting as the launch view
-  $('analysislink').href = '/analysis?' + v;
+  $('backlink').href = '/?' + params();
+  // The launch view and the analysis page READ a flown trajectory; neither
+  // takes a vehicle and starts one. Linking them with this form's
+  // configuration made both of them fly a mission on arrival — twelve seconds
+  // of simulation as the side effect of clicking a navigation link, and a
+  // flight nobody had asked to fly.
+  //
+  // Bare, they resolve to the most recent run, or explain themselves when
+  // there is none. Mission control is where a vehicle becomes a flight, and
+  // `backlink` above carries this exact form to it.
 }
 
 // ------------------------------------------------------------- geometry --
@@ -568,6 +572,10 @@ async function doFetchGeo() {
     if (my !== inflight) return;
     $('state').className = 'status err';
     $('state').textContent = 'no answer from the server: ' + e.message;
+    // The status line is one line at the bottom of a column and the next
+    // successful edit overwrites it. A dropped server should not be something
+    // you only notice because the numbers stopped moving.
+    fail(e, 'geometry');
   }
 }
 
@@ -1026,13 +1034,17 @@ function staleCheck() {
 
 // --------------------------------------------------------------- startup --
 async function boot() {
+  const done = busy('loading the parts catalogue…');
   try {
     CATALOGUE = await api.catalogue();
     staleCheck();
   } catch (e) {
     $('state').className = 'status err';
     $('state').textContent = 'no catalogue from the server: ' + e.message;
+    fail(e, 'catalogue');
     return;
+  } finally {
+    done();
   }
   // Rehydrate from an inbound query (the panel links here with its whole
   // form); with no vehicle in the query, the last stored vehicle applies —

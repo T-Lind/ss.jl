@@ -282,6 +282,85 @@ end
         @test !occursin("id=\"c_asc_h\"", bod)
         @test !occursin("id=\"sweepchart\"", bod)
 
+        # --- navigation must not depend on opening a window -----------------
+        # v0.3.1 shipped with `target="_blank"` on the analysis and launch-view
+        # links. A WebView2 with no NewWindowRequested handler REFUSES a new
+        # window and reports nothing at all, so in the desktop application both
+        # links were dead: clicking them did nothing, no error, no navigation.
+        # The vehicle-builder link, which had no target, worked — which is
+        # exactly the shape of the bug report.
+        #
+        # There is no browser here to prove that with, so the assertion is on
+        # the thing that caused it: no in-app link opens a new window.
+        for page in ("/", "/build", "/analysis", "/launch")
+            st, hdrs, bod = http("GET", page; port = port)
+            @test st == 200
+            @test !occursin("target=\"_blank\"", bod)
+            @test !occursin("window.open(", bod)
+        end
+
+        # --- the run store --------------------------------------------------
+        # /launch and /analysis read a flown trajectory by id rather than
+        # re-flying one from a query string. Re-flying was both seconds of
+        # duplicated simulation and a correctness bug: the trajectory shown was
+        # a fresh one that only resembled the run whose numbers had been read.
+        st, hdrs, bod = http("GET", "/api/runs"; port = port)
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test occursin("\"runs\":", bod)
+
+        # An unknown id is a 404 that explains itself — history is capped and
+        # in memory, so an id can legitimately stop resolving and "not found"
+        # on its own would read as a bug.
+        st, hdrs, bod = http("GET", "/api/runs/nosuchrun"; port = port)
+        @test st == 404
+        @test occursin("\"ok\":false", bod)
+        @test occursin("nosuchrun", bod)
+
+        # Flying through the route (not panel_mission directly) files the run
+        # and gives it an id, which is what the pages then pass around.
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port,
+                             body = "mode=suborbital&sub_profile=hop&sub_apogee_km=90")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test occursin("\"id\":\"r", bod)
+        rid = match(r"\"id\":\"(r\d+)\"", bod)[1]
+
+        # and it is retrievable, whole, by that id
+        st, hdrs, bod = http("GET", "/api/runs/$rid"; port = port)
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        @test occursin("\"id\":\"$rid\"", bod)
+        # the configuration that produced it travels with it — that is what
+        # lets a history entry put the form back rather than only replay a plot
+        @test occursin("\"params\":", bod)
+        @test occursin("\"sub_apogee_km\":\"90\"", bod)
+        @test occursin("\"apogee_km\":", bod)          # the trajectory itself
+
+        # it now appears in the history list, with a digest and no trajectory
+        st, hdrs, bod = http("GET", "/api/runs"; port = port)
+        @test st == 200
+        @test occursin("\"id\":\"$rid\"", bod)
+        @test occursin("\"mode\":\"suborbital\"", bod)
+        @test occursin("\"outcome\":", bod)
+        # a digest is metadata, not a flight: no sample arrays
+        @test !occursin("\"asc3d\"", bod)
+
+        # A FAILED run is not history. Nothing was flown, so there is nothing
+        # to go back to, and filing it would put an entry in the list that
+        # restores to nothing.
+        st, hdrs, bod = http("GET", "/api/runs"; port = port)
+        before = length(collect(eachmatch(r"\"id\":\"r\d+\"", bod)))
+        st, hdrs, bod = http("POST", "/api/run";
+                             port = port,
+                             body = "nstages=2&s1_engine=raptor_2&s1_propellant=kerolox")
+        @test st == 200
+        @test occursin("\"ok\":false", bod)
+        @test !occursin("\"id\":\"r", bod)      # no id handed out for a non-flight
+        st, hdrs, bod = http("GET", "/api/runs"; port = port)
+        @test length(collect(eachmatch(r"\"id\":\"r\d+\"", bod))) == before
+
         # A named engine owns its mixture: naming both an engine and a
         # DIFFERENT propellant is an error the user must see, not a silent
         # override (the form used to display a mixture the server was not
@@ -519,7 +598,15 @@ end
         (_, _, ba) = fetch(a)
         (_, _, bb) = fetch(b)
         @test occursin("\"ok\":true", ba)
-        @test ba == bb
+        # Every run now carries its own id and the wall-clock time it was
+        # filed, so two identical requests are no longer byte-identical and
+        # must not be asserted to be. What has to agree is the FLIGHT — strip
+        # the two fields that are deliberately unique and compare the rest,
+        # which is the trajectory, the metrics and the events.
+        drop_ids(s) = replace(s, r"\"(id|at)\":(\"[^\"]*\"|[-0-9.eE+]+),?" => "")
+        @test drop_ids(ba) == drop_ids(bb)
+        @test ba != bb                       # ...and the ids really are distinct
+        @test occursin(r"\"id\":\"r\d+\"", ba) && occursin(r"\"id\":\"r\d+\"", bb)
 
         # --- suborbital over the wire ---------------------------------------
         # A suborbital run carries no cislunar leg at all, so the payload has
