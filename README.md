@@ -629,52 +629,85 @@ julia --project -t auto scripts/desktop.jl
 ### Windows desktop application
 
 `ss.jl` also ships as a self-contained Windows application: no Julia
-installation, no `Pkg.instantiate`, no terminal. Download the release zip,
-unpack it, run `bin\ssjl.exe`, and a window opens on mission control. Close
-the window and the process exits — the server, the browser host and the
-simulator all go with it.
+installation, no `Pkg.instantiate`, no terminal, no browser. Download the
+release zip, unpack it, run `ssjl.exe`, and a window opens on mission control.
+Close the window and everything exits.
 
 ```powershell
 julia --project=build build/build_app.jl      # -> dist/ssjl (~615 MB, ~25 min)
-dist\ssjl\bin\ssjl.exe
+dist\ssjl\ssjl.exe
 ```
+
+The application is **two binaries**, and the split is the whole design:
+
+```
+ssjl/
+  ssjl.exe            the window — the only thing to run
+  bin/
+    ssjl-server.exe   the simulator, plus ~30 runtime DLLs
+  share/scripts/      the four pages and the shared modules
+```
+
+* `ssjl.exe` — a ~545 KB native window (`host/`, Rust + `wry`/`tao`). It owns
+  a WebView2 control, so it has its own icon, its own taskbar entry, no
+  browser branding anywhere, and no console window. WebView2 ships with
+  Windows, so the renderer costs nothing to bundle. It sits at the root
+  because the first thing you see after unzipping should be one obviously
+  runnable file.
+* `bin/ssjl-server.exe` — the simulator, frozen by PackageCompiler. The host
+  spawns it with `--no-window --exit-with-parent` and no console, reads the
+  port off its stdout, and points the WebView at it. Closing the window kills
+  it; so does killing the host from Task Manager, because the server holds a
+  pipe from its parent and exits when that closes.
+
+**v0.3.0 got this wrong and it is worth recording why.** That version opened
+Edge with `--app=` and waited on the browser process, treating its exit as
+"the user closed the window". Those are different statements: `msedge.exe`
+exits early whenever it hands the URL to an Edge that is already running, or
+cannot create its profile directory, or is mid-update. When it did, the server
+was torn down under a window that was still opening and the app came up
+showing `ERR_CONNECTION_REFUSED`. A `--user-data-dir` made that rare, not
+impossible — and rare is the wrong target when being wrong means a broken
+application. Now the window is the process, so there is no second lifetime to
+guess at. The from-source path in `scripts/desktop.jl` still uses a browser
+and no longer guesses either: it waits for traffic to go quiet
+(`PanelApp.LAST_REQUEST`) rather than for a process to exit.
 
 `build/build_app.jl` uses PackageCompiler's `create_app`, from a **separate
 environment** (`build/Project.toml`) so the simulator itself keeps its zero
 external dependencies — which is why it compiles fast and why CI needs no
 registry. `build/precompile_workload.jl` flies all three mission modes and
 exercises every HTTP route at build time, so the frozen app answers its first
-request immediately instead of printing "warming up".
+request immediately instead of printing "warming up". The Rust host needs a
+toolchain (<https://rustup.rs>); without one the build still succeeds and
+warns, and `ssjl-server.exe` opens a browser on its own.
 
-Three things about the frozen build are worth knowing, because each was a
-real failure before it was a line of code:
+Two more things about the frozen build, each a real failure before it was a
+line of code:
 
 * **Threads.** A compiled app starts with one thread, and thread count is
   fixed by the runtime *before* `julia_main` runs — `-t auto` is a Julia flag
   and there is no Julia command line here to put it on. One thread is not a
   detail: a mission in flight would block the accept loop and every geometry
-  request the builder makes while you type. `julia_main` therefore re-executes
-  itself once with `JULIA_NUM_THREADS=auto` set, guarded by `SSJL_THREADED`
-  so it cannot loop.
-* **Assets.** The four HTML pages and `static/*.js` are data, not code:
+  request the builder makes while you type. The host sets
+  `JULIA_NUM_THREADS=auto` when it spawns the server; run directly, the server
+  re-executes itself once to the same effect, guarded by `SSJL_THREADED` so it
+  cannot loop.
+* **Assets.** The four HTML pages and `static/*` are data, not code:
   `create_app` freezes compiled methods and knows nothing about them. They
-  travel to `share/scripts` beside the executable and are read from disk per
+  travel to `share/scripts` beside the executables and are read from disk per
   request, which is also what makes editing a page show up on refresh.
   `SSJL_SCRIPTS` overrides the location, so a frozen build can be pointed at
   a working tree.
-* **The window.** `scripts/desktop.jl` launches Edge (or Chrome) in `--app=`
-  mode against a dedicated `--user-data-dir`. The dedicated profile is
-  load-bearing rather than tidiness: without it, `msedge` hands the URL to an
-  already-running Edge and exits immediately, and the app has no window to
-  own.
 
 **GPU note, measured rather than assumed.** On a machine with both an Intel
 iGPU and a discrete NVIDIA card, `powerPreference: 'high-performance'` in the
 page's WebGL context request does **nothing** — Chromium binds its GPU process
-to one adapter at browser launch, and the renderer string comes back
-byte-identical. The lever that does work is on the command line, so
-`desktop.jl` passes `--force_high_performance_gpu`, which does put the browser
-process on the discrete card.
+to one adapter at launch, and the renderer string comes back byte-identical.
+The lever that works is a browser-process argument, so the host passes
+`--force_high_performance_gpu` to WebView2 and `desktop.jl` passes it to Edge.
+Whether the discrete card is measurably *faster* for this workload is still
+unestablished.
 
 ### Deploying the panel on Render
 

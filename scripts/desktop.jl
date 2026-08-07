@@ -1,22 +1,26 @@
-# ss.jl as a desktop application.
+# ss.jl in a window, when run from source.
 #
 #   julia --project -t auto scripts/desktop.jl
+#   julia --project -t auto scripts/desktop.jl --no-window
 #
-# Starts the panel server on a port nobody else is using, opens it in a
-# chromeless Edge window, and exits when that window is closed. No tray, no
-# background process left behind.
+# Starts the panel server on a port nobody else is using, opens a browser at
+# it, and exits when the window goes away.
 #
-# WHY EDGE RATHER THAN A BUNDLED RUNTIME
+# THIS IS THE FALLBACK, NOT THE SHIPPED APP
 #
-# Edge and the WebView2 runtime ship with Windows 11, so "self-contained"
-# costs zero megabytes here. Bundling Chromium (Electron) would add ~150 MB to
-# ship a renderer the machine already has, and a Rust/wry host would add a
-# toolchain to the build for the same WebView2 underneath. `--app=` gives a
-# window with no tabs, no omnibox and no browser chrome — which is the part
-# that makes it read as an application rather than a web page.
+# The released application is `bin/ssjl.exe`, a native WebView2 window written
+# in Rust (`host/`), which spawns the frozen simulator with `--no-window` and
+# owns the window itself. That is what gives it its own icon, its own taskbar
+# entry, no Edge branding, and no console.
 #
-# It also buys the one thing a web page provably cannot have: control over
-# which GPU renders. See GPU_FLAGS below.
+# What is left here is the from-source path, where there is no host binary to
+# run: open the page in whatever browser exists. Edge `--app=` gets a window
+# with no tabs and no omnibox, which is as close to an application as a
+# browser gets, and it takes `--force_high_performance_gpu` (see GPU_FLAGS) —
+# the one thing a web page provably cannot do for itself.
+#
+# The hard lesson is in `idle_out` below: a browser you launch is not a window
+# you own, and v0.3.0 shipped believing otherwise.
 
 include(joinpath(@__DIR__, "panelapp.jl"))
 
@@ -85,8 +89,17 @@ child die at once and shuts the server down under a window that just opened.
 A private profile forces a browser process this launcher actually owns, which
 is what makes waiting on it mean "the window is open".
 """
-function launch(; port::Int = free_port(), open_browser::Bool = true,
-                  gpu::Bool = true, warm::Bool = true)
+function launch(; port::Int = free_port(),
+                  # Defaults come from the command line, so that ALL launcher
+                  # policy lives in this file. That matters more than it looks:
+                  # this file is read from disk at run time while `julia_main`
+                  # is frozen into the system image, so a flag handled here can
+                  # be changed without a 25-minute rebuild, and one handled
+                  # there cannot.
+                  open_browser::Bool = !("--no-window" in ARGS),
+                  gpu::Bool = !("--no-gpu" in ARGS),
+                  warm::Bool = true,
+                  exit_on_stdin_eof::Bool = "--exit-with-parent" in ARGS)
     if warm
         print("starting the simulator… ")
         t0 = time()
@@ -96,10 +109,33 @@ function launch(; port::Int = free_port(), open_browser::Bool = true,
     srv = PanelApp.start_panel(port)
     url = "http://127.0.0.1:$port/"
     println("panel on $url")
+    # The native host reads this line off our stdout to learn the port, and a
+    # pipe is block-buffered where a console is not. Without the flush the
+    # window can sit on its splash screen until enough log lines accumulate to
+    # push this one out.
+    flush(stdout)
 
     if !open_browser
-        println("(no window requested — Ctrl-C to stop)")
-        wait(srv.acceptors[1])
+        if exit_on_stdin_eof
+            println("(serving for the desktop host — exits when it does)")
+            flush(stdout)
+            # Our stdin is a pipe held open by the host for exactly this
+            # purpose. When the host goes away for ANY reason — window closed,
+            # force-killed, user logged off — the write end closes and this
+            # read returns. Without it, a host killed from Task Manager would
+            # leave half a gigabyte of simulator listening forever.
+            #
+            # Gated behind the flag rather than done always: run from a service
+            # or with stdin redirected from NUL, stdin is at EOF immediately
+            # and the server would exit the instant it started.
+            try; read(stdin); catch; end
+            println("the desktop host is gone — shutting down")
+        else
+            println("(no window requested — Ctrl-C to stop)")
+            flush(stdout)
+            wait(srv.acceptors[1])
+        end
+        PanelApp.stop_panel(srv)
         return srv
     end
 
@@ -127,11 +163,23 @@ function launch(; port::Int = free_port(), open_browser::Bool = true,
     println("opening the window…")
     proc = run(Cmd([exe; args]), wait = false)
     try
-        wait(proc)                       # returns when the window is closed
+        wait(proc)
+        # `wait` returning means THE PROCESS WE SPAWNED EXITED. That is not the
+        # same statement as "the user closed the window", and treating it as
+        # such is what shipped v0.3.0 with a window showing
+        # ERR_CONNECTION_REFUSED: Edge exits early whenever it hands the URL to
+        # an Edge that is already running, or cannot create its profile
+        # directory, or is mid-update — and the server was then torn down
+        # underneath the window that had just appeared.
+        #
+        # `--user-data-dir` above makes the hand-off case rare. Rare is not the
+        # same as impossible, and the cost of being wrong was a broken app, so
+        # the browser's exit is now only a HINT. What settles it is whether
+        # anything is still talking to us.
+        idle_out(srv)
     catch err
         err isa InterruptException || rethrow()
     finally
-        println("window closed — shutting down")
         PanelApp.stop_panel(srv)
         # best-effort: a profile directory is a few MB and the OS will clear
         # temp eventually, so a failure here is not worth an error on exit
@@ -140,8 +188,52 @@ function launch(; port::Int = free_port(), open_browser::Bool = true,
     srv
 end
 
+"Seconds of silence after which a window is presumed gone."
+const IDLE_GRACE = 12.0
+
+"""
+    idle_out(srv)
+
+Return once the UI is really gone: no request for `IDLE_GRACE` seconds.
+
+Called after the browser process exits. Two cases have to come apart here and
+they used to be one:
+
+  * The window was closed. Traffic stopped when it did, so this returns after
+    the grace period and the app shuts down — a few seconds later than before,
+    which nobody can see because the window is already gone.
+
+  * The browser handed our URL to another process and exited. A window is
+    alive and talking to us. Shutting down here is precisely the bug, so this
+    keeps waiting, and the app lives as long as the window does.
+
+A browser that exits before ever loading the page is the third case: there is
+no window to serve and nothing to wait for, so say what happened and leave the
+server up rather than vanishing without explanation.
+"""
+function idle_out(srv)
+    if PanelApp.LAST_REQUEST[] == 0.0
+        println("""
+        The browser exited without ever loading the page. That usually means it
+        handed the address to a copy of itself that was already running.
+
+        The simulator is still serving — open this in any browser:
+            $(server_url(srv))
+        Ctrl-C here to stop it.""")
+        wait(srv.acceptors[1])
+        return
+    end
+    while time() - PanelApp.LAST_REQUEST[] < IDLE_GRACE
+        sleep(1.0)
+    end
+    println("window closed — shutting down")
+end
+
+"The address the panel is actually listening on."
+server_url(srv) = "http://127.0.0.1:$(srv.port)/"
+
 if abspath(PROGRAM_FILE) == @__FILE__
     # `--no-window` serves without opening anything, which is what a headless
     # check or a second window attaching to an existing server wants.
-    launch(open_browser = !("--no-window" in ARGS), gpu = !("--no-gpu" in ARGS))
+    launch()          # every flag is a default of `launch` itself, see above
 end

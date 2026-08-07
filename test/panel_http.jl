@@ -444,6 +444,20 @@ end
             @test !occursin("PanelApp", bod)     # never the file's contents
         end
 
+        # --- the liveness signal ---------------------------------------------
+        # v0.3.0 shipped a desktop launcher that treated "the browser process
+        # we spawned exited" as "the user closed the window". Those are not the
+        # same statement — Edge exits early when it hands the URL to a copy of
+        # itself — and the server was torn down under a window that had just
+        # opened, giving ERR_CONNECTION_REFUSED. Traffic is the honest signal,
+        # so the launcher now waits on this instead.
+        before = PanelApp.LAST_REQUEST[]
+        @test before > 0                       # every request above set it
+        sleep(0.05)
+        st, hdrs, bod = http("GET", "/api/health"; port = port)
+        @test st == 200
+        @test PanelApp.LAST_REQUEST[] > before  # and it moves
+
         # --- health ---------------------------------------------------------
         st, hdrs, bod = http("GET", "/api/health"; port = port)
         @test st == 200

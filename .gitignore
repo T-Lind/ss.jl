@@ -12,6 +12,10 @@ Manifest.toml
 # `julia --project=build build/build_app.jl` and shipped as a release asset
 dist/
 
+# the native window's build output. Cargo.lock IS committed (below): it is a
+# binary we ship, so the exact dependency versions are part of the release.
+host/target/
+
 # Python
 __pycache__/
 *.pyc

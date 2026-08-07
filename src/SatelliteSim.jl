@@ -147,6 +147,10 @@ function julia_main()::Cint
         # and the warning says plainly that it becomes an error in a future
         # version. Fetching the binding through invokelatest too is the fix.
         launch_fn = Base.invokelatest(getglobal, Main, :launch)
+        # No arguments on purpose. `launch` reads the command line itself, in
+        # `desktop.jl`, which is loaded from disk at run time — so `--no-window`
+        # (how the native window drives this) and anything added later can
+        # change without rebuilding the system image this function lives in.
         Base.invokelatest(launch_fn)
         return Cint(0)
     catch err
