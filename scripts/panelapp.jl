@@ -20,6 +20,18 @@ const PAGE_PATH = Ref(joinpath(@__DIR__, "panel_page.html"))
 const LAUNCH_PATH = Ref(joinpath(@__DIR__, "launch_page.html"))
 const BUILD_PATH = Ref(joinpath(@__DIR__, "build_page.html"))
 const ANALYSIS_PATH = Ref(joinpath(@__DIR__, "analysis_page.html"))
+
+"""
+When a client last spoke to us, as `time()`. Zero means never.
+
+The desktop launcher needs to know whether a window is actually there, and a
+browser process's lifetime is not that: `msedge.exe` exits early for reasons
+that have nothing to do with the window — it hands the URL to an Edge that is
+already running, fails to create its profile directory, or is mid-update — and
+treating that as "the user closed the window" tore the server down under a
+window that was still opening. Traffic is the honest signal.
+"""
+const LAST_REQUEST = Ref(0.0)
 const STATIC_DIR = Ref(joinpath(@__DIR__, "static"))
 
 # ---------------------------------------------------------------- helpers --
@@ -1414,6 +1426,7 @@ own serialization or in the socket write.
 """
 function handle(sock)
     t0 = time()
+    LAST_REQUEST[] = t0
     method, path, status, nbytes = "-", "-", "-", 0
     wrote = false
     try

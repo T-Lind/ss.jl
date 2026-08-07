@@ -28,11 +28,25 @@ const OUT = length(ARGS) >= 1 ? ARGS[1] : joinpath(ROOT, "dist", "ssjl")
 
 isdir(dirname(OUT)) || mkpath(dirname(OUT))
 
+# The native window is built FIRST, before the twenty-minute system-image
+# compile. It takes about half a minute, and a missing Rust toolchain or a
+# syntax error in the host should be discovered then rather than after the
+# expensive half of the build. `create_app` also runs with `force = true`,
+# which wipes the output directory — so a failure late in this script leaves no
+# working application behind, and the cheap check belongs in front of that.
+include(joinpath(@__DIR__, "host.jl"))
+const HOST_EXE = build_host(ROOT)
+
 @info "compiling ss.jl into an application" source=ROOT dest=OUT
 
 create_app(
     ROOT, OUT;
-    executables = ["ssjl" => "julia_main"],
+    # `ssjl-server`, not `ssjl`: the thing a user double-clicks is the native
+    # window (host/, built below), and this is the simulator it drives. The
+    # name matters beyond tidiness — a PackageCompiler app is a CONSOLE
+    # subsystem binary, so whatever is called `ssjl.exe` here is what decides
+    # whether launching the app flashes a black console window at you.
+    executables = ["ssjl-server" => "julia_main"],
     precompile_execution_file = joinpath(@__DIR__, "precompile_workload.jl"),
     # The mission stack is the expensive thing to compile and the whole point
     # of freezing it, so let the compiler work on it properly.
@@ -62,4 +76,19 @@ for f in readdir(joinpath(ROOT, "scripts"))
     end
 end
 
-@info "done" exe=joinpath(OUT, "bin", "ssjl.exe") assets=SHARE
+# --------------------------------------------------------------- the window --
+#
+# `host/` was compiled at the top of this script; all that is left is to put it
+# where a user will find it. At the ROOT of the output, not in bin/: unzipping
+# should put one obviously-runnable thing in front of you, and bin/ holds the
+# simulator with the thirty runtime DLLs it needs. The host knows to look in
+# bin/ for the server.
+if HOST_EXE !== nothing
+    cp(HOST_EXE, joinpath(OUT, basename(HOST_EXE)); force = true)
+    @info "done" app=joinpath(OUT, basename(HOST_EXE)) server=joinpath(OUT, "bin") assets=SHARE
+else
+    @warn """
+          No native window was built (needs a Rust toolchain: https://rustup.rs).
+          The frozen simulator still works — run bin/ssjl-server.exe and it will
+          open a browser instead.""" assets=SHARE
+end
