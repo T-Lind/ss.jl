@@ -75,6 +75,89 @@ include("config.jl")
 include("montecarlo.jl")
 include("output.jl")
 
+"""
+    julia_main() -> Cint
+
+Entry point for the frozen Windows application built by `build/build_app.jl`.
+
+Opens the desktop window and returns when it is closed. Not used when running
+from source — `scripts/desktop.jl` is the entry point there — and deliberately
+thin, because everything it needs already exists.
+
+The panel layer is `include`d at run time rather than compiled into the
+package. That is on purpose: the expensive thing to compile is the mission
+stack above, which IS frozen into the sysimage, while `panelapp.jl` is
+straightforward code whose compile cost is small. Keeping it out of the
+package keeps the simulator importable without dragging an HTTP server and a
+browser launcher along with it.
+
+Assets (the three HTML pages, `static/*.js`, and these two scripts) sit next
+to the executable under `share/scripts`. `SSJL_SCRIPTS` overrides that, which
+is how a frozen build can be pointed at a working tree.
+"""
+function julia_main()::Cint
+    try
+        here = dirname(abspath(PROGRAM_FILE))
+
+        # Thread count is fixed by the runtime BEFORE this function runs, and a
+        # compiled app starts with one thread — `-t auto` is a julia flag and
+        # there is no julia command line here to put it on. One thread is not a
+        # detail: `panel_mission` never yields, so a mission in flight blocks
+        # the accept loop and every geometry request the builder makes while
+        # you type. Measured on this exe: 1 thread out of 16 available.
+        #
+        # JULIA_NUM_THREADS *is* read at startup, so the fix is to set it and
+        # start again. Ugly, and the alternative is an app that quietly uses a
+        # sixteenth of the machine unless its user knows to set an environment
+        # variable before double-clicking it.
+        if Threads.nthreads() == 1 && !haskey(ENV, "SSJL_THREADED")
+            exe = abspath(PROGRAM_FILE)
+            if isfile(exe)
+                env = copy(ENV)
+                env["JULIA_NUM_THREADS"] = "auto"
+                env["SSJL_THREADED"] = "1"       # the guard against looping
+                p = run(setenv(Cmd([exe; ARGS]), env); wait = true)
+                return Cint(p.exitcode)
+            end
+        end
+
+        candidates = [
+            get(ENV, "SSJL_SCRIPTS", ""),
+            joinpath(here, "..", "share", "scripts"),   # installed layout
+            joinpath(here, "share", "scripts"),
+            joinpath(dirname(@__DIR__), "scripts"),     # running from source
+        ]
+        root = nothing
+        for c in candidates
+            isempty(c) && continue
+            if isfile(joinpath(c, "desktop.jl"))
+                root = abspath(c)
+                break
+            end
+        end
+        if root === nothing
+            println(stderr, "cannot find the panel scripts; set SSJL_SCRIPTS " *
+                            "to the directory holding desktop.jl")
+            return Cint(1)
+        end
+        Base.include(Main, joinpath(root, "desktop.jl"))
+        # Both the binding lookup AND the call have to be deferred. Reading
+        # `Main.launch` directly is what Julia 1.12 warns about — the binding
+        # did not exist in this function's world age, only the call was wrapped,
+        # and the warning says plainly that it becomes an error in a future
+        # version. Fetching the binding through invokelatest too is the fix.
+        launch_fn = Base.invokelatest(getglobal, Main, :launch)
+        Base.invokelatest(launch_fn)
+        return Cint(0)
+    catch err
+        # a frozen app has no console to read a stack trace from unless it is
+        # printed here, and an exit code alone is not a bug report
+        showerror(stderr, err, catch_backtrace())
+        println(stderr)
+        return Cint(1)
+    end
+end
+
 export
     # constants / helpers
     MU_EARTH, RE_EQ, RE_MEAN, OMEGA_EARTH, G0, deg2rad_, rad2deg_,

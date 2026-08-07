@@ -19,6 +19,8 @@ using Printf
 const PAGE_PATH = Ref(joinpath(@__DIR__, "panel_page.html"))
 const LAUNCH_PATH = Ref(joinpath(@__DIR__, "launch_page.html"))
 const BUILD_PATH = Ref(joinpath(@__DIR__, "build_page.html"))
+const ANALYSIS_PATH = Ref(joinpath(@__DIR__, "analysis_page.html"))
+const STATIC_DIR = Ref(joinpath(@__DIR__, "static"))
 
 # ---------------------------------------------------------------- helpers --
 
@@ -248,14 +250,39 @@ behaves exactly as it did before the field existed.
 pod_diameter(p, pod_mass) =
     (d = getf(p, "pod_dia", 0.0); d > 0 ? d : 2 * pod_radius(pod_mass))
 
+"""
+    stage_slug(vname) -> String
+
+The stem a stage is named after, taken from the vehicle's own name.
+
+Stage names are not internal: an ascent emits `sep_<stage name>`, and the
+launch view renders that with the underscores turned into spaces — so
+`sep_saturn_v1` reads "SATURN V1 SEPARATION". They were hardcoded to `sable`,
+which is why flying a Saturn V announced "SABLE1 SEPARATION".
+
+Anything parenthesised is dropped ("Sable (panel)" is the Sable), runs of
+non-alphanumerics become the single underscore the label splits on, and a name
+with nothing usable in it falls back to the reference vehicle's stem rather
+than producing a nameless event.
+"""
+function stage_slug(vname::AbstractString)
+    base = first(split(vname, '('))
+    s = replace(lowercase(strip(base)), r"[^a-z0-9]+" => "_")
+    s = strip(s, '_')
+    # long enough for "saturn_v", short enough that the HUD's own abbreviator
+    # still has room to cut on a word
+    isempty(s) ? "sable" : first(s, 14)
+end
+
 "Build a LaunchVehicle from panel parameters."
 function lv_from_params(p)
     dia = getf(p, "diameter", 1.8)
     nst = n_stages(p)
+    slug = stage_slug(gets(p, "vname", "Sable (panel)"))
     stages = map(1:nst) do k
         d = STAGE_ROLE[stage_role(k, nst)]
         f = stage_scale(k, nst)
-        nm = k == nst ? :sablek : Symbol(:sable, k)
+        nm = k == nst ? Symbol(slug, :k) : Symbol(slug, k)
         stage_from_params(p, "s$(k)_", nm, dia; dry = d.dry * f, prop = d.prop * f,
                           thrust_kn = d.thrust * f, isp = d.isp, ae = d.ae * f,
                           ptype = d.ptype, nedef = d.ne)
@@ -819,6 +846,10 @@ function panel_mission(p)::Dict{String,Any}
     mission_mode(p) === :suborbital && return panel_suborbital(p)
     ms = moonshot(
         pod_mass = getf(p, "pod_mass", 350.0),
+        # a stated capsule width is the width in the flow, the width on the
+        # screen AND the width at entry — the same number in all three, which
+        # is what the builder promises. Omitted, moonshot takes the mass fit.
+        pod_diameter = pod_diameter(p, getf(p, "pod_mass", 350.0)),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
 
         hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3,
@@ -850,10 +881,29 @@ function panel_mission(p)::Dict{String,Any}
         "liftoff_t" => liftoff_mass(ms.lv) / 1e3,
         "t_days" => (ent !== nothing ? ent.t_splash :
                      cis !== nothing ? cis.t : asc.t) / 86400,
+        # what the free-return corrector made of the problem, so the page can
+        # say WHY a mission stopped rather than only that it did
+        "design_status" => string(ms.design_status),
     )
     out = Dict{String,Any}(
         "ok" => true, "mode" => "flyby",
-        "outcome" => ent !== nothing ? "nominal" :
+        # An entry that RAN is not an entry that ARRIVED. `terminated` is
+        # :splashdown or :timeout, and a capsule whose ballistic coefficient
+        # skips it back out of the atmosphere produces a full 8-hour entry log
+        # with NaN splash fields — which this reported as "nominal" while every
+        # splashdown metric serialised to null. The text reports have always
+        # read this field (`DID NOT SPLASH DOWN` in mission.jl and
+        # lunarreturn.jl); the web path was the one that did not. Orbit and
+        # suborbital above already test their own outcome the same way.
+        "outcome" => ent !== nothing ?
+                       (ent.terminated === :splashdown ? "nominal" :
+                        "entry_" * string(ent.terminated)) :
+                     # a design the corrector never closed outranks the leg
+                     # outcome: with strict=false moonshot stops before the
+                     # entry, and "entry_interface" as an outcome would read
+                     # like a flight that simply ended early rather than a
+                     # trajectory that was never the requested one
+                     ms.design_status in (:stalled, :unreachable) ? "design_failed" :
                      cis !== nothing ? string(cis.outcome) : "ascent_failed",
         "metrics" => metrics,
         "asc3d" => sc.asc3d,
@@ -926,10 +976,37 @@ end
 """
 Metrics a solve can target. All are scalars from a completed mission, so
 each evaluation is a full design-and-fly of the chain.
+
+`perilune_km` and `vac_perigee_km` are deliberately NOT here. They are
+COMMANDED, not achieved: the free-return corrector drives both to whatever
+the mission targets ask for, so they read the same to four figures across the
+whole feasible range of any vehicle parameter and then cliff when the design
+stops closing. Solving against one spent the entire iteration budget crawling
+along a flat function and returned the cliff edge as if it were a root. The
+number to move is the target itself.
 """
-const SOLVE_METRICS = ["prop_margin_kg", "perilune_km", "vac_perigee_km",
+const SOLVE_METRICS = ["prop_margin_kg",
                        "peak_g", "peak_q_wcm2", "t_days", "liftoff_t",
                        "park_apogee_km", "v_splash", "tli_dv", "heat_mj"]
+
+"""
+Metrics the mission DESIGN drives to a commanded value, mapped to the field
+that commands them. Solving a vehicle parameter against one of these is not a
+root-find, it is a misunderstanding — so it is refused by name rather than
+answered with a meaningless number.
+"""
+const COMMANDED_METRICS = Dict(
+    "perilune_km"    => "perilune [km]",
+    "vac_perigee_km" => "return perigee [km]",
+)
+
+"""
+Metrics a SWEEP may chart. A sweep only plots a metric against a parameter —
+there is no root to find — so a commanded one belongs here even though it
+cannot be solved for: the flat line and the cliff at its end are exactly the
+picture of where this vehicle stops being able to fly the mission.
+"""
+const SWEEP_METRICS = vcat(SOLVE_METRICS, collect(keys(COMMANDED_METRICS)))
 
 """
 Metrics a suborbital flight can be solved against. Deliberately its own list:
@@ -966,13 +1043,21 @@ function run_solve(p)::Dict{String,Any}
     metric = get(p, "solve_metric", "prop_margin_kg")
     param in sweepable(p) || return Dict{String,Any}("ok" => false,
         "error" => "cannot solve for: $param")
+    haskey(COMMANDED_METRICS, metric) && return Dict{String,Any}("ok" => false,
+        "error" => "$metric is commanded, not achieved — the designer already " *
+                   "drives it to the target, so it does not respond to $param. " *
+                   "Set \"$(COMMANDED_METRICS[metric])\" directly instead.")
     metric in solve_metrics(p) || return Dict{String,Any}("ok" => false,
         "error" => "cannot target metric: $metric")
     lo = getf(p, "solve_min", 200.0)
     hi = getf(p, "solve_max", 600.0)
     target = getf(p, "solve_target", 0.0)
     budget = clamp(round(Int, getf(p, "solve_iters", 14.0)), 4, 30)
-    res = find_root(lo, hi; target = target, max_iter = budget) do x
+    # A metric already on target to within a part in ten thousand IS solved.
+    # With ftol = 0 nothing ever counts as hit, so a search that starts on the
+    # answer still burns its whole budget and reports :no_bracket.
+    ftol = 1e-4 * max(abs(target), 1.0)
+    res = find_root(lo, hi; target = target, max_iter = budget, ftol = ftol) do x
         q = copy(p)
         q[param] = string(x)
         v = panel_mission(q)["metrics"][metric]
@@ -1166,6 +1251,7 @@ catalogue_payload() = Dict{String,Any}(
     "features" => ["fairing_on", "crewed", "pod_dia", "l_diameter",
                    "grazing", "flyby_wire"],
     "solve_metrics" => SOLVE_METRICS,
+    "sweep_metrics" => SWEEP_METRICS,
     "landing_metrics" => LANDING_METRICS,
     "suborbital_metrics" => SUBORBITAL_METRICS,
     "max_stages" => 5)
@@ -1236,6 +1322,36 @@ function safe_call(f, body::AbstractString)
 end
 
 """
+    static_asset(path) -> (status, content_type, payload)
+
+Serve a shared ES module or stylesheet out of `scripts/static/`.
+
+The requested name is matched against a strict whitelist rather than
+sanitised: `[A-Za-z0-9_-]+.(js|css)`, which cannot express a directory
+separator at all. Sanitising instead means enumerating every way a path can
+escape its root — `..`, `%2e%2e`, backslashes on Windows, drive letters,
+symlinks — and losing the moment you miss one. This process reads the user's
+own filesystem, so the distinction matters even though the panel only ever
+listens on loopback.
+
+Read per request, like the pages, so editing an asset shows up on refresh.
+"""
+function static_asset(path::AbstractString)
+    name = first(split(path[length("/static/") + 1:end], '?'))
+    ok = occursin(r"^[A-Za-z0-9_-]+\.(js|css)$", name) &&
+         isfile(joinpath(STATIC_DIR[], name))
+    ok || return ("404 Not Found", "application/json",
+                  json(Dict{String,Any}("ok" => false,
+                                        "error" => "no such asset: $name")))
+    # a module served as anything but a JS media type is refused by the
+    # browser outright, and the console error names CORS rather than the type.
+    # A stylesheet served as the wrong type is dropped just as silently.
+    ctype = endswith(name, ".css") ? "text/css; charset=utf-8" :
+                                     "text/javascript; charset=utf-8"
+    return ("200 OK", ctype, read(joinpath(STATIC_DIR[], name), String))
+end
+
+"""
     route(method, path, body) -> (status, content_type, payload)
 
 Total function: every input produces a response, including an unknown route
@@ -1253,6 +1369,16 @@ function route(method::AbstractString, path::AbstractString,
         elseif method in ("GET", "HEAD") &&
                (path == "/build" || startswith(path, "/build?"))
             return ("200 OK", "text/html; charset=utf-8", read(BUILD_PATH[], String))
+        elseif method in ("GET", "HEAD") &&
+               (path == "/analysis" || startswith(path, "/analysis?"))
+            # The plots, the event log, the sweep and the solver. Like /launch,
+            # this takes the whole mission as a query string and flies its own
+            # run rather than being handed one — there is no shared run state
+            # between tabs, and inventing some to save a second of simulation
+            # would be the wrong trade.
+            return ("200 OK", "text/html; charset=utf-8", read(ANALYSIS_PATH[], String))
+        elseif method in ("GET", "HEAD") && startswith(path, "/static/")
+            return static_asset(path)
         elseif method in ("GET", "HEAD") && path == "/api/catalogue"
             return ("200 OK", "application/json", json(catalogue_payload()))
         elseif method in ("GET", "HEAD") && path == "/api/health"

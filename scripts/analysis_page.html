@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ss.jl analysis</title>
+<link rel="stylesheet" href="/static/tokens.css">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--text);
+         font: 13.5px/1.45 var(--sans); }
+  .wrap { max-width: 1480px; margin: 0 auto; padding: var(--s4);
+          display: flex; flex-direction: column; gap: var(--s5); }
+
+  /* --- the run being analysed ------------------------------------------
+   * A sweep of "pod mass" means nothing without saying which vehicle and
+   * which mission it is a sweep OF, and this page flies its own run rather
+   * than inheriting one, so it has to state what it flew. */
+  .runhdr { display: flex; align-items: baseline; gap: var(--s4);
+            flex-wrap: wrap; }
+  .runhdr .who { font-family: var(--mono); font-size: var(--t-body);
+                 font-weight: 600; }
+  .runhdr .who .mode { color: var(--amber); }
+  .runhdr .facts { color: var(--text-2); font-size: 12.5px;
+                   font-variant-numeric: tabular-nums; }
+  .runhdr .facts b { color: var(--text); font-family: var(--mono);
+                     font-weight: 600; }
+  .runhdr .act { margin-left: auto; display: flex; gap: var(--s2); }
+
+  section { display: flex; flex-direction: column; gap: var(--s3); }
+  .sec-h { display: flex; align-items: baseline; gap: var(--s3);
+           border-bottom: 1px solid var(--line); padding-bottom: var(--s2); }
+  .sec-h h2 { font-family: var(--mono); font-size: var(--t-label); margin: 0;
+              letter-spacing: .18em; text-transform: uppercase;
+              color: var(--text-2); font-weight: 600; }
+  .sec-h .hint { color: var(--text-3); font-size: 12px; }
+
+  /* Charts get room. At 150px in a two-up grid these were postage stamps with
+   * six numbers on the axes; the point of moving them off mission control was
+   * to stop treating them as decoration. */
+  .plots { display: grid; gap: var(--s3);
+           grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .plot { background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: var(--s2); }
+  .plot canvas { width: 100%; height: 210px; display: block; }
+  .plot.wide { grid-column: 1 / -1; }
+  .plot.wide canvas { height: 300px; }
+
+  .legend { display: flex; gap: var(--s4); font-size: 11.5px;
+            color: var(--text-2); flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 13px; height: 3px; border-radius: 2px;
+              vertical-align: middle; margin-right: 5px; }
+
+  .studies { display: grid; gap: var(--s3);
+             grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+             align-items: start; }
+
+  label { display: block; color: var(--text-3); font-size: var(--t-label);
+          letter-spacing: .04em; margin: 0 0 3px;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  input, select { width: 100%; background: var(--ground); color: var(--text);
+    border: 1px solid var(--line); border-radius: var(--radius-sm);
+    padding: 5px 8px; font: inherit; font-variant-numeric: tabular-nums; }
+  input:focus, select:focus, button:focus-visible {
+    outline: 2px solid var(--amber); outline-offset: 1px; }
+  .row  { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--s2); }
+  button { background: var(--raise); color: var(--text);
+           border: 1px solid var(--line); border-radius: var(--radius);
+           padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover { background: var(--line); }
+  button:disabled { opacity: .5; cursor: wait; }
+  /* Re-running the mission is the one action here that flies something, so it
+     is the one that gets the live-mission colour. */
+  #rerun { background: var(--amber); border-color: var(--amber); color: #12151A; }
+  #rerun:hover { background: #ffb71a; }
+
+  .out { font-size: 12.5px; color: var(--text-2); min-height: 17px; }
+  .out.err { color: var(--failed); }
+  .out b { color: var(--text); font-family: var(--mono); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px;
+          font-variant-numeric: tabular-nums; }
+  td, th { text-align: left; padding: 4px 10px 4px 0;
+           border-bottom: 1px solid var(--line); }
+  th { color: var(--text-3); font-weight: 500; font-size: var(--t-label);
+       letter-spacing: .1em; text-transform: uppercase; }
+  td.ph { font-family: var(--mono); color: var(--text-2); }
+  td.t  { font-family: var(--mono); text-align: right; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<nav class="appnav">
+  <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
+  <span class="appnav-links">
+    <a class="navlink" id="nav_home" href="/">mission control</a>
+    <a class="navlink" id="nav_build" href="/build">vehicle builder</a>
+    <!-- same order on every page: the bar is only worth having if the link you
+         want is in the place you last saw it -->
+    <a class="navlink" href="#" aria-current="page">analysis</a>
+    <a class="navlink" id="nav_launch" href="/launch" target="_blank">launch view</a>
+  </span>
+  <span class="appnav-end u-label" id="nav_note">analysis</span>
+</nav>
+
+<div class="wrap">
+  <div class="runhdr">
+    <span class="who">analysis · <span class="mode" id="hdr_mode">—</span></span>
+    <span class="facts" id="hdr_facts">flying the mission…</span>
+    <span class="act"><button id="rerun">Re-run</button></span>
+  </div>
+
+  <!-- Powered descent leads on a landing mission: it is the fifteen kilometres
+       the whole flight exists to fly, and burying it under six ascent and
+       entry charts said the opposite. -->
+  <section id="sec_descent" class="hidden">
+    <div class="sec-h">
+      <h2>Powered descent</h2>
+      <span class="hint" id="desc_note">—</span>
+    </div>
+    <div class="legend">
+      <span><i style="background:#c98500"></i>braking (full thrust)</span>
+      <span><i style="background:#d55181"></i>terminal (throttled)</span>
+      <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>high gate</span>
+    </div>
+    <div class="plots">
+      <div class="plot wide"><canvas id="c_desc_prof"></canvas></div>
+      <div class="plot"><canvas id="c_desc_v"></canvas></div>
+      <div class="plot"><canvas id="c_desc_thr"></canvas></div>
+    </div>
+  </section>
+
+  <section id="sec_profiles">
+    <div class="sec-h">
+      <h2>Flight profiles</h2>
+      <span class="hint">every curve is this run — nothing here is canned</span>
+    </div>
+    <div class="plots">
+      <div class="plot"><canvas id="c_asc_h"></canvas></div>
+      <div class="plot"><canvas id="c_asc_q"></canvas></div>
+      <div class="plot" id="w_dist"><canvas id="c_dist"></canvas></div>
+      <div class="plot" id="w_corridor"><canvas id="c_corridor"></canvas></div>
+      <div class="plot" id="w_ent_g"><canvas id="c_ent_g"></canvas></div>
+      <div class="plot" id="w_ent_q"><canvas id="c_ent_q"></canvas></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-h">
+      <h2>Studies</h2>
+      <span class="hint">each point below flies a whole mission — these take
+        seconds, not milliseconds</span>
+    </div>
+    <div class="studies">
+      <div class="panel">
+        <div class="panel-h">Parameter sweep</div>
+        <div class="row3">
+          <div><label for="sweep_param">parameter</label>
+            <select id="sweep_param" data-solvable></select></div>
+          <div><label for="sweep_min">min</label><input id="sweep_min" value="250"></div>
+          <div><label for="sweep_max">max</label><input id="sweep_max" value="450"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label for="sweep_n">steps</label><input id="sweep_n" value="9"></div>
+          <div><label for="sweep_metric">metric</label>
+            <select id="sweep_metric"></select></div>
+        </div>
+        <div style="margin-top:10px"><button id="sweepbtn">Run sweep</button></div>
+        <div class="out" id="sweep_out" style="margin-top:6px">—</div>
+        <canvas id="sweepchart" style="width:100%;height:200px;margin-top:6px"></canvas>
+      </div>
+
+      <div class="panel">
+        <div class="panel-h">Solve for a target</div>
+        <div class="out" style="margin-bottom:8px">
+          Lock everything else and search one field until a mission metric
+          reaches a value.
+        </div>
+        <div class="row">
+          <div><label for="solve_param">vary</label>
+            <select id="solve_param" data-solvable></select></div>
+          <div><label for="solve_metric">until</label>
+            <select id="solve_metric"></select></div>
+        </div>
+        <div class="row3" style="margin-top:6px">
+          <div><label for="solve_target">equals</label><input id="solve_target" value="3000"></div>
+          <div><label for="solve_min">search from</label><input id="solve_min" value="1000"></div>
+          <div><label for="solve_max">to</label><input id="solve_max" value="4000"></div>
+        </div>
+        <div style="margin-top:10px"><button id="solvebtn">Solve</button></div>
+        <div class="out" id="solve_out" style="margin-top:6px">—</div>
+        <canvas id="solvechart" style="width:100%;height:170px;margin-top:6px"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-h">
+      <h2>Event log</h2>
+      <span class="hint" id="ev_count"></span>
+    </div>
+    <div class="panel" style="overflow-x:auto"><table id="events"></table></div>
+  </section>
+</div>
+
+<script type="module">
+'use strict';
+import { fin, fmt } from '/static/fmt.js';
+import * as api from '/static/api.js';
+import * as vehicle from '/static/vehicle.js';
+import { drawLine, niceStep, fmtTick, fmtPeak } from '/static/charts.js';
+import { METRIC_LABEL, SFIELD_LABEL, PARAM_LABEL, SPARAM_LABEL, LPARAM_LABEL,
+         paramLabel, metricLabel } from '/static/metrics.js';
+import { suite, report, requested } from '/static/selftest.js';
+
+const $ = id => document.getElementById(id);
+
+// The mission arrives as a query string, exactly the way the launch view takes
+// one: mission control links here with its own params(). There is no second
+// copy of the configuration form on this page, and deliberately so — a page
+// that both analyses a run and lets you edit it is two pages.
+//
+// Opened bare, this falls back to the vehicle the builder has stored and the
+// server's default mission, so the page is never a dead end.
+const Q = (() => {
+  const q = new URLSearchParams(location.search);
+  q.delete('selftest');
+  if ([...q.keys()].length) return q;
+  const stored = new URLSearchParams(vehicle.load() || '');
+  stored.set('mode', 'flyby');
+  return stored;
+})();
+const MODE = Q.get('mode') || 'flyby';
+const landing = () => MODE === 'landing';
+const subm = () => MODE === 'suborbital';
+const orbitm = () => MODE === 'orbit';
+const nStages = () => Math.max(1, +Q.get('nstages') || 3);
+
+// carry the run's configuration to the other pages, so moving between them
+// never silently changes the vehicle
+for (const [id, base] of [['nav_home', '/'], ['nav_build', '/build'],
+                          ['nav_launch', '/launch']])
+  $(id).href = base + '?' + Q.toString();
+
+const ACC = '#3987e5';
+let run = null, sweepData = null;
+
+// ------------------------------------------------------------- the run --
+
+async function fly() {
+  $('rerun').disabled = true;
+  $('hdr_facts').textContent = 'flying the mission…';
+  try {
+    run = await api.run(Q);
+    renderHeader();
+    renderCharts();
+    renderEvents();
+  } catch (e) {
+    $('hdr_facts').innerHTML =
+      `<span style="color:var(--failed)">${String(e.message || e)}</span>`;
+  }
+  $('rerun').disabled = false;
+}
+
+function renderHeader() {
+  const m = run.metrics || {};
+  $('hdr_mode').textContent =
+    landing() ? 'lunar landing' : orbitm() ? 'Earth orbit' :
+    subm() ? 'suborbital' : 'circumlunar free return';
+  $('nav_note').textContent = Q.get('vname') || 'Sable';
+  // The facts a reader needs to know WHICH run these plots are of. Not a
+  // second metrics panel — mission control owns that — just enough identity
+  // that a sweep chart below can be trusted to belong to this vehicle.
+  const bits = [`<b>${Q.get('vname') || 'Sable'}</b>`];
+  if (fin(m.liftoff_t)) bits.push(`<b>${fmt(m.liftoff_t, 1)}</b> t on the pad`);
+  if (fin(m.peak_g)) bits.push(`<b>${fmt(m.peak_g, 1)}</b> g peak`);
+  if (fin(m.t_days)) bits.push(`<b>${fmt(m.t_days, 1)}</b> d`);
+  bits.push(run.outcome === 'nominal' && m.on_target
+    ? '<span style="color:var(--nominal)">nominal</span>'
+    : `<span style="color:var(--failed)">${run.outcome || 'off target'}</span>`);
+  $('hdr_facts').innerHTML = bits.join(' · ');
+}
+
+// ---------------------------------------------------------------- plots --
+
+function renderCharts() {
+  const A = run.ascent, E = run.entry, D = run.cis;
+  drawLine('c_asc_h', [{xs: A.t, ys: A.h, color: ACC, unit: 'km'}],
+           'ascent altitude vs time', {xu: 's', yu: 'km'});
+  drawLine('c_asc_q', [{xs: A.t, ys: A.qbar, color: ACC, unit: 'kPa'}],
+           'ascent dynamic pressure vs time', {xu: 's', yu: 'kPa'});
+  // Full-mission geometry exists only for orbital and cislunar missions. A
+  // suborbital run has ascent + entry but deliberately no `cis` leg.
+  const hasDistance = D && D.t && D.t.length;
+  $('w_dist').classList.toggle('hidden', !hasDistance);
+  if (hasDistance) {
+    const td = D.t.map(t => t/86400);
+    const rE = D.x.map((x, i) => Math.hypot(x, D.y[i], D.z[i]));
+    const dM = D.x.map((x, i) =>
+      Math.hypot(x - D.mx[i], D.y[i] - D.my[i], D.z[i] - D.mz[i]));
+    drawLine('c_dist', [
+        {xs: td, ys: dM, color: '#199e70', label: 'to Moon', unit: 'k km'},
+        {xs: td, ys: rE, color: ACC, label: 'to Earth', unit: 'k km'},
+      ], 'distance from Earth and Moon', {y0: 0, xu: 'd', yu: 'k km'});
+  }
+  const hasEntry = E && E.t && E.t.length;
+  for (const id of ['w_corridor', 'w_ent_g', 'w_ent_q'])
+    $(id).classList.toggle('hidden', !hasEntry);
+  if (hasEntry) {
+    // the classic entry corridor: altitude vs velocity
+    drawLine('c_corridor',
+             [{xs: E.v.map(v => v/1000), ys: E.h, color: '#d55181', unit: 'km'}],
+             'entry altitude vs velocity', {xu: 'km/s', yu: 'km'});
+    drawLine('c_ent_g', [{xs: E.t, ys: E.g, color: ACC, unit: 'g'}],
+             'entry g-load vs time', {xu: 's', yu: 'g'});
+    drawLine('c_ent_q', [{xs: E.t, ys: E.q, color: ACC, unit: 'W/cm²'}],
+             'entry heating vs time', {xu: 's', yu: 'W/cm²'});
+  }
+  drawDescent();
+}
+
+// Altitude against downrange, in the plane the descent actually flies. The
+// braking phase and the throttled terminal phase are drawn as separate series
+// because they are separate control laws, and the seam between them is high
+// gate — the moment the vehicle stops being a decelerating orbit and starts
+// being a landing.
+function drawDescent() {
+  const d = run.descent, m = run.metrics;
+  const has = !!(d && d.t && d.t.length);
+  $('sec_descent').classList.toggle('hidden', !has);
+  if (!has) return;
+  const gate = m.gate_s;
+  const iGate = Math.max(1, d.t.findIndex(t => t >= gate));
+  const seg = (a, b) => ({ xs: d.dr.slice(a, b), ys: d.h.slice(a, b) });
+  const s1 = seg(0, iGate + 1), s2 = seg(iGate, d.t.length);
+  // the section's own legend names the two phases, so the series carry no
+  // labels here — they would land on top of the high-gate callout
+  drawLine('c_desc_prof', [
+      { xs: s1.xs, ys: s1.ys, color: '#c98500', unit: 'km' },
+      { xs: s2.xs, ys: s2.ys, color: '#d55181', unit: 'km' },
+    ], 'descent altitude vs downrange', { y0: 0, xu: 'km', yu: 'km', nopeak: true,
+        labelAt: 'start',
+        marks: [{ x: d.dr[iGate], y: d.h[iGate], color: '#8fbef0', label: 'high gate' }] });
+  drawLine('c_desc_v', [
+      { xs: d.t, ys: d.vh, color: '#c98500', label: 'horizontal', unit: 'm/s' },
+      { xs: d.t, ys: d.vv, color: '#8fbef0', label: 'vertical', unit: 'm/s' },
+    ], 'descent velocity vs time', { xu: 's', yu: 'm/s', nopeak: true, labelAt: 'start' });
+  drawLine('c_desc_thr', [{ xs: d.t, ys: d.thr, color: ACC, unit: '%' }],
+      'commanded throttle vs time', { y0: 0, xu: 's', yu: '%', nopeak: true });
+  const bad = m.outcome !== 'touchdown';
+  $('desc_note').innerHTML = bad
+    ? `<span style="color:var(--failed)">${m.outcome}</span> — arrived at ` +
+      `${fmt(m.touchdown_v,1)} m/s sink, ${fmt(m.touchdown_vh,1)} m/s lateral`
+    : `braking ${fmt(m.braking_dv,0)} m/s for ${fmt(m.gate_s,0)} s, then ` +
+      `${fmt(m.terminal_dv,0)} m/s throttled to ${fmt(m.touchdown_v,2)} m/s of ` +
+      `sink · ${fmt(m.prop_left_kg,0)} kg left · ${fmt(m.hover_s,0)} s of hover`;
+}
+
+function renderEvents() {
+  const rows = (run.events || []).map(e =>
+    `<tr><td class="ph">${e.phase}</td><td>${e.name}</td>` +
+    `<td class="t">${(e.t/3600).toFixed(2)}</td>` +
+    `<td class="t">${(e.t/86400).toFixed(2)}</td></tr>`);
+  $('events').innerHTML =
+    '<tr><th>phase</th><th>event</th><th style="text-align:right">T+ hours</th>' +
+    '<th style="text-align:right">T+ days</th></tr>' + rows.join('');
+  $('ev_count').textContent = `${rows.length} events`;
+}
+
+// --------------------------------------------------------- sweep & solve --
+
+// Exactly the numeric fields this configuration has, so a four-stage vehicle
+// immediately makes its fourth stage's propellant load solvable.
+function fillParams() {
+  const opts = Object.keys(PARAM_LABEL).map(k => [k, PARAM_LABEL[k]]);
+  if (landing()) for (const k in LPARAM_LABEL) opts.push([k, LPARAM_LABEL[k]]);
+  if (subm()) for (const k in SPARAM_LABEL) opts.push([k, SPARAM_LABEL[k]]);
+  for (let k = 1; k <= nStages(); k++)
+    for (const f in SFIELD_LABEL) opts.push([`s${k}_${f}`, `stage ${k} ${SFIELD_LABEL[f]}`]);
+  const html = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+  for (const el of document.querySelectorAll('select[data-solvable]')) {
+    el.innerHTML = html;
+    el.value = landing() ? 'l_prop' : subm() ? 'sub_apogee_km' : 'pod_mass';
+  }
+  $('solve_param').value = landing() ? 'l_prop' : subm() ? 'sub_apogee_km' : 'hp_moon_km';
+  if (landing()) { $('sweep_min').value = 6000; $('sweep_max').value = 12000; }
+
+  // A sweep and a solve do not accept the same metrics on the flyby. Perilune
+  // and return perigee are COMMANDED — the corrector drives them to the target
+  // — so charting one is useful (the flat line, then the cliff where the
+  // design stops closing) and root-finding against one is meaningless. The
+  // server keeps the two lists apart; so does this.
+  const base = landing() ? CATALOGUE.landing_metrics :
+               subm() ? CATALOGUE.suborbital_metrics : null;
+  for (const id of ['solve_metric', 'sweep_metric']) {
+    const ms = (base || (id === 'sweep_metric' ? CATALOGUE.sweep_metrics
+                                               : CATALOGUE.solve_metrics))
+               || Object.keys(METRIC_LABEL);
+    const sel = $(id);
+    sel.innerHTML = ms.map(m => `<option value="${m}">${metricLabel(m)}</option>`).join('');
+    const want = landing() ? (id === 'sweep_metric' ? 'hover_s' : 'prop_left_kg')
+               : subm()    ? (id === 'sweep_metric' ? 'peak_g' : 'apogee_km')
+               :             (id === 'sweep_metric' ? 'perilune_km' : 'prop_margin_kg');
+    sel.value = ms.includes(want) ? want : ms[0];
+  }
+  // start the sweep from where this configuration actually is, so the first
+  // run brackets something real instead of a number typed into the markup
+  const cur = +Q.get($('sweep_param').value);
+  if (isFinite(cur) && cur > 0) {
+    $('sweep_min').value = +(cur * 0.7).toPrecision(3);
+    $('sweep_max').value = +(cur * 1.3).toPrecision(3);
+  }
+}
+
+let CATALOGUE = { propellants: [], engines: [], solve_metrics: [] };
+
+async function doSweep() {
+  $('sweepbtn').disabled = true;
+  $('sweep_out').className = 'out';
+  $('sweep_out').textContent = 'sweeping — each step flies a whole mission…';
+  try {
+    const u = new URLSearchParams(Q);
+    for (const f of ['sweep_param','sweep_min','sweep_max','sweep_n'])
+      u.set(f, $(f).value);
+    sweepData = await api.sweep(u);
+    drawSweep();
+    const nOk = sweepData.runs.filter(x => x.ok && x.metrics.on_target).length;
+    $('sweep_out').innerHTML = `<b>${nOk}</b>/${sweepData.runs.length} on target` +
+      (nOk < sweepData.runs.length ? ' — off-target runs are left out of the chart' : '');
+  } catch (e) {
+    $('sweep_out').className = 'out err';
+    $('sweep_out').textContent = String(e.message || e);
+  }
+  $('sweepbtn').disabled = false;
+}
+
+function drawSweep() {
+  if (!sweepData) return;
+  const j = sweepData, key = $('sweep_metric').value;
+  const xs = [], ys = [];
+  for (let i = 0; i < j.values.length; i++)
+    if (j.runs[i].ok && j.runs[i].metrics.on_target && isFinite(j.runs[i].metrics[key])) {
+      xs.push(j.values[i]); ys.push(j.runs[i].metrics[key]);
+    }
+  drawLine('sweepchart', [{xs, ys, color: ACC, unit: ''}],
+    `${metricLabel(key)} vs ${paramLabel($('sweep_param').value)}`);
+}
+
+async function doSolve() {
+  $('solvebtn').disabled = true;
+  $('solve_out').className = 'out';
+  $('solve_out').textContent = 'searching — each step flies a whole mission…';
+  try {
+    const u = new URLSearchParams(Q);
+    for (const f of ['solve_param','solve_metric','solve_target','solve_min','solve_max'])
+      u.set(f, $(f).value);
+    const j = await api.solve(u);
+    const pl = paramLabel(j.param), ml = metricLabel(j.metric);
+    // an end that produced no valid mission was walked inward; saying so
+    // matters, because then the fix is not "widen the range"
+    const shrank = Math.abs(j.hi - j.asked_hi) > 1e-9 ||
+                   Math.abs(j.lo - j.asked_lo) > 1e-9;
+    const note = shrank
+      ? ` Part of the range flies no valid mission, so the search was ` +
+        `confined to ${(+j.lo).toPrecision(4)}–${(+j.hi).toPrecision(4)}.`
+      : '';
+    $('solve_out').innerHTML = j.status === 'converged'
+      ? `${pl} = <b>${(+j.x).toPrecision(5)}</b> gives ${ml} = ` +
+        `${(+j.value).toPrecision(4)} (target ${j.target}) — ${j.iterations} runs.` + note
+      : j.status === 'no_bracket'
+      ? `${ml} never reaches ${j.target} over that range; closest is ` +
+        `${pl} = ${(+j.x).toPrecision(5)} at ${(+j.value).toPrecision(4)}.` +
+        (shrank ? note : ' Try a wider range.')
+      : `no valid mission anywhere in that range — try bounds nearer the ` +
+        `current configuration.`;
+    drawSolve(j);
+  } catch (e) {
+    $('solve_out').className = 'out err';
+    $('solve_out').textContent = String(e.message || e);
+  }
+  $('solvebtn').disabled = false;
+}
+
+// the search path is most of the information when each point costs a second
+function drawSolve(j) {
+  const cv = $('solvechart'), ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const pts = ((j && j.history) || []).filter(p => isFinite(p.value));
+  if (pts.length < 2) return;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.value).concat([j.target]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const px = v => 34 + (w - 44) * (x1 > x0 ? (v - x0)/(x1 - x0) : 0.5);
+  const py = v => h - 20 - (h - 32) * (y1 > y0 ? (v - y0)/(y1 - y0) : 0.5);
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath(); ctx.moveTo(30, py(j.target)); ctx.lineTo(w - 6, py(j.target));
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '10px system-ui';
+  ctx.fillText('target', 32, py(j.target) - 3);
+  // evaluations in the order they were taken: early wide, late clustered
+  pts.forEach((p, i) => {
+    const t = i/(pts.length - 1);
+    ctx.fillStyle = `rgba(240,165,0,${0.35 + 0.65*t})`;
+    ctx.beginPath(); ctx.arc(px(p.x), py(p.value), 3.2, 0, 7); ctx.fill();
+  });
+  if (j.status === 'converged') {
+    ctx.strokeStyle = '#F0A500'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(px(j.x), 8); ctx.lineTo(px(j.x), h - 18); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText(x0.toPrecision(4), 30, h - 6);
+  ctx.fillText(x1.toPrecision(4), w - 46, h - 6);
+}
+
+// ---------------------------------------------------------------- wire up --
+$('rerun').onclick = fly;
+$('sweepbtn').onclick = doSweep;
+$('sweep_metric').onchange = drawSweep;
+$('solvebtn').onclick = doSolve;
+// charts are sized from their container, so a resized window has to redraw
+let rz = null;
+window.addEventListener('resize', () => {
+  clearTimeout(rz);
+  rz = setTimeout(() => { if (run) renderCharts(); drawSweep(); }, 120);
+});
+
+// the page is useful the moment the run lands; the catalogue only feeds the
+// study pickers, so the two are fetched together rather than in sequence
+api.catalogue().then(c => { CATALOGUE = c || CATALOGUE; fillParams(); });
+fly();
+
+// A module's top-level bindings are not on `window`, which is right — but it
+// also means none of this is reachable from devtools, and this page's whole
+// job is asynchronous. One explicit handle, rather than leaking the module.
+window.__debug = {
+  get run() { return run; },
+  get sweep() { return sweepData; },
+  params: Q, mode: MODE, fly, redraw: renderCharts,
+};
+
+// -------------------------------------------------------------- selftest --
+window.__selftest = function () {
+  const out = suite(), eq = out.eq;
+
+  // The vocabulary is shared with mission control now. These pin the parts
+  // that are GENERATED rather than listed, because a stage field's label is
+  // built from a regex and nothing else would notice it drifting.
+  eq('a plain parameter keeps its name', () => paramLabel('pod_mass'), 'pod mass');
+  eq('a stage field names its stage', () => paramLabel('s2_prop'), 'stage 2 prop');
+  eq('and expands the short field name', () => paramLabel('s3_thrust_kn'), 'stage 3 thrust');
+  eq('a booster field says booster', () => paramLabel('b_isp'), 'booster Isp');
+  eq('an unknown parameter is still readable', () => paramLabel('some_new_knob'),
+     'some new knob');
+  eq('a metric carries its unit', () => metricLabel('peak_g'), 'peak entry g');
+  eq('an unknown metric is still readable', () => metricLabel('new_metric'),
+     'new metric');
+
+  // The chart axis ladder. A tick step off this ladder is what turns gridlines
+  // into arbitrary numbers, and it is pure arithmetic, so it can be pinned.
+  // The ladder rounds UP to the next allowed step, so a raw 3.33 becomes 5,
+  // not 2.5. Both rungs are asserted because rounding the wrong way is the
+  // failure that would still produce a plausible-looking chart.
+  eq('a raw step of 3.33 rounds up to five', () => niceStep(10, 3), 5);
+  eq('and a raw step of 2.5 stays on that rung', () => niceStep(7.5, 3), 2.5);
+  eq('a raw step just over 2.5 goes to five', () => niceStep(7.8, 3), 5);
+  eq('a tick above a thousand abbreviates', () => fmtTick(2500), '2.5k');
+  eq('a round thousand drops the decimal', () => fmtTick(3000), '3k');
+  eq('a small value keeps precision', () => fmtTick(0.25), '0.25');
+  eq('an exact zero is just zero', () => fmtTick(0), '0');
+
+  // The peak callout is the one number a reader takes away from a chart, and
+  // toPrecision alone renders every entry altitude in this app as "2.01e+3".
+  eq('a large peak is grouped, not exponential', () => fmtPeak(2010), '2,010');
+  eq('a peak in the hundreds keeps three figures', () => fmtPeak(249.31), '249');
+  eq('a small peak keeps its decimals', () => fmtPeak(5.653), '5.65');
+  eq('a peak of zero is zero', () => fmtPeak(0), '0');
+  eq('a missing peak is an em-dash, not NaN', () => fmtPeak(NaN), '—');
+
+  // This page flies its own run from a query string. If that plumbing breaks
+  // the page silently analyses the WRONG vehicle, which is the one failure
+  // here that would not look like a failure.
+  eq('the mission mode came from the query', () => typeof MODE, 'string');
+  eq('the query carries a mode', () => Q.has('mode') || MODE === 'flyby', true);
+  eq('nav links carry the configuration',
+     () => $('nav_build').getAttribute('href').startsWith('/build?'), true);
+  eq('and the selftest flag is not carried into the run',
+     () => Q.has('selftest'), false);
+
+  return report(out);
+};
+// Every assertion above is synchronous on purpose. This page's content
+// arrives from a mission that takes a second or two to fly, and a suite that
+// waited for it would either be flaky or would be asserting the simulator's
+// speed. Whether the run RENDERS is checked by looking at the page.
+if (requested()) setTimeout(window.__selftest, 0);
+</script>
+</body>
+</html>

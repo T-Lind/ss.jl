@@ -621,7 +621,60 @@ julia --project scripts/make_plots.jl  # requires Plots.jl installed
 
 # mission-control panel: configure, run, and explore in the browser
 julia --project -t auto scripts/panel.jl   # then open http://localhost:8137
+
+# the same thing as a desktop window, from source
+julia --project -t auto scripts/desktop.jl
 ```
+
+### Windows desktop application
+
+`ss.jl` also ships as a self-contained Windows application: no Julia
+installation, no `Pkg.instantiate`, no terminal. Download the release zip,
+unpack it, run `bin\ssjl.exe`, and a window opens on mission control. Close
+the window and the process exits — the server, the browser host and the
+simulator all go with it.
+
+```powershell
+julia --project=build build/build_app.jl      # -> dist/ssjl (~615 MB, ~25 min)
+dist\ssjl\bin\ssjl.exe
+```
+
+`build/build_app.jl` uses PackageCompiler's `create_app`, from a **separate
+environment** (`build/Project.toml`) so the simulator itself keeps its zero
+external dependencies — which is why it compiles fast and why CI needs no
+registry. `build/precompile_workload.jl` flies all three mission modes and
+exercises every HTTP route at build time, so the frozen app answers its first
+request immediately instead of printing "warming up".
+
+Three things about the frozen build are worth knowing, because each was a
+real failure before it was a line of code:
+
+* **Threads.** A compiled app starts with one thread, and thread count is
+  fixed by the runtime *before* `julia_main` runs — `-t auto` is a Julia flag
+  and there is no Julia command line here to put it on. One thread is not a
+  detail: a mission in flight would block the accept loop and every geometry
+  request the builder makes while you type. `julia_main` therefore re-executes
+  itself once with `JULIA_NUM_THREADS=auto` set, guarded by `SSJL_THREADED`
+  so it cannot loop.
+* **Assets.** The four HTML pages and `static/*.js` are data, not code:
+  `create_app` freezes compiled methods and knows nothing about them. They
+  travel to `share/scripts` beside the executable and are read from disk per
+  request, which is also what makes editing a page show up on refresh.
+  `SSJL_SCRIPTS` overrides the location, so a frozen build can be pointed at
+  a working tree.
+* **The window.** `scripts/desktop.jl` launches Edge (or Chrome) in `--app=`
+  mode against a dedicated `--user-data-dir`. The dedicated profile is
+  load-bearing rather than tidiness: without it, `msedge` hands the URL to an
+  already-running Edge and exits immediately, and the app has no window to
+  own.
+
+**GPU note, measured rather than assumed.** On a machine with both an Intel
+iGPU and a discrete NVIDIA card, `powerPreference: 'high-performance'` in the
+page's WebGL context request does **nothing** — Chromium binds its GPU process
+to one adapter at browser launch, and the renderer string comes back
+byte-identical. The lever that does work is on the command line, so
+`desktop.jl` passes `--force_high_performance_gpu`, which does put the browser
+process on the discrete card.
 
 ### Deploying the panel on Render
 
@@ -647,9 +700,35 @@ HOST=0.0.0.0; local julia ... scripts/panel.jl remains loopback-only.
 `scripts/panel.jl` serves a local cockpit (pure stdlib — a raw-`Sockets`
 HTTP server, no dependencies): edit the mission targets and all three
 stages' propellant/dry mass/thrust/Isp, hit **Run** (or pick a one-click
-**preset**), and get the full design + flight back in about a second —
-stat tiles, the interactive 3D scene, ascent & entry profile charts, the
-event timeline, and a run history for side-by-side comparison.
+**preset**), and get the full design + flight back in about a second.
+
+It is **four pages**, each answering a different question, and they share one
+visual language (`scripts/static/tokens.css`) and one set of ES modules
+(`scripts/static/*.js`) so a formatting rule or a limit threshold exists once
+rather than once per page:
+
+| page | question it answers |
+| --- | --- |
+| `/` mission control | *Did it work?* — the verdict, the metrics grouped in flight order, the 3D trajectory and the stack, on one screen |
+| `/build` vehicle builder | *What am I flying?* — the launcher, stage by stage, with a live verdict as you type |
+| `/analysis` | *Why?* — the flight profiles, the powered descent, the event log, parameter sweeps and the solver |
+| `/launch` | *What does it look like?* — a cinematic pad-cam flight of the same run |
+
+Mission control opens with a **verdict**: NOMINAL, GRAZING, OFF TARGET, NO
+TRAJECTORY, DID NOT REACH ORBIT or DID NOT COME HOME, in one of four reserved
+colours, with the reason beside it. That is the page's primary output and it
+used to be a sentence of grey body text below the fold. Under it, the metrics
+sit in groups that follow the mission — launch, transit, entry — rather than
+as a wrapping strip of equal-weight tiles, and the handful of numbers with a
+defensible limit (propellant margin, peak g, touchdown rates) go amber or red
+when they approach it.
+
+The pages open in separate tabs on purpose — mission control and the launch
+view are meant to sit side by side — and every link between them carries the
+whole configuration in its query string, so moving between pages never
+silently changes the vehicle under you. `/analysis` and `/launch` each fly
+their own run from that query string rather than being handed one; a second
+of simulation is cheaper than shared mutable state between tabs.
 
 The panel logs one line per request — method, path, status, duration, bytes —
 and answers `GET /api/health` with its uptime, Julia version and thread count.
@@ -662,15 +741,17 @@ A switch at the top picks the **mission**: the free-return flyby, or the
 lunar landing. They share every launch field — the launcher, the ascent, the
 trans-lunar leg are the same mission underneath — so switching keeps the
 vehicle and swaps the half that differs: pod and entry corridor for lander
-and descent plan. The landing view adds its own tiles (insertion, descent-
-orbit and descent Δv, touchdown sink and drift, propellant left, hover
-margin, deepest throttle, landing site), a **powered-descent card** —
-altitude against downrange with high gate called out, the two velocity
-components, and the commanded throttle — and a **Moon-frame view** of the
-parking orbit, the descent ellipse and the descent arc, with the sub-Earth
-direction drawn so near side and far side are obvious. Every landing metric
-is sweepable and solvable: *vary lander propellant until hover margin = 200 s*
-is a search over whole missions like any other.
+and descent plan. The landing view adds its own metric groups (insertion,
+descent-orbit and descent Δv, touchdown sink and drift, propellant left,
+hover margin, deepest throttle, landing site) and a **Moon-frame view** of
+the parking orbit, the descent ellipse and the descent arc, with the
+sub-Earth direction drawn so near side and far side are obvious. On
+`/analysis` a landing run leads with the **powered descent** — altitude
+against downrange with high gate called out, the two velocity components,
+and the commanded throttle — ahead of the ascent and entry profiles, because
+the last fifteen kilometres are what that mission exists to fly. Every
+landing metric is sweepable and solvable: *vary lander propellant until
+hover margin = 200 s* is a search over whole missions like any other.
 
 **Vehicle presets** sit beside the mission presets and configure the entire
 launcher — stack height, engines, propellant loads, diameters, and the
@@ -699,8 +780,10 @@ adaptive scale bar says how big the frame is, because across one mission it
 spans five orders of magnitude. On a landing run the lunar parking orbit and
 the descent are drawn in the same scene, each sample offset by where the Moon
 actually was at that moment, so zooming in on the Moon shows them in place.
-The timeline, the frame toggle, the zooms and Run all have keys
-(`R`, `space`, `←`/`→`, `F`, `E`, `Z`, `L`), listed on the page.
+The timeline, the frame toggle, the zooms, Run and the three other pages all
+have keys (`R`, `space`, `←`/`→`, `F`, `E`, `C`, `Z`, `M`, `A`, `B`, `L`),
+listed behind `?` in the nav bar rather than in a card that occupied the
+sidebar permanently to be read once.
 The **stage count** is a field (2–5) and the whole launcher form is generated
 from it — nothing in the page or the server counts stages itself, so the
 geometry viewer, the sweep list and the solver all pick up a new stage the
@@ -738,8 +821,8 @@ geometry, the panel viewer and the launch view as bodies beside the core
 with their own nose cones, bells and exhaust plumes, dropping away at their
 separation event while the core keeps burning.
 
-A **solve** card locks every field but one and searches it until a mission
-metric hits a target: *vary perilune target until perilune = 3000 km*, or
+The **solve** panel on `/analysis` locks every field but one and searches it
+until a mission metric hits a target: *vary perilune until perilune = 3000 km*, or
 *vary pod mass until the kick stage's propellant margin = 0*. Each step flies
 the whole chain, so this is a bracketing search (Illinois-modified regula
 falsi, `solve.jl`) on a hard iteration budget rather than a scan — typically
@@ -749,10 +832,11 @@ outright counts as past the feasible edge: the search retreats from it and
 reports the interval it could actually use, so "a 500 kg pod flies no valid
 mission" reads differently from "your range is too narrow". Running it is
 instructive about this vehicle — most targets turn out to be unreachable,
-and the reason is always the same thin margin. A **vehicle geometry** card
-renders the launcher those choices imply — built from the very same
-`LaunchVehicle` the mission flies, so the drawing and the trajectory cannot
-disagree — and updates as you edit the configuration; it
+and the reason is always the same thin margin. A **vehicle** panel sits
+beside the trajectory on mission control and renders the launcher those
+choices imply — built from the very same `LaunchVehicle` the mission flies,
+so the drawing and the trajectory cannot disagree — and updates as you edit
+the configuration; it
 **follows the mission clock**: scrub the timeline and stage 1, the fairing,
 stage 2, and finally the spent kick stage drop away at their actual event
 times, with an engine flame while a stage burns and the view recentering

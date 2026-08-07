@@ -395,6 +395,30 @@ end
     @test minimum(off) > 0.1                          # none of it on the core axis
 end
 
+@testset "the capsule that re-enters is the capsule that was drawn" begin
+    # `default_reentry_pod` took a `diameter` and `moonshot` never passed one,
+    # so every entry — 350 kg or 50 t — flew the 1.5 m default. The mesh and
+    # the panel meanwhile sized the capsule from its mass. A heavy capsule
+    # therefore had a ballistic coefficient an order of magnitude too high,
+    # could not decelerate, and skipped back out of the atmosphere instead of
+    # landing. The size has to come from one place.
+    for m in (350.0, 5560.0, 45000.0)
+        d = 2 * pod_radius(m)
+        pod = default_reentry_pod(mass = m, diameter = d)
+        @test isapprox(pod.sref, pi * (d / 2)^2; rtol = 1e-12)
+        @test isapprox(pod.lref, d; rtol = 1e-12)
+    end
+    # frontal area has to actually grow with the capsule, which is the whole
+    # point: the 1.5 m default gave a 45 t pod the same 1.77 m^2 as a 350 kg one
+    small = default_reentry_pod(mass = 350.0, diameter = 2 * pod_radius(350.0))
+    big   = default_reentry_pod(mass = 45000.0, diameter = 2 * pod_radius(45000.0))
+    @test big.sref > 15 * small.sref
+    # and moonshot's default must be that same fit, not a constant
+    ms = moonshot(pod_mass = 350.0)
+    @test isapprox(ms.entry_scn.vehicle.lref, 2 * pod_radius(350.0); rtol = 1e-9)
+    @test ms.entry.terminated == :splashdown
+end
+
 @testset "circumlunar free return" begin
     ms = moonshot()
     cis = ms.cislunar

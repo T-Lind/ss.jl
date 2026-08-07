@@ -4,21 +4,26 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ss.jl mission control</title>
+<link rel="stylesheet" href="/static/tokens.css">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; background: #0d0d0d; color: #c3c2b7;
-         font: 13.5px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* ground, ink and rules come from /static/tokens.css so this page and the
+     builder and the launch view are one product rather than three that happen
+     to be dark. Only what is genuinely local to this page stays here. */
+  body { margin: 0; background: var(--ground); color: var(--text);
+         font: 13.5px/1.45 var(--sans); }
   .app { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px;
          max-width: 1560px; margin: 0 auto; padding: 16px; }
   @media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
-  h1 { color: #fff; font-size: 17px; margin: 0 0 2px; }
-  h2 { color: #fff; font-size: 13px; margin: 0; letter-spacing: .04em;
-       text-transform: uppercase; font-weight: 600; }
+  h1 { color: var(--text); font-size: 17px; margin: 0 0 2px; }
+  h2 { color: var(--text); font-family: var(--mono); font-size: var(--t-label);
+       margin: 0; letter-spacing: .18em; text-transform: uppercase;
+       font-weight: 600; }
   h2 + * { margin-top: 8px; }
-  .sub { color: #898781; font-size: 12px; margin-bottom: 10px; }
-  .card { background: #1a1a19; border: 1px solid rgba(255,255,255,.1);
-          border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  .sub { color: var(--text-2); font-size: 12px; margin-bottom: 10px; }
+  .card { background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
   /* a card header that collapses its body: the launcher form is long, and a
      panel you have to scroll past to reach Run is a panel you fight */
   .card > h2.fold { cursor: pointer; user-select: none; display: flex;
@@ -47,36 +52,77 @@
   input:focus, select:focus, button:focus { outline: 2px solid #3987e5; outline-offset: 1px; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
-  button { background: #3987e5; color: #fff; border: 0; border-radius: 7px;
+  button { background: #3987e5; color: #fff; border: 0; border-radius: var(--radius);
            padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; width: 100%; }
   button:hover { background: #4a94ee; }
+  /* The armed control, and the only button on the page that starts a mission.
+     Amber is reserved for live mission state, and "press this and it flies" is
+     that. The other buttons stay as they are: a toggle like "rotating frame"
+     is not a mission action and making every button shout dilutes the one
+     that should. Restyling the rest is a component pass, not this. */
+  #run { background: var(--amber); color: #12151A; }
+  #run:hover { background: #ffb71a; }
   button.ghost { background: #2a2a28; border: 1px solid rgba(255,255,255,.15); }
   button.ghost:hover { background: #383835; }
   button:disabled { opacity: .5; cursor: wait; }
-  .status { font-size: 12px; color: #898781; margin-top: 8px; min-height: 17px; }
-  .status.err { color: #e66767; }
-  /* verdict colours for the static vehicle check (T/W, delta-v budget) */
-  .good { color: #8fbf7f; } .warn { color: #d9a95c; } .bad { color: #e66767; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
-           gap: 8px; margin-bottom: 12px; }
-  .tile { background: #1a1a19; border: 1px solid rgba(255,255,255,.1);
-          border-radius: 8px; padding: 7px 11px; }
-  .tile .v { color: #fff; font-size: 16.5px; font-weight: 650;
-             font-variant-numeric: tabular-nums; }
-  .tile .k { color: #898781; font-size: 10.5px; }
-  #scene { width: 100%; height: 430px; display: block; cursor: grab;
+  .status { font-size: 12px; color: var(--text-2); margin-top: 8px; min-height: 17px; }
+  .status.err { color: var(--failed); }
+  /* the static vehicle check (T/W, Δv budget) speaks the same three-colour
+     language as the mission verdict, because "this will not lift off" and
+     "this did not reach orbit" are the same kind of statement */
+  .good { color: var(--nominal); }
+  .warn { color: var(--marginal); }
+  .bad  { color: var(--failed); }
+  /* the metric strip is .mgroups / .mrow in /static/tokens.css now — grouped
+     by mission phase in flight order rather than eleven equal-weight tiles */
+  /* The two live views, side by side. The trajectory needs the width — a
+     trans-lunar transfer is 60 Earth radii long — and the stack needs the
+     height, so they want opposite aspect ratios and this gives each one the
+     one it wants. Below 1150px they stack and both go full width. */
+  .stage { display: grid; grid-template-columns: minmax(0, 1fr) 300px;
+           gap: 12px; align-items: start; margin-bottom: 12px; }
+  .stage .card { margin-bottom: 0; }
+  @media (max-width: 1150px) { .stage { grid-template-columns: 1fr; } }
+  #scene { width: 100%; height: 470px; display: block; cursor: grab;
            touch-action: none; border-radius: 8px; background: #131312; }
+  #geo { width: 100%; height: 380px; display: block; cursor: grab;
+         touch-action: none; }
+  @media (max-width: 1150px) { #geo { height: 260px; } }
   .bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
   .bar button { width: auto; }
-  input[type=range] { flex: 1; min-width: 120px; accent-color: #3987e5;
+  input[type=range] { flex: 1; min-width: 120px; accent-color: var(--amber);
                       padding: 0; border: 0; background: none; }
   .legend { display: flex; gap: 12px; font-size: 11.5px; margin: 6px 0 8px;
             flex-wrap: wrap; }
   .legend i { display: inline-block; width: 13px; height: 3px; border-radius: 2px;
               vertical-align: middle; margin-right: 4px; }
-  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  @media (max-width: 1100px) { .charts { grid-template-columns: 1fr; } }
-  .charts canvas { width: 100%; height: 150px; display: block; }
+
+  /* The one thing at the bottom of the page, and it is a door rather than a
+     dead end: mission control now answers "did it work", and everything that
+     answers "why" is one click away. */
+  .gonext { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px;
+            align-items: baseline; text-decoration: none; color: inherit; }
+  .gonext:hover { border-color: var(--amber); }
+  .gonext:hover .gonext-t { color: var(--amber); }
+  .gonext-k { grid-row: 1 / 3; align-self: center; }
+  .gonext-t { font-family: var(--mono); font-size: var(--t-body);
+              font-weight: 600; }
+  .gonext-w { color: var(--text-2); font-size: 12px; }
+
+  /* keyboard reference, on demand */
+  #helpdlg { background: var(--surface); color: var(--text);
+             border: 1px solid var(--line); border-radius: var(--radius);
+             padding: 18px 20px; max-width: 460px; }
+  #helpdlg::backdrop { background: rgba(0,0,0,.55); }
+  #helpdlg h3 { margin: 0 0 12px; font-family: var(--mono);
+                font-size: var(--t-label); letter-spacing: .18em;
+                text-transform: uppercase; color: var(--text-2); }
+  #helpdlg button { width: auto; }
+  .helpbtn { width: 22px; height: 22px; padding: 0; border-radius: 50%;
+             background: var(--raise); color: var(--text-2);
+             border: 1px solid var(--line); font-size: 12px; line-height: 1;
+             font-weight: 600; cursor: pointer; }
+  .helpbtn:hover { background: var(--line); color: var(--text); }
   .chip { display: inline-block; background: #2a2a28; border: 1px solid rgba(255,255,255,.12);
           border-radius: 6px; padding: 4px 9px; margin: 0 6px 6px 0; font-size: 11.5px;
           cursor: pointer; font-variant-numeric: tabular-nums; }
@@ -84,34 +130,76 @@
   .chip.sel, .chip.on { border-color: #3987e5; color: #fff; }
   /* mission-mode switch: two missions share every launch field, so they are
      one page with a switch rather than two pages */
-  .seg { display: flex; gap: 0; margin: 8px 0 0; border-radius: 8px;
-         overflow: hidden; border: 1px solid rgba(255,255,255,.15); }
-  .seg button { border-radius: 0; background: #17171690; color: #898781;
-                font-weight: 500; padding: 7px 0; }
-  .seg button.on { background: #3987e5; color: #fff; font-weight: 600; }
+  /* Two by two, not four across. In a 300px column four labels ranging from
+     "suborbital" to "free-return flyby" wrapped to two lines each and made the
+     control twice as tall as it needed to be, with a ragged bottom edge. The
+     1px gap over a rule-coloured ground draws the hairlines between cells, so
+     there are no per-button borders to get out of step. */
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+         margin: 8px 0 0; border-radius: var(--radius); overflow: hidden;
+         border: 1px solid var(--line); background: var(--line); }
+  .seg button { border-radius: 0; background: var(--raise); color: var(--text-2);
+                font-weight: 500; padding: 7px 4px; }
+  /* amber, not blue: this is the same "you have chosen this one" the nav and
+     the preset chips say, and it was being said in a third colour here. Blue
+     is reserved for plotted data — the ascent leg on the trajectory below is
+     blue, and a selected control that matches a data series reads as a key. */
+  .seg button.on { background: var(--amber); color: #12151A; font-weight: 600; }
   .runbar { position: sticky; top: 8px; z-index: 5; }
   .kbd { background: #0d0d0d; border: 1px solid rgba(255,255,255,.18);
          border-bottom-width: 2px; border-radius: 4px; padding: 0 4px;
          font: 11px ui-monospace, Consolas, monospace; color: #c3c2b7; }
-  .helprow { display: grid; grid-template-columns: 66px 1fr; gap: 4px 8px;
-             font-size: 11.5px; color: #898781; }
-  .analysis { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
-              align-items: start; }
-  @media (max-width: 1150px) { .analysis { grid-template-columns: 1fr; } }
-  .analysis .card { margin-bottom: 0; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px;
-          font-variant-numeric: tabular-nums; }
-  td, th { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid #2c2c2a; }
-  th { color: #898781; font-weight: 500; font-size: 11px; }
+  .helprow { display: grid; grid-template-columns: 84px 1fr; gap: 6px 10px;
+             font-size: 12px; color: var(--text-2); align-items: baseline; }
   .ro { font-variant-numeric: tabular-nums; font-size: 12px; color: #c3c2b7; }
   .hidden { display: none !important; }
 </style>
 </head>
 <body>
+<!-- One bar, same place and order on all three pages. They still open as
+     separate tabs on purpose — mission control and the launch view are meant
+     to sit side by side — but nothing previously told you what the other two
+     were or which one you were looking at, which is what made three windows
+     read as scattered rather than as one tool. -->
+<nav class="appnav">
+  <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
+  <span class="appnav-links">
+    <a class="navlink" href="/" aria-current="page">mission control</a>
+    <a class="navlink" id="nav_build" href="/build">vehicle builder</a>
+    <a class="navlink" id="nav_analysis" href="/analysis" target="_blank">analysis</a>
+    <a class="navlink" id="nav_launch" href="/launch" target="_blank">launch view</a>
+  </span>
+  <span class="appnav-end">
+    <span class="u-label" id="nav_note">circumlunar free return</span>
+    <button class="helpbtn" id="helpbtn" title="keyboard shortcuts — key ?"
+            aria-label="keyboard shortcuts">?</button>
+  </span>
+</nav>
+
+<!-- The shortcut list was a permanent card in the sidebar: reference material,
+     read once, occupying the same space as the controls you use every run.
+     Native <dialog> so Escape closes it and focus is trapped without any of
+     that being written here. -->
+<dialog id="helpdlg">
+  <h3>Keys</h3>
+  <div class="helprow">
+    <span><span class="kbd">R</span></span><span>run the mission</span>
+    <span><span class="kbd">space</span></span><span>play / pause the timeline</span>
+    <span><span class="kbd">←</span> <span class="kbd">→</span></span><span>step the timeline</span>
+    <span><span class="kbd">F</span></span><span>inertial ⇄ rotating frame</span>
+    <span><span class="kbd">E</span> <span class="kbd">C</span> <span class="kbd">Z</span></span><span>zoom to Earth / to the craft / fit the whole trajectory</span>
+    <span><span class="kbd">M</span></span><span>Moon-centred frame (lunar landing)</span>
+    <span><span class="kbd">A</span></span><span>open the analysis page</span>
+    <span><span class="kbd">L</span></span><span>open the cinematic launch view</span>
+    <span><span class="kbd">B</span></span><span>open the vehicle builder</span>
+  </div>
+  <p class="sub" style="margin:12px 0 0">Drag the 3D views to orbit the camera,
+    scroll to zoom. Everything on this page is a live run of the simulator —
+    no canned data anywhere.</p>
+  <div style="margin-top:14px"><button id="helpclose" class="ghost">Close</button></div>
+</dialog>
 <div class="app">
   <div>
-    <h1>ss.jl mission control</h1>
-    <div class="sub" id="tagline">circumlunar free return — configure, run, explore</div>
 
     <div class="card">
       <h2>Mission</h2>
@@ -123,14 +211,12 @@
       </div>
       <div class="sub" id="modenote" style="margin:6px 0 0">a pod around the
         Moon and home — nothing is left behind and nothing has to stop</div>
-    </div>
-
-    <div class="card">
-      <h2>Presets</h2>
-      <div class="sub" style="margin:8px 0 3px">mission</div>
+      <!-- Presets were their own card, which made choosing a mission a
+           two-card decision: the mode here, the preset below it. They are one
+           choice — "what am I flying" — so they are one card. -->
+      <div class="u-label" style="margin:14px 0 7px">presets</div>
       <div id="presets"></div>
-      <div class="sub" style="margin:4px 0 0">one click configures + runs.
-        Vehicle presets live in the builder.</div>
+      <div class="sub" style="margin:2px 0 0">one click configures and runs</div>
     </div>
 
     <div class="card hidden" id="card_suborbital">
@@ -176,11 +262,9 @@
           <input type="checkbox" id="deorbit" style="width:auto;margin:0">
           deorbit and re-enter after the last revolution</label></div>
       </div>
-      <div class="sub" style="margin:6px 0 0">the goal is the orbit itself:
-        ascent to the parking orbit, transfer burns on the kick stage where the
-        target needs them, and the achieved elements reported against the
-        request. GEO asks ~4.3 km/s of the kick stage — size it in the builder
-        or expect an honest "propellant depleted".</div>
+      <div class="sub" style="margin:6px 0 0">GEO asks ~4.3 km/s of the kick
+        stage — size it in the builder or expect an honest "propellant
+        depleted".</div>
     </div>
 
     <div class="card" id="card_flyby">
@@ -220,30 +304,41 @@
         <div><label for="n_rev">revs before DOI</label><input id="n_rev" value="1"></div>
       </div>
       <div class="row" style="margin-top:6px">
+        <!-- flex:1 to claim the row the way the other checkbox lines do, and
+             white-space:normal to undo the global `label` rule: that rule's
+             nowrap + overflow:hidden is right for a one-word field label above
+             an input, but here it defeated this label's own flex-wrap and cut
+             the sentence to "...perfect navigat". -->
         <label for="plain_moon" style="display:flex;gap:7px;align-items:flex-start;
-               flex-wrap:wrap;cursor:pointer" title="fly the descent onto a smooth
+               flex:1;flex-wrap:wrap;white-space:normal;overflow:visible;
+               cursor:pointer" title="fly the descent onto a smooth
                sphere with perfect navigation, as everything here did before
                terrain existed">
           <input type="checkbox" id="plain_moon" style="width:auto;margin:2px 0 0">
           <span>smooth sphere, perfect navigation</span></label>
       </div>
-      <div class="sub" style="margin:6px 0 0">the lander flies insertion,
-        descent-orbit initiation and the descent on its own propellant; the
-        launcher only has to throw its wet mass through TLI. Arrival is on a
-        free return, so a failed insertion still comes home.
-        <b>By default it lands on the real thing</b>: procedural terrain,
-        mascons, orbit-determination error corrected by landing radar, and
-        hazard avoidance choosing the touchdown point at high gate. Tick the
-        box to take all of that away and watch what each of them was for.</div>
+      <!-- Two lines, not eight. The mode note at the top of the sidebar
+           already says what a landing mission IS; what belongs here is the one
+           thing a reader cannot infer from the controls — that the default is
+           the hard version. -->
+      <div class="sub" style="margin:6px 0 0"><b>Lands on the real thing by
+        default</b>: terrain, mascons, navigation error corrected by landing
+        radar, hazard avoidance at high gate. The box above takes all of that
+        away.</div>
     </div>
 
     <div class="card" id="card_launcher">
-      <h2>Launcher <span class="count" id="lv_count"></span>
-        <span class="chip" id="buildbtn" style="float:right;font-weight:normal"
-              title="open the vehicle builder — key B">&#128736; vehicle builder</span></h2>
-      <div class="sub" style="margin:8px 0 0">the vehicle is configured in the
-        builder and syncs here live — this page just flies it</div>
+      <!-- Read-only, on purpose: the vehicle is EDITED in the builder and
+           FLOWN from here. The float:right chip that used to sit in this
+           header wrapped the paragraph under it into an L shape at every
+           sidebar width, which is every width this column has. -->
+      <h2>Launcher</h2>
+      <div class="sub" id="lv_count" style="margin:8px 0 0">—</div>
       <div class="sub" id="pod_note" style="margin:4px 0 0">—</div>
+      <div style="margin-top:9px">
+        <span class="chip" id="buildbtn" title="the vehicle is configured there
+              and syncs back here live — key B">&#128736; edit in the vehicle builder</span>
+      </div>
       <!-- The whole launcher form still exists and still feeds params() and
            the presets; it is only no longer ON SCREEN. The visible editor is
            /build, and its state arrives here through localStorage. -->
@@ -307,78 +402,53 @@
       <button id="run">Run mission <span class="kbd" style="margin-left:6px">R</span></button>
       <div class="status" id="status">idle</div>
     </div>
-
-    <div class="card">
-      <h2>Vehicle geometry</h2>
-      <canvas id="geo" style="width:100%;height:230px;display:block;cursor:grab;touch-action:none"></canvas>
-      <div class="sub" id="geo_state" style="margin:6px 0 0">full stack</div>
-      <div class="sub" id="geo_info" style="margin:2px 0 0">—</div>
-      <div class="sub" id="geo_perf" style="margin:2px 0 0">—</div>
-    </div>
-
-    <div class="card">
-      <h2 class="fold">Keys &amp; help</h2>
-      <div class="helprow" style="margin-top:8px">
-        <span><span class="kbd">R</span></span><span>run the mission</span>
-        <span><span class="kbd">space</span></span><span>play / pause the timeline</span>
-        <span><span class="kbd">←</span> <span class="kbd">→</span></span><span>step the timeline</span>
-        <span><span class="kbd">F</span></span><span>inertial ⇄ rotating frame</span>
-        <span><span class="kbd">E</span> <span class="kbd">C</span> <span class="kbd">Z</span></span><span>zoom to Earth / to the craft / fit the whole trajectory</span>
-        <span><span class="kbd">L</span></span><span>open the cinematic launch view</span>
-        <span><span class="kbd">B</span></span><span>open the vehicle builder</span>
-      </div>
-      <div class="sub" style="margin:8px 0 0">drag the 3D views to orbit the
-        camera, scroll to zoom. Everything on this page is a live run of the
-        simulator — no canned data anywhere.</div>
-    </div>
   </div>
 
   <div>
-    <div class="tiles" id="tiles"></div>
-
-    <div class="card">
-      <div class="legend" id="legend"></div>
-      <canvas id="scene"></canvas>
-      <div class="bar">
-        <button id="play" class="ghost">&#9654; play</button>
-        <input id="scrub" type="range" min="0" max="1000" value="1000">
-        <button id="frame" class="ghost">rotating frame</button>
-        <span class="chip" data-zoom="30" title="key E">Earth</span>
-        <span class="chip" data-zoom="0.4" title="key C — a 400 km frame that
-              follows the craft; the only way to see a suborbital arc">craft</span>
-        <span class="chip" data-zoom="fit" title="key Z — frame the whole trajectory">fit</span>
-        <span class="chip hidden" id="moonview" title="the lunar phase, Moon-centred">&#127765; Moon</span>
-        <span class="chip" id="launchbtn" title="cinematic pad-cam liftoff, flown from this run's parameters">&#128640; launch view</span>
-        <span class="ro" id="readout"></span>
-      </div>
-      <div class="sub" style="margin:6px 0 0">drag to orbit the camera · scroll to
-        zoom · dots ride the rotating surface (zoom in on Earth to see them)</div>
+    <!-- The outcome, stated. This is the page's primary output and it used to
+         live as a sentence of grey body text below the fold, under the button
+         that started the run. -->
+    <div class="verdict" id="verdict" hidden>
+      <span class="verdict-state" id="verdict_state">—</span>
+      <span class="verdict-why" id="verdict_why"></span>
+    </div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="mgroups" id="tiles"></div>
     </div>
 
-    <div class="card hidden" id="card_descent">
-      <h2>Powered descent</h2>
-      <div class="legend">
-        <span><i style="background:#c98500"></i>braking (full thrust)</span>
-        <span><i style="background:#d55181"></i>terminal (throttled)</span>
-        <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>high gate</span>
+    <!-- The stage: the two live views, side by side, driven by one clock.
+         The vehicle used to sit in the sidebar under the controls, which put
+         a 3D view of the stack among the boxes you type into and left the
+         trajectory alone in a column twice as wide as it needed. They are
+         both pictures of the same instant of the same flight. -->
+    <div class="stage">
+      <div class="card stagemain">
+        <div class="legend" id="legend"></div>
+        <canvas id="scene"></canvas>
+        <div class="bar">
+          <button id="play" class="ghost">&#9654; play</button>
+          <input id="scrub" type="range" min="0" max="1000" value="1000">
+          <button id="frame" class="ghost">rotating frame</button>
+          <span class="chip" data-zoom="30" title="key E">Earth</span>
+          <span class="chip" data-zoom="0.4" title="key C — a 400 km frame that
+                follows the craft; the only way to see a suborbital arc">craft</span>
+          <span class="chip" data-zoom="fit" title="key Z — frame the whole trajectory">fit</span>
+          <span class="chip hidden" id="moonview" title="the lunar phase, Moon-centred">&#127765; Moon</span>
+          <span class="chip" id="launchbtn" title="cinematic pad-cam liftoff, flown from this run's parameters">&#128640; launch view</span>
+          <span class="ro" id="readout"></span>
+        </div>
+        <div class="sub" style="margin:6px 0 0">drag to orbit the camera · scroll to
+          zoom · dots ride the rotating surface (zoom in on Earth to see them)</div>
       </div>
-      <canvas id="c_desc_prof" style="width:100%;height:210px;display:block"></canvas>
-      <div class="charts" style="margin-top:10px">
-        <canvas id="c_desc_v"></canvas>
-        <canvas id="c_desc_thr"></canvas>
-      </div>
-      <div class="sub" id="desc_note" style="margin:8px 0 0">—</div>
-    </div>
 
-    <div class="card">
-      <h2>Profiles</h2>
-      <div class="charts">
-        <canvas id="c_asc_h"></canvas>
-        <canvas id="c_asc_q"></canvas>
-        <canvas id="c_dist"></canvas>
-        <canvas id="c_corridor"></canvas>
-        <canvas id="c_ent_g"></canvas>
-        <canvas id="c_ent_q"></canvas>
+      <div class="card stageside">
+        <h2>Vehicle</h2>
+        <canvas id="geo"></canvas>
+        <div class="sub" id="geo_state" style="margin:6px 0 0">full stack</div>
+        <div class="sub" id="geo_info" style="margin:2px 0 0">—</div>
+        <div class="sub" id="geo_perf" style="margin:2px 0 0">—</div>
+        <div class="sub" style="margin:8px 0 0">stages, fairing and the kick
+          stage drop off as the timeline passes their separation events</div>
       </div>
     </div>
 
@@ -387,58 +457,32 @@
       <div id="history"><span class="sub">runs appear here — click to restore</span></div>
     </div>
 
-    <div class="analysis">
-      <div class="card">
-        <h2>Parameter sweep</h2>
-        <div class="row3" style="margin-top:8px">
-          <div><label for="sweep_param">parameter</label>
-            <select id="sweep_param" data-solvable></select></div>
-          <div><label for="sweep_min">min</label><input id="sweep_min" value="250"></div>
-          <div><label for="sweep_max">max</label><input id="sweep_max" value="450"></div>
-        </div>
-        <div class="row" style="margin-top:6px">
-          <div><label for="sweep_n">steps</label><input id="sweep_n" value="9"></div>
-          <div><label for="sweep_metric">metric</label>
-            <select id="sweep_metric"></select></div>
-        </div>
-        <div style="margin-top:8px"><button id="sweepbtn" class="ghost">Run sweep</button></div>
-        <canvas id="sweepchart" style="width:100%;height:180px;margin-top:8px"></canvas>
-      </div>
-
-      <div class="card">
-        <h2>Solve for a target</h2>
-        <div class="sub" style="margin:8px 0 6px">
-          Lock everything else and search one field until a mission metric
-          reaches a value. Each step flies the whole mission.
-        </div>
-        <div class="row">
-          <div><label for="solve_param">vary</label>
-            <select id="solve_param" data-solvable></select></div>
-          <div><label for="solve_metric">until</label>
-            <select id="solve_metric"></select></div>
-        </div>
-        <div class="row3" style="margin-top:6px">
-          <div><label for="solve_target">equals</label><input id="solve_target" value="3000"></div>
-          <div><label for="solve_min">search from</label><input id="solve_min" value="1000"></div>
-          <div><label for="solve_max">to</label><input id="solve_max" value="4000"></div>
-        </div>
-        <div style="margin-top:8px"><button id="solvebtn" class="ghost">Solve</button></div>
-        <div class="sub" id="solve_out" style="margin-top:6px">—</div>
-        <canvas id="solvechart" style="width:100%;height:150px;margin-top:6px"></canvas>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top:12px">
-      <h2>Events</h2>
-      <div style="overflow-x:auto"><table id="events"></table></div>
-    </div>
+    <!-- Where the plots went. The six profile charts, the descent charts, the
+         event log, the sweep and the solver all moved to /analysis: they are
+         what you read AFTER a run, not what you watch during one, and having
+         them here meant the answer to "did it work" was four screens above
+         the tools for asking why. -->
+    <a class="card gonext" id="analysislink" href="/analysis" target="_blank">
+      <span class="gonext-k u-label">next</span>
+      <span class="gonext-t">Analysis &rarr;</span>
+      <span class="gonext-w">ascent, entry and descent profiles · the event log ·
+        parameter sweeps · solve a field for a target</span>
+    </a>
   </div>
 </div>
 
-<script>
+<script type="module">
 'use strict';
+import { fin, fmt, fmtKm } from '/static/fmt.js';
+import * as api from '/static/api.js';
+import * as vehicle from '/static/vehicle.js';
+// The metric vocabulary and the limit table are shared with /analysis, which
+// names the same quantities in its sweep and solve pickers.
+import { V, limit } from '/static/metrics.js';
+import { suite, report, requested } from '/static/selftest.js';
+
 const $ = id => document.getElementById(id);
-const BASE_FIELDS = ['pod_mass','pod_dia','crewed','h_park_km','incl_deg','hp_moon_km','hp_return_km',
+const BASE_FIELDS =['pod_mass','pod_dia','crewed','h_park_km','incl_deg','hp_moon_km','hp_return_km',
   'fairing','fairing_on','diameter','nstages','nboost','opt_kick','kick_deg',
   'tli_mag_err_pct','tli_point_err_deg'];
 // the landing mission adds a lander and a descent plan; everything else — the
@@ -495,7 +539,7 @@ const roleAt = (k, n) => {
 
 let CATALOGUE = { propellants: [], engines: [], solve_metrics: [] };
 async function fillCatalogues() {
-  try { CATALOGUE = await (await fetch('/api/catalogue')).json(); } catch (e) {}
+  CATALOGUE = await api.catalogue();
   // the orbit picker comes from the same catalogue, so the page can never
   // offer an orbit the simulator does not fly
   const sel = $('orbit');
@@ -636,152 +680,15 @@ function buildStages() {
   for (const el of box.querySelectorAll('input,select'))
     el.addEventListener('change', () => { syncSizeBy(); fetchGeo(); });
   syncSizeBy();
-  fillSolveParams();
 }
 
-// Sweep and solve offer exactly the numeric fields that exist right now, so
-// adding a fourth stage immediately makes its propellant load solvable.
-const PARAM_LABEL = { pod_mass: 'pod mass', h_park_km: 'parking alt',
-  hp_moon_km: 'perilune', hp_return_km: 'return perigee',
-  incl_deg: 'inclination', diameter: 'diameter', fairing: 'fairing mass' };
-const SFIELD_LABEL = { prop: 'prop', dry: 'dry', isp: 'Isp',
-                       thrust_kn: 'thrust', engines: 'engine count' };
-const METRIC_LABEL = { prop_margin_kg: 'launcher prop margin [kg]',
-  perilune_km: 'perilune [km]', vac_perigee_km: 'return perigee [km]',
-  peak_g: 'peak entry g', peak_q_wcm2: 'peak q̇ [W/cm²]',
-  t_days: 'mission days', liftoff_t: 'liftoff mass [t]',
-  park_apogee_km: 'parking apogee [km]', v_splash: 'splashdown speed [m/s]',
-  tli_dv: 'TLI Δv [m/s]', heat_mj: 'heat load [MJ/m²]',
-  prop_left_kg: 'lander propellant left [kg]', hover_s: 'hover margin [s]',
-  descent_dv: 'descent Δv [m/s]', loi_dv: 'insertion Δv [m/s]',
-  touchdown_v: 'touchdown sink [m/s]', downrange_km: 'descent downrange [km]',
-  min_throttle_pct: 'deepest throttle [%]',
-  apogee_km: 'apogee [km]', range_km: 'ground range [km]',
-  cutoff_h_km: 'cutoff altitude [km]', t_apogee_s: 'coast to apogee [s]' };
-const SPARAM_LABEL = { sub_apogee_km: 'target apogee', sub_range_km: 'target range',
-  sub_loft_deg: 'loft angle', sub_azimuth_deg: 'launch azimuth' };
-const LPARAM_LABEL = { l_dry: 'lander dry mass', l_prop: 'lander propellant',
-  l_thrust_kn: 'lander thrust', l_isp: 'lander Isp',
-  l_throttle_min: 'lander min throttle', h_moon_park_km: 'lunar orbit altitude',
-  h_pdi_km: 'descent-orbit altitude', n_rev: 'revs before DOI',
-  plain_moon: 'smooth sphere, perfect navigation' };
-function fillSolveParams() {
-  const n = nStages();
-  const opts = Object.keys(PARAM_LABEL).map(k => [k, PARAM_LABEL[k]]);
-  if (landing())
-    for (const k in LPARAM_LABEL) opts.push([k, LPARAM_LABEL[k]]);
-  if (subm())
-    for (const k in SPARAM_LABEL) opts.push([k, SPARAM_LABEL[k]]);
-  for (let k = 1; k <= n; k++)
-    for (const f in SFIELD_LABEL)
-      opts.push([`s${k}_${f}`, `stage ${k} ${SFIELD_LABEL[f]}`]);
-  const html = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
-  for (const el of document.querySelectorAll('select[data-solvable]')) {
-    const was = el.value;
-    el.innerHTML = html;
-    el.value = opts.some(o => o[0] === was) ? was :
-               (landing() ? 'l_prop' : subm() ? 'sub_apogee_km' : 'pod_mass');
-  }
-  if (landing() && !$('sweep_param').dataset.touched) {
-    $('sweep_param').value = 'l_prop';
-    $('sweep_min').value = 6000; $('sweep_max').value = 12000;
-  }
-  // a target this vehicle can actually hit, so the first solve demonstrates
-  // the feature instead of reporting an unreachable goal
-  if (!$('solve_param').dataset.touched)
-    $('solve_param').value = landing() ? 'l_prop' :
-                             subm() ? 'sub_apogee_km' : 'hp_moon_km';
-  const ms = (landing() ? CATALOGUE.landing_metrics :
-              subm() ? CATALOGUE.suborbital_metrics : CATALOGUE.solve_metrics)
-             || Object.keys(METRIC_LABEL);
-  for (const id of ['solve_metric', 'sweep_metric']) {
-    const sel = $(id), was = sel.value;
-    sel.innerHTML = ms.map(m =>
-      `<option value="${m}">${METRIC_LABEL[m] || m}</option>`).join('');
-    const want = landing() ? (id === 'sweep_metric' ? 'hover_s' : 'prop_left_kg')
-               : subm()    ? (id === 'sweep_metric' ? 'peak_g' : 'apogee_km')
-               :             (id === 'sweep_metric' ? 'peak_g' : 'perilune_km');
-    sel.value = ms.includes(was) && was ? was
-              : ms.includes(want) ? want : ms[0];
-  }
-}
-
-async function doSolve() {
-  $('solvebtn').disabled = true;
-  $('solve_out').textContent = 'searching — each step flies a whole mission…';
-  try {
-    const u = params();
-    for (const f of ['solve_param','solve_metric','solve_target','solve_min','solve_max'])
-      u.set(f, $(f).value);
-    const j = await (await fetch('/api/solve',
-      { method: 'POST', body: u })).json();
-    if (!j.ok) throw new Error(j.error || 'solve failed');
-    const pl = PARAM_LABEL[j.param] ||
-      j.param.replace(/^s(\d+)_/, 'stage $1 ').replace('thrust_kn','thrust');
-    const ml = METRIC_LABEL[j.metric] || j.metric;
-    // an end that produced no valid mission was walked inward; saying so
-    // matters, because then the fix is not "widen the range"
-    const shrank = Math.abs(j.hi - j.asked_hi) > 1e-9 ||
-                   Math.abs(j.lo - j.asked_lo) > 1e-9;
-    const note = shrank
-      ? ` Part of the range flies no valid mission, so the search was ` +
-        `confined to ${(+j.lo).toPrecision(4)}–${(+j.hi).toPrecision(4)}.`
-      : '';
-    const msg = j.status === 'converged'
-      ? `${pl} = <b>${(+j.x).toPrecision(5)}</b> gives ${ml} = ` +
-        `${(+j.value).toPrecision(4)} (target ${j.target}) — ${j.iterations} runs.` + note
-      : j.status === 'no_bracket'
-      ? `${ml} never reaches ${j.target} over that range; closest is ` +
-        `${pl} = ${(+j.x).toPrecision(5)} at ${(+j.value).toPrecision(4)}.` +
-        (shrank ? note : ' Try a wider range.')
-      : `no valid mission anywhere in that range — try bounds nearer the ` +
-        `current configuration.`;
-    $('solve_out').innerHTML = msg;
-    drawSolve(j);
-  } catch (e) {
-    $('solve_out').textContent = 'solve: ' + (e.message || e);
-  }
-  $('solvebtn').disabled = false;
-}
-
-// the search path is most of the information when each point costs a second
-function drawSolve(j) {
-  const cv = $('solvechart'), ctx = cv.getContext('2d');
-  const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, h = cv.clientHeight;
-  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  const pts = ((j && j.history) || []).filter(p => isFinite(p.value));
-  if (pts.length < 2) return;
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.value).concat([j.target]);
-  const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  const y0 = Math.min(...ys), y1 = Math.max(...ys);
-  const px = v => 34 + (w - 44) * (x1 > x0 ? (v - x0)/(x1 - x0) : 0.5);
-  const py = v => h - 20 - (h - 32) * (y1 > y0 ? (v - y0)/(y1 - y0) : 0.5);
-  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-  ctx.beginPath(); ctx.moveTo(30, py(j.target)); ctx.lineTo(w - 6, py(j.target));
-  ctx.stroke();
-  ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '10px system-ui';
-  ctx.fillText('target', 32, py(j.target) - 3);
-  // evaluations in the order they were taken: early wide, late clustered
-  pts.forEach((p, i) => {
-    const t = i/(pts.length - 1);
-    ctx.fillStyle = `rgba(242,193,78,${0.35 + 0.65*t})`;
-    ctx.beginPath(); ctx.arc(px(p.x), py(p.value), 3.2, 0, 7); ctx.fill();
-  });
-  if (j.status === 'converged') {
-    ctx.strokeStyle = '#f2c14e'; ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.moveTo(px(j.x), 8); ctx.lineTo(px(j.x), h - 18); ctx.stroke();
-  }
-  ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.fillText(x0.toPrecision(4), 30, h - 6);
-  ctx.fillText(x1.toPrecision(4), w - 46, h - 6);
-}
 // trajectory phase colors: 4 ascent, 0 parking coast, 1 TLI burn,
 // 2 outbound, 3 return, 5 entry
 const COL = {4:'#8fbef0',0:'#3987e5',1:'#d95926',2:'#199e70',3:'#c98500',5:'#d55181'};
-const INK='#fff', INK2='#c3c2b7', MUTED='#898781', GRID='#2c2c2a', ACC='#3987e5';
+// scene ink. `INK` and `ACC` left with the charts — the only things drawn on
+// this page now are the trajectory and the stack, and both carry their own
+// phase colours from COL above.
+const INK2='#c3c2b7', MUTED='#898781', GRID='#2c2c2a';
 const OMEGA_E = 7.2921159e-5;                 // Earth rotation [rad/s]
 const N_MOON = 2*Math.PI/(27.321661*86400);   // lunar mean motion [rad/s]
 const RE_MM = 6.371, RM_MM = 1.7374;          // radii in 1000 km
@@ -942,11 +849,10 @@ async function doRun() {
   $('run').disabled = true;
   $('status').className = 'status';
   $('status').textContent = 'designing + flying mission…';
+  showVerdict('running', 'RUNNING', 'designing and flying the mission…');
   const t0 = performance.now();
   try {
-    const r = await fetch('/api/run', { method: 'POST', body: params() });
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || 'run failed');
+    const j = await api.run(params());
     j._params = Object.fromEntries(params());
     run = j;
     history.unshift(j);
@@ -960,121 +866,198 @@ async function doRun() {
       if (j.outcome && j.outcome !== 'nominal') console.warn('partial render:', err);
       else throw err;
     }
-    if (j.outcome && j.outcome !== 'nominal' && j.mode !== 'landing') {
-      $('status').className = 'status err';
-      $('status').textContent = (j.outcome === 'ascent_failed'
-        ? 'flown, but the ascent never reached orbit'
-        : `flown, but the mission ended in "${j.outcome}"`) +
-        ' — open the launch view (L) to fly what was simulated';
-    } else if (j.metrics.on_target && j.metrics.grazing) {
-      // On target, and the target is one where "above the surface" stops
-      // meaning what it usually means. Perilune here is measured against the
-      // MEAN SPHERE, and the Moon's relief runs to roughly +/- 8 km — so a
-      // clearance under about ten is a clearance over a smooth Moon, and the
-      // real one has mountains in it. Said out loud rather than left in a
-      // metric nobody reads.
-      $('status').className = 'status warn';
-      $('status').textContent =
-        `done in ${((performance.now()-t0)/1000).toFixed(1)} s — GRAZING: ` +
-        `${(j.metrics.perilune_km*1000).toFixed(0)} m is above the MEAN SPHERE, ` +
-        `and lunar relief runs to ±8 km. The free return also gives up its ` +
-        `return corridor this low.`;
-    } else if (j.metrics.on_target) {
-      $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
-    } else if (j.mode === 'landing') {
-      $('status').className = 'status err';
-      $('status').textContent = `flown, but the descent ended in "${j.metrics.outcome}" ` +
-        `— see the descent card for what ran out`;
-    } else {
-      $('status').className = 'status err';
-      $('status').textContent = 'flown, but OFF TARGET — targeting could not reach ' +
-        'the requested perilune/perigee with this configuration (check prop margin)';
-    }
+    setVerdict(j);
+    $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
   } catch (e) {
     $('status').className = 'status err';
     $('status').textContent = String(e.message || e);
+    showVerdict('failed', 'RUN FAILED', String(e.message || e));
   }
   $('run').disabled = false;
 }
 
-function fmt(v, d=1) { return (v==null||!isFinite(v)) ? '—' : (+v).toFixed(d); }
+// ------------------------------------------------------------- the verdict --
+// Did it work? Every branch below already existed as status-line prose; this
+// gives the same wording a place at the top of the results where it is the
+// first thing read, and a colour that means one thing.
+
+function showVerdict(kind, state, why) {
+  const el = $('verdict');
+  el.hidden = false;
+  el.className = 'verdict is-' + kind;
+  $('verdict_state').textContent = state;
+  $('verdict_why').textContent = why || '';
+}
+
+function setVerdict(j) {
+  const m = j.metrics || {};
+  if (j.outcome && j.outcome !== 'nominal' && j.mode !== 'landing') {
+    // Three of these are genuinely different failures and used to read as one
+    // undifferentiated error line.
+    const why =
+      j.outcome === 'ascent_failed'
+        ? 'the ascent never reached orbit'
+      // the capsule reached the atmosphere and did not stay in it: too much
+      // mass behind too little frontal area to decelerate, so it skipped back
+      // out. Worth saying, because every number BEFORE entry is good.
+      : j.outcome === 'entry_timeout'
+        ? 'the capsule never came down — it skipped back out of the atmosphere ' +
+          'instead of decelerating'
+      // the corrector never closed on the requested perilune/perigee, so there
+      // is no designed trajectory to fly. Not flown, and not a failure of the
+      // vehicle: the targeting did not converge on this configuration.
+      : j.outcome === 'design_failed'
+        ? 'free-return targeting did not converge — no trajectory reaches the ' +
+          'requested perilune, so nothing flew past the parking orbit'
+      : `the mission ended in "${j.outcome}"`;
+    const state = j.outcome === 'design_failed' ? 'NO TRAJECTORY' :
+                  j.outcome === 'ascent_failed' ? 'DID NOT REACH ORBIT' :
+                  j.outcome === 'entry_timeout' ? 'DID NOT COME HOME' : 'FAILED';
+    return showVerdict('failed', state,
+                       why + ' · press L for the launch view to fly what was simulated');
+  }
+  if (j.mode === 'landing' && !m.on_target)
+    return showVerdict('failed', 'DESCENT FAILED',
+                       `the descent ended in "${m.outcome}" — see the descent card ` +
+                       'for what ran out');
+  if (!m.on_target)
+    return showVerdict('failed', 'OFF TARGET',
+                       'targeting could not reach the requested perilune/perigee with ' +
+                       'this configuration — check the prop margin');
+  // On target, and the target is one where "above the surface" stops meaning
+  // what it usually means. Perilune here is measured against the MEAN SPHERE,
+  // and the Moon's relief runs to roughly ±8 km — so a clearance under about
+  // ten is a clearance over a smooth Moon, and the real one has mountains in
+  // it. Said out loud rather than left in a metric nobody reads.
+  if (m.grazing)
+    return showVerdict('marginal', 'GRAZING',
+                       `${(m.perilune_km*1000).toFixed(0)} m above the MEAN SPHERE, and ` +
+                       'lunar relief runs to ±8 km. The free return also gives up its ' +
+                       'return corridor this low.');
+  // Converged is the ordinary case, but "outside tolerance" is also routine —
+  // the reference Sable and the Saturn V both land there — so it is reported
+  // rather than hidden, without being dressed up as a failure.
+  const drift = m.design_status && m.design_status !== 'converged' &&
+                m.design_status !== 'no_design'
+    ? ` · targeting ${String(m.design_status).replace(/_/g, ' ')}` : '';
+  const where = isFinite(m.splash_lat)
+    ? `splashdown ${fmt(m.splash_lat,1)}°, ${fmt(m.splash_lon,1)}°`
+    : j.mode === 'landing' && isFinite(m.land_lat)
+    ? `touchdown ${fmt(m.land_lat,1)}°, ${fmt(m.land_lon,1)}°` : 'on target';
+  showVerdict('nominal', 'NOMINAL',
+              `${where}${isFinite(m.t_days) ? ' · ' + fmt(m.t_days,1) + ' d' : ''}${drift}`);
+}
 
 function renderAll() {
   if (!run) return;
   const m = run.metrics;
-  const tiles = run.mode === 'landing' ? [
-    [fmt(m.liftoff_t,1)+' t','liftoff mass'],
-    [fmt(m.lander_wet_t,1)+' t','lander wet mass'],
-    [fmt(m.tli_dv,0)+' m/s','TLI Δv'],
-    [fmt(m.prop_margin_kg,0)+' kg','launcher margin'],
-    [fmt(m.perilune_km,0)+' km','lunar orbit'],
-    [fmt(m.loi_dv,0)+' m/s','insertion Δv'],
-    [fmt(m.doi_dv,1)+' m/s','descent-orbit Δv'],
-    [fmt(m.descent_dv,0)+' m/s','descent Δv'],
-    [fmt(m.descent_s,0)+' s','descent time'],
-    [fmt(m.downrange_km,0)+' km','descent downrange'],
-    [fmt(m.touchdown_v,2)+' m/s','touchdown sink'],
-    [fmt(m.touchdown_vh,2)+' m/s','touchdown lateral'],
-    [fmt(m.prop_left_kg,0)+' kg','propellant left'],
-    [fmt(m.hover_s,0)+' s','hover margin'],
-    [fmt(m.min_throttle_pct,0)+' %','deepest throttle'],
-    [fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°','landing site'],
-    [(m.ground_elev_m>=0?'+':'')+fmt(m.ground_elev_m,0)+' m','ground off the sphere'],
-    [fmt(m.ground_slope_deg,1)+'°','slope at touchdown'],
-    [m.redesignate_m>0 ? fmt(m.site_score_deg,1)+'° ← '+fmt(m.site_was_deg,1)+'°' : '—',
-     'site chosen (was)'],
-    [m.redesignate_m>0 ? fmt(m.redesignate_m,0)+' m' : '—','aim point moved'],
-    [fmt(m.nav_alt_err_m,0)+' m','nav altitude error'],
-    [fmt(m.t_days,2)+' d','pad to surface'],
+  const groups = run.mode === 'landing' ? [
+    ['launch', [
+      ['liftoff mass', V(m.liftoff_t,1,'t')],
+      ['lander wet mass', V(m.lander_wet_t,1,'t')],
+      ['TLI Δv', V(m.tli_dv,0,'m/s')],
+      ['launcher margin', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
+      ['pad to surface', V(m.t_days,2,'d')],
+    ]],
+    ['lunar orbit', [
+      ['lunar orbit', V(m.perilune_km,0,'km')],
+      ['insertion Δv', V(m.loi_dv,0,'m/s')],
+      ['descent-orbit Δv', V(m.doi_dv,1,'m/s')],
+    ]],
+    ['descent', [
+      ['descent Δv', V(m.descent_dv,0,'m/s')],
+      ['descent time', V(m.descent_s,0,'s')],
+      ['downrange', V(m.downrange_km,0,'km')],
+      ['deepest throttle', V(m.min_throttle_pct,0,'%')],
+      ['propellant left', V(m.prop_left_kg,0,'kg')],
+      ['hover margin', V(m.hover_s,0,'s'), limit('hover_s',m.hover_s)],
+    ]],
+    ['touchdown', [
+      ['sink rate', V(m.touchdown_v,2,'m/s'), limit('touchdown_v',m.touchdown_v)],
+      ['lateral rate', V(m.touchdown_vh,2,'m/s'), limit('touchdown_vh',m.touchdown_vh)],
+      ['landing site', fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°'],
+      ['ground off sphere', (m.ground_elev_m>=0?'+':'')+V(m.ground_elev_m,0,'m')],
+      ['slope', V(m.ground_slope_deg,1,'°')],
+      ['nav altitude error', V(m.nav_alt_err_m,0,'m')],
+      ['site chosen (was)', m.redesignate_m>0
+        ? fmt(m.site_score_deg,1)+'° ← '+fmt(m.site_was_deg,1)+'°' : '—'],
+      ['aim point moved', m.redesignate_m>0 ? V(m.redesignate_m,0,'m') : '—'],
+    ]],
   ] : run.mode === 'suborbital' ? [
-    [fmt(m.liftoff_t,1)+' t','liftoff mass'],
-    [fmt(m.apogee_km,1)+' km','apogee reached'],
+    ['launch', [
+      ['liftoff mass', V(m.liftoff_t,1,'t')],
+      ['cutoff altitude', V(m.cutoff_h_km,1,'km')],
+      ['cutoff flight path', V(m.cutoff_gamma_deg,1,'°')],
+      ['peak load', V(m.peak_g,1,'g'), limit('peak_g',m.peak_g)],
+      ['propellant left', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
+    ]],
     // what was asked for next to what it did, because on a suborbital flight
     // the target is the whole point and the miss is the whole answer
-    [(run.suborbital||{}).profile === 'hop'
-       ? fmt(m.target_apogee_km,0)+' km' : fmt(m.target_range_km,0)+' km','asked for'],
-    [((run.suborbital||{}).profile === 'hop'
-       ? fmt(m.apogee_err_km,1) : fmt(m.range_err_km,1))+' km','miss'],
-    [fmt(m.range_km,1)+' km','ground range'],
-    [fmt(m.cutoff_h_km,1)+' km','cutoff altitude'],
-    [fmt(m.cutoff_gamma_deg,1)+'°','cutoff flight path'],
-    [fmt(m.t_apogee_s,0)+' s','coast to apogee'],
-    [fmt(m.peak_g,1)+' g','peak load'],
-    [fmt(m.peak_q_wcm2,1)+' W/cm²','peak heating'],
-    [fmt(m.prop_margin_kg,0)+' kg','propellant left'],
-    [fmt(m.v_splash,1)+' m/s','splash speed'],
+    ['trajectory', [
+      ['apogee reached', V(m.apogee_km,1,'km')],
+      ['asked for', (run.suborbital||{}).profile === 'hop'
+        ? V(m.target_apogee_km,0,'km') : V(m.target_range_km,0,'km')],
+      ['miss', (run.suborbital||{}).profile === 'hop'
+        ? V(m.apogee_err_km,1,'km') : V(m.range_err_km,1,'km')],
+      ['ground range', V(m.range_km,1,'km')],
+      ['coast to apogee', V(m.t_apogee_s,0,'s')],
+    ]],
+    ['entry', [
+      ['peak heating', V(m.peak_q_wcm2,1,'W/cm²')],
+      ['splash speed', V(m.v_splash,1,'m/s'), limit('v_splash',m.v_splash)],
+    ]],
   ] : run.mode === 'orbit' ? [
-    [fmt(m.liftoff_t,1)+' t','liftoff mass'],
-    [fmt(m.park_perigee_km,0)+'×'+fmt(m.park_apogee_km,0)+' km','parking orbit'],
-    [fmt(m.orbit_rp_km,0)+'×'+fmt(m.orbit_ra_km,0)+' km','achieved orbit'],
-    [fmt(m.orbit_incl_deg,2)+'°','inclination'],
-    [fmt(m.period_min,0)+' min','period'],
-    [fmt(m.burn_dv_total,0)+' m/s','transfer Δv'],
-    [fmt(m.prop_margin_kg,0)+' kg','prop margin'],
-    [fmt(m.peak_g,1)+' g','peak entry load'],
-    [fmt(m.v_splash,1)+' m/s','splash speed'],
-    [fmt(m.t_days,2)+' d','mission time'],
+    ['launch', [
+      ['liftoff mass', V(m.liftoff_t,1,'t')],
+      ['parking orbit', V(m.park_perigee_km,0,'')+'×'+V(m.park_apogee_km,0,'km')],
+      ['prop margin', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
+    ]],
+    ['orbit', [
+      ['achieved orbit', V(m.orbit_rp_km,0,'')+'×'+V(m.orbit_ra_km,0,'km')],
+      ['inclination', V(m.orbit_incl_deg,2,'°')],
+      ['period', V(m.period_min,0,'min')],
+      ['transfer Δv', V(m.burn_dv_total,0,'m/s')],
+      ['mission time', V(m.t_days,2,'d')],
+    ]],
+    ['entry', [
+      ['peak load', V(m.peak_g,1,'g'), limit('peak_g',m.peak_g)],
+      ['splash speed', V(m.v_splash,1,'m/s'), limit('v_splash',m.v_splash)],
+    ]],
   ] : [
-    [fmt(m.liftoff_t,1)+' t','liftoff mass'],
-    [fmt(m.park_perigee_km,0)+'×'+fmt(m.park_apogee_km,0)+' km','parking orbit'],
-    [fmt(m.tli_dv,0)+' m/s','TLI Δv'],
-    [fmt(m.prop_margin_kg,0)+' kg','prop margin'],
-    [fmt(m.perilune_km,0)+' km','perilune'],
-    [fmt(m.vac_perigee_km,1)+' km','return perigee'],
-    [fmt(m.ei_v_ms/1000,2)+' km/s','entry speed'],
-    [fmt(m.peak_g,1)+' g','peak load'],
-    [fmt(m.peak_q_wcm2,0)+' W/cm²','peak heating'],
-    [fmt(m.t_days,1)+' d','mission time'],
-    [fmt(m.splash_lat,1)+'°, '+fmt(m.splash_lon,1)+'°','splashdown'],
-    [fmt(m.v_splash,1)+' m/s','splash speed'],
+    ['launch', [
+      ['liftoff mass', V(m.liftoff_t,1,'t')],
+      ['parking orbit', V(m.park_perigee_km,0,'')+'×'+V(m.park_apogee_km,0,'km')],
+      ['prop margin', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
+    ]],
+    ['transit', [
+      ['TLI Δv', V(m.tli_dv,0,'m/s')],
+      ['perilune', V(m.perilune_km,0,'km')],
+      ['return perigee', V(m.vac_perigee_km,1,'km')],
+      ['mission time', V(m.t_days,1,'d')],
+    ]],
+    ['entry', [
+      ['entry speed', V(m.ei_v_ms/1000,2,'km/s')],
+      ['peak load', V(m.peak_g,1,'g'), limit('peak_g',m.peak_g)],
+      ['peak heating', V(m.peak_q_wcm2,0,'W/cm²')],
+      ['splashdown', fmt(m.splash_lat,1)+'°, '+fmt(m.splash_lon,1)+'°'],
+      ['splash speed', V(m.v_splash,1,'m/s'), limit('v_splash',m.v_splash)],
+    ]],
   ];
+  // A dispersed cruise adds a correction burn. It belongs with the transit
+  // group it happened in, not appended after the entry numbers as the flat
+  // strip did — which put a mid-course event after splashdown.
   if (m.tcm_dv != null) {
-    tiles.push([fmt(m.tcm_dv,1)+' m/s','TCM Δv']);
-    tiles.push([fmt(m.tcm_prop_kg,1)+' kg','TCM propellant']);
-    tiles.push([fmt(m.rcs_margin_kg,1)+' kg','cruise RCS margin']);
+    const t = groups.find(g => g[0] === 'transit') || groups[groups.length - 1];
+    t[1].push(['TCM Δv', V(m.tcm_dv,1,'m/s')],
+              ['TCM propellant', V(m.tcm_prop_kg,1,'kg')],
+              ['cruise RCS margin', V(m.rcs_margin_kg,1,'kg')]);
   }
-  $('tiles').innerHTML = tiles.map(t =>
-    `<div class="tile"><div class="v">${t[0]}</div><div class="k">${t[1]}</div></div>`).join('');
+  $('tiles').innerHTML = groups.map(([name, rows]) =>
+    `<div class="mgroup"><div class="mgroup-h">${name}</div>` +
+    rows.map(([k, v, cls]) =>
+      `<div class="mrow ${cls || ''}"><span class="mrow-k">${k}</span>` +
+      `<span class="mrow-v">${v}</span></div>`).join('') +
+    '</div>').join('');
 
   precompute();
   ti = S.n - 1;
@@ -1088,17 +1071,8 @@ function renderAll() {
   }
   $('scrub').value = 1000;
   if (autoFit) fitCamera();
-  drawCharts();
-  renderEvents();
   renderHistory();
-}
-
-function renderEvents() {
-  const rows = run.events.map(e =>
-    `<tr><td>${e.phase}</td><td>${e.name}</td><td>${(e.t/3600).toFixed(2)} h</td>` +
-    `<td>${(e.t/86400).toFixed(2)} d</td></tr>`);
-  $('events').innerHTML =
-    '<tr><th>phase</th><th>event</th><th>T+ hours</th><th>T+ days</th></tr>' + rows.join('');
+  syncLinks();
 }
 
 function renderHistory() {
@@ -1286,11 +1260,6 @@ function project(cv, p0) {
 
 function circle(ctx, x, y, r, fill) {
   ctx.beginPath(); ctx.arc(x, y, r, 0, 2*Math.PI); ctx.fillStyle = fill; ctx.fill();
-}
-
-function fmtKm(mm) {   // Mm (1000 km) -> readable km
-  const km = mm*1000;
-  return km >= 99500 ? (km/1000).toFixed(0) + 'k km' : km.toFixed(0) + ' km';
 }
 
 // Zoom so the whole flown trajectory fits, with the Earth still legible.
@@ -1549,221 +1518,6 @@ function togglePlay(on) {
   $('play').innerHTML = playing ? '&#10074;&#10074; pause' : '&#9654; play';
 }
 
-// --------------------------------------------------------------- charts --
-// series: [{xs, ys, color, label, unit}] — peak of the FIRST series is
-// direct-labeled; additional series get end labels
-function drawLine(cvId, series, title, opts) {
-  opts = opts || {};
-  const cv = $(cvId), ctx = cv.getContext('2d');
-  const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, h = cv.clientHeight;
-  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  series = series.filter(s => s.xs && s.xs.length);
-  if (!series.length) return;
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (const s of series) {
-    for (const v of s.xs) { if (v < x0) x0 = v; if (v > x1) x1 = v; }
-    for (const v of s.ys) { if (v < y0) y0 = v; if (v > y1) y1 = v; }
-  }
-  if (y1 - y0 < 1e-9) y1 = y0 + 1;
-  if (opts.y0 !== undefined) y0 = Math.min(opts.y0, y0);
-  // round the value axis out to nice ticks so the gridlines mean something
-  const nice = (span, n) => {
-    const raw = span/n, p = Math.pow(10, Math.floor(Math.log10(raw)));
-    const f = raw/p;
-    return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
-  };
-  const dy = nice(y1 - y0, 3);
-  y0 = Math.floor(y0/dy)*dy; y1 = Math.ceil(y1/dy)*dy;
-  const fmtTick = v => Math.abs(v) >= 1000 ? (v/1000).toFixed(v % 1000 ? 1 : 0) + 'k'
-                     : Math.abs(v) >= 10 ? v.toFixed(0)
-                     : Math.abs(v) >= 1 ? v.toFixed(1)
-                     : Math.abs(v) < 1e-9 ? '0' : v.toPrecision(2);
-  const L = 40, R = 10, T = 20, B = 26;
-  const px = x => L + (x-x0)/(x1-x0)*(w-L-R);
-  const py = y => h-B - (y-y0)/(y1-y0)*(h-T-B);
-  ctx.font = '10px system-ui';
-  ctx.strokeStyle = GRID; ctx.lineWidth = 1;
-  for (let v = y0; v <= y1 + 1e-9; v += dy) {
-    const y = py(v);
-    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w-R, y); ctx.stroke();
-    ctx.fillStyle = MUTED;
-    const s = fmtTick(v);
-    ctx.fillText(s, L - 5 - ctx.measureText(s).width, y + 3);
-  }
-  // three x ticks: start, middle, end of the range actually plotted
-  const dx = nice(x1 - x0, 2);
-  ctx.fillStyle = MUTED;
-  for (let v = Math.ceil(x0/dx)*dx; v <= x1 + 1e-9; v += dx) {
-    const x = px(v);
-    ctx.strokeStyle = 'rgba(255,255,255,.05)';
-    ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, h-B); ctx.stroke();
-    const s = fmtTick(v);
-    ctx.fillText(s, Math.min(x - ctx.measureText(s).width/2, w - 20), h - 14);
-  }
-  if (opts.xu) {
-    const s = '[' + opts.xu + ']';
-    ctx.fillText(s, w - R - ctx.measureText(s).width, h - 3);
-  }
-  if (opts.yu) ctx.fillText('[' + opts.yu + ']', 2, 12);
-  for (const s of series) {
-    ctx.strokeStyle = s.color; ctx.lineWidth = 1.8; ctx.lineJoin = 'round';
-    ctx.beginPath();
-    for (let i = 0; i < s.xs.length; i++) {
-      const X = px(s.xs[i]), Y = py(s.ys[i]);
-      i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
-    }
-    ctx.stroke();
-  }
-  ctx.font = '11px system-ui';
-  // peak marker + direct label on the primary series
-  const p = series[0];
-  if (!opts.nopeak) {
-    let ipk = 0;
-    for (let i = 1; i < p.ys.length; i++) if (p.ys[i] > p.ys[ipk]) ipk = i;
-    circle(ctx, px(p.xs[ipk]), py(p.ys[ipk]), 2.6, p.color);
-    ctx.fillStyle = INK2;
-    const lbl = `${(+p.ys[ipk]).toPrecision(3)} ${p.unit || ''}`;
-    const lx = Math.min(px(p.xs[ipk]) + 6, w - ctx.measureText(lbl).width - 4);
-    ctx.fillText(lbl, lx, Math.max(py(p.ys[ipk]) - 6, 26));
-  }
-  // called-out points (high gate, and anything else worth naming)
-  for (const mk of (opts.marks || [])) {
-    const X = px(mk.x), Y = py(mk.y);
-    circle(ctx, X, Y, 3.4, mk.color);
-    ctx.strokeStyle = mk.color; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(X, Y, 6, 0, 2*Math.PI); ctx.stroke();
-    ctx.fillStyle = mk.color;
-    ctx.fillText(mk.label, Math.min(X + 9, w - ctx.measureText(mk.label).width - 4), Y - 6);
-  }
-  // series name labels at line ends (identity not by color alone)
-  if (series.length > 1) {
-    for (const s of series) {
-      if (!s.label) continue;
-      const n = opts.labelAt === 'start' ? 0 : s.xs.length - 1;
-      ctx.fillStyle = s.color;
-      const tx = opts.labelAt === 'start' ? px(s.xs[0]) + 5
-               : Math.min(px(s.xs[n]) - ctx.measureText(s.label).width - 4, w - 60);
-      const ty = opts.labelAt === 'start' ? py(s.ys[0]) + 13 : py(s.ys[n]) - 5;
-      ctx.fillText(s.label, Math.max(Math.min(tx, w - ctx.measureText(s.label).width - 4), L + 2),
-                   Math.min(Math.max(ty, T + 12), h - B - 2));
-    }
-  }
-  ctx.fillStyle = MUTED;
-  ctx.fillText(title, L, 12);
-}
-
-function drawCharts() {
-  const A = run.ascent, E = run.entry, D = run.cis;
-  drawLine('c_asc_h', [{xs: A.t, ys: A.h, color: ACC, unit: 'km'}],
-           'ascent altitude vs time', {xu: 's', yu: 'km'});
-  drawLine('c_asc_q', [{xs: A.t, ys: A.qbar, color: ACC, unit: 'kPa'}],
-           'ascent dynamic pressure vs time', {xu: 's', yu: 'kPa'});
-  // Full-mission geometry exists only for orbital and cislunar missions. A
-  // suborbital run has ascent + entry but deliberately no `cis` leg.
-  const hasDistance = D && D.t && D.t.length;
-  $('c_dist').style.display = hasDistance ? '' : 'none';
-  if (hasDistance) {
-    const td = D.t.map(t => t/86400);
-    const rE = D.x.map((x, i) => Math.hypot(x, D.y[i], D.z[i]));
-    const dM = D.x.map((x, i) =>
-      Math.hypot(x - D.mx[i], D.y[i] - D.my[i], D.z[i] - D.mz[i]));
-    drawLine('c_dist', [
-        {xs: td, ys: dM, color: '#199e70', label: 'to Moon', unit: 'k km'},
-        {xs: td, ys: rE, color: ACC, label: 'to Earth', unit: 'k km'},
-      ], 'distance from Earth and Moon', {y0: 0, xu: 'd', yu: 'k km'});
-  }
-  const hasEntry = E && E.t && E.t.length;
-  for (const id of ['c_corridor','c_ent_g','c_ent_q'])
-    $(id).style.display = hasEntry ? '' : 'none';
-  if (!hasEntry) { drawDescent(); return; }
-  // the classic entry corridor: altitude vs velocity
-  drawLine('c_corridor', [{xs: E.v.map(v => v/1000), ys: E.h, color: '#d55181', unit: 'km'}],
-           'entry altitude vs velocity', {xu: 'km/s', yu: 'km'});
-  drawLine('c_ent_g', [{xs: E.t, ys: E.g, color: ACC, unit: 'g'}],
-           'entry g-load vs time', {xu: 's', yu: 'g'});
-  drawLine('c_ent_q', [{xs: E.t, ys: E.q, color: ACC, unit: 'W/cm²'}],
-           'entry heating vs time', {xu: 's', yu: 'W/cm²'});
-}
-
-// ------------------------------------------------------- descent profile --
-// Altitude against downrange, in the plane the descent actually flies. The
-// braking phase and the throttled terminal phase are drawn as separate
-// series because they are separate control laws, and the seam between them
-// is high gate — the moment the vehicle stops being a decelerating orbit and
-// starts being a landing.
-function drawDescent() {
-  const d = run.descent, m = run.metrics;
-  if (!d || !d.t || !d.t.length) return;
-  const gate = m.gate_s;
-  const iGate = Math.max(1, d.t.findIndex(t => t >= gate));
-  const seg = (a, b) => ({ xs: d.dr.slice(a, b), ys: d.h.slice(a, b) });
-  const s1 = seg(0, iGate + 1), s2 = seg(iGate, d.t.length);
-  // the card's own legend names the two phases, so the series carry no
-  // labels here — they would land on top of the high-gate callout
-  drawLine('c_desc_prof', [
-      { xs: s1.xs, ys: s1.ys, color: '#c98500', unit: 'km' },
-      { xs: s2.xs, ys: s2.ys, color: '#d55181', unit: 'km' },
-    ], 'descent altitude vs downrange', { y0: 0, xu: 'km', yu: 'km', nopeak: true,
-        labelAt: 'start',
-        marks: [{ x: d.dr[iGate], y: d.h[iGate], color: '#8fbef0', label: 'high gate' }] });
-  drawLine('c_desc_v', [
-      { xs: d.t, ys: d.vh, color: '#c98500', label: 'horizontal', unit: 'm/s' },
-      { xs: d.t, ys: d.vv, color: '#8fbef0', label: 'vertical', unit: 'm/s' },
-    ], 'descent velocity vs time', { xu: 's', yu: 'm/s', nopeak: true, labelAt: 'start' });
-  drawLine('c_desc_thr', [{ xs: d.t, ys: d.thr, color: ACC, unit: '%' }],
-      'commanded throttle vs time', { y0: 0, xu: 's', yu: '%', nopeak: true });
-  const bad = m.outcome !== 'touchdown';
-  $('desc_note').innerHTML = bad
-    ? `<span class="bad">${m.outcome}</span> — arrived at ${fmt(m.touchdown_v,1)} m/s ` +
-      `sink, ${fmt(m.touchdown_vh,1)} m/s lateral. Give the lander more propellant, ` +
-      `more thrust, or a deeper throttle.`
-    : `braking ${fmt(m.braking_dv,0)} m/s at full thrust for ${fmt(m.gate_s,0)} s, ` +
-      `then ${fmt(m.terminal_dv,0)} m/s throttled down to ` +
-      `${fmt(m.touchdown_v,2)} m/s of sink — ${fmt(m.prop_left_kg,0)} kg left, ` +
-      `${fmt(m.hover_s,0)} s of hover at touchdown mass. The engine had to ` +
-      `throttle to ${fmt(m.min_throttle_pct,0)}% of rated thrust.`;
-}
-
-// ---------------------------------------------------------------- sweep --
-async function doSweep() {
-  $('sweepbtn').disabled = true;
-  $('status').className = 'status';
-  $('status').textContent = 'sweeping…';
-  try {
-    const u = params();
-    for (const f of ['sweep_param','sweep_min','sweep_max','sweep_n'])
-      u.set(f, $(f).value);
-    const r = await fetch('/api/sweep', { method: 'POST', body: u });
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || 'sweep failed');
-    window._sweep = j;
-    drawSweep();
-    const nOk = j.runs.filter(x => x.ok && x.metrics.on_target).length;
-    $('status').textContent = `sweep done: ${nOk}/${j.runs.length} on target` +
-      (nOk < j.runs.length ? ' (off-target runs excluded from the chart)' : '');
-  } catch (e) {
-    $('status').className = 'status err';
-    $('status').textContent = String(e.message || e);
-  }
-  $('sweepbtn').disabled = false;
-}
-
-function drawSweep() {
-  const j = window._sweep;
-  if (!j) return;
-  const key = $('sweep_metric').value;
-  const xs = [], ys = [];
-  for (let i = 0; i < j.values.length; i++)
-    if (j.runs[i].ok && j.runs[i].metrics.on_target && isFinite(j.runs[i].metrics[key])) {
-      xs.push(j.values[i]); ys.push(j.runs[i].metrics[key]);
-    }
-  drawLine('sweepchart', [{xs: xs, ys: ys, color: ACC, unit: ''}],
-    `${$('sweep_metric').selectedOptions[0].text} vs ${$('sweep_param').selectedOptions[0].text}`);
-}
-
 // ------------------------------------------------------- vehicle geometry --
 // The viewer follows the mission clock: stages, fairing, and finally the
 // kick stage drop off as the scrubbed time passes their separation events.
@@ -1784,9 +1538,7 @@ function geoStyle(name) {
 
 async function fetchGeo() {
   try {
-    const r = await fetch('/api/geometry', { method: 'POST', body: params() });
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || 'geometry failed');
+    const j = await api.geometry(params());
     geo = j;
     geoKey = '';
     const ds = (j.stages || []).map(s => +s.diameter_m);
@@ -1838,6 +1590,9 @@ async function fetchGeo() {
   } catch (e) {
     $('geo_info').textContent = 'geometry: ' + String(e.message || e);
   }
+  // fetchGeo runs on every change that alters the vehicle, which makes it the
+  // one place that always knows the configuration has moved
+  syncLinks();
 }
 
 // which sections are still attached / burning at mission time t [s]
@@ -2068,7 +1823,6 @@ function setMode(m) {
   $('card_orbit').classList.toggle('hidden', !orbitm());
   $('card_suborbital').classList.toggle('hidden', !subm());
   $('card_landing').classList.toggle('hidden', !landing());
-  $('card_descent').classList.toggle('hidden', !landing());
   $('moonview').classList.toggle('hidden', !landing());
   subNote();
   // the cinematic view flies the pad-to-splashdown profile; say so rather
@@ -2076,13 +1830,12 @@ function setMode(m) {
   $('launchbtn').title = landing()
     ? 'cinematic launch view — flies this vehicle on the free-return profile, pad to splashdown'
     : "cinematic pad-cam liftoff, flown from this run's parameters";
-  $('tagline').textContent = landing()
-    ? 'free return, insertion, and a powered descent — pad to lunar surface'
-    : orbitm()
-    ? 'ascent, transfer, and the orbit itself — configure, run, explore'
-    : subm()
-    ? 'up and back down — a hop or a ballistic shot, pad to splashdown'
-    : 'circumlunar free return — configure, run, explore';
+  // the nav bar states the mission being flown, so what the page is for is
+  // legible without reading the mode switch
+  $('nav_note').textContent = landing() ? 'lunar landing'
+    : orbitm() ? 'Earth orbit'
+    : subm() ? 'suborbital'
+    : 'circumlunar free return';
   $('modenote').textContent = landing()
     ? 'the lander stops at the Moon: insertion at perilune, a lunar parking orbit, then a guided descent to touchdown'
     : orbitm()
@@ -2093,9 +1846,9 @@ function setMode(m) {
   if (landing() && moonView === null) moonView = false;
   podNote();
   renderMissionPresets();
-  fillSolveParams();
   renderLegend();
   updateLanderNote();
+  syncLinks();
 }
 // Which target the profile actually closes on. A vehicle has one degree of
 // freedom at cutoff, so it can be given one target and one only — the other
@@ -2129,9 +1882,12 @@ function subNote() {
   $('sub_range_km').disabled = hop;
   $('sub_loft_deg').disabled = hop;
   $('sub_apogee_km').disabled = !hop;
+  // A vehicle has one degree of freedom at cutoff, so one of these two numbers
+  // is commanded and the other falls out of the flight. Which is which is the
+  // only thing this note has to say — the greyed-out field says the rest.
   $('sub_note').textContent = hop
-    ? 'straight up: no pitch-over at all, the vertical held all the way, cutoff on the apogee above. Where it comes down is a consequence — a few kilometres from the pad — not a target.'
-    : 'a ballistic shot: the gravity turn hands over to the loft attitude, and the engines cut when the free-flight arc through the vehicle’s own state reaches the range above. Apogee is a consequence.';
+    ? 'vertical all the way; cutoff on the apogee above. Where it lands is a consequence.'
+    : 'cutoff when the free-flight arc reaches the range above. Apogee is a consequence.';
 }
 function renderLegend() {
   const items = landing() ? [
@@ -2172,9 +1928,20 @@ function updateLanderNote() {
 }
 
 // ---------------------------------------------------------------- wire up --
+// The analysis page and the builder fly their own copy of whatever is
+// configured here, so every link out of this page carries the configuration.
+// Real hrefs rather than click handlers: middle-click and "open in new tab"
+// are how you end up with mission control and its plots side by side, which
+// is the point of them being separate pages at all.
+function syncLinks() {
+  const qs = '?' + params();
+  for (const [id, base] of [['nav_analysis', '/analysis'], ['analysislink', '/analysis'],
+                            ['nav_build', '/build'], ['nav_launch', '/launch']]) {
+    const el = $(id);
+    if (el) el.href = base + qs;
+  }
+}
 $('run').onclick = () => { fetchGeo(); doRun(); };
-$('sweepbtn').onclick = doSweep;
-$('sweep_metric').onchange = drawSweep;
 $('play').onclick = () => { geoFollow = true; togglePlay(); };
 $('scrub').oninput = e => {
   geoFollow = true;
@@ -2260,7 +2027,9 @@ window.addEventListener('keydown', e => {
   else if (k === 'z') { moonView = false; autoFit = true; fitCamera(); }
   else if (k === 'l') $('launchbtn').click();
   else if (k === 'b') $('buildbtn').click();
+  else if (k === 'a') window.open('/analysis?' + params(), '_blank');
   else if (k === 'm' && landing()) $('moonview').click();
+  else if (e.key === '?') $('helpdlg').showModal();
 });
 const scene = $('scene');
 let drag = null;
@@ -2306,8 +2075,10 @@ $('nboost').addEventListener('change', () => {
   if (nBoost() > 0) $('opt_kick').checked = true;
   buildStages(); fetchGeo();
 });
-$('solvebtn').onclick = doSolve;
-$('solve_param').addEventListener('change', e => e.target.dataset.touched = '1');
+// the keyboard reference, on demand rather than permanently parked in the
+// sidebar. showModal so Escape closes it and focus stays inside.
+$('helpbtn').onclick = () => $('helpdlg').showModal();
+$('helpclose').onclick = () => $('helpdlg').close();
 // the capsule's size follows this number, so the note follows the box
 $('pod_mass').addEventListener('input', podNote);
 $('pod_mass').addEventListener('change', () => { podNote(); fetchGeo(); });
@@ -2336,7 +2107,7 @@ for (const c of document.querySelectorAll('.card')) {
 // under this key on every change; this page applies it into the (hidden)
 // launcher form, so params(), the presets, and the geometry card all keep
 // reading the fields they always read — they just show the builder's truth.
-const VEHICLE_KEY = 'ssjl.vehicle';
+const VEHICLE_KEY = vehicle.KEY;
 function applyVehicleConfig(qs) {
   if (!qs) return false;
   const q = new URLSearchParams(qs);
@@ -2386,8 +2157,15 @@ fillCatalogues().then(() => {
       setField(k, v);
     }
     syncSizeBy();
+    // the URL just set the capsule's mass, so the note that describes the
+    // capsule has to be recomputed — applyVehicleConfig (the localStorage
+    // path) has always done both, and this branch did only the first. Arriving
+    // from the builder's own "mission control" link therefore read
+    // "payload 350 kg ... 1.21 m across" while flying a 45 t capsule.
+    podNote();
+    updateLanderNote();
   } else if (!landing()) {
-    try { applyVehicleConfig(localStorage.getItem(VEHICLE_KEY)); } catch (e) {}
+    applyVehicleConfig(vehicle.load());
   }
   fetchGeo();
   doRun();
@@ -2400,6 +2178,100 @@ window.addEventListener('storage', e => {
   applyVehicleConfig(e.newValue);
   fetchGeo();
 });
+
+// -------------------------------------------------------------- selftest --
+// Load with ?selftest=1. This page had none, which is how `fmt` — the one
+// function every metric tile on the dashboard goes through — carried both of
+// the formatting faults below unnoticed.
+window.__selftest = function () {
+  const out = suite(), eq = out.eq;
+
+  // A missing metric is an em-dash, never a number. `isFinite` alone is not
+  // this test — Number(null) is 0, so isFinite(null) is true — and the launch
+  // page's copy of this guard, which lacked the null check, died on it.
+  eq('fmt of null', () => fmt(null), '—');
+  eq('fmt of undefined', () => fmt(undefined), '—');
+  eq('fmt of NaN', () => fmt(NaN), '—');
+  eq('fmt of Infinity', () => fmt(Infinity), '—');
+  eq('fmt of a number', () => fmt(6.25, 2), '6.25');
+  eq('fmt of zero', () => fmt(0, 1), '0.0');
+  eq('fmt of a string number', () => fmt('6.5', 1), '6.5');
+
+  // Rounding must not invent a minus sign. A nav error of -4 cm is 0 m, and a
+  // landing site on the prime meridian is 0.0 deg — both printed "-0" before.
+  eq('fmt does not print negative zero', () => fmt(-0.04, 0), '0');
+  eq('nor at one decimal', () => fmt(-0.004, 1), '0.0');
+  eq('nor for an exact -0', () => fmt(-0, 1), '0.0');
+  eq('but keeps a real negative', () => fmt(-10.3, 1), '-10.3');
+  eq('and keeps a small real negative that still shows', () => fmt(-0.06, 1), '-0.1');
+
+  eq('fmtKm below the switch', () => fmtKm(1.5), '1500 km');
+  eq('fmtKm above it', () => fmtKm(384.4), '384k km');
+  eq('fmtKm of a missing distance', () => fmtKm(null), '—');
+
+  // This page and the builder both read the vehicle out of storage under the
+  // same key, using the same notion of which fields belong to the vehicle. A
+  // drift between two copies of that boundary is invisible until a mission
+  // field starts surviving a reload.
+  eq('the storage key is the shared one', () => vehicle.KEY, 'ssjl.vehicle');
+  eq('stage fields are the vehicle', () => vehicle.own('s1_prop'), true);
+  eq('the mode is not the vehicle', () => vehicle.own('mode'), false);
+
+  // A value and its unit, and the case that matters: a leg that never flew
+  // must not render as a blank measurement with units attached.
+  eq('a value carries its unit', () => V(58.5, 1, 't'),
+     '58.5<span class="u-unit">t</span>');
+  eq('a missing value carries no unit', () => V(null, 1, 'm/s'), '—');
+  eq('a missing value with no unit is still a dash', () => V(NaN, 0, ''), '—');
+
+  // The limit table is the only thing that colours a metric, so a threshold
+  // drifting silently would quietly stop flagging a real problem.
+  eq('a negative prop margin is a failure', () => limit('prop_margin_kg', -5), 'is-failed');
+  eq('a thin prop margin is marginal', () => limit('prop_margin_kg', 20), 'is-marginal');
+  eq('a healthy prop margin is unmarked', () => limit('prop_margin_kg', 400), '');
+  eq('an Apollo-like entry load is unmarked', () => limit('peak_g', 6.5), '');
+  eq('a crushing entry load is a failure', () => limit('peak_g', 13), 'is-failed');
+  eq('a hard touchdown is marginal', () => limit('touchdown_v', 3.4), 'is-marginal');
+  eq('a missing metric is never flagged', () => limit('peak_g', null), '');
+  eq('an unlisted metric is never flagged', () => limit('perilune_km', 1e9), '');
+
+  // The verdict states the outcome. These pin the mapping from an outcome the
+  // server can send to what the reader is told, because every one of these
+  // used to be the same undifferentiated red status line.
+  const verdictFor = j => { setVerdict(j); return $('verdict_state').textContent; };
+  const kindFor = j => { setVerdict(j); return $('verdict').className; };
+  eq('a converged run is nominal',
+     () => verdictFor({ outcome: 'nominal', metrics: { on_target: true, t_days: 6.6,
+                                                       splash_lat: -27.1, splash_lon: -137.6 } }),
+     'NOMINAL');
+  eq('a failed design says there is no trajectory',
+     () => verdictFor({ outcome: 'design_failed', metrics: {} }), 'NO TRAJECTORY');
+  eq('a failed ascent says so',
+     () => verdictFor({ outcome: 'ascent_failed', metrics: {} }), 'DID NOT REACH ORBIT');
+  eq('a skip-out says the capsule never came home',
+     () => verdictFor({ outcome: 'entry_timeout', metrics: {} }), 'DID NOT COME HOME');
+  eq('on target but off tolerance is still nominal',
+     () => verdictFor({ outcome: 'nominal',
+                        metrics: { on_target: true, design_status: 'outside_tolerance' } }),
+     'NOMINAL');
+  eq('and says the targeting drifted', () => {
+    setVerdict({ outcome: 'nominal',
+                 metrics: { on_target: true, design_status: 'outside_tolerance' } });
+    return /outside tolerance/.test($('verdict_why').textContent);
+  }, true);
+  eq('a grazing pass is marginal, not failed',
+     () => kindFor({ outcome: 'nominal',
+                     metrics: { on_target: true, grazing: true, perilune_km: 0.1 } }),
+     'verdict is-marginal');
+  eq('an off-target run is a failure',
+     () => kindFor({ outcome: 'nominal', metrics: { on_target: false } }),
+     'verdict is-failed');
+  // restore whatever the page was actually showing
+  if (run) setVerdict(run); else $('verdict').hidden = true;
+
+  return report(out);
+};
+if (requested()) setTimeout(window.__selftest, 0);
 </script>
 </body>
 </html>
