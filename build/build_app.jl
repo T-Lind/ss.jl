@@ -76,6 +76,30 @@ for f in readdir(joinpath(ROOT, "scripts"))
     end
 end
 
+# Every module a page imports has to have actually travelled.
+#
+# The pages import by URL — `/static/busy.js` — which no compiler, linter or
+# test resolves, so a new shared module that the copy above missed would ship
+# an application whose every page dies on an unresolved import. That is not a
+# hypothetical class of bug here: this project has already shipped a release
+# where the panel came up and did nothing.
+#
+# The check is trivial and it runs at build time, which is the last moment
+# anyone is looking.
+let missing_assets = String[]
+    for f in readdir(SHARE)
+        endswith(f, ".html") || continue
+        page = read(joinpath(SHARE, f), String)
+        for m in eachmatch(r"['\"]/static/([A-Za-z0-9_-]+\.(?:js|css))['\"]", page)
+            isfile(joinpath(SHARE, "static", m[1])) ||
+                push!(missing_assets, "$f imports /static/$(m[1])")
+        end
+    end
+    isempty(missing_assets) ||
+        error("the build is missing assets its own pages import:\n  " *
+              join(unique(missing_assets), "\n  "))
+end
+
 # --------------------------------------------------------------- the window --
 #
 # `host/` was compiled at the top of this script; all that is left is to put it
