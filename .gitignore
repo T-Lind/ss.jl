@@ -3,6 +3,14 @@
 *.jl.*.cov
 *.jl.mem
 Manifest.toml
+# ...except the build environment's, which pins the PackageCompiler that
+# produces a release binary. A release nobody can reproduce is a release with
+# no provenance.
+!build/Manifest.toml
+
+# the frozen Windows app: ~600 MB of Julia runtime, rebuilt by
+# `julia --project=build build/build_app.jl` and shipped as a release asset
+dist/
 
 # Python
 __pycache__/

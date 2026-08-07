@@ -1,12 +1,22 @@
 name = "SatelliteSim"
 uuid = "7a2c9e64-3f5d-4b21-9c4a-8e1d2f6b0a55"
 authors = ["Tiernan Lindauer"]
-version = "0.1.0"
+# Tracks the mission milestones the README names: v0.1 LEO reentry, v0.2 the
+# circumlunar free return, v0.3 the lunar landing. All three fly, so this said
+# 0.1.0 while shipping v0.3's mission.
+version = "0.3.0"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+# `julia_main` makes this package an application that serves HTTP, so Sockets
+# is a real dependency of it and not only of the tests. It lived under
+# [extras] until the frozen build was tried: `create_app` derives the shipped
+# environment from [deps], so the executable started, reached `using Sockets`
+# in panelapp.jl, and died with "Package Sockets not found in current path".
+# Still zero external packages — every entry here is a stdlib.
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
@@ -16,9 +26,9 @@ julia = "1.9"
 # `Pkg.test()` resolves the test environment from these, not from whatever the
 # REPL happens to have loaded: without them `using Test` in test/runtests.jl
 # fails with "Package Test not found in current path" on every Julia version.
+# Sockets is no longer listed here because [deps] already covers the test env.
 [extras]
-Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "Sockets"]
+test = ["Test"]

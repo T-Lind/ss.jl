@@ -1,0 +1,290 @@
+/* ss.jl console language.
+ *
+ * Every value here was already somewhere in the app — this names them, fixes
+ * the count, and gives each one a job. The source is launch_page.html, which
+ * is the only page that had a coherent look: dark ground, amber instrument
+ * type, monospace telemetry, chrome that yields to the 3D. Mission control
+ * and the builder were a generic dark dashboard that happened to share a
+ * background colour. This file is what makes them the same product.
+ *
+ * Load before the page's own <style> so a page can still override a token for
+ * something genuinely local.
+ */
+
+:root {
+  /* --- ground ------------------------------------------------------------
+   * Four steps, not five: page, panel, raised control, and the line between
+   * them. A fifth step reads as noise at this contrast. The blue bias is
+   * deliberate — a neutral grey ground under an amber accent goes muddy. */
+  --ground:   #0A0D12;
+  --surface:  #131922;
+  --raise:    #1B2330;
+  --line:     #232C3A;
+  --line-hi:  #33405420;
+
+  /* --- ink --------------------------------------------------------------- */
+  --text:     #E4E9F0;
+  --text-2:   #8B97A8;   /* labels, units, secondary values */
+  --text-3:   #5A6675;   /* captions, disabled, axis ticks */
+
+  /* --- reserved meaning --------------------------------------------------
+   * amber is LIVE MISSION STATE and nothing else: the clock, the active
+   * phase, the armed control. It was previously competing with blue for
+   * "selected", which is why neither read as meaningful.
+   *
+   * nominal/marginal/failed are status ONLY. Never a chart series, never a
+   * selected chip. The whole value of a status colour is that seeing it
+   * means one thing. */
+  --amber:    #F0A500;
+  --amber-dim:#2A2109;
+  --nominal:  #3FB950;
+  --nominal-d:#10281A;
+  --marginal: #D29922;
+  --marginal-d:#2A2109;
+  --failed:   #F85149;
+  --failed-d: #2A1518;
+
+  /* --- data --------------------------------------------------------------
+   * Plotted series and trajectory legs. Explicitly NOT a status colour, so a
+   * blue line never has to be read as "good". */
+  --data:     #4A9EFF;
+  --data-2:   #37C7A8;
+  --data-3:   #C77DFF;
+
+  /* --- type --------------------------------------------------------------
+   * Monospace is the PRIMARY voice. Mission consoles are monospace because
+   * columns of figures must align and digits must not shimmer as they
+   * change; the sans carries prose only. This is the inverse of the usual
+   * arrangement and it is the right way round for this subject.
+   *
+   * Consolas and Cascadia Mono ship with Windows, so the stack lands on a
+   * real face rather than a silent substitution. */
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+
+  /* 11 / 13 / 15 / 22 / 34 — five sizes, no others. The pages were using at
+   * least nine, which is what makes ad-hoc density look like an accident
+   * rather than a choice. */
+  --t-label:  11px;
+  --t-data:   13px;
+  --t-body:   15px;
+  --t-metric: 22px;
+  --t-display:34px;
+
+  /* --- space -------------------------------------------------------------
+   * One 4px grid. Panel padding 16, group gap 24, section gap 32. */
+  --s1: 4px;  --s2: 8px;  --s3: 12px;
+  --s4: 16px; --s5: 24px; --s6: 32px;
+
+  --radius: 4px;
+  --radius-sm: 3px;
+}
+
+/* --------------------------------------------------------------- primitives */
+
+.u-label {
+  font-family: var(--mono);
+  font-size: var(--t-label);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* Every measured quantity. tabular-nums is not cosmetic here: without it a
+ * value ticking from 9 to 10 shifts every column beside it. */
+.u-num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The unit rides with the number but must not compete with it — the figure is
+ * what changes, the unit never does.
+ *
+ * 0.78em, not smaller: at 0.62 of a 13px row this rendered around 8px and
+ * read as a subscript rather than as a unit, which is worse than not
+ * demoting it at all. The separation comes from weight and colour; the size
+ * step only has to be perceptible. */
+.u-unit {
+  color: var(--text-2);
+  font-weight: 400;
+  font-size: 0.78em;
+  margin-left: 2px;
+}
+
+/* ------------------------------------------------------------------ verdict
+ *
+ * The component this app most needed and did not have. A run's outcome was a
+ * sentence of body text below the fold, under the button that started it —
+ * so the single most important output of the simulator was the least visible
+ * thing on the page.
+ *
+ * The status colour is carried on the left edge and as a wash that fades out,
+ * rather than as a filled block: a full-width saturated bar for a NOMINAL
+ * result (the common case) shouts at you every single run, and a warning
+ * colour that fires constantly stops being a warning. */
+.verdict {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--text-3);
+  background: var(--surface);
+  margin-bottom: var(--s4);
+}
+.verdict .verdict-state {
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.verdict .verdict-why {
+  font-family: var(--sans);
+  font-size: var(--t-data);
+  color: var(--text-2);
+  line-height: 1.45;
+}
+.verdict.is-nominal  { border-left-color: var(--nominal);
+  background: linear-gradient(90deg, var(--nominal-d), var(--surface) 60%); }
+.verdict.is-nominal  .verdict-state { color: var(--nominal); }
+.verdict.is-marginal { border-left-color: var(--marginal);
+  background: linear-gradient(90deg, var(--marginal-d), var(--surface) 60%); }
+.verdict.is-marginal .verdict-state { color: var(--marginal); }
+.verdict.is-failed   { border-left-color: var(--failed);
+  background: linear-gradient(90deg, var(--failed-d), var(--surface) 60%); }
+.verdict.is-failed   .verdict-state { color: var(--failed); }
+.verdict.is-running  { border-left-color: var(--amber);
+  background: linear-gradient(90deg, var(--amber-dim), var(--surface) 60%); }
+.verdict.is-running  .verdict-state { color: var(--amber); }
+
+/* ------------------------------------------------- metrics, in flight order
+ *
+ * Eleven equal-weight tiles wrapping arbitrarily told the reader nothing
+ * about which numbers belonged together. Grouped by mission phase, in the
+ * order the mission actually flies, the layout does the sorting the reader
+ * was doing. */
+.mgroups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--s5);
+}
+.mgroup-h {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding-bottom: var(--s2);
+  margin-bottom: var(--s2);
+  border-bottom: 1px solid var(--line);
+}
+.mrow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s3);
+  padding: 3px 0;
+}
+.mrow-k {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.mrow-v {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t-data);
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* A value near its limit. The ONLY thing coloured inside a metric group, so
+ * that colour there always means "look at this one". */
+.mrow.is-marginal .mrow-v { color: var(--marginal); }
+.mrow.is-failed   .mrow-v { color: var(--failed); }
+
+/* ------------------------------------------------------------------- panels */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s4);
+}
+.panel-h {
+  font-family: var(--mono);
+  font-size: var(--t-label);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: var(--s3);
+}
+
+/* -------------------------------------------------------------------- chips */
+.chip {
+  font-family: var(--sans);
+  font-size: 12px;
+  background: var(--raise);
+  border: 1px solid var(--line);
+  color: var(--text-2);
+  border-radius: 20px;
+  padding: 4px 11px;
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--text-3); color: var(--text); }
+.chip.is-on {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #12151A;
+  font-weight: 600;
+}
+.chip:focus-visible,
+.navlink:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+/* ---------------------------------------------------------------------- nav
+ *
+ * The three pages open in separate tabs on purpose — you want mission control
+ * and the launch view side by side — but "separate windows" was reading as
+ * "scattered", because nothing on any page said what the other two were or
+ * which one you were on. One bar, same place, same order, every page. */
+.appnav {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: var(--s2) var(--s4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.appnav-brand {
+  font-family: var(--mono);
+  font-size: var(--t-data);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  white-space: nowrap;
+}
+.appnav-brand .dot { color: var(--amber); }
+.appnav-links { display: flex; gap: var(--s1); margin-left: var(--s2); }
+.navlink {
+  font-family: var(--sans);
+  font-size: 12.5px;
+  color: var(--text-2);
+  text-decoration: none;
+  padding: 5px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.navlink:hover { background: var(--raise); color: var(--text); }
+/* The page you are on is stated, not merely implied by which link is missing */
+.navlink[aria-current="page"] {
+  background: var(--raise);
+  border-color: var(--line);
+  color: var(--text);
+  font-weight: 600;
+}
+.appnav-end { margin-left: auto; display: flex; align-items: center; gap: var(--s3); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

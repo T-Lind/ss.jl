@@ -31,9 +31,12 @@ eph = coplanar_moon(asc.r, asc.v;
                     phase0 = lead + (n_sc - N_MOON) * 0.55 * Tpark - N_MOON * asc.t)
 kick = lv.stages[end]
 m_stack = asc.m - (lv.stages[2].mdry + asc.prop_left[2])
-t_ign, dv, nom = design_free_return(asc.r, asc.v, asc.t, eph;
-                                    stage = kick, m_stack = m_stack,
-                                    prop_avail = asc.prop_left[end])
+t_ign, dv, nom, dstatus = design_free_return(asc.r, asc.v, asc.t, eph;
+                                             stage = kick, m_stack = m_stack,
+                                             prop_avail = asc.prop_left[end])
+dstatus in (:converged, :outside_tolerance) ||
+    error("free-return targeting did not converge (status: $dstatus) — " *
+          "dispersing about a design that missed its target says nothing")
 nomfly = fly_cislunar(asc.r, asc.v, asc.t, eph; t_ign = t_ign, dv = dv,
                       stage = kick, m_stack = m_stack,
                       prop_avail = asc.prop_left[end],

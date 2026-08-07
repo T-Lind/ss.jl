@@ -25,8 +25,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sable — mission</title>
+<link rel="stylesheet" href="/static/tokens.css">
 <style>
-  :root { --ink: #e8e6df; --dim: #9a978e; --acc: #f2c14e; --go: #9fe0b8; }
+  /* This page is where the console language came from, so its own names now
+     point at the shared tokens rather than carrying a second set of values.
+     The accent was #f2c14e here and #F0A500 on the other pages — two ambers
+     nobody chose, which is the drift the token file exists to stop. One
+     definition, in /static/tokens.css; change it there and every page moves. */
+  :root { --ink: var(--text); --dim: var(--text-2);
+          --acc: var(--amber); --go: var(--nominal); }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; background: #000; overflow: hidden;
                font-family: system-ui, sans-serif; }
@@ -118,7 +125,12 @@
 <div class="hud" id="clock">T–00:15<div id="phase">ASCENT</div></div>
 <div class="hud" id="stats"></div>
 <div class="hud" id="toast"></div>
-<div class="hud" id="backlink"><a href="/">&#8617; mission control</a></div>
+<!-- No nav bar here on purpose: this view is full-bleed and the chrome yields
+     to it. It still needs to reach both other pages, though — a view you can
+     only leave one way is what made three tabs feel scattered. -->
+<div class="hud" id="backlink"><a href="/">&#8617; mission control</a>
+  <a href="/build" style="margin-left:10px">vehicle builder</a>
+  <a href="/analysis" id="analysislink" style="margin-left:10px">analysis</a></div>
 <div id="keys" class="show">
   <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>h</b> for all controls</div>
 </div>
@@ -156,8 +168,12 @@
   <div id="err" class="hidden"></div>
 </div>
 
-<script>
+<script type="module">
 'use strict';
+import { fin } from '/static/fmt.js';
+import * as api from '/static/api.js';
+import { suite, report, requested } from '/static/selftest.js';
+
 const $ = id => document.getElementById(id);
 const RE = 6371000.0, RM = 1737400.0, OME = 7.2921159e-5;
 
@@ -231,9 +247,40 @@ function mApply(m, v) {
 }
 
 // --------------------------------------------------------------- gl setup --
+// On a laptop with switchable graphics, which adapter answers a context
+// request matters here: this page is fragment-bound and spends its frame in
+// two noise shaders. `?gpu=high` / `?gpu=low` set powerPreference.
+//
+// MEASURED, so that nobody re-derives it: on Chrome/Windows this changes
+// NOTHING. Requesting 'high-performance' on a machine with an Intel iGPU and
+// an NVIDIA T550 returned the byte-identical Intel renderer string, because
+// Chrome binds its GPU process to one adapter chosen at BROWSER LAUNCH and
+// powerPreference cannot move a context off it. The adapter is picked by the
+// Windows per-app graphics preference, the vendor control panel, or a command
+// line flag — none of which a page can reach. A desktop shell that launches
+// its own browser process can; a web page cannot.
+//
+// The knob stays because it is spec-correct and is honoured on other
+// platforms, but it is a hint, never an assumption — GPU_INFO below reports
+// the adapter that actually answered, and that is the thing to read.
 const cv = $('gl');
-const gl = cv.getContext('webgl', { alpha: false, antialias: true });
+const GPU_PREF = new URLSearchParams(location.search).get('gpu');
+const glAttrs = { alpha: false, antialias: true };
+if (GPU_PREF === 'high') glAttrs.powerPreference = 'high-performance';
+else if (GPU_PREF === 'low') glAttrs.powerPreference = 'low-power';
+const gl = cv.getContext('webgl', glAttrs);
 if (!gl) { $('ov_sub').textContent = 'WebGL is not available in this browser.'; throw 0; }
+
+// Which adapter actually answered, as data. WEBGL_debug_renderer_info is
+// absent in some privacy configurations, so its absence is not a failure.
+const GPU_INFO = (() => {
+  const d = gl.getExtension('WEBGL_debug_renderer_info');
+  return {
+    requested: GPU_PREF || 'default',
+    vendor: d ? gl.getParameter(d.UNMASKED_VENDOR_WEBGL) : 'unknown',
+    renderer: d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : 'unknown',
+  };
+})();
 
 function shader(type, src) {
   const s = gl.createShader(type);
@@ -1323,6 +1370,10 @@ function lathe(out, prof, nseg, colFn) {
 
 // --------------------------------------------------------------- the app --
 const qs = location.search.slice(1);
+// The analysis link carries the mission this view is flying — that page flies
+// its own run from a query string, so without this it would analyse the
+// default vehicle while you watch a different one lift off.
+if (qs) document.getElementById('analysislink').href = '/analysis?' + qs;
 let run = null, geo = null;
 // What is painted on the hull and announced over it. Geometry supplies the
 // configured vehicle's name; old servers and empty builder names fall back to
@@ -7038,6 +7089,14 @@ function nextEv(t) {
     if (isFinite(e.t) && e.t > t && (!best || e.t < best.t)) best = e;
   return best;
 }
+// `fin` — "is this server metric a real number?" — is imported from
+// /static/fmt.js, which carries the full account of why isFinite alone is not
+// that test. Short version: it coerces, Number(null) is 0, and the server
+// writes a non-finite Float64 as JSON null, so a mission that never splashed
+// down sends "t_days": null. Guarding that with isFinite let the null through
+// to .toFixed(1), which threw out of boot() and replaced the entire launch
+// view with "could not load the mission".
+
 // A countdown in the units a countdown is read in. Seconds up to a minute,
 // then minutes and seconds, then hours — because "T-9134 s" is a number you
 // have to do arithmetic on before it means anything.
@@ -7494,13 +7553,13 @@ function showEndCard() {
   // the card reports whatever this trajectory actually produced
   const rows = [];
   const row = (k, ok, v) => { if (ok) rows.push(`<tr><td>${k}</td><td>${v}</td></tr>`); };
-  row('mission elapsed', isFinite(m.t_days), `${(m.t_days || 0).toFixed(2)} days`);
-  row('perilune', isFinite(m.perilune_km),
+  row('mission elapsed', fin(m.t_days), `${(m.t_days || 0).toFixed(2)} days`);
+  row('perilune', fin(m.perilune_km),
       `${(m.perilune_km || 0).toFixed(0)} km (day ${(m.t_perilune_d || 0).toFixed(1)})`);
-  row('entry interface', isFinite(m.ei_v_ms), `${((m.ei_v_ms || 0)/1000).toFixed(2)} km/s`);
-  row('peak load · heating', isFinite(m.peak_g),
+  row('entry interface', fin(m.ei_v_ms), `${((m.ei_v_ms || 0)/1000).toFixed(2)} km/s`);
+  row('peak load · heating', fin(m.peak_g),
       `${(m.peak_g || 0).toFixed(1)} g · ${(m.peak_q_wcm2 || 0).toFixed(0)} W/cm²`);
-  row('splashdown', isFinite(m.splash_lat),
+  row('splashdown', fin(m.splash_lat),
       `${(m.splash_lat || 0).toFixed(1)}°, ${(m.splash_lon || 0).toFixed(1)}° ` +
       `at ${(m.v_splash || 0).toFixed(1)} m/s`);
   $('ov_title').textContent = isFinite(tSplash) ? 'SPLASHDOWN' : 'END OF MISSION';
@@ -7534,18 +7593,7 @@ function showEndCard() {
 // Three of the four original symptoms lived in them, and wideCam's distance
 // clamp is the trickiest arithmetic on this branch.
 window.__selftest = function () {
-  const out = { pass: 0, fail: 0, failures: [] };
-  // fn is a thunk so a missing or throwing function is a readable failure
-  // rather than a crash that hides every assertion after it.
-  const eq = (name, fn, want, tol) => {
-    let got;
-    try { got = fn(); }
-    catch (e) { out.fail++; out.failures.push(`${name}: threw ${e.message}`); return; }
-    // exact equality first, so non-numeric answers (a class name) can be
-    // asserted with the same helper; the tolerance path is numbers only
-    if (got === want || Math.abs(got - want) <= (tol === undefined ? 1e-9 : tol)) out.pass++;
-    else { out.fail++; out.failures.push(`${name}: got ${got}, want ${want}`); }
-  };
+  const out = suite(), eq = out.eq;
   const EC = [0, -RE, 0];
   // A camera position with a known true altitude and known horizontal range
   // from the frame origin. Solving rng^2 + (y+RE)^2 = (RE+alt)^2 for y is what
@@ -8760,14 +8808,23 @@ window.__selftest = function () {
   eq('and low', () => bgMemParse('{"air":0.01}').air, 0.35);
   eq('and ignores a non-number', () => bgMemParse('{"space":"x"}').space, 0.7);
 
-  window.__selftestResult = out;
-  console.log(`__selftest: ${out.pass} passed, ${out.fail} failed`,
-              out.failures.length ? out.failures : '');
-  if (out.failures.length)
-    console.log('__selftestFailures ' + JSON.stringify(out.failures));
-  return out;
+  // A metric that came back null must not read as a number. This is the whole
+  // bug: isFinite(null) is true, so the null reached .toFixed() and threw out
+  // of boot(), and the page that a failed mission most needs to show was the
+  // page that would not load at all.
+  eq('fin rejects null', () => fin(null), false);
+  eq('fin rejects undefined', () => fin(undefined), false);
+  eq('fin rejects NaN', () => fin(NaN), false);
+  eq('fin rejects Infinity', () => fin(Infinity), false);
+  eq('fin accepts a number', () => fin(6.57), true);
+  eq('fin accepts zero', () => fin(0), true);
+  // the guard isFinite got wrong, stated as the caller uses it
+  eq('a null t_days is not a mission duration',
+     () => (fin(null) ? null : 0).toFixed(1), '0.0');
+
+  return report(out);
 };
-const SELFTEST_REQUESTED = new URLSearchParams(location.search).get('selftest') === '1';
+const SELFTEST_REQUESTED = requested();
 
 // ---------------------------------------------------------- test harness --
 // rAF does not fire in a background tab, so anything that needs the sim to
@@ -8784,6 +8841,96 @@ window.__pumpFrames = function (n, dtMs) {
   let t = performance.now();
   for (let i = 0; i < (n || 1); i++) { t += step; frame(t); }
   return { frames: n || 1, simT: simT, parts: parts.length };
+};
+
+// The deliberate debug surface.
+//
+// Under a classic <script> every top-level binding here was also a property of
+// `window`, so the devtools console could set `simT` and call `frame()` to seek
+// the mission to an arbitrary instant — the only way to inspect a specific
+// moment, since requestAnimationFrame is throttled to nothing in a background
+// or automated tab. Module scope ends that by design, and losing it silently
+// would be a worse trade than the accidental globals it removes. So it is
+// stated instead of assumed: this is the supported handle, and anything not
+// listed is genuinely private.
+window.__debug = {
+  seek(t) { simT = Math.max(-15, Math.min(+t, tEnd - 0.5)); running = false; return simT; },
+  render(n, dtMs) { return window.__pumpFrames(n === undefined ? 1 : n, dtMs); },
+  get state() {
+    return { simT, running, started, ended, camMode, warpEff,
+             parts: parts.length, vehicle: VEHNAME };
+  },
+  get mission() { return run; },
+  get geometry() { return geo; },
+  get gpu() { return GPU_INFO; },
+  gl,
+
+  /** Time the real scene at a fixed drawing-buffer size.
+   *
+   *  Deliberately independent of requestAnimationFrame and of the canvas's
+   *  layout size: a background or automated tab is throttled to no frames and
+   *  laid out at 0x0, which measures nothing at all on a workload that is
+   *  entirely fragment shading. Sizing the buffer directly makes the GPU do
+   *  the real work either way.
+   *
+   *  gl.finish() after each frame is what makes the number a frame time
+   *  rather than a submission time — without it the CPU races ahead of the
+   *  driver queue and reports microseconds for work that took milliseconds.
+   *  Costly, and exactly what is wanted when the question is "how long does
+   *  this frame take".
+   *
+   *  Returns milliseconds per frame: median and p95, plus the adapter that
+   *  produced them, since the point of measuring is usually to compare two.
+   *
+   *  READ THE NUMBERS ONLY FROM A FOREGROUND WINDOW. In a hidden or automated
+   *  tab this reports figures that are not merely noisy but incoherent — 1440p
+   *  measuring cheaper than 720p, the pad cheaper than cruise — because the
+   *  browser deprioritises a background tab's GPU work and gl.finish() stops
+   *  meaning what it says. Sizing the buffer by hand makes the draw happen;
+   *  it does not make the clock trustworthy. Check document.visibilityState
+   *  before believing anything this returns. */
+  bench({ w = 1920, h = 1080, frames = 60, warmup = 10, t = 240 } = {}) {
+    const saveT = simT, saveRun = running, saveStarted = started;
+    const saveCss = cv.style.cssText;
+    // drawScene derives the drawing buffer from cv.clientWidth, so the CSS
+    // box is what has to be forced — setting cv.width alone is overwritten on
+    // the first draw. An explicit pixel size also survives a 0x0 viewport,
+    // which is what a background tab lays out at.
+    cv.style.width = w + 'px';
+    cv.style.height = h + 'px';
+    void cv.clientWidth;                       // force layout before measuring
+    // frame() returns immediately unless the mission has started; without
+    // this the loop times an early return and reports 0 ms for a scene that
+    // was never drawn.
+    started = true;
+    running = false;
+    simT = Math.max(-15, Math.min(+t, tEnd - 0.5));
+    const now = performance.now.bind(performance);
+    let clock = now();
+    for (let i = 0; i < warmup; i++) { clock += 16.7; frame(clock); }
+    gl.finish();
+    const ms = [];
+    for (let i = 0; i < frames; i++) {
+      clock += 16.7;
+      const t0 = now();
+      frame(clock);
+      gl.finish();
+      ms.push(now() - t0);
+    }
+    const drewAt = `${cv.width}x${cv.height}`;
+    cv.style.cssText = saveCss;
+    simT = saveT; running = saveRun; started = saveStarted;
+    ms.sort((a, b) => a - b);
+    const q = p => +ms[Math.min(ms.length - 1, Math.floor(p * ms.length))].toFixed(2);
+    return {
+      renderer: GPU_INFO.renderer, requested: GPU_INFO.requested,
+      // the size actually rendered, not the size asked for — a bench that
+      // silently drew 0x0 must not be reported as a frame time
+      size: drewAt, asked: `${w}x${h}`, frames,
+      medianMs: q(0.5), p95Ms: q(0.95), minMs: q(0), maxMs: +ms[ms.length - 1].toFixed(2),
+      fpsAtMedian: +(1000 / q(0.5)).toFixed(1),
+    };
+  },
 };
 
 // Where the Earth actually lands in each camera, as data rather than as a
@@ -8984,12 +9131,16 @@ window.__cameraAuditCheck = function () {
 // ------------------------------------------------------------------- boot --
 async function boot() {
   try {
-    const [r1, r2] = await Promise.all([
-      fetch('/api/run', { method: 'POST', body: qs }),
-      fetch('/api/geometry', { method: 'POST', body: qs })]);
-    run = await r1.json(); geo = await r2.json();
-    if (!run.ok) throw new Error(run.error || 'mission failed');
-    if (!geo.ok) throw new Error(geo.error || 'geometry failed');
+    // both in flight at once, but validated in order: transport-level `post`
+    // keeps the mission's error the one you see when both legs fail, which
+    // api.run/api.geometry could not promise — Promise.all rejects with
+    // whichever settled first, and "geometry failed" for an unflyable vehicle
+    // sends you to the builder to fix a stack that was never the problem
+    const [r, g] = await Promise.all([
+      api.post('/api/run', qs),
+      api.post('/api/geometry', qs)]);
+    run = api.expect(r, 'mission');
+    geo = api.expect(g, 'geometry');
     VEHNAME = vehName(geo.name);
     $('ov_title').textContent = VEHNAME;
     document.title = VEHNAME + ' — mission';
@@ -9033,13 +9184,30 @@ async function boot() {
     // simulated plus `outcome`, and the timeline built itself from only the
     // events that exist. Say plainly where this flight stops.
     const M = run.metrics || {};
-    const tD = isFinite(M.t_days) ? M.t_days : 0;
-    const mass = isFinite(M.liftoff_t) ? `${M.liftoff_t.toFixed(1)} t · ` : '';
+    const tD = fin(M.t_days) ? M.t_days : 0;
+    const mass = fin(M.liftoff_t) ? `${M.liftoff_t.toFixed(1)} t · ` : '';
     const oc = run.outcome;
+    // A flight can COMPLETE and still not be the flight that was asked for.
+    // When the free-return corrector fails to converge it hands back the last
+    // trajectory it tried, and that trajectory splashes down perfectly well
+    // having passed the Moon at a couple of hundred thousand kilometres — a
+    // nominal outcome, and "around the Moon and home" is simply untrue of it.
+    // Mission control already says OFF TARGET here; the metric it says it from
+    // is in this payload too, so say it here rather than claim the flyby.
+    const offTarget = oc === 'nominal' && M.on_target === false;
     $('ov_sub').textContent =
+      offTarget ?
+      `${mass}${LEN.toFixed(1)} m — flown, but OFF TARGET: the trajectory ` +
+      `missed the perilune it was aimed at` +
+      (fin(M.perilune_km) ? ` (${(M.perilune_km).toFixed(0)} km)` : '') :
       oc && oc !== 'nominal' ?
       `${mass}${LEN.toFixed(1)} m — this flight ends where the simulation ` +
       `ended: ${oc === 'ascent_failed' ? 'the ascent never reached orbit'
+              : oc === 'entry_timeout'
+              ? 'the capsule reached the atmosphere and skipped back out of it'
+              : oc === 'design_failed'
+              ? 'the free-return targeting never converged, so there is no ' +
+                'trajectory past the parking orbit to fly'
               : `the return leg ended in "${oc}"`}` :
       MS ?
       `${mass}${LEN.toFixed(1)} m — ` +
@@ -9062,6 +9230,10 @@ async function boot() {
     };
     return true;
   } catch (e) {
+    // The overlay gets the message; the console gets the stack. Without the
+    // stack a boot failure names a symptom ("reading 'toFixed' of null") and
+    // not the line that read it, which is the only thing worth knowing.
+    console.error('boot failed:', e);
     $('ov_sub').textContent = 'could not load the mission';
     $('err').textContent = String(e.message || e);
     $('err').classList.remove('hidden');

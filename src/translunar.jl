@@ -431,11 +431,27 @@ end
 """
     design_free_return(r0, v0, t0, eph; stage, m_stack, prop_avail,
                        hp_moon_target=2000e3, hp_return_target=35e3,
-                       max_iter=15, verbose=false) -> (t_ign, dv, result)
+                       max_iter=15, verbose=false) -> (t_ign, dv, result, status)
 
 Shooting design of the circumlunar free return. Scans TLI ignition time over
 one parking revolution around the patched-conic phase seed, then Newton-
 iterates (t_ign, dv) on (perilune altitude, return vacuum perigee altitude).
+
+`status` says whether the answer is one to fly:
+
+- `:converged` — inside `perigee_tol`, entering on the first perigee pass.
+- `:outside_tolerance` — the corrector ran out of passes but every design it
+  kept was valid; the tightest is returned. Routine: the reference vehicle
+  lands here at a couple of hundred metres against a 250 m band.
+- `:unreachable` — the requested perilune is below anything this transfer
+  reaches, or no ignition time in the scan window gets to it.
+- `:stalled` — the Newton never converged and NO valid design was found. What
+  comes back is the last iterate tried, and it is not the requested mission.
+
+The distinction is the point. A stalled design still returns a trajectory that
+propagates, reaches entry interface and splashes down — it simply passes the
+Moon a quarter of a million kilometres away. Reported as an ordinary result it
+is indistinguishable from a flown flyby, so callers have to be able to ask.
 """
 function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEphemeris;
                             stage::Stage, m_stack::Float64, prop_avail::Float64,
@@ -598,7 +614,7 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
             @warn("perilune target is below the closest approach this transfer reaches",
                   closest_m = round(alo, digits = 1), target_m = hp_moon_target)
             full = verify(lo, dvv)
-            return (lo, dvv, full)
+            return (lo, dvv, full, :unreachable)
         end
         # walk out to the far side of the target — later ignition crosses further
         # ahead of the Moon and passes higher
@@ -608,9 +624,11 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
             ahi = pa(hi)
             ahi > hp_moon_target && break
         end
+        reached = true
         if ahi <= hp_moon_target
             @warn("no ignition time in the scan window reaches this perilune",
                   reached_m = round(ahi, digits = 1), target_m = hp_moon_target)
+            reached = false
         else
             for _ in 1:22
                 mid = 0.5 * (lo + hi)
@@ -627,7 +645,11 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
         verbose && @info "free-return perilune-only" f_perilune_km = f1 outcome = full.outcome
         abs(f1) >= tol_perilune_km &&
             @warn "grazing perilune outside tolerance" f_perilune_km = f1
-        return (tig, dvv, full)
+        # a graze is scored on perilune alone — it has already given up the
+        # return corridor — so "on target" here means the bisection closed
+        return (tig, dvv, full,
+                !reached ? :unreachable :
+                abs(f1) < tol_perilune_km ? :converged : :outside_tolerance)
     end
 
     local full
@@ -652,7 +674,8 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
             if full.miss_passes == 0 && abs(err) < best[1]
                 best = (abs(err), tig, dvv, full)
             end
-            abs(err) < perigee_tol && full.miss_passes == 0 && return (tig, dvv, full)
+            abs(err) < perigee_tol && full.miss_passes == 0 &&
+                return (tig, dvv, full, :converged)
             proxy_target[] -= err
         else
             @warn "free-return design stalled" converged outcome = full.outcome
@@ -664,11 +687,16 @@ function design_free_return(r0::V3, v0::V3, t0::Float64, eph::CircularMoonEpheme
         # tightest one seen, not whichever the last pass landed on, and say
         # how far off target it actually is
         @warn "free-return perigee outside tolerance" achieved_m = round(best[1], digits=1) tol_m = perigee_tol
-        return (best[2], best[3], best[4])
+        return (best[2], best[3], best[4], :outside_tolerance)
     end
+    # Nothing valid was ever found. What follows is the last iterate, and it is
+    # not the mission that was asked for — it will still propagate, still reach
+    # entry interface and still splash down, having missed the Moon by whatever
+    # f_perilune_km says. Saying :stalled is the only way a caller can tell that
+    # apart from a flown flyby.
     f1, f2, res = resid(tig, dvv)
     @warn "free-return targeting did not fully converge" f_perilune_km = f1 f_perigee_km = f2 outcome = full.outcome
-    (tig, dvv, full)
+    (tig, dvv, full, :stalled)
 end
 
 # ---------------------------------------------------------------------------

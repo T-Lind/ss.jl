@@ -134,6 +134,24 @@ end
     @test 2.0 < eo.entry.peak_gload < 12.0        # ballistic LEO entry range
 end
 
+@testset "stage naming" begin
+    # the stem the ascent's sep_/ignition_ events are built from
+    @test PanelApp.stage_slug("Sable") == "sable"
+    @test PanelApp.stage_slug("Sable (panel)") == "sable"     # the default
+    @test PanelApp.stage_slug("Saturn V") == "saturn_v"
+    @test PanelApp.stage_slug("Falcon-class") == "falcon_class"
+    @test PanelApp.stage_slug("Starship") == "starship"
+    # a name with nothing usable in it still has to produce a legal symbol
+    @test PanelApp.stage_slug("") == "sable"
+    @test PanelApp.stage_slug("!!!") == "sable"
+    @test PanelApp.stage_slug("  ") == "sable"
+    # no leading/trailing underscore, which would render as a leading space
+    @test !startswith(PanelApp.stage_slug("(x) Ares"), "_")
+    @test !endswith(PanelApp.stage_slug("Ares I "), "_")
+    # long names are cut so the HUD abbreviator still has room
+    @test length(PanelApp.stage_slug("A Very Long Vehicle Name Indeed")) <= 14
+end
+
 @testset "panel http" begin
     # the module must reuse the already-loaded package rather than loading a
     # second copy off LOAD_PATH — a duplicate would give us two incompatible
@@ -239,6 +257,31 @@ end
         st, hdrs, bod = http("GET", "/build?nstages=3&diameter=1.8"; port = port)
         @test st == 200
 
+        # --- the analysis page ----------------------------------------------
+        # The plots, the event log, the sweep and the solver moved off mission
+        # control. Like /launch it takes the whole mission as a query string
+        # and flies its own run, so the route has to accept one.
+        st, hdrs, bod = http("GET", "/analysis"; port = port)
+        @test st == 200
+        @test hdrs["content-type"] == "text/html; charset=utf-8"
+        @test occursin("<html", lowercase(bod))
+        @test occursin("/static/charts.js", bod)
+        @test occursin("/static/metrics.js", bod)
+        st, hdrs, bod = http("GET", "/analysis?mode=landing&nstages=3"; port = port)
+        @test st == 200
+        # a near-miss must not be served the page — /analysisx is not a route
+        st, hdrs, bod = http("GET", "/analysisx"; port = port)
+        @test st == 404
+
+        # Mission control links out to it and no longer draws any chart of its
+        # own. If a chart canvas reappears there, this split has been undone by
+        # accident rather than on purpose.
+        st, hdrs, bod = http("GET", "/"; port = port)
+        @test st == 200
+        @test occursin("/analysis", bod)
+        @test !occursin("id=\"c_asc_h\"", bod)
+        @test !occursin("id=\"sweepchart\"", bod)
+
         # A named engine owns its mixture: naming both an engine and a
         # DIFFERENT propellant is an error the user must see, not a silent
         # override (the form used to display a mixture the server was not
@@ -337,6 +380,70 @@ end
         @test occursin("\"ok\":false", bod)
         @test hdrs["content-type"] == "application/json"
 
+        # --- shared ES modules ----------------------------------------------
+        # The three pages import their formatting, API and vehicle-storage
+        # helpers from here instead of each keeping a copy. A module served
+        # with the wrong media type is refused by the browser outright, and
+        # the console blames CORS, so the content type is asserted.
+        for name in ("fmt.js", "api.js", "vehicle.js", "selftest.js",
+                     "charts.js", "metrics.js")
+            st, hdrs, bod = http("GET", "/static/$name"; port = port)
+            @test st == 200
+            @test hdrs["content-type"] == "text/javascript; charset=utf-8"
+            @test occursin("export", bod)
+        end
+
+        # `limit` is the only thing that colours a metric anywhere in the app,
+        # and `drawLine` the only thing that draws a chart. Both were private
+        # to mission control until the analysis page needed them; a second copy
+        # of either is the `fmt` mistake again.
+        st, hdrs, bod = http("GET", "/static/metrics.js"; port = port)
+        @test occursin("export function limit", bod)
+        @test occursin("prop_margin_kg", bod)
+        st, hdrs, bod = http("GET", "/static/charts.js"; port = port)
+        @test occursin("export function drawLine", bod)
+
+        # The console language. A stylesheet served as the wrong media type is
+        # dropped as silently as a module is, and the page still renders —
+        # just unstyled — so the type is worth asserting.
+        st, hdrs, bod = http("GET", "/static/tokens.css"; port = port)
+        @test st == 200
+        @test hdrs["content-type"] == "text/css; charset=utf-8"
+        # the reserved-meaning colours and the verdict component are what the
+        # other pages import this file for
+        @test occursin("--amber", bod)
+        @test occursin("--nominal", bod)
+        @test occursin("--failed", bod)
+        @test occursin(".verdict", bod)
+        @test occursin(".mgroups", bod)
+        @test occursin(".appnav", bod)
+
+        # `fin` is the guard three pages got wrong independently; if this
+        # module ever stops exporting it, every one of them breaks at once,
+        # which is the trade this extraction makes.
+        st, hdrs, bod = http("GET", "/static/fmt.js"; port = port)
+        @test occursin("export const fin", bod)
+        st, hdrs, bod = http("GET", "/static/vehicle.js"; port = port)
+        @test occursin("ssjl.vehicle", bod)
+
+        # A query string is how a cache-buster would arrive; it must not
+        # defeat the name match.
+        st, hdrs, bod = http("GET", "/static/fmt.js?v=2"; port = port)
+        @test st == 200
+
+        # The name is whitelisted rather than sanitised, so every one of these
+        # fails on the same rule — no separator can be expressed at all. This
+        # process reads the user's own filesystem; loopback-only is not a
+        # reason to hand out arbitrary files.
+        for bad in ("../panelapp.jl", "..%2Fpanelapp.jl", "..\\panelapp.jl",
+                    "sub/dir.js", "fmt.js.bak", "nope.js", "C:/Windows/win.ini",
+                    "../Project.toml", "tokens.css.bak", "tokens.scss")
+            st, hdrs, bod = http("GET", "/static/$bad"; port = port)
+            @test st == 404
+            @test occursin("\"ok\":false", bod)
+            @test !occursin("PanelApp", bod)     # never the file's contents
+        end
+
         # --- health ---------------------------------------------------------
         st, hdrs, bod = http("GET", "/api/health"; port = port)
         @test st == 200
@@ -433,6 +540,79 @@ end
         @test occursin("\"on_target\":true", bod)
         @test abs(num(bod, "range_km") - 500.0) < 25.0
         @test num(bod, "apogee_km") > 40.0              # a shot is still lofted
+
+        # --- a heavy capsule has to come home too -----------------------------
+        # The entry pod used to be built with the mass alone, so every capsule
+        # re-entered behind a fixed 1.5 m heat shield no matter how heavy it
+        # was. A 45 t Apollo stack therefore could not decelerate: it skipped
+        # back out, the integrator ran its full t_max, and the splash fields
+        # stayed NaN — served as null under an "outcome":"nominal" that the
+        # launch page then died reading.
+        #
+        # Both halves are asserted here: the flight arrives, and the outcome
+        # and the metrics agree that it arrived.
+        satv = "vname=Saturn+V&nstages=3&diameter=10.1&pod_mass=45000&kick_deg=1" *
+               "&opt_kick=1&fairing_on=0&s1_engine=f1&s1_engines=5&s1_prop=2077000" *
+               "&s1_dry=130000&s1_diameter=10.1&s2_engine=j2&s2_engines=5" *
+               "&s2_prop=451000&s2_dry=36000&s2_diameter=10.1&s3_engine=j2" *
+               "&s3_engines=1&s3_prop=106600&s3_dry=13500&s3_diameter=6.6&mode=flyby"
+        st, hdrs, bod = http("POST", "/api/run"; port = port, timeout = 300.0,
+                             body = satv)
+        @test st == 200
+        @test occursin("\"ok\":true", bod)
+        # stages are named after the vehicle, not after the reference one:
+        # the launch view spells `sep_saturn_v1` "SATURN V1 SEPARATION", and it
+        # used to announce a Saturn V staging as "SABLE1 SEPARATION"
+        @test occursin("sep_saturn_v1", bod)
+        @test !occursin("sable", bod)
+        @test occursin("\"entry_interface\"", bod)
+        @test occursin("\"splashdown\"", bod)
+        @test occursin("\"outcome\":\"nominal\"", bod)
+        # nominal and a null splashdown metric must never co-occur again
+        @test !occursin("\"t_days\":null", bod)
+        @test !occursin("\"splash_lat\":null", bod)
+        @test !occursin("\"v_splash\":null", bod)
+        # and it is a real lunar-return entry, not a graze: Apollo peaked near
+        # 6 g, and the skipping-out failure showed up as a peak under 1
+        @test 4.0 < num(bod, "peak_g") < 9.0
+        @test num(bod, "perilune_km") > 1000.0
+
+        # the same invariant from the other side, on the reference vehicle
+        st, hdrs, bod = http("POST", "/api/run"; port = port, timeout = 300.0,
+                             body = "mode=flyby&pod_mass=350")
+        @test occursin("\"outcome\":\"nominal\"", bod)
+        @test occursin("\"splashdown\"", bod)
+        @test !occursin("\"t_days\":null", bod)
+        @test isfinite(num(bod, "t_days")) && num(bod, "t_days") > 1.0
+        @test 4.0 < num(bod, "peak_g") < 9.0
+
+        # --- a design that never converged is not a flyby ---------------------
+        # The corrector emits "free-return design stalled" and "did not fully
+        # converge" with a perilune residual of ~249,000 km, then returns the
+        # last iterate anyway. That trajectory propagates, reaches entry
+        # interface and splashes down — so it used to be served as
+        # "outcome":"nominal" with a perilune a quarter of a million km from
+        # the Moon, and the launch view narrated it as a flyby.
+        st, hdrs, bod = http("POST", "/api/run"; port = port, timeout = 300.0,
+                             body = "mode=flyby&nstages=3&nboost=4&pod_mass=900" *
+                                    "&s3_prop=1900&s3_dry=250")
+        @test st == 200
+        @test occursin("\"ok\":true", bod)             # still a result, not an error
+        @test occursin("\"outcome\":\"design_failed\"", bod)
+        @test !occursin("\"outcome\":\"nominal\"", bod)
+        @test occursin("\"design_status\":\"stalled\"", bod)
+        @test !occursin("\"splashdown\"", bod)         # nothing past the parking orbit
+        @test occursin("\"asc3d\"", bod)               # the ascent that DID fly is served
+
+        # and the converged reference says so, on the same field
+        st, hdrs, bod = http("POST", "/api/run"; port = port, timeout = 300.0,
+                             body = "mode=flyby&pod_mass=350")
+        @test occursin("\"outcome\":\"nominal\"", bod)
+        @test !occursin("\"design_status\":\"stalled\"", bod)
+        # :outside_tolerance is ROUTINE — the reference lands a couple of
+        # hundred metres off a 250 m band — and must never be treated as failure
+        @test occursin("\"design_status\":\"converged\"", bod) ||
+              occursin("\"design_status\":\"outside_tolerance\"", bod)
 
         # --- the last-resort 500 --------------------------------------------
         # `route`'s own catch is the first of the two "answer it whatever

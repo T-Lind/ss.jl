@@ -46,7 +46,14 @@ struct MoonshotResult
     entry_scn::Union{Nothing,Scenario}
     entry::Union{Nothing,SimResult}
     cruise::Union{Nothing,CruiseReport}
+    # What the free-return corrector made of the problem: :converged,
+    # :outside_tolerance, :unreachable or :stalled (see design_free_return).
+    # A stalled design flies and lands like any other, so this is the only
+    # thing that distinguishes the mission from a flyby that never happened.
+    design_status::Symbol
 end
+MoonshotResult(lv, guid, asc, eph, cis, scn, entry, cruise) =
+    MoonshotResult(lv, guid, asc, eph, cis, scn, entry, cruise, :converged)
 
 """
     translunar_design(lv; h_park, hp_moon, hp_return, inclination,
@@ -89,7 +96,8 @@ function translunar_design(lv::LaunchVehicle;
     guid, asc = tune_ascent(lv, guid0; optimize_kick = optimize_kick,
                             theta_g0 = theta_g0, verbose = verbose)
     partial = (guid = guid, ascent = asc, eph = nothing, t_ign = NaN,
-               dv = NaN, cis = nothing, m_stack = NaN, kick = lv.stages[end])
+               dv = NaN, cis = nothing, m_stack = NaN, kick = lv.stages[end],
+               design_status = :no_design)
     if !asc.reached_orbit
         strict && error("ascent failed to reach orbit (h_cut=$(asc.h_cut/1e3) km, gamma=$(rad2deg_(asc.gamma_cut))°)")
         return partial
@@ -129,7 +137,7 @@ function translunar_design(lv::LaunchVehicle;
                         phase0 = phase_at_insertion - N_MOON * asc.t)
 
     kick = lv.stages[end]
-    t_ign, dv, cis = design_free_return(asc.r, asc.v, asc.t, eph;
+    t_ign, dv, cis, dstatus = design_free_return(asc.r, asc.v, asc.t, eph;
                                         eta = cis_eta, perigee_tol = perigee_tol,
                                         theta_g0 = theta_g0,
                                         stage = kick, m_stack = m_stack,
@@ -139,7 +147,7 @@ function translunar_design(lv::LaunchVehicle;
                                         tol_perigee_km = tol_perigee_km,
                                         verbose = verbose)
     (guid = guid, ascent = asc, eph = eph, t_ign = t_ign, dv = dv,
-     cis = cis, m_stack = m_stack, kick = kick)
+     cis = cis, m_stack = m_stack, kick = kick, design_status = dstatus)
 end
 
 """
@@ -183,6 +191,20 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   # instead of discarding a fully-materialized trajectory
                   # for the sake of an error string
                   strict::Bool = true,
+                  # How wide the capsule that re-enters actually is [m]. NaN
+                  # takes the same mass fit the mesh draws and the panel
+                  # quotes, so the flown capsule is the drawn capsule.
+                  #
+                  # This used to be a fixed 1.5 m for every payload, because
+                  # `default_reentry_pod` was called with the mass alone. A
+                  # 45 t capsule therefore re-entered behind a 1.77 m^2 heat
+                  # shield: nothing that heavy can decelerate through that
+                  # little area, so it skipped back out of the atmosphere and
+                  # the entry integrator ran to t_max having never landed.
+                  # That is the whole of the "heavy vehicles never come home"
+                  # failure, and it was invisible because the number was right
+                  # in the geometry and wrong only in the physics.
+                  pod_diameter::Float64 = NaN,
                   verbose::Bool = false)
     # --- 1-3. launch, ephemeris, free-return design ------------------------
     # a supplied launch vehicle wins; its payload IS the pod
@@ -195,14 +217,23 @@ function moonshot(; pod_mass::Float64 = 350.0,
                             theta_g0 = theta_g0, strict = strict,
                             verbose = verbose)
     guid, asc, eph = des.guid, des.ascent, des.eph
+    dstatus = des.design_status
     des.cis === nothing &&
         return MoonshotResult(lv, guid, asc, nothing, nothing, nothing,
-                              nothing, nothing)
+                              nothing, nothing, dstatus)
     t_ign, dv, cis = des.t_ign, des.dv, des.cis
     m_stack, kick = des.m_stack, des.kick
     if cis.outcome != :entry_interface
         strict && error("free-return design did not come home (outcome: $(cis.outcome))")
-        return MoonshotResult(lv, guid, asc, eph, cis, nothing, nothing, nothing)
+        return MoonshotResult(lv, guid, asc, eph, cis, nothing, nothing, nothing, dstatus)
+    end
+    # A design the corrector never closed is not the mission that was asked
+    # for. It propagates, reaches entry interface and lands — which is exactly
+    # why it has to be refused here rather than flown and reported as a flyby.
+    if dstatus === :stalled || dstatus === :unreachable
+        strict && error("free-return targeting did not converge (status: $dstatus) — " *
+                        "the trajectory returned misses the requested perilune")
+        return MoonshotResult(lv, guid, asc, eph, cis, nothing, nothing, nothing, dstatus)
     end
 
     # --- 3b. optional dispersed execution + mid-course correction ----------
@@ -236,7 +267,7 @@ function moonshot(; pod_mass::Float64 = 350.0,
                                          verbose = verbose)
         if cis_d.outcome != :entry_interface
             strict && error("dispersed cruise did not come home (outcome: $(cis_d.outcome))")
-            return MoonshotResult(lv, guid, asc, eph, cis_d, nothing, nothing, nothing)
+            return MoonshotResult(lv, guid, asc, eph, cis_d, nothing, nothing, nothing, dstatus)
         end
         tcm_prop = cis_d.m * (exp(tcm_dv / (G0 * kick.isp_vac)) - 1)
         rcs_budget = cruise_rcs_budget(default_kick_rcs(), 1000.0;
@@ -247,13 +278,17 @@ function moonshot(; pod_mass::Float64 = 350.0,
     end
 
     # --- 4. entry handoff: jettison the spent kick stage, fly the pod ------
-    pod = default_reentry_pod(mass = pod_mass)
+    # resolved here rather than in the signature because `lv` may have replaced
+    # pod_mass above, and the fit has to see the mass actually being flown
+    pod_d = isfinite(pod_diameter) && pod_diameter > 0 ?
+            pod_diameter : 2 * pod_radius(pod_mass)
+    pod = default_reentry_pod(mass = pod_mass, diameter = pod_d)
     scn = Scenario(vehicle = pod, r0 = cis.r, v0 = cis.v,
                    t0 = cis.t, t_max = cis.t + 3.0e4, theta_g0 = theta_g0,
                    alpha0 = deg2rad_(5.0))
     entry = simulate(scn)
 
-    MoonshotResult(lv, guid, asc, eph, cis, scn, entry, cruise)
+    MoonshotResult(lv, guid, asc, eph, cis, scn, entry, cruise, dstatus)
 end
 
 function print_moonshot_summary(io::IO, ms::MoonshotResult)
