@@ -117,6 +117,14 @@
   #overlay td { padding: 3px 14px; text-align: left; }
   #overlay td:first-child { color: var(--dim); }
   #err { color: #e08080; font: 13px ui-monospace, monospace; max-width: 600px; }
+  /* the empty state: pick a flight, or go and make one */
+  .emptyruns { display: flex; flex-direction: column; gap: 6px;
+               max-width: min(560px, 86vw); }
+  .runpick { display: block; padding: 7px 14px; border-radius: 20px;
+             border: 1px solid rgba(255,255,255,.16); color: var(--ink);
+             font: 12px ui-monospace, Consolas, monospace; text-decoration: none;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .runpick:hover { border-color: var(--acc); color: var(--acc); }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -172,6 +180,7 @@
 'use strict';
 import { fin } from '/static/fmt.js';
 import * as api from '/static/api.js';
+import * as runs from '/static/runs.js';
 import { suite, report, requested } from '/static/selftest.js';
 
 const $ = id => document.getElementById(id);
@@ -1369,11 +1378,27 @@ function lathe(out, prof, nseg, colFn) {
 }
 
 // --------------------------------------------------------------- the app --
-const qs = location.search.slice(1);
-// The analysis link carries the mission this view is flying — that page flies
-// its own run from a query string, so without this it would analyse the
-// default vehicle while you watch a different one lift off.
-if (qs) document.getElementById('analysislink').href = '/analysis?' + qs;
+//
+// This view FLIES a trajectory; it does not invent one. Three ways in:
+//
+//   ?run=<id>   a flight already flown, fetched from the server's run store.
+//               The normal case, and the only one that guarantees you are
+//               watching the same flight mission control just showed you.
+//   ?pod_mass=… a configuration, which is flown here. Bare links and the
+//               selftest below.
+//   nothing     nothing has been flown. Say so — see `showEmpty`.
+const RUN_ID = new URLSearchParams(location.search).get('run');
+const qs = (() => {
+  const q = new URLSearchParams(location.search);
+  q.delete('run');
+  q.delete('selftest');
+  return q.toString();
+})();
+// The analysis link carries whatever this view is flying, so the two pages
+// never end up describing different missions.
+document.getElementById('analysislink').href =
+  RUN_ID ? '/analysis?run=' + encodeURIComponent(RUN_ID) :
+  qs     ? '/analysis?' + qs : '/analysis';
 let run = null, geo = null;
 // What is painted on the hull and announced over it. Geometry supplies the
 // configured vehicle's name; old servers and empty builder names fall back to
@@ -9129,32 +9154,74 @@ window.__cameraAuditCheck = function () {
 };
 
 // ------------------------------------------------------------------- boot --
+
+/**
+ * Say what is being built, and let the browser actually draw it.
+ *
+ * Everything below `boot` is synchronous WebGL setup — meshes, three
+ * procedural textures, terrain — and the main thread cannot repaint while it
+ * runs. Measured in the shipped window on an Intel iGPU: twenty-odd seconds
+ * during which the overlay still read "designing mission…", because the text
+ * had been assigned but no frame had been painted since. An application that
+ * shows one unchanging word for twenty seconds is indistinguishable from one
+ * that has hung, and that is what "the launch view won't load" looked like.
+ *
+ * A double rAF is the honest "you have painted now" signal. It races a
+ * timeout because a backgrounded or remote-driven tab may never fire one, and
+ * a boot that never finishes would be a far worse bug than a missed frame.
+ */
+function step(msg) {
+  $('ov_sub').textContent = msg;
+  return Promise.race([
+    new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))),
+    new Promise(r => setTimeout(r, 250)),
+  ]);
+}
+
 async function boot() {
   try {
-    // both in flight at once, but validated in order: transport-level `post`
-    // keeps the mission's error the one you see when both legs fail, which
-    // api.run/api.geometry could not promise — Promise.all rejects with
-    // whichever settled first, and "geometry failed" for an unflyable vehicle
-    // sends you to the builder to fix a stack that was never the problem
-    const [r, g] = await Promise.all([
-      api.post('/api/run', qs),
-      api.post('/api/geometry', qs)]);
-    run = api.expect(r, 'mission');
-    geo = api.expect(g, 'geometry');
+    if (RUN_ID) {
+      // A stored run is a lookup, so there is nothing to overlap it with —
+      // and the vehicle to draw is the one the run recorded, which is only
+      // known once it lands. Re-flying instead was the old behaviour, and it
+      // meant this view could show a subtly different flight from the one
+      // whose numbers you had just read.
+      run = await runs.get(RUN_ID);
+      await step('building the vehicle…');
+      geo = api.expect(
+        await api.post('/api/geometry',
+                       new URLSearchParams(run.params || {}).toString()),
+        'geometry');
+    } else {
+      // both in flight at once, but validated in order: transport-level `post`
+      // keeps the mission's error the one you see when both legs fail, which
+      // api.run/api.geometry could not promise — Promise.all rejects with
+      // whichever settled first, and "geometry failed" for an unflyable vehicle
+      // sends you to the builder to fix a stack that was never the problem
+      const [r, g] = await Promise.all([
+        api.post('/api/run', qs),
+        api.post('/api/geometry', qs)]);
+      run = api.expect(r, 'mission');
+      geo = api.expect(g, 'geometry');
+    }
     VEHNAME = vehName(geo.name);
     $('ov_title').textContent = VEHNAME;
     document.title = VEHNAME + ' — mission';
+    await step('plotting the trajectory…');
     buildData();
+    await step('painting the vehicle…');
     buildLiveryTex();
     buildRocket();
+    await step('fitting out the cabin…');
     cabScreenInit();
     cabScreenBuild();     // needs the sections buildRocket just measured
     cabDecalInit();
     cabDecalBuild();
+    await step('building the pad…');
     buildStatics();
     buildLandTex();
     if (MS) {
-      $('ov_sub').textContent = 'building the ground…';
+      await step('building the ground…');
       moonRings = buildMoonTerrain();
       buildLander();
       pickGroundCam();
@@ -9240,7 +9307,55 @@ async function boot() {
     return false;
   }
 }
-boot().then(ok => { if (ok && SELFTEST_REQUESTED) window.__selftest(); });
+/**
+ * Arrived with nothing to fly.
+ *
+ * The launch view is a view OF a trajectory. Opened bare it used to fly a
+ * default mission so there would be something on screen, which is both twelve
+ * seconds of simulation nobody asked for and a lie about what you are
+ * watching. Now it says what it needs and hands over the runs that exist.
+ */
+async function showEmpty() {
+  $('ov_title').textContent = 'NO TRAJECTORY';
+  $('ov_sub').textContent =
+    'the launch view flies a mission that has already been designed';
+  const list = await runs.list();
+  const body = $('ov_body');
+  if (list.length) {
+    body.innerHTML =
+      '<div class="sub" style="margin-bottom:8px">runs from this session</div>' +
+      '<div class="emptyruns"></div>';
+    const host = body.querySelector('.emptyruns');
+    for (const [i, d] of list.entries()) {
+      const a = document.createElement('a');
+      a.className = 'runpick';
+      a.href = '/launch?run=' + encodeURIComponent(d.id);
+      a.textContent = `#${list.length - i} · ${d.vname || 'vehicle'} · ${runs.describe(d)}`;
+      host.appendChild(a);
+    }
+  } else {
+    body.innerHTML =
+      '<div class="sub">nothing has been flown yet — mission control is ' +
+      'where a flight starts</div>';
+  }
+  // The overlay is the only thing on screen, so it must not swallow the
+  // links inside it by arming click-to-launch.
+  $('overlay').style.cursor = 'default';
+  $('ov_go').classList.add('hidden');
+}
+
+if (!RUN_ID && !qs) {
+  // Opened bare — from the builder, or typed. The most recent flight is the
+  // one meant nine times in ten, so go there rather than asking; redirecting
+  // rather than loading in place keeps the URL honest, so a reload and a
+  // shared link both still mean that specific run.
+  runs.list().then(list => {
+    if (list.length) location.replace('/launch?run=' + encodeURIComponent(list[0].id));
+    else showEmpty();      // nothing has ever been flown
+  });
+} else {
+  boot().then(ok => { if (ok && SELFTEST_REQUESTED) window.__selftest(); });
+}
 requestAnimationFrame(frame);
 </script>
 </body>

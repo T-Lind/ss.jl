@@ -57,6 +57,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 
 enum UserEvent {
+    /// the page asked for a new window; we navigate this one instead
+    Navigate(String),
     /// the server is listening and answered a health check
     Ready(String),
     /// the server exited or never came up, with something to tell the user
@@ -81,9 +83,32 @@ fn main() {
     // The window appears immediately with a splash rather than after the
     // simulator has warmed up. Several seconds of nothing on screen is what
     // makes an application feel broken, and the wait here is real work.
+    // A WebView2 with no NewWindowRequested handler REFUSES the request and
+    // tells nobody: `target="_blank"` and `window.open` do nothing at all, no
+    // error, no console message, no navigation. Two of the four nav links and
+    // three keyboard shortcuts were dead in the shipped app for exactly this
+    // reason, and the pages now use ordinary same-document links instead.
+    //
+    // This stays as the backstop, because "nothing happens" is the single
+    // worst failure an application can have and one stray _blank should not
+    // bring it back. Same-origin requests navigate this window; anything else
+    // — a genuinely external link — is handed to the user's real browser,
+    // where it belongs.
+    let nav_proxy = proxy.clone();
     let builder = WebViewBuilder::new()
         .with_html(SPLASH)
-        .with_background_color((10, 13, 18, 255));
+        .with_background_color((10, 13, 18, 255))
+        .with_new_window_req_handler(move |url: String, _features| {
+            if url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:") {
+                let _ = nav_proxy.send_event(UserEvent::Navigate(url));
+            } else {
+                open_externally(&url);
+            }
+            // Deny in both cases: the panel has been navigated instead, and an
+            // external link has gone to the real browser. Allow would open a
+            // second bare WebView2 with none of this window's chrome.
+            wry::NewWindowResponse::Deny
+        });
     // Measured, not assumed: a page cannot move itself onto the discrete GPU
     // — Chromium binds its GPU process to one adapter at launch — but the
     // host process can ask. See README.
@@ -132,7 +157,8 @@ fn main() {
             }
         }
         match event {
-            Event::UserEvent(UserEvent::Ready(url)) => {
+            Event::UserEvent(UserEvent::Ready(url))
+            | Event::UserEvent(UserEvent::Navigate(url)) => {
                 let _ = webview.load_url(&url);
             }
             Event::UserEvent(UserEvent::Failed(why)) => {
@@ -161,9 +187,56 @@ fn main() {
 /// the only way a startup failure reaches the person who double-clicked.
 /// Declared by hand rather than pulling in a Windows binding crate for one
 /// call.
+/// A NUL-terminated UTF-16 string, which is what every `…W` entry point wants.
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Hand a link that is not ours to whatever the user browses with.
+///
+/// Restricted to http and https on purpose. This receives a string chosen by
+/// the page, and `ShellExecuteW` will happily launch a `file:` path or a
+/// registered `ms-…:` protocol handler — an application should not be a
+/// general-purpose way to start other programs.
+#[cfg(windows)]
+fn open_externally(url: &str) {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return;
+    }
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut core::ffi::c_void,
+            op: *const u16,
+            file: *const u16,
+            params: *const u16,
+            dir: *const u16,
+            show: i32,
+        ) -> *mut core::ffi::c_void;
+    }
+    const SW_SHOWNORMAL: i32 = 1;
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide("open").as_ptr(),
+            wide(url).as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn open_externally(_url: &str) {}
+
 #[cfg(windows)]
 fn fatal(msg: &str) {
-    use std::os::windows::ffi::OsStrExt;
     #[link(name = "user32")]
     extern "system" {
         fn MessageBoxW(
@@ -172,12 +245,6 @@ fn fatal(msg: &str) {
             caption: *const u16,
             utype: u32,
         ) -> i32;
-    }
-    fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
     }
     const MB_ICONERROR: u32 = 0x10;
     unsafe {

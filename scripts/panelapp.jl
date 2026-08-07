@@ -1219,6 +1219,115 @@ function run_sweep(p)::Dict{String,Any}
     Dict{String,Any}("ok" => true, "param" => param, "values" => vals, "runs" => runs)
 end
 
+# -------------------------------------------------------------- run store --
+
+"""
+The missions this server has actually flown, newest first.
+
+Three pages want to look at the same trajectory, and before this each of them
+re-flew it from a query string. That was expensive — seconds of simulation to
+show a flight that had just been shown — and worse, it was not reliably the
+SAME flight: the query string and the run it produced were only ever as
+identical as the form's serialisation, so "open the launch view on this run"
+quietly meant "fly something close to this run again".
+
+A run gets an id when it is flown, and the pages pass the id around. That
+makes "show me this" a lookup instead of a simulation, and it makes history
+mean something: these are flights that happened, not recipes for flights that
+might.
+
+In memory, and deliberately: this is the session's history, the session is one
+window, and a trajectory is far too big to be worth writing to disk to survive
+a restart that also throws away everything else on screen.
+"""
+const MAX_RUNS = 12
+const RUNS = Dict{String,Dict{String,Any}}()
+const RUN_ORDER = String[]            # ids, newest first
+const RUN_SEQ = Ref(0)
+# Runs arrive from `Threads.@spawn handle(sock)`, so two windows or a double
+# click can be here at once.
+const RUNS_LOCK = ReentrantLock()
+
+"""
+    remember_run!(payload, p) -> payload
+
+Give a successful run an id and file it, evicting the oldest beyond `MAX_RUNS`.
+
+The parameters that produced it are stored alongside, which is what lets a
+history entry put the form back the way it was rather than only replaying a
+result.
+"""
+function remember_run!(payload::Dict{String,Any}, p::AbstractDict)
+    lock(RUNS_LOCK) do
+        RUN_SEQ[] += 1
+        id = "r$(RUN_SEQ[])"
+        payload["id"] = id
+        payload["at"] = time()
+        payload["params"] = Dict{String,String}(string(k) => string(v) for (k, v) in p)
+        RUNS[id] = payload
+        pushfirst!(RUN_ORDER, id)
+        while length(RUN_ORDER) > MAX_RUNS
+            delete!(RUNS, pop!(RUN_ORDER))
+        end
+        payload
+    end
+end
+
+"""
+    run_and_remember(p) -> Dict
+
+Fly a mission and keep it. Only `/api/run` goes through here — a sweep flies
+dozens of missions internally and none of them are runs the user asked for.
+"""
+function run_and_remember(p)
+    out = panel_mission(p)
+    get(out, "ok", false) === true ? remember_run!(out, p) : out
+end
+
+"""
+One history entry: enough to label it, and enough to restore the form from it,
+without shipping a whole trajectory per row.
+"""
+function run_digest(payload::Dict{String,Any})
+    p = get(payload, "params", Dict{String,String}())
+    Dict{String,Any}(
+        "id" => get(payload, "id", ""),
+        "at" => get(payload, "at", 0.0),
+        "mode" => get(p, "mode", "flyby"),
+        "vname" => get(p, "vname", "vehicle"),
+        "outcome" => get(payload, "outcome", "?"),
+        # flat, a couple of dozen numbers, and the client already knows how to
+        # format them — so a chip can say what the run WAS, not just when it ran
+        "metrics" => get(payload, "metrics", Dict{String,Any}()),
+        "params" => p)
+end
+
+"The history list, newest first."
+runs_payload() = lock(RUNS_LOCK) do
+    Dict{String,Any}("ok" => true,
+                     "runs" => [run_digest(RUNS[id]) for id in RUN_ORDER if haskey(RUNS, id)])
+end
+
+"""
+    stored_run(path) -> (status, content_type, payload)
+
+`GET /api/runs/{id}`. A miss is a 404 that says why it might be a miss —
+history is capped and lives in memory, so an id CAN legitimately stop
+resolving, and "not found" alone would read as a bug.
+"""
+function stored_run(path::AbstractString)
+    id = first(split(path[length("/api/runs/") + 1:end], '?'))
+    payload = lock(RUNS_LOCK) do
+        get(RUNS, id, nothing)
+    end
+    payload === nothing && return ("404 Not Found", "application/json",
+        json(Dict{String,Any}("ok" => false,
+            "error" => "no run \"$id\" — history keeps the last $MAX_RUNS " *
+                       "runs of this session, and starts empty each time the " *
+                       "app opens")))
+    ("200 OK", "application/json", json(payload))
+end
+
 # -------------------------------------------------------------- http loop --
 
 "When this server started, so /api/health can report how long it has been up."
@@ -1383,11 +1492,12 @@ function route(method::AbstractString, path::AbstractString,
             return ("200 OK", "text/html; charset=utf-8", read(BUILD_PATH[], String))
         elseif method in ("GET", "HEAD") &&
                (path == "/analysis" || startswith(path, "/analysis?"))
-            # The plots, the event log, the sweep and the solver. Like /launch,
-            # this takes the whole mission as a query string and flies its own
-            # run rather than being handed one — there is no shared run state
-            # between tabs, and inventing some to save a second of simulation
-            # would be the wrong trade.
+            # The plots, the event log, the sweep and the solver. Like /launch
+            # it reads `?run=<id>` out of the store above; a full query string
+            # still flies a mission, which is what a bare link and the page's
+            # own selftest use. That shared state was once refused here on the
+            # grounds that re-simulating was the honest trade — it was not.
+            # Re-flying showed a DIFFERENT run than the one being looked at.
             return ("200 OK", "text/html; charset=utf-8", read(ANALYSIS_PATH[], String))
         elseif method in ("GET", "HEAD") && startswith(path, "/static/")
             return static_asset(path)
@@ -1395,8 +1505,13 @@ function route(method::AbstractString, path::AbstractString,
             return ("200 OK", "application/json", json(catalogue_payload()))
         elseif method in ("GET", "HEAD") && path == "/api/health"
             return ("200 OK", "application/json", json(health_payload()))
+        elseif method in ("GET", "HEAD") &&
+               (path == "/api/runs" || startswith(path, "/api/runs?"))
+            return ("200 OK", "application/json", json(runs_payload()))
+        elseif method in ("GET", "HEAD") && startswith(path, "/api/runs/")
+            return stored_run(path)
         elseif method == "POST" && path == "/api/run"
-            return ("200 OK", "application/json", json(safe_call(panel_mission, body)))
+            return ("200 OK", "application/json", json(safe_call(run_and_remember, body)))
         elseif method == "POST" && path == "/api/sweep"
             return ("200 OK", "application/json", json(safe_call(run_sweep, body)))
         elseif method == "POST" && path == "/api/geometry"
