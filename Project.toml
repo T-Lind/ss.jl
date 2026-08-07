@@ -1,7 +1,10 @@
 name = "SatelliteSim"
 uuid = "7a2c9e64-3f5d-4b21-9c4a-8e1d2f6b0a55"
 authors = ["Tiernan Lindauer"]
-version = "0.1.0"
+# Tracks the mission milestones the README names: v0.1 LEO reentry, v0.2 the
+# circumlunar free return, v0.3 the lunar landing. All three fly, so this said
+# 0.1.0 while shipping v0.3's mission.
+version = "0.3.0"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
