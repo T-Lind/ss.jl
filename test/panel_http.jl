@@ -407,7 +407,8 @@ end
         # flies it to wherever the simulation actually ended.
         st, hdrs, bod = http("POST", "/api/run";
                              port = port, timeout = 180.0,
-                             body = "mode=flyby&nstages=2&s1_prop=3000&s1_dry=2500&" *
+                             body = "_job=failed-flight-test&mode=flyby&nstages=2&" *
+                                    "s1_prop=3000&s1_dry=2500&" *
                                     "s2_prop=100&s2_dry=140")
         @test st == 200
         @test occursin("\"ok\":true", bod)
@@ -416,6 +417,12 @@ end
         @test occursin("\"launch_lat\"", bod)    # the launch page's hard needs
         @test occursin("\"liftoff_t\"", bod)
         @test !occursin("\"cis\":", bod)         # and no leg it did not fly
+        @test !occursin("\"_job\"", bod)          # transport state is not a run parameter
+        st, hdrs, prog = http("GET", "/api/progress?job=failed-flight-test";
+                              port = port)
+        @test st == 200
+        @test occursin("\"stage\":\"complete\"", prog)
+        @test occursin("\"done\":true", prog)
 
         # --- Earth-orbit missions -------------------------------------------
         st, hdrs, bod = http("GET", "/api/catalogue"; port = port)
@@ -465,7 +472,7 @@ end
         # with the wrong media type is refused by the browser outright, and
         # the console blames CORS, so the content type is asserted.
         for name in ("fmt.js", "api.js", "vehicle.js", "selftest.js",
-                     "charts.js", "metrics.js")
+                     "charts.js", "groundtrack.js", "metrics.js")
             st, hdrs, bod = http("GET", "/static/$name"; port = port)
             @test st == 200
             @test hdrs["content-type"] == "text/javascript; charset=utf-8"
@@ -702,6 +709,8 @@ end
         @test occursin("\"outcome\":\"design_failed\"", bod)
         @test !occursin("\"outcome\":\"nominal\"", bod)
         @test occursin("\"design_status\":\"stalled\"", bod)
+        @test occursin("\"flyby\":false", bod)
+        @test !occursin("\"name\":\"perilune\"", bod)
         @test !occursin("\"splashdown\"", bod)         # nothing past the parking orbit
         @test occursin("\"asc3d\"", bod)               # the ascent that DID fly is served
 

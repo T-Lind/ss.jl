@@ -1475,6 +1475,17 @@ function entryWarp(t) {
 function buildData() {
   A = run.ascent;
   const C = run.cis, E = run.entry;
+  // Requested mode is intent, not history. A failed targeting solve may still
+  // include its last trial trajectory for diagnosis, so phase names come from
+  // the server's achieved-milestone ledger (with event-based fallbacks for
+  // runs produced by older servers).
+  const ACH = run.achievements || {
+    orbit: !!(run.metrics && isFinite(run.metrics.park_perigee_km)),
+    tli: (run.events || []).some(e => e.name === 'tli_ignition'),
+    flyby: (run.events || []).some(e => e.name === 'perilune'),
+    return: (run.events || []).some(e => e.name === 'entry_handoff'),
+    entry: !!(E && E.t && E.t.length > 2),
+  };
   hasCis = !!(C && C.t && C.t.length > 2);
   hasEnt = !!(E && E.t && E.t.length > 2);
   for (const e of run.events) if (!(e.name in EV)) EV[e.name] = e.t;
@@ -1644,7 +1655,7 @@ function buildData() {
     add('ORBIT', isFinite(tTLI) ? tTLI - 12 : cisEnd, 'eci', { pace: 14 });
     if (isFinite(tTLI))
       add('TLI', (isFinite(tCut) ? tCut : tTLI + 120) + 8, 'eci');
-    if (isFinite(tPeri)) {
+    if (ACH.flyby && isFinite(tPeri)) {
       const win = Math.max(600, Math.min(5400, (tPeri - last())*0.25));
       add('TRANSLUNAR', tPeri - win, 'eci', { pace: 26 });
       add('FLYBY', tPeri + win, 'eci', { pace: 45 });
@@ -1663,8 +1674,15 @@ function buildData() {
       if (isFinite(tDOI)) add('LUNAR ORBIT', tDOI + 60, 'eci', { pace: 14 });
       add('DESCENT ORBIT', MS.t_pdi - 25, 'eci', { pace: 10 });
     }
-    else add('RETURN', hasEnt && isFinite(tEI) ? Math.min(tEI - 20, cisEnd) : cisEnd,
-             'eci', { pace: 26 });
+    else if (ACH.return)
+      add('RETURN', hasEnt && isFinite(tEI) ? Math.min(tEI - 20, cisEnd) : cisEnd,
+          'eci', { pace: 26 });
+    else {
+      // The data is still useful: it is the path that explains the failure.
+      // What it is not is a flyby or a return. Keep the viewer available and
+      // name the leg for what actually happened.
+      add(ACH.tli ? 'OFF-NOMINAL COAST' : 'ORBIT', cisEnd, 'eci', { pace: 26 });
+    }
   }
   if (MS) add('DESCENT', MS.t_td + 16, 'moon', { warp: descentWarp });
   if (hasEnt) add('ENTRY', tEnd, 'entry', { warp: entryWarp });
@@ -9199,7 +9217,9 @@ async function boot() {
       // whichever settled first, and "geometry failed" for an unflyable vehicle
       // sends you to the builder to fix a stack that was never the problem
       const [r, g] = await Promise.all([
-        api.post('/api/run', qs),
+        api.post('/api/run', qs, { onProgress: p => {
+          if (p && p.detail) $('ov_sub').textContent = p.detail;
+        }}),
         api.post('/api/geometry', qs)]);
       run = api.expect(r, 'mission');
       geo = api.expect(g, 'geometry');

@@ -633,6 +633,14 @@ installation, no `Pkg.instantiate`, no terminal, no browser. Download the
 release zip, unpack it, run `ssjl.exe`, and a window opens on mission control.
 Close the window and everything exits.
 
+The application checks the official GitHub Releases feed in the background
+and reports an available version in the navigation bar. **Download update**
+fetches the release asset, verifies its published SHA-256 checksum and stages
+it outside the running installation; **Restart to update** atomically swaps
+the application directory and keeps the previous copy until the new process
+has launched. Releases are produced by `.github/workflows/release.yml` from
+`v*` tags, with the zip and matching checksum names expected by the host.
+
 ```powershell
 julia --project=build build/build_app.jl      # -> dist/ssjl (~615 MB, ~25 min)
 dist\ssjl\ssjl.exe
@@ -744,7 +752,7 @@ rather than once per page:
 | --- | --- |
 | `/` mission control | *Did it work?* — the verdict, the metrics grouped in flight order, the 3D trajectory and the stack, on one screen |
 | `/build` vehicle builder | *What am I flying?* — the launcher, stage by stage, with a live verdict as you type |
-| `/analysis` | *Why?* — the flight profiles, the powered descent, the event log, parameter sweeps and the solver |
+| `/analysis` | *Why?* — interactive flight profiles, a ground-track explorer, powered descent, event log, parameter sweeps and the solver |
 | `/launch` | *What does it look like?* — a cinematic pad-cam flight of the same run |
 
 Mission control opens with a **verdict**: NOMINAL, GRAZING, OFF TARGET, NO
@@ -807,6 +815,20 @@ and the commanded throttle — ahead of the ascent and entry profiles, because
 the last fifteen kilometres are what that mission exists to fly. Every
 landing metric is sweepable and solvable: *vary lander propellant until
 hover margin = 200 s* is a search over whole missions like any other.
+
+Every analysis run also carries its own diagnostic strip and interactive
+telemetry: altitude, speed, dynamic pressure and proper acceleration can be
+hovered for exact values, zoomed with the wheel and reset with a double click.
+Orbital and suborbital samples include latitude/longitude, so the world map can
+scrub or play the actual ground track—including dateline crossings—in lockstep
+with the flight clock. Peak dynamic pressure, ascent load, Mach and altitude
+are summarized above the plots rather than being left to visual estimation.
+
+Slow work reports its real stage instead of showing a generic spinner. Mission
+runs name configuration, simulation and diagnostics; sweeps count completed
+missions; solvers count target evaluations. The progress overlay preserves
+those completed steps and elapsed time, so a long trajectory remains visibly
+alive and says exactly what it is doing.
 
 **Vehicle presets** sit beside the mission presets and configure the entire
 launcher — stack height, engines, propellant loads, diameters, and the

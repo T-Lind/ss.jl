@@ -13,12 +13,34 @@
 
 /** Fetch and parse, nothing more. Throws only on network or parse failure,
  *  with the path in the message — a bare "Failed to fetch" names no endpoint. */
-export async function post(path, body) {
+export async function post(path, body, options = {}) {
+  const u = new URLSearchParams(body || '');
+  const onProgress = options && options.onProgress;
+  const job = onProgress
+    ? (globalThis.crypto && crypto.randomUUID
+        ? crypto.randomUUID() : `j${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    : '';
+  if (job) u.set('_job', job);
+  let poll = null, stopped = false;
+  const readProgress = async () => {
+    if (stopped) return;
+    try {
+      const p = await (await fetch('/api/progress?job=' + encodeURIComponent(job))).json();
+      if (!stopped && p && p.ok) onProgress(p);
+    } catch (_) { /* the original request owns transport failure reporting */ }
+  };
+  if (job) {
+    setTimeout(readProgress, 120);
+    poll = setInterval(readProgress, 350);
+  }
   let r;
   try {
-    r = await fetch(path, { method: 'POST', body });
+    r = await fetch(path, { method: 'POST', body: u });
   } catch (e) {
     throw new Error(`${path}: ${e.message || 'network error'}`);
+  } finally {
+    stopped = true;
+    if (poll) clearInterval(poll);
   }
   try {
     return await r.json();
@@ -33,10 +55,10 @@ export function expect(j, what) {
   return j;
 }
 
-export const run      = async body => expect(await post('/api/run', body), 'run');
-export const geometry = async body => expect(await post('/api/geometry', body), 'geometry');
-export const sweep    = async body => expect(await post('/api/sweep', body), 'sweep');
-export const solve    = async body => expect(await post('/api/solve', body), 'solve');
+export const run      = async (body, options) => expect(await post('/api/run', body, options), 'run');
+export const geometry = async (body, options) => expect(await post('/api/geometry', body, options), 'geometry');
+export const sweep    = async (body, options) => expect(await post('/api/sweep', body, options), 'sweep');
+export const solve    = async (body, options) => expect(await post('/api/solve', body, options), 'solve');
 
 /** Stage and engine catalogues. GET, and deliberately tolerant: the forms
  *  render with empty option lists rather than not rendering at all. */

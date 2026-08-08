@@ -879,7 +879,7 @@ async function doRun() {
   const done = busy('designing and flying the mission…');
   const t0 = performance.now();
   try {
-    const j = await api.run(params());
+    const j = await api.run(params(), { onProgress: done.progress });
     j._params = Object.fromEntries(params());
     run = j;
     clearFailures();

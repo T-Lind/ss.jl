@@ -61,6 +61,7 @@ export function drawLine(target, series, title, opts) {
     for (const v of s.xs) { if (v < x0) x0 = v; if (v > x1) x1 = v; }
     for (const v of s.ys) { if (v < y0) y0 = v; if (v > y1) y1 = v; }
   }
+  if (opts._view && opts._view.length === 2) [x0, x1] = opts._view;
   if (y1 - y0 < 1e-9) y1 = y0 + 1;
   if (opts.y0 !== undefined) y0 = Math.min(opts.y0, y0);
   // round the value axis out to nice ticks so the gridlines mean something
@@ -138,6 +139,50 @@ export function drawLine(target, series, title, opts) {
   }
   ctx.fillStyle = MUTED;
   ctx.fillText(title, L, 12);
+
+  // Keep interaction state on the canvas. Scroll zooms around the pointer,
+  // double-click resets, and pointer inspection gives every curve a precise
+  // value without adding a charting dependency to the desktop build.
+  cv.__lineChart = { series, title, opts, x0, x1, y0, y1, px, py, L, R, T, B };
+  cv.title = 'Move to inspect · scroll to zoom time · double-click to reset';
+  if (!cv.__lineInteractive) {
+    cv.__lineInteractive = true;
+    cv.style.touchAction = 'none';
+    const repaint = () => {
+      const s = cv.__lineChart;
+      if (s) drawLine(cv, s.series, s.title, s.opts);
+    };
+    cv.addEventListener('pointerleave', repaint);
+    cv.addEventListener('dblclick', () => {
+      const s=cv.__lineChart;if(!s)return;
+      const o={...s.opts};delete o._view;drawLine(cv,s.series,s.title,o);
+    });
+    cv.addEventListener('wheel', e => {
+      e.preventDefault();const s=cv.__lineChart;if(!s)return;
+      const all=s.series.flatMap(x=>x.xs).filter(Number.isFinite);
+      const full0=Math.min(...all),full1=Math.max(...all),span=s.x1-s.x0;
+      const f=Math.max(0,Math.min(1,(e.offsetX-s.L)/(cv.clientWidth-s.L-s.R)));
+      const anchor=s.x0+f*span, next=Math.max((full1-full0)/200,Math.min(full1-full0,span*(e.deltaY>0?1.3:.75)));
+      let a=anchor-f*next,b=a+next;if(a<full0){b+=full0-a;a=full0}if(b>full1){a-=b-full1;b=full1}
+      drawLine(cv,s.series,s.title,{...s.opts,_view:[a,b]});
+    }, {passive:false});
+    cv.addEventListener('pointermove', e => {
+      const s=cv.__lineChart;if(!s)return;
+      drawLine(cv,s.series,s.title,s.opts);
+      const x=s.x0+Math.max(0,Math.min(1,(e.offsetX-s.L)/(cv.clientWidth-s.L-s.R)))*(s.x1-s.x0);
+      const primary=s.series[0];let k=0;
+      for(let i=1;i<primary.xs.length;i++)if(Math.abs(primary.xs[i]-x)<Math.abs(primary.xs[k]-x))k=i;
+      const X=s.px(primary.xs[k]);
+      ctx.save();ctx.setTransform(devicePixelRatio||1,0,0,devicePixelRatio||1,0,0);
+      ctx.strokeStyle='rgba(240,165,0,.55)';ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(X,s.T);ctx.lineTo(X,cv.clientHeight-s.B);ctx.stroke();ctx.setLineDash([]);
+      const lines=s.series.map(a=>`${a.label||title}: ${fmtPeak(a.ys[Math.min(k,a.ys.length-1)])}${a.unit?' '+a.unit:''}`);
+      lines.unshift(`${opts.xu||'x'} ${fmtPeak(primary.xs[k])}`);
+      ctx.font='11px system-ui';const tw=Math.max(...lines.map(z=>ctx.measureText(z).width))+16,th=lines.length*16+10;
+      const tx=Math.min(Math.max(X+8,s.L),cv.clientWidth-tw-4),ty=s.T+5;
+      ctx.fillStyle='rgba(8,12,18,.94)';ctx.strokeStyle='rgba(143,190,240,.3)';ctx.fillRect(tx,ty,tw,th);ctx.strokeRect(tx,ty,tw,th);
+      lines.forEach((z,i)=>{ctx.fillStyle=i?'#e4e9f0':'#f0a500';ctx.fillText(z,tx+8,ty+16+i*16)});ctx.restore();
+    });
+  }
 }
 
 /** A tick step from the 1/2/2.5/5/10 ladder — the reason gridlines land on

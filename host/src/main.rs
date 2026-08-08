@@ -30,10 +30,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use tao::dpi::LogicalSize;
@@ -63,6 +63,30 @@ enum UserEvent {
     Ready(String),
     /// the server exited or never came up, with something to tell the user
     Failed(String),
+    UpdateCheck,
+    UpdateDownload,
+    UpdateInstall,
+    UpdateStatus(UpdateMessage),
+}
+
+#[derive(Clone)]
+struct UpdateInfo {
+    version: String,
+    url: String,
+    sha_url: String,
+}
+
+#[derive(Clone)]
+struct PreparedUpdate {
+    version: String,
+    root: PathBuf,
+}
+
+#[derive(Clone)]
+struct UpdateMessage {
+    state: &'static str,
+    message: String,
+    version: String,
 }
 
 fn main() {
@@ -95,9 +119,23 @@ fn main() {
     // — a genuinely external link — is handed to the user's real browser,
     // where it belongs.
     let nav_proxy = proxy.clone();
+    let update_proxy = proxy.clone();
     let builder = WebViewBuilder::new()
         .with_html(SPLASH)
         .with_background_color((10, 13, 18, 255))
+        .with_initialization_script(UPDATE_UI)
+        .with_ipc_handler(move |request| match request.body().as_str() {
+            "update:check" => {
+                let _ = update_proxy.send_event(UserEvent::UpdateCheck);
+            }
+            "update:download" => {
+                let _ = update_proxy.send_event(UserEvent::UpdateDownload);
+            }
+            "update:install" => {
+                let _ = update_proxy.send_event(UserEvent::UpdateInstall);
+            }
+            _ => {}
+        })
         .with_new_window_req_handler(move |url: String, _features| {
             if url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:") {
                 let _ = nav_proxy.send_event(UserEvent::Navigate(url));
@@ -141,11 +179,14 @@ fn main() {
             let _ = proxy.send_event(UserEvent::Ready(url));
         }
         None => {
-            std::thread::spawn(move || run_server(&tx, &proxy));
+            let server_proxy = proxy.clone();
+            std::thread::spawn(move || run_server(&tx, &server_proxy));
         }
     }
 
     let mut server: Option<Child> = None;
+    let available = Arc::new(Mutex::new(None::<UpdateInfo>));
+    let prepared = Arc::new(Mutex::new(None::<PreparedUpdate>));
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -163,6 +204,41 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Failed(why)) => {
                 let _ = webview.load_html(&failure_page(&why));
+            }
+            Event::UserEvent(UserEvent::UpdateCheck) => {
+                let proxy = proxy.clone();
+                let available = Arc::clone(&available);
+                std::thread::spawn(move || check_for_update(proxy, available));
+            }
+            Event::UserEvent(UserEvent::UpdateDownload) => {
+                let info = available.lock().ok().and_then(|g| g.clone());
+                let proxy = proxy.clone();
+                let prepared = Arc::clone(&prepared);
+                std::thread::spawn(move || match info {
+                    Some(i) => prepare_update(proxy, prepared, i),
+                    None => send_update(&proxy, "error", "check for an update first", ""),
+                });
+            }
+            Event::UserEvent(UserEvent::UpdateInstall) => {
+                let ready = prepared.lock().ok().and_then(|g| g.clone());
+                match ready.and_then(|p| launch_update(&p).ok()) {
+                    Some(()) => {
+                        if let Some(child) = server.as_mut() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        *control_flow = ControlFlow::Exit;
+                    }
+                    None => send_update(
+                        &proxy,
+                        "error",
+                        "the prepared update could not be started",
+                        "",
+                    ),
+                }
+            }
+            Event::UserEvent(UserEvent::UpdateStatus(msg)) => {
+                let _ = webview.evaluate_script(&update_event_script(&msg));
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -267,6 +343,296 @@ fn existing_url() -> Option<String> {
     std::env::args()
         .find_map(|a| a.strip_prefix("--url=").map(str::to_string))
         .filter(|u| !u.is_empty())
+}
+
+fn send_update(
+    proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+    state: &'static str,
+    message: &str,
+    version: &str,
+) {
+    let _ = proxy.send_event(UserEvent::UpdateStatus(UpdateMessage {
+        state,
+        message: message.to_string(),
+        version: version.to_string(),
+    }));
+}
+
+fn semver(s: &str) -> (u32, u32, u32) {
+    let mut n = s.trim_start_matches('v').split('.').map(|x| {
+        x.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .unwrap_or(0)
+    });
+    (
+        n.next().unwrap_or(0),
+        n.next().unwrap_or(0),
+        n.next().unwrap_or(0),
+    )
+}
+
+#[cfg(windows)]
+fn powershell(script: &str) -> Result<std::process::Output, String> {
+    use std::os::windows::process::CommandExt;
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("could not start PowerShell: {e}"))
+}
+
+#[cfg(windows)]
+fn check_for_update(
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+    available: Arc<Mutex<Option<UpdateInfo>>>,
+) {
+    send_update(&proxy, "checking", "checking GitHub Releases...", "");
+    let script = format!(
+        r#"$ErrorActionPreference='Stop';
+$h=@{{'User-Agent'='ssjl/{}'}};
+$r=Invoke-RestMethod -Headers $h -Uri 'https://api.github.com/repos/T-Lind/ss.jl/releases/latest';
+$a=$r.assets | Where-Object {{$_.name -eq 'ssjl-windows-x64.zip'}} | Select-Object -First 1;
+$s=$r.assets | Where-Object {{$_.name -eq 'ssjl-windows-x64.zip.sha256'}} | Select-Object -First 1;
+if($null -eq $a -or $null -eq $s){{throw 'the latest release has no verified Windows package'}};
+Write-Output $r.tag_name; Write-Output $a.browser_download_url; Write-Output $s.browser_download_url"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    match powershell(&script) {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut lines = text.lines().map(str::trim).filter(|x| !x.is_empty());
+            let version = lines
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('v')
+                .to_string();
+            let url = lines.next().unwrap_or("").to_string();
+            let sha_url = lines.next().unwrap_or("").to_string();
+            if version.is_empty()
+                || !url.starts_with("https://github.com/T-Lind/ss.jl/releases/download/")
+                || !sha_url.starts_with("https://github.com/T-Lind/ss.jl/releases/download/")
+            {
+                return send_update(&proxy, "error", "GitHub returned an invalid release", "");
+            }
+            if semver(&version) > semver(env!("CARGO_PKG_VERSION")) {
+                if let Ok(mut slot) = available.lock() {
+                    *slot = Some(UpdateInfo {
+                        version: version.clone(),
+                        url,
+                        sha_url,
+                    });
+                }
+                send_update(
+                    &proxy,
+                    "available",
+                    "a tested Windows build is ready",
+                    &version,
+                );
+            } else {
+                send_update(
+                    &proxy,
+                    "current",
+                    "you are on the latest release",
+                    env!("CARGO_PKG_VERSION"),
+                );
+            }
+        }
+        Ok(out) => send_update(
+            &proxy,
+            "error",
+            String::from_utf8_lossy(&out.stderr).trim(),
+            "",
+        ),
+        Err(e) => send_update(&proxy, "error", &e, ""),
+    }
+}
+
+#[cfg(not(windows))]
+fn check_for_update(
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+    _available: Arc<Mutex<Option<UpdateInfo>>>,
+) {
+    send_update(
+        &proxy,
+        "error",
+        "automatic updates are available in the Windows build",
+        "",
+    );
+}
+
+fn ps_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn prepare_update(
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+    prepared: Arc<Mutex<Option<PreparedUpdate>>>,
+    info: UpdateInfo,
+) {
+    send_update(
+        &proxy,
+        "downloading",
+        "downloading and verifying the release package...",
+        &info.version,
+    );
+    let base = match std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("TEMP")) {
+        Ok(x) => PathBuf::from(x).join("ssjl").join("updates"),
+        Err(_) => {
+            return send_update(
+                &proxy,
+                "error",
+                "no writable update directory is available",
+                "",
+            )
+        }
+    };
+    let zip = base.join(format!("ssjl-{}.zip", info.version));
+    let sha = base.join(format!("ssjl-{}.sha256", info.version));
+    let stage = base.join(format!("ssjl-{}", info.version));
+    let script = format!(
+        r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';
+New-Item -ItemType Directory -Force -Path {base} | Out-Null;
+if(Test-Path -LiteralPath {stage}){{Remove-Item -LiteralPath {stage} -Recurse -Force}};
+Invoke-WebRequest -Headers @{{'User-Agent'='ssjl/{current}'}} -Uri '{url}' -OutFile {zip};
+Invoke-WebRequest -Headers @{{'User-Agent'='ssjl/{current}'}} -Uri '{sha_url}' -OutFile {sha};
+$expected=((Get-Content -LiteralPath {sha} -Raw).Trim().Split()[0]).ToUpperInvariant();
+$actual=(Get-FileHash -LiteralPath {zip} -Algorithm SHA256).Hash.ToUpperInvariant();
+if($expected -ne $actual){{throw 'the downloaded package failed its SHA-256 check'}};
+Expand-Archive -LiteralPath {zip} -DestinationPath {stage} -Force;
+$root={stage};
+if(!(Test-Path -LiteralPath (Join-Path $root 'ssjl.exe'))){{$d=Get-ChildItem -LiteralPath $root -Directory | Select-Object -First 1;if($d){{$root=$d.FullName}}}};
+if(!(Test-Path -LiteralPath (Join-Path $root 'ssjl.exe')) -or !(Test-Path -LiteralPath (Join-Path $root 'bin\ssjl-server.exe'))){{throw 'the release package is incomplete'}};
+Write-Output $root"#,
+        base = ps_quote(&base),
+        stage = ps_quote(&stage),
+        zip = ps_quote(&zip),
+        sha = ps_quote(&sha),
+        current = env!("CARGO_PKG_VERSION"),
+        url = info.url.replace('\'', "%27"),
+        sha_url = info.sha_url.replace('\'', "%27")
+    );
+    match powershell(&script) {
+        Ok(out) if out.status.success() => {
+            let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+            if let Ok(mut slot) = prepared.lock() {
+                *slot = Some(PreparedUpdate {
+                    version: info.version.clone(),
+                    root,
+                });
+            }
+            send_update(
+                &proxy,
+                "ready",
+                "download complete - restart to apply",
+                &info.version,
+            );
+        }
+        Ok(out) => send_update(
+            &proxy,
+            "error",
+            String::from_utf8_lossy(&out.stderr).trim(),
+            &info.version,
+        ),
+        Err(e) => send_update(&proxy, "error", &e, &info.version),
+    }
+}
+
+#[cfg(not(windows))]
+fn prepare_update(
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+    _prepared: Arc<Mutex<Option<PreparedUpdate>>>,
+    _info: UpdateInfo,
+) {
+    send_update(
+        &proxy,
+        "error",
+        "automatic updates are available in the Windows build",
+        "",
+    );
+}
+
+#[cfg(windows)]
+fn launch_update(update: &PreparedUpdate) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let app = exe
+        .parent()
+        .ok_or("the application directory is missing")?
+        .to_path_buf();
+    if !app.join("bin").join("ssjl-server.exe").is_file() {
+        return Err("updates can only be installed by a packaged build".into());
+    }
+    let name = app.file_name().unwrap_or_default().to_string_lossy();
+    let backup = app.with_file_name(format!("{name}.previous"));
+    let script = format!(
+        r#"$ErrorActionPreference='Stop';Start-Sleep -Milliseconds 1200;
+$app={app};$new={new};$backup={backup};
+try{{
+ if(Test-Path -LiteralPath $backup){{Remove-Item -LiteralPath $backup -Recurse -Force}};
+ Move-Item -LiteralPath $app -Destination $backup;
+ Move-Item -LiteralPath $new -Destination $app;
+ Start-Process -FilePath (Join-Path $app 'ssjl.exe');
+ Start-Sleep -Seconds 3;
+ Remove-Item -LiteralPath $backup -Recurse -Force
+}}catch{{
+ if(!(Test-Path -LiteralPath $app) -and (Test-Path -LiteralPath $backup)){{Move-Item -LiteralPath $backup -Destination $app}};
+ if(Test-Path -LiteralPath (Join-Path $app 'ssjl.exe')){{Start-Process -FilePath (Join-Path $app 'ssjl.exe')}};
+ throw
+}}"#,
+        app = ps_quote(&app),
+        new = ps_quote(&update.root),
+        backup = ps_quote(&backup)
+    );
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("TEMP"))
+        .map_err(|_| "no update directory".to_string())?;
+    let path = PathBuf::from(base)
+        .join("ssjl")
+        .join(format!("apply-{}.ps1", update.version));
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let mut bytes = vec![0xff, 0xfe];
+    for w in script.encode_utf16() {
+        bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn launch_update(_update: &PreparedUpdate) -> Result<(), String> {
+    Err("automatic updates are available in the Windows build".into())
+}
+
+fn js_string(s: &str) -> String {
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+            .replace('\"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "")
+    )
+}
+
+fn update_event_script(m: &UpdateMessage) -> String {
+    format!("window.dispatchEvent(new CustomEvent('ssjl-update',{{detail:{{state:{},message:{},version:{}}}}}));",
+            js_string(m.state), js_string(&m.message), js_string(&m.version))
 }
 
 /// Spawn the simulator, announce its URL, then keep reading its output for as
@@ -396,9 +762,7 @@ fn start_server(
 fn parse_url(line: &str) -> Option<String> {
     let start = line.find("http://127.0.0.1:")?;
     let rest = &line[start..];
-    let end = rest
-        .find(char::is_whitespace)
-        .unwrap_or(rest.len());
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     let url = rest[..end].trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/');
     if url.len() > "http://127.0.0.1:".len() {
         Some(url.to_string())
@@ -419,8 +783,8 @@ fn server_path() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("SSJL_SERVER") {
         return Ok(PathBuf::from(p));
     }
-    let here = std::env::current_exe()
-        .map_err(|e| format!("cannot locate this executable: {e}"))?;
+    let here =
+        std::env::current_exe().map_err(|e| format!("cannot locate this executable: {e}"))?;
     let dir = here
         .parent()
         .ok_or_else(|| "this executable has no directory".to_string())?;
@@ -471,6 +835,46 @@ fn app_icon() -> Icon {
 
 /// Shown while the simulator warms up. Deliberately styled like the app so
 /// the window does not flash a white page first.
+const UPDATE_UI: &str = concat!(
+    r#"
+(() => {
+  const current = '"#,
+    env!("CARGO_PKG_VERSION"),
+    r#"';
+  function mount() {
+    const nav = document.querySelector('.appnav');
+    if (!nav || document.getElementById('host-update')) return;
+    const b = document.createElement('button'); b.id = 'host-update';
+    b.textContent = 'v' + current; b.title = 'Check for updates';
+    b.style.cssText = 'margin-left:auto;background:transparent;color:var(--text-3,#8b97a8);border:1px solid var(--line,#273140);border-radius:4px;padding:4px 9px;font:10px ui-monospace,monospace;cursor:pointer';
+    const end = nav.querySelector('.appnav-end'); nav.insertBefore(b, end || null);
+    const toast = document.createElement('div'); toast.id = 'host-update-note';
+    toast.style.cssText = 'display:none;position:fixed;z-index:120;right:14px;top:66px;max-width:340px;padding:10px 12px;background:var(--surface,#131922);color:var(--text,#e4e9f0);border:1px solid var(--amber,#f0a500);border-radius:5px;box-shadow:0 12px 34px #0008;font:12px/1.45 system-ui';
+    document.body.appendChild(toast);
+    const send = m => window.ipc && window.ipc.postMessage(m);
+    const action = m => { b.onclick = () => send(m); b.disabled = false; };
+    b.onclick = () => send('update:check');
+    window.addEventListener('ssjl-update', e => {
+      const d=e.detail||{}, v=d.version ? ' v'+d.version : '';
+      b.title=d.message||'Update status'; toast.textContent=d.message||'';
+      if(d.state==='checking'){b.textContent='checking...';b.disabled=true}
+      else if(d.state==='current'){b.textContent='v'+current;action('update:check');toast.style.display='none'}
+      else if(d.state==='available'){b.textContent='update'+v;action('update:download');toast.textContent=`${d.message}. Click “update${v}” to download it.`;toast.style.display='block'}
+      else if(d.state==='downloading'){b.textContent='downloading'+v;b.disabled=true;toast.style.display='block'}
+      else if(d.state==='ready'){b.textContent='restart to update';action('update:install');toast.style.display='block'}
+      else if(d.state==='error'){b.textContent='update issue';action('update:check');toast.style.borderColor='var(--failed,#f85149)';toast.style.display='block'}
+    });
+    const last=+(sessionStorage.getItem('ssjl.update.checked')||0);
+    if(Date.now()-last>21600000) setTimeout(() => {
+      sessionStorage.setItem('ssjl.update.checked',String(Date.now()));
+      send('update:check');
+    }, 1800);
+  }
+  document.addEventListener('DOMContentLoaded', mount);
+})();
+"#
+);
+
 const SPLASH: &str = r#"<!doctype html><html><head><meta charset="utf-8">
 <style>
   html,body{height:100%;margin:0}

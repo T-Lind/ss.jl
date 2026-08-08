@@ -427,14 +427,22 @@ function scene_payload(asc, cis)
         idx = flyby_idx(L, 1600)
         px = Float64[]; py = Float64[]; pz = Float64[]
         mx = Float64[]; my = Float64[]; mz = Float64[]
-        tt = Float64[]; pp = Int[]
+        tt = Float64[]; pp = Int[]; lat = Float64[]; lon = Float64[]
         for i in idx
             push!(px, L.rx[i] / 1e6); push!(py, L.ry[i] / 1e6); push!(pz, L.rz[i] / 1e6)
             push!(mx, L.mx[i] / 1e6); push!(my, L.my[i] / 1e6); push!(mz, L.mz[i] / 1e6)
             push!(tt, L.t[i]); push!(pp, L.phase[i])
+            # Ground track in the same rotating-Earth convention as the
+            # propagator. Shipping it explicitly keeps the analysis map out of
+            # the business of reimplementing geodesy in JavaScript.
+            la, lo, _ = SatelliteSim.geodetic_from_ecef(
+                SatelliteSim.rot_z((L.rx[i], L.ry[i], L.rz[i]),
+                                   SatelliteSim.earth_rotation_angle(0.0, L.t[i])))
+            push!(lat, rad2deg_(la)); push!(lon, rad2deg_(lo))
         end
         cisd = Dict("t" => tt, "x" => px, "y" => py, "z" => pz,
                     "mx" => mx, "my" => my, "mz" => mz, "ph" => pp,
+                    "lat" => lat, "lon" => lon,
                     "n" => [nrm[1], nrm[2], nrm[3]])
     end
     AL = asc.log
@@ -447,7 +455,13 @@ function scene_payload(asc, cis)
                   "v" => deci(AL.vrel[aidx], 400), "qbar" => deci(AL.qbar[aidx] ./ 1e3, 400),
                   "gamma" => deci(AL.gamma[aidx], 400), "mach" => deci(AL.mach[aidx], 400),
                   "thrust" => deci(AL.thrust[aidx], 400), "m" => deci(AL.m[aidx], 400),
-                  "dr" => deci(AL.downrange[aidx], 400))
+                  "dr" => deci(AL.downrange[aidx], 400),
+                  "lat" => rad2deg_.(deci(AL.lat[aidx], 400)),
+                  "lon" => rad2deg_.(deci(AL.lon[aidx], 400)),
+                  # Proper axial acceleration while powered. This is the load
+                  # an occupant or payload feels from thrust; entry's total
+                  # aerodynamic g-load is supplied by entry_payload! below.
+                  "g" => deci((AL.thrust[aidx] ./ AL.m[aidx]) ./ G0, 400))
     (cis = cisd, asc3d = asc3d, ascent = ascent)
 end
 
@@ -672,7 +686,9 @@ function entry_payload!(out, metrics, events, ent)
                         "h" => deci(EL.h[eidx] ./ 1e3, 500),
                         "v" => deci(EL.vrel[eidx], 500),
                         "g" => deci(EL.gload[eidx], 500),
-                        "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500))
+                        "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500),
+                        "lat" => rad2deg_.(deci(EL.lat[eidx], 500)),
+                        "lon" => rad2deg_.(deci(EL.lon[eidx], 500)))
     out["sites"]["splash_lat"] = rad2deg_(ent.lat_splash)
     out["sites"]["splash_lon"] = rad2deg_(ent.lon_splash)
     nothing
@@ -746,6 +762,11 @@ function panel_orbit(p)::Dict{String,Any}
         "asc3d" => sc.asc3d,
         "ascent" => sc.ascent,
         "events" => events,
+        "achievements" => Dict{String,Any}(
+            "orbit" => asc.reached_orbit && haslog,
+            "tli" => false, "flyby" => false, "return" => false,
+            "entry" => ent !== nothing,
+        ),
         "sites" => Dict{String,Any}(
             "launch_lat" => rad2deg_(eo.guid.site_lat),
             "launch_lon" => rad2deg_(eo.guid.site_lon),
@@ -821,6 +842,10 @@ function panel_suborbital(p)::Dict{String,Any}
         "asc3d" => sc.asc3d,
         "ascent" => sc.ascent,
         "events" => events,
+        "achievements" => Dict{String,Any}(
+            "orbit" => false, "tli" => false, "flyby" => false, "return" => false,
+            "entry" => ent !== nothing,
+        ),
         "sites" => Dict{String,Any}(
             "launch_lat" => rad2deg_(sb.guid.site_lat),
             "launch_lon" => rad2deg_(sb.guid.site_lon),
@@ -921,6 +946,21 @@ function panel_mission(p)::Dict{String,Any}
         "asc3d" => sc.asc3d,
         "ascent" => sc.ascent,
         "events" => events,
+        # A payload block says data exists; it does not prove a mission
+        # milestone was achieved. The free-return corrector can return its
+        # last off-target trial so a failure remains diagnosable.
+        "achievements" => Dict{String,Any}(
+            "orbit" => asc.reached_orbit,
+            "tli" => cis !== nothing && isfinite(cis.t_tli),
+            "flyby" => cis !== nothing &&
+                       !(ms.design_status in (:stalled, :unreachable)) &&
+                       isfinite(cis.t_perilune) && cis.perilune_alt > 0.0 &&
+                       any(==(3), cis.log.phase),
+            "return" => cis !== nothing &&
+                        !(ms.design_status in (:stalled, :unreachable)) &&
+                        any(==(3), cis.log.phase),
+            "entry" => ent !== nothing,
+        ),
         "sites" => Dict{String,Any}(
             "launch_lat" => rad2deg_(ms.guid.site_lat),
             "launch_lon" => rad2deg_(ms.guid.site_lon),
@@ -971,7 +1011,7 @@ function panel_mission(p)::Dict{String,Any}
         push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
         push!(events, Dict("phase" => "cislunar", "name" => "tli_cutoff",
                            "t" => cis.t_tli + cis.burn_duration))
-        isfinite(cis.t_perilune) &&
+        out["achievements"]["flyby"] &&
             push!(events, Dict("phase" => "cislunar", "name" => "perilune",
                                "t" => cis.t_perilune))
         ent !== nothing &&
@@ -1069,12 +1109,19 @@ function run_solve(p)::Dict{String,Any}
     # With ftol = 0 nothing ever counts as hit, so a search that starts on the
     # answer still burns its whole budget and reports :no_bracket.
     ftol = 1e-4 * max(abs(target), 1.0)
+    progress!(p, "solve", "starting bracket search…"; current = 0, total = budget)
+    evaluated = Threads.Atomic{Int}(0)
     res = find_root(lo, hi; target = target, max_iter = budget, ftol = ftol) do x
         q = copy(p)
         q[param] = string(x)
         v = panel_mission(q)["metrics"][metric]
+        n = Threads.atomic_add!(evaluated, 1) + 1
+        progress!(p, "solve", "evaluation $n of up to $budget · $param = $(round(x, sigdigits=5))";
+                  current = n, total = budget)
         v === nothing ? NaN : Float64(v)
     end
+    progress!(p, "complete", "target search complete";
+              current = evaluated[], total = evaluated[], done = true)
     Dict{String,Any}(
         "ok" => true, "param" => param, "metric" => metric,
         "target" => target, "x" => res.x, "value" => res.value,
@@ -1206,6 +1253,8 @@ function run_sweep(p)::Dict{String,Any}
     nv = clamp(Int(getf(p, "sweep_n", 9.0)), 2, 41)
     vals = collect(range(lo, hi; length = nv))
     runs = Vector{Any}(undef, nv)
+    progress!(p, "sweep", "launching $nv mission evaluations…"; current = 0, total = nv)
+    finished = Threads.Atomic{Int}(0)
     Threads.@threads for i in 1:nv
         q = copy(p)
         q[param] = string(vals[i])
@@ -1215,7 +1264,11 @@ function run_sweep(p)::Dict{String,Any}
         catch err
             Dict("ok" => false, "error" => sprint(showerror, err))
         end
+        n = Threads.atomic_add!(finished, 1) + 1
+        progress!(p, "sweep", "completed mission $n of $nv"; current = n, total = nv)
     end
+    progress!(p, "complete", "parameter sweep complete";
+              current = nv, total = nv, done = true)
     Dict{String,Any}("ok" => true, "param" => param, "values" => vals, "runs" => runs)
 end
 
@@ -1248,6 +1301,42 @@ const RUN_SEQ = Ref(0)
 # click can be here at once.
 const RUNS_LOCK = ReentrantLock()
 
+# ----------------------------------------------------------- live progress --
+# Long simulations are ordinary here, but a silent ten-second request is
+# indistinguishable from a hung one. Each client gives slow work a short-lived
+# job id and polls this ledger while the original request remains in flight.
+const PROGRESS = Dict{String,Dict{String,Any}}()
+const PROGRESS_LOCK = ReentrantLock()
+
+job_id(p) = get(p, "_job", "")
+
+function progress!(p, stage::AbstractString, detail::AbstractString;
+                   current::Int = 0, total::Int = 0, done::Bool = false)
+    id = job_id(p)
+    isempty(id) && return
+    lock(PROGRESS_LOCK) do
+        PROGRESS[id] = Dict{String,Any}(
+            "ok" => true, "stage" => stage, "detail" => detail,
+            "current" => current, "total" => total, "done" => done,
+            "at" => time())
+        # Browser tabs can vanish mid-request. Bound abandoned progress state
+        # rather than keeping one entry per mission for the server's lifetime.
+        for (k, v) in collect(PROGRESS)
+            time() - get(v, "at", 0.0) > 600 && delete!(PROGRESS, k)
+        end
+    end
+end
+
+function progress_payload(path::AbstractString)
+    q = findfirst('?', path)
+    id = q === nothing ? "" : get(parse_form(path[nextind(path, q):end]), "job", "")
+    lock(PROGRESS_LOCK) do
+        get(PROGRESS, id, Dict{String,Any}(
+            "ok" => true, "stage" => "queued", "detail" => "waiting for the worker…",
+            "current" => 0, "total" => 0, "done" => false))
+    end
+end
+
 """
     remember_run!(payload, p) -> payload
 
@@ -1263,7 +1352,11 @@ function remember_run!(payload::Dict{String,Any}, p::AbstractDict)
         id = "r$(RUN_SEQ[])"
         payload["id"] = id
         payload["at"] = time()
-        payload["params"] = Dict{String,String}(string(k) => string(v) for (k, v) in p)
+        # `_job` is transport metadata for progress polling, not part of the
+        # vehicle. Letting it into saved params leaked a stale job id into
+        # builder/analysis links and into every re-run of this flight.
+        payload["params"] = Dict{String,String}(string(k) => string(v) for (k, v) in p
+                                                 if !startswith(string(k), "_"))
         RUNS[id] = payload
         pushfirst!(RUN_ORDER, id)
         while length(RUN_ORDER) > MAX_RUNS
@@ -1280,8 +1373,22 @@ Fly a mission and keep it. Only `/api/run` goes through here — a sweep flies
 dozens of missions internally and none of them are runs the user asked for.
 """
 function run_and_remember(p)
+    progress!(p, "configuration", "validating the vehicle and mission inputs…";
+              current = 1, total = 4)
+    progress!(p, "simulation", mission_mode(p) === :landing ?
+              "optimizing ascent, translunar injection, and powered descent…" :
+              mission_mode(p) === :orbit ?
+              "optimizing ascent and propagating the requested orbit…" :
+              mission_mode(p) === :suborbital ?
+              "solving guidance and propagating the ballistic arc…" :
+              "optimizing ascent and the free-return trajectory…";
+              current = 2, total = 4)
     out = panel_mission(p)
-    get(out, "ok", false) === true ? remember_run!(out, p) : out
+    progress!(p, "diagnostics", "building event, telemetry, and ground-track data…";
+              current = 3, total = 4)
+    result = get(out, "ok", false) === true ? remember_run!(out, p) : out
+    progress!(p, "complete", "trajectory ready"; current = 4, total = 4, done = true)
+    result
 end
 
 """
@@ -1505,6 +1612,8 @@ function route(method::AbstractString, path::AbstractString,
             return ("200 OK", "application/json", json(catalogue_payload()))
         elseif method in ("GET", "HEAD") && path == "/api/health"
             return ("200 OK", "application/json", json(health_payload()))
+        elseif method in ("GET", "HEAD") && startswith(path, "/api/progress?")
+            return ("200 OK", "application/json", json(progress_payload(path)))
         elseif method in ("GET", "HEAD") &&
                (path == "/api/runs" || startswith(path, "/api/runs?"))
             return ("200 OK", "application/json", json(runs_payload()))

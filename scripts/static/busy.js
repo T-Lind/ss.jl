@@ -33,20 +33,32 @@ const CSS = `
 }
 @keyframes busy-in { from { opacity: 0 } to { opacity: 1 } }
 .busy-card {
-  display: flex; flex-direction: column; align-items: center; gap: 10px;
-  padding: 22px 30px; min-width: 260px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 9px;
+  padding: 22px 24px; width: min(390px, calc(100vw - 32px));
   background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--radius); box-shadow: 0 18px 50px rgba(0,0,0,.5);
 }
-.busy-bar { width: 200px; height: 3px; border-radius: 2px;
+.busy-head { display:flex; align-items:baseline; justify-content:space-between; gap:16px }
+.busy-bar { width: 100%; height: 4px; border-radius: 2px;
             background: var(--raise); overflow: hidden; }
 .busy-bar i { display: block; width: 40%; height: 100%; border-radius: 2px;
               background: var(--amber); animation: busy-slide 1.1s ease-in-out infinite; }
+.busy-bar.determinate i { animation:none; transform:none; width:0;
+                          transition:width .2s ease-out }
 @keyframes busy-slide { 0% { transform: translateX(-110%) }
                         100% { transform: translateX(360%) } }
-.busy-what { font-family: var(--sans); font-size: 13px; color: var(--text); text-align: center; }
+.busy-what { font-family: var(--sans); font-size: 13px; color: var(--text); }
 .busy-t { font-family: var(--mono); font-size: 11px; color: var(--text-3);
           font-variant-numeric: tabular-nums; }
+.busy-stage { display:flex; justify-content:space-between; gap:12px;
+              font:600 11px/1.3 var(--mono); letter-spacing:.08em;
+              text-transform:uppercase; color:var(--amber) }
+.busy-count { color:var(--text-3); font-weight:500; letter-spacing:0 }
+.busy-detail { min-height:18px; color:var(--text-2); font:12px/1.45 var(--sans) }
+.busy-log { list-style:none; padding:7px 0 0; margin:0; border-top:1px solid var(--line);
+            display:flex; flex-direction:column; gap:4px }
+.busy-log li { color:var(--text-3); font:10.5px/1.35 var(--mono) }
+.busy-log li::before { content:'✓'; color:var(--nominal); margin-right:7px }
 
 .busy-errs { position: fixed; z-index: 95; right: 14px; bottom: 14px;
              display: flex; flex-direction: column; gap: 8px;
@@ -107,9 +119,13 @@ export function busy(what) {
     scrim.className = 'busy-scrim';
     scrim.innerHTML =
       `<div class="busy-card" role="status" aria-live="polite">
+         <div class="busy-head">
+           <div class="busy-what"></div><div class="busy-t">0.0 s</div>
+         </div>
          <div class="busy-bar"><i></i></div>
-         <div class="busy-what"></div>
-         <div class="busy-t">0.0 s</div>
+         <div class="busy-stage"><span>starting</span><span class="busy-count"></span></div>
+         <div class="busy-detail">preparing the request…</div>
+         <ul class="busy-log" hidden></ul>
        </div>`;
     scrim.querySelector('.busy-what').textContent = what || 'working…';
     document.body.appendChild(scrim);
@@ -121,7 +137,7 @@ export function busy(what) {
     scrim.querySelector('.busy-what').textContent = what || 'working…';
   }
   let ended = false;
-  return () => {
+  const end = () => {
     if (ended) return;          // a double call must not unbalance the count
     ended = true;
     if (--depth > 0) return;
@@ -129,6 +145,31 @@ export function busy(what) {
     if (scrim) scrim.remove();
     scrim = null;
   };
+  end.progress = p => {
+    if (!scrim || !p) return;
+    const stage = String(p.stage || 'working');
+    const detail = String(p.detail || '');
+    const stageEl = scrim.querySelector('.busy-stage span');
+    const previous = stageEl.dataset.stage;
+    if (previous && previous !== stage && previous !== 'complete' && previous !== 'queued') {
+      const log = scrim.querySelector('.busy-log');
+      const li = document.createElement('li'); li.textContent = previous;
+      log.appendChild(li); log.hidden = false;
+      while (log.children.length > 4) log.firstElementChild.remove();
+    }
+    stageEl.dataset.stage = stage;
+    stageEl.textContent = stage;
+    scrim.querySelector('.busy-detail').textContent = detail;
+    const total = +p.total || 0, current = +p.current || 0;
+    scrim.querySelector('.busy-count').textContent = total ? `${current} / ${total}` : '';
+    if (total) {
+      const bar = scrim.querySelector('.busy-bar');
+      bar.classList.add('determinate');
+      bar.querySelector('i').style.width = `${Math.max(2, Math.min(100, 100*current/total))}%`;
+    }
+  };
+  end.say = what => say(what);
+  return end;
 }
 
 /** Update the message of the overlay currently showing, if there is one. */

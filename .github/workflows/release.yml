@@ -1,0 +1,53 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag matches application version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $want = '${{ github.ref_name }}'.TrimStart('v')
+          $project = (Select-String -Path Project.toml -Pattern '^version = "([^"]+)"$').Matches.Groups[1].Value
+          $host = (Select-String -Path host/Cargo.toml -Pattern '^version = "([^"]+)"$').Matches.Groups[1].Value
+          if ($project -ne $want -or $host -ne $want) { throw "tag $want, Project $project, host $host" }
+      - name: Install build dependencies
+        run: julia --project=build -e "using Pkg; Pkg.instantiate()"
+      - name: Build desktop application
+        run: julia --project=build build/build_app.jl
+      - name: Package and checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/ssjl/* -DestinationPath ssjl-windows-x64.zip -CompressionLevel Optimal
+          $hash = (Get-FileHash ssjl-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ssjl-windows-x64.zip" | Set-Content -NoNewline ssjl-windows-x64.zip.sha256
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ssjl-windows-x64.zip
+            ssjl-windows-x64.zip.sha256
+      - name: Keep manual-build artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssjl-windows-x64
+          path: |
+            ssjl-windows-x64.zip
+            ssjl-windows-x64.zip.sha256
