@@ -23,8 +23,8 @@ jobs:
         run: |
           $want = '${{ github.ref_name }}'.TrimStart('v')
           $project = (Select-String -Path Project.toml -Pattern '^version = "([^"]+)"$').Matches.Groups[1].Value
-          $host = (Select-String -Path host/Cargo.toml -Pattern '^version = "([^"]+)"$').Matches.Groups[1].Value
-          if ($project -ne $want -or $host -ne $want) { throw "tag $want, Project $project, host $host" }
+          $hostVersion = (Select-String -Path host/Cargo.toml -Pattern '^version = "([^"]+)"$').Matches.Groups[1].Value
+          if ($project -ne $want -or $hostVersion -ne $want) { throw "tag $want, Project $project, host $hostVersion" }
       - name: Install build dependencies
         run: julia --project=build -e "using Pkg; Pkg.instantiate()"
       - name: Build desktop application
