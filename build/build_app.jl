@@ -48,9 +48,13 @@ create_app(
     # whether launching the app flashes a black console window at you.
     executables = ["ssjl-server" => "julia_main"],
     precompile_execution_file = joinpath(@__DIR__, "precompile_workload.jl"),
-    # The mission stack is the expensive thing to compile and the whole point
-    # of freezing it, so let the compiler work on it properly.
-    incremental = false,
+    # Build on Julia's shipped sysimage instead of recompiling Base from
+    # scratch. A clean Windows Actions runner spent more than fifty minutes in
+    # the two non-incremental compiler passes before the release was cancelled;
+    # the app-specific workload below is the code we actually need to add.
+    # This costs roughly 70 MB in the bundle, but makes release builds bounded
+    # and keeps the startup-specialized mission code.
+    incremental = true,
     filter_stdlibs = false,
     force = true,
     include_lazy_artifacts = false,

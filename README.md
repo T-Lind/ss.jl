@@ -642,7 +642,7 @@ has launched. Releases are produced by `.github/workflows/release.yml` from
 `v*` tags, with the zip and matching checksum names expected by the host.
 
 ```powershell
-julia --project=build build/build_app.jl      # -> dist/ssjl (~615 MB, ~25 min)
+julia --project=build build/build_app.jl      # -> dist/ssjl (~685 MB; build time varies)
 dist\ssjl\ssjl.exe
 ```
 
