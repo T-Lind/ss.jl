@@ -1047,10 +1047,15 @@ function payloadUI() {
 // the server is asked.
 const podR = m => Math.min(3.0, Math.max(0.30, 0.086*Math.cbrt(Math.max(m, 1))));
 function crewNote() {
-  const c = $('crewed').checked;
-  $('crew_note').textContent = c ? 'crew capsule'
-    : 'uncrewed bus — no cabin, and no interior view';
-  $('crew_note').style.color = c ? '' : '#d9a95c';
+  // The note follows the PAYLOAD KIND, not the crew box: a capsule with no crew
+  // is still a capsule, and calling it an "uncrewed bus" read as the selection
+  // being inverted.
+  const bus = isBus();
+  const c = !bus && $('crewed').checked;
+  $('crew_note').textContent = bus ? 'uncrewed bus — no cabin, and no interior view'
+    : c ? 'crew capsule'
+    : 'uncrewed capsule — no cabin, and no interior view';
+  $('crew_note').style.color = (bus || !c) ? '#d9a95c' : '';
 }
 function podNote() {
   if (landingMode()) {

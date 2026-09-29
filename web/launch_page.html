@@ -4472,7 +4472,11 @@ function musFor(world, t) {
 }
 
 // ---------------------------------------------------------------- cameras --
-let camMode = 'auto', freeYaw = -2.4, freePitch = 0.12, freeDist = 0;
+// 'auto' is the cinematic director: it cuts between shots as the flight
+// progresses. It is still selectable, but it is not the default any more —
+// opening on a single camera means the view does not move or change unless you
+// ask it to.
+let camMode = 'chase', freeYaw = -2.4, freePitch = 0.12, freeDist = 0;
 // Operator zoom, a magnification on top of the camera's computed fov (1 = the
 // rig's own framing). Applied in frame(), NOT in the cameras or buildScene:
 // the camera audit reads buildScene directly and its recorded baselines are
@@ -7484,7 +7488,7 @@ function warpStep(dir) {
   return manualWarp === 0 ? 'AUTO' : warpLabel(manualWarp).toUpperCase();
 }
 function initControls() {
-  chipRow($('cams'), MS ? CAMS_MOON() : CAMS(), 'auto', m => camMode = m);
+  chipRow($('cams'), MS ? CAMS_MOON() : CAMS(), camMode, m => camMode = m);
   syncHelp();
   // the hint has done its job by the time the vehicle is off the pad
   setTimeout(() => $('keys').classList.remove('show'), 9000);
