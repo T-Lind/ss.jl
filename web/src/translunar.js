@@ -16,7 +16,7 @@ export const cislunarLog = () => ({
   mx: [], my: [], mz: [], phase: [],
 });
 
-function cis_push(L, t, r, v, eph, theta_g0, phase) {
+export function cis_push(L, t, r, v, eph, theta_g0, phase) {
   const theta = earth_rotation_angle(theta_g0, t);
   const h = geodetic_from_ecef(rot_z(r, theta))[2];
   const m = moon_position(eph, t);
@@ -28,7 +28,7 @@ function cis_push(L, t, r, v, eph, theta_g0, phase) {
   L.phase.push(phase);
 }
 
-const cislunarResult = (L, outcome, r, v, t, m, dv_tli, t_tli, burn_duration,
+export const cislunarResult = (L, outcome, r, v, t, m, dv_tli, t_tli, burn_duration,
                         perilune_alt, t_perilune, vac_perigee_alt, gamma_end,
                         miss_passes, first_perigee_alt) => ({
   log: L, outcome, r, v, t, m, dv_tli, t_tli, burn_duration, perilune_alt,
