@@ -18,11 +18,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ss.jl vehicle builder</title>
-<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="./static/tokens.css">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  /* ground, ink and rules from /static/tokens.css — see the note in
+  /* ground, ink and rules from ./static/tokens.css — see the note in
      panel_page.html; only what is local to the builder stays here */
   body { margin: 0; background: var(--ground); color: var(--text);
          font: 13.5px/1.45 var(--sans); }
@@ -99,10 +99,10 @@
 <nav class="appnav">
   <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
   <span class="appnav-links">
-    <a class="navlink" id="backlink" href="/">mission control</a>
-    <a class="navlink" href="/build" aria-current="page">vehicle builder</a>
-    <a class="navlink" id="analysislink" href="/analysis">analysis</a>
-    <a class="navlink" id="flylink" href="/launch">launch view</a>
+    <a class="navlink" id="backlink" href="./">mission control</a>
+    <a class="navlink" href="build_page.html" aria-current="page">vehicle builder</a>
+    <a class="navlink" id="analysislink" href="analysis_page.html">analysis</a>
+    <a class="navlink" id="flylink" href="launch_page.html">launch view</a>
   </span>
   <!-- short on purpose: uppercase and letterspaced, this slot can carry about
        four words before it stops being a caption and starts being a headline
@@ -253,12 +253,12 @@
 
 <script type="module">
 'use strict';
-import { fin, fmt, fmtMass } from '/static/fmt.js';
-import * as api from '/static/api.js';
-import * as vehicle from '/static/vehicle.js';
-import { own } from '/static/vehicle.js';
-import { busy, fail, reportUncaught } from '/static/busy.js';
-import { suite, report, requested } from '/static/selftest.js';
+import { fin, fmt, fmtMass } from './static/fmt.js';
+import * as api from './static/api.js';
+import * as vehicle from './static/vehicle.js';
+import { own } from './static/vehicle.js';
+import { busy, fail, reportUncaught } from './static/busy.js';
+import { suite, report, requested } from './static/selftest.js';
 
 const $ = id => document.getElementById(id);
 reportUncaught();
@@ -549,7 +549,7 @@ function params() {
 // The wire to mission control: every good edit lands in localStorage, and the
 // panel (in any other tab) applies it on its storage event — so the mission
 // page's geometry view follows this page live. Which keys travel, and why
-// only those, is documented in /static/vehicle.js.
+// only those, is documented in ./static/vehicle.js.
 function saveVehicle() { vehicle.save(params()); }
 function refreshLinks() {
   $('backlink').href = '/?' + params();

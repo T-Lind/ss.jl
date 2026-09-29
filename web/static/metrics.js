@@ -6,7 +6,7 @@
 // ugly name — it makes the two pages look like they are measuring different
 // things.
 
-import { fmt } from '/static/fmt.js';
+import { fmt } from './fmt.js';
 
 /** Mission fields a sweep or a solve may vary. */
 export const PARAM_LABEL = {

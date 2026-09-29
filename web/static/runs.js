@@ -11,8 +11,8 @@
 // /launch and /analysis — and a history entry that reads differently
 // depending on which page you are on is not a history.
 
-import { fin, fmt } from '/static/fmt.js';
-import { runsList, runsGet } from '/static/api.js';
+import { fin, fmt } from './fmt.js';
+import { runsList, runsGet } from './api.js';
 
 /** Every run this session has flown, newest first. Never throws: an empty
  *  history and an unreachable server both mean "nothing to offer". */

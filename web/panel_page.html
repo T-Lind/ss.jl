@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ss.jl mission control</title>
-<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="./static/tokens.css">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  /* ground, ink and rules come from /static/tokens.css so this page and the
+  /* ground, ink and rules come from ./static/tokens.css so this page and the
      builder and the launch view are one product rather than three that happen
      to be dark. Only what is genuinely local to this page stays here. */
   body { margin: 0; background: var(--ground); color: var(--text);
@@ -73,7 +73,7 @@
   .good { color: var(--nominal); }
   .warn { color: var(--marginal); }
   .bad  { color: var(--failed); }
-  /* the metric strip is .mgroups / .mrow in /static/tokens.css now — grouped
+  /* the metric strip is .mgroups / .mrow in ./static/tokens.css now — grouped
      by mission phase in flight order rather than eleven equal-weight tiles */
   /* The two live views, side by side. The trajectory needs the width — a
      trans-lunar transfer is 60 Earth radii long — and the stack needs the
@@ -167,10 +167,10 @@
 <nav class="appnav">
   <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
   <span class="appnav-links">
-    <a class="navlink" href="/" aria-current="page">mission control</a>
-    <a class="navlink" id="nav_build" href="/build">vehicle builder</a>
-    <a class="navlink" id="nav_analysis" href="/analysis">analysis</a>
-    <a class="navlink" id="nav_launch" href="/launch">launch view</a>
+    <a class="navlink" href="./" aria-current="page">mission control</a>
+    <a class="navlink" id="nav_build" href="build_page.html">vehicle builder</a>
+    <a class="navlink" id="nav_analysis" href="analysis_page.html">analysis</a>
+    <a class="navlink" id="nav_launch" href="launch_page.html">launch view</a>
   </span>
   <span class="appnav-end">
     <span class="u-label" id="nav_note">circumlunar free return</span>
@@ -489,7 +489,7 @@
          what you read AFTER a run, not what you watch during one, and having
          them here meant the answer to "did it work" was four screens above
          the tools for asking why. -->
-    <a class="card gonext" id="analysislink" href="/analysis">
+    <a class="card gonext" id="analysislink" href="analysis_page.html">
       <span class="gonext-k u-label">next</span>
       <span class="gonext-t">Analysis &rarr;</span>
       <span class="gonext-w">ascent, entry and descent profiles · the event log ·
@@ -500,17 +500,17 @@
 
 <script type="module">
 'use strict';
-import { fin, fmt, fmtKm } from '/static/fmt.js';
-import * as api from '/static/api.js';
-import * as vehicle from '/static/vehicle.js';
+import { fin, fmt, fmtKm } from './static/fmt.js';
+import * as api from './static/api.js';
+import * as vehicle from './static/vehicle.js';
 // The metric vocabulary and the limit table are shared with /analysis, which
 // names the same quantities in its sweep and solve pickers.
-import { V, limit } from '/static/metrics.js';
+import { V, limit } from './static/metrics.js';
 // Loading and failure are shared surfaces: a mission takes seconds, and a
 // page that is thinking must not look like a page that is broken.
-import { busy, fail, clearFailures, reportUncaught } from '/static/busy.js';
-import * as runs from '/static/runs.js';
-import { suite, report, requested } from '/static/selftest.js';
+import { busy, fail, clearFailures, reportUncaught } from './static/busy.js';
+import * as runs from './static/runs.js';
+import { suite, report, requested } from './static/selftest.js';
 
 reportUncaught();
 
@@ -2109,10 +2109,10 @@ function runQuery() {
 }
 function syncLinks() {
   const cfg = '?' + params(), rq = runQuery();
-  for (const [id, base, q] of [['nav_analysis', '/analysis', rq],
-                               ['analysislink', '/analysis', rq],
-                               ['nav_launch',   '/launch',   rq],
-                               ['nav_build',    '/build',    cfg]]) {
+  for (const [id, base, q] of [['nav_analysis', 'analysis_page.html', rq],
+                               ['analysislink', 'analysis_page.html', rq],
+                               ['nav_launch',   'launch_page.html',   rq],
+                               ['nav_build',    'build_page.html',    cfg]]) {
     const el = $(id);
     if (!el) continue;
     el.href = base + q;
@@ -2120,7 +2120,7 @@ function syncLinks() {
     // resolves to the most recent run, so history alone keeps it live. The
     // link always works; this says whether it leads anywhere yet.
     el.classList.toggle('is-empty',
-                        base !== '/build' && !run && !history.length);
+                        base !== 'build_page.html' && !run && !history.length);
   }
 }
 /** Navigate to one of the run pages, carrying the run on screen. */
@@ -2190,12 +2190,12 @@ for (const b of $('modeswitch').querySelectorAll('button'))
 // `go` rather than window.open: a WebView2 with no NewWindowRequested handler
 // refuses to open one and reports nothing, so every one of these was a button
 // that did nothing at all in the shipped application. See `syncLinks`.
-$('launchbtn').onclick = () => go('/launch');
+$('launchbtn').onclick = () => go('launch_page.html');
 // the builder opens on this form's exact configuration; stopPropagation
 // because the chip lives inside a fold header that would otherwise collapse
 $('buildbtn').onclick = e => {
   e.stopPropagation();
-  location.href = '/build?' + params();
+  location.href = 'build_page.html?' + params();
 };
 for (const f of ['l_dry','l_prop','l_isp','l_thrust_kn','l_throttle_min','l_diameter'])
   $(f).addEventListener('input', updateLanderNote);
@@ -2215,7 +2215,7 @@ window.addEventListener('keydown', e => {
   else if (k === 'z') { moonView = false; autoFit = true; fitCamera(); }
   else if (k === 'l') $('launchbtn').click();
   else if (k === 'b') $('buildbtn').click();
-  else if (k === 'a') go('/analysis');
+  else if (k === 'a') go('analysis_page.html');
   else if (k === 'm' && landing()) $('moonview').click();
   else if (e.key === '?') $('helpdlg').showModal();
 });

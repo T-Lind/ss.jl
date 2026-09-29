@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ss.jl analysis</title>
-<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="./static/tokens.css">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -138,12 +138,12 @@
 <nav class="appnav">
   <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
   <span class="appnav-links">
-    <a class="navlink" id="nav_home" href="/">mission control</a>
-    <a class="navlink" id="nav_build" href="/build">vehicle builder</a>
+    <a class="navlink" id="nav_home" href="./">mission control</a>
+    <a class="navlink" id="nav_build" href="build_page.html">vehicle builder</a>
     <!-- same order on every page: the bar is only worth having if the link you
          want is in the place you last saw it -->
     <a class="navlink" href="#" aria-current="page">analysis</a>
-    <a class="navlink" id="nav_launch" href="/launch">launch view</a>
+    <a class="navlink" id="nav_launch" href="launch_page.html">launch view</a>
   </span>
   <span class="appnav-end u-label" id="nav_note">analysis</span>
 </nav>
@@ -165,7 +165,7 @@
       Fly one from mission control and it appears here — with the ascent and
       entry profiles, the event log, and the sweep and solve tools.</p>
     <div class="empty-runs" id="empty_runs"></div>
-    <p><a class="chip" href="/">Go to mission control &rarr;</a></p>
+    <p><a class="chip" href="./">Go to mission control &rarr;</a></p>
   </section>
 
   <!-- Powered descent leads on a landing mission: it is the fifteen kilometres
@@ -327,16 +327,16 @@
 
 <script type="module">
 'use strict';
-import { fin, fmt } from '/static/fmt.js';
-import * as api from '/static/api.js';
-import { drawLine, niceStep, fmtTick, fmtPeak } from '/static/charts.js';
-import { drawGroundTrack } from '/static/groundtrack.js';
-import { drawGroundStation } from '/static/groundstation.js';
-import { busy, fail, clearFailures, reportUncaught } from '/static/busy.js';
-import * as runs from '/static/runs.js';
+import { fin, fmt } from './static/fmt.js';
+import * as api from './static/api.js';
+import { drawLine, niceStep, fmtTick, fmtPeak } from './static/charts.js';
+import { drawGroundTrack } from './static/groundtrack.js';
+import { drawGroundStation } from './static/groundstation.js';
+import { busy, fail, clearFailures, reportUncaught } from './static/busy.js';
+import * as runs from './static/runs.js';
 import { METRIC_LABEL, SFIELD_LABEL, PARAM_LABEL, SPARAM_LABEL, LPARAM_LABEL,
-         paramLabel, metricLabel } from '/static/metrics.js';
-import { suite, report, requested } from '/static/selftest.js';
+         paramLabel, metricLabel } from './static/metrics.js';
+import { suite, report, requested } from './static/selftest.js';
 
 const $ = id => document.getElementById(id);
 reportUncaught();
@@ -376,8 +376,8 @@ const nStages = () => Math.max(1, +Q.get('nstages') || 3);
 function syncLinks() {
   const rq = run && run.id ? '?run=' + encodeURIComponent(run.id) : '';
   $('nav_home').href = '/' + rq;
-  $('nav_launch').href = '/launch' + rq;
-  $('nav_build').href = '/build?' + Q.toString();
+  $('nav_launch').href = 'launch_page.html' + rq;
+  $('nav_build').href = 'build_page.html?' + Q.toString();
 }
 // NOT called here: `run` is declared below, and reading a `let` above its
 // declaration throws — which in a module aborts everything after it, so the
@@ -474,7 +474,7 @@ async function showEmpty() {
   host.replaceChildren(...list.map((d, i) => {
     const a = document.createElement('a');
     a.className = 'chip hchip is-' + runs.verdict(d);
-    a.href = '/analysis?run=' + encodeURIComponent(d.id);
+    a.href = 'analysis_page.html?run=' + encodeURIComponent(d.id);
     a.innerHTML = `<b>#${list.length - i}</b> <span class="hv"></span> <span class="hd"></span>`;
     a.querySelector('.hv').textContent = d.vname || '';
     a.querySelector('.hd').textContent = runs.describe(d);
@@ -955,7 +955,7 @@ if (RUN_ID) {
   // never flown anything gets the empty state.
   if ([...Q.keys()].length) showEmpty();
   else runs.list().then(list => {
-      if (list.length) location.replace('/analysis?run=' + encodeURIComponent(list[0].id));
+      if (list.length) location.replace('analysis_page.html?run=' + encodeURIComponent(list[0].id));
       else showEmpty();
     });
 }
@@ -1013,7 +1013,7 @@ window.__selftest = function () {
   eq('the mission mode came from the query', () => typeof MODE, 'string');
   eq('the query carries a mode', () => Q.has('mode') || MODE === 'flyby', true);
   eq('nav links carry the configuration',
-     () => $('nav_build').getAttribute('href').startsWith('/build?'), true);
+     () => $('nav_build').getAttribute('href').startsWith('build_page.html?'), true);
   eq('and the selftest flag is not carried into the run',
      () => Q.has('selftest'), false);
 

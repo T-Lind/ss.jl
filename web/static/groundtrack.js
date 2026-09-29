@@ -10,7 +10,7 @@ const STATES = new Set();
 // Guarded so the module can be imported outside a browser (the Node helper
 // tests import `mapPath` from here) without firing a relative-URL fetch.
 if (typeof document !== 'undefined') {
-  fetch('/static/ne_110m_admin_0_countries.geojson')
+  fetch('./static/ne_110m_admin_0_countries.geojson')
     .then(r => { if (!r.ok) throw new Error(`map data: HTTP ${r.status}`); return r.json(); })
     .then(j => {
       WORLD = (j.features || []).flatMap(f => {

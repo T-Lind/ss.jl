@@ -1,0 +1,38 @@
+name: Pages
+
+on:
+  push:
+    branches: [main, feat/web-port]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # The site is web/ minus the parity harness and the dev server: the pages,
+      # the ES-module port they import, and the shared static assets.
+      - name: Stage the site
+        run: |
+          mkdir -p _site
+          cp web/*.html _site/
+          cp -r web/src _site/src
+          cp -r web/static _site/static
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

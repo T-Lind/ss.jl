@@ -24,13 +24,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sable — mission</title>
-<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="./static/tokens.css">
 <style>
   /* This page is where the console language came from, so its own names now
      point at the shared tokens rather than carrying a second set of values.
      The accent was #f2c14e here and #F0A500 on the other pages — two ambers
      nobody chose, which is the drift the token file exists to stop. One
-     definition, in /static/tokens.css; change it there and every page moves. */
+     definition, in ./static/tokens.css; change it there and every page moves. */
   :root { --ink: var(--text); --dim: var(--text-2);
           --acc: var(--amber); --go: var(--nominal); }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -135,9 +135,9 @@
 <!-- No nav bar here on purpose: this view is full-bleed and the chrome yields
      to it. It still needs to reach both other pages, though — a view you can
      only leave one way is what made three tabs feel scattered. -->
-<div class="hud" id="backlink"><a href="/">&#8617; mission control</a>
-  <a href="/build" style="margin-left:10px">vehicle builder</a>
-  <a href="/analysis" id="analysislink" style="margin-left:10px">analysis</a></div>
+<div class="hud" id="backlink"><a href="./">&#8617; mission control</a>
+  <a href="build_page.html" style="margin-left:10px">vehicle builder</a>
+  <a href="analysis_page.html" id="analysislink" style="margin-left:10px">analysis</a></div>
 <div id="keys" class="show">
   <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>h</b> for all controls</div>
 </div>
@@ -177,10 +177,10 @@
 
 <script type="module">
 'use strict';
-import { fin } from '/static/fmt.js';
-import * as api from '/static/api.js';
-import * as runs from '/static/runs.js';
-import { suite, report, requested } from '/static/selftest.js';
+import { fin } from './static/fmt.js';
+import * as api from './static/api.js';
+import * as runs from './static/runs.js';
+import { suite, report, requested } from './static/selftest.js';
 
 const $ = id => document.getElementById(id);
 const RE = 6371000.0, RM = 1737400.0, OME = 7.2921159e-5;
@@ -1396,8 +1396,8 @@ const qs = (() => {
 // The analysis link carries whatever this view is flying, so the two pages
 // never end up describing different missions.
 document.getElementById('analysislink').href =
-  RUN_ID ? '/analysis?run=' + encodeURIComponent(RUN_ID) :
-  qs     ? '/analysis?' + qs : '/analysis';
+  RUN_ID ? 'analysis_page.html?run=' + encodeURIComponent(RUN_ID) :
+  qs     ? 'analysis_page.html?' + qs : 'analysis_page.html';
 let run = null, geo = null;
 // What is painted on the hull and announced over it. Geometry supplies the
 // configured vehicle's name; old servers and empty builder names fall back to
@@ -7163,7 +7163,7 @@ function nextEv(t) {
   return best;
 }
 // `fin` — "is this server metric a real number?" — is imported from
-// /static/fmt.js, which carries the full account of why isFinite alone is not
+// ./static/fmt.js, which carries the full account of why isFinite alone is not
 // that test. Short version: it coerces, Number(null) is 0, and the server
 // writes a non-finite Float64 as JSON null, so a mission that never splashed
 // down sends "t_days": null. Guarding that with isFinite let the null through
@@ -9371,7 +9371,7 @@ async function showEmpty(configured=false) {
     for (const [i, d] of list.entries()) {
       const a = document.createElement('a');
       a.className = 'runpick';
-      a.href = '/launch?run=' + encodeURIComponent(d.id);
+      a.href = 'launch_page.html?run=' + encodeURIComponent(d.id);
       a.textContent = `#${list.length - i} · ${d.vname || 'vehicle'} · ${runs.describe(d)}`;
       host.appendChild(a);
     }
@@ -9392,7 +9392,7 @@ if (!RUN_ID && !qs) {
   // rather than loading in place keeps the URL honest, so a reload and a
   // shared link both still mean that specific run.
   runs.list().then(list => {
-    if (list.length) location.replace('/launch?run=' + encodeURIComponent(list[0].id));
+    if (list.length) location.replace('launch_page.html?run=' + encodeURIComponent(list[0].id));
     else showEmpty();      // nothing has ever been flown
   });
 } else if (RUN_ID) {
