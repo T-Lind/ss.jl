@@ -1,0 +1,9 @@
+{
+  "name": "ssjl-web",
+  "private": true,
+  "type": "module",
+  "description": "SatelliteSim ported to browser ES modules. Parity-tested against the Julia source.",
+  "scripts": {
+    "test": "node --test parity/"
+  }
+}
