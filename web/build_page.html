@@ -1,0 +1,1299 @@
+<!doctype html>
+<!-- Vehicle builder. Served at /build by panelapp.jl, which re-reads this
+     file per request. The page is a pure client of two endpoints the panel
+     already exposes: /api/catalogue (engines and mixtures) and /api/geometry
+     (the authoritative vehicle: stats and the very mesh the mission flies).
+     It holds no vehicle model of its own — every number and every triangle
+     on screen came back from the server, so what you see here is what
+     /api/run will fly.
+
+     The form speaks the panel's exact field encoding (nstages, nboost,
+     diameter, fairing, pod_mass, s<k>_*, b_*), so the query string is
+     interchangeable: /build?... rehydrates from the panel's params(), and
+     the back/launch links replay this form into / and /launch. Query keys
+     this page does not own (mission fields, kick, lander) pass through
+     untouched. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ss.jl vehicle builder</title>
+<link rel="stylesheet" href="/static/tokens.css">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  /* ground, ink and rules from /static/tokens.css — see the note in
+     panel_page.html; only what is local to the builder stays here */
+  body { margin: 0; background: var(--ground); color: var(--text);
+         font: 13.5px/1.45 var(--sans); }
+  .app { display: grid; grid-template-columns: 340px minmax(0, 1fr) 340px;
+         gap: 16px; max-width: 1560px; margin: 0 auto; padding: 16px; }
+  @media (max-width: 1100px) { .app { grid-template-columns: 1fr 1fr; }
+    .mid { grid-column: 1 / -1; order: -1; } }
+  h1 { color: var(--text); font-size: 17px; margin: 0 0 2px; }
+  h2 { color: var(--text); font-family: var(--mono); font-size: var(--t-label);
+       margin: 0; letter-spacing: .18em; text-transform: uppercase;
+       font-weight: 600; }
+  h2 + * { margin-top: 8px; }
+  .sub { color: var(--text-2); font-size: 12px; margin-bottom: 10px; }
+  .card { background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
+  label { display: block; color: #898781; font-size: 11px; margin: 7px 0 2px;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stagehdr { color: #c3c2b7; font-size: 11.5px; font-weight: 600;
+              letter-spacing: .03em; margin: 12px 0 0; display: flex;
+              align-items: baseline; gap: 8px;
+              border-top: 1px solid #2c2c2a; padding-top: 8px; }
+  .stagehdr:first-of-type { border-top: 0; margin-top: 2px; padding-top: 0; }
+  .stagehdr .rm { margin-left: auto; color: #898781; cursor: pointer;
+                  font-weight: 400; font-size: 11px; }
+  .stagehdr .rm:hover { color: #e66767; }
+  .derived { display: block; color: #898781; font-size: 10.5px;
+             font-weight: 400; letter-spacing: 0; margin: 2px 0 0;
+             font-variant-numeric: tabular-nums; }
+  input, select { width: 100%; background: #0d0d0d; color: #fff;
+    border: 1px solid rgba(255,255,255,.15); border-radius: 6px;
+    padding: 5px 8px; font: inherit; font-variant-numeric: tabular-nums; }
+  input:focus, select:focus, button:focus { outline: 2px solid #3987e5; outline-offset: 1px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  button { background: #2a2a28; color: #fff; border: 1px solid rgba(255,255,255,.15);
+           border-radius: 7px; padding: 7px 12px; font: inherit; font-weight: 600;
+           cursor: pointer; width: 100%; }
+  button:hover { background: #383835; }
+  button:disabled { opacity: .4; cursor: default; }
+  /* same three-colour language as the mission verdict */
+  .good { color: var(--nominal); }
+  .warn { color: var(--marginal); }
+  .bad  { color: var(--failed); }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tile { background: #131312; border: 1px solid rgba(255,255,255,.08);
+          border-radius: 8px; padding: 7px 11px; }
+  .tile .v { color: #fff; font-size: 16px; font-weight: 650;
+             font-variant-numeric: tabular-nums; }
+  .tile .k { color: #898781; font-size: 10.5px; }
+  #view { width: 100%; height: calc(100vh - 150px); min-height: 420px;
+          display: block; cursor: grab; touch-action: none;
+          border-radius: 8px; background: #131312; }
+  .chip { display: inline-block; background: #2a2a28; border: 1px solid rgba(255,255,255,.12);
+          border-radius: 6px; padding: 4px 9px; margin: 0 6px 6px 0; font-size: 11.5px;
+          cursor: pointer; font-variant-numeric: tabular-nums; text-decoration: none;
+          color: #c3c2b7; }
+  .chip:hover { background: #383835; }
+  /* This page defines its own .chip, which overrides the one in tokens.css —
+     the builder's are square and denser and that is right for a form this
+     long. The SELECTED state is not local, though: it was blue here and amber
+     in the nav, so "this one is chosen" was said two ways on one screen. */
+  .chip.sel { border-color: var(--amber); color: var(--amber); }
+  .status { font-size: 12px; color: var(--text-2); margin-top: 8px; min-height: 17px;
+            font-variant-numeric: tabular-nums; }
+  .status.err { color: #e66767; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px;
+          font-variant-numeric: tabular-nums; }
+  td, th { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid #2c2c2a; }
+  th { color: #898781; font-weight: 500; font-size: 11px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<nav class="appnav">
+  <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
+  <span class="appnav-links">
+    <a class="navlink" id="backlink" href="/">mission control</a>
+    <a class="navlink" href="/build" aria-current="page">vehicle builder</a>
+    <a class="navlink" id="analysislink" href="/analysis">analysis</a>
+    <a class="navlink" id="flylink" href="/launch">launch view</a>
+  </span>
+  <!-- short on purpose: uppercase and letterspaced, this slot can carry about
+       four words before it stops being a caption and starts being a headline
+       competing with the nav itself -->
+  <span class="appnav-end u-label" id="nav_note">one LaunchVehicle · the mission flies it</span>
+</nav>
+<div class="app">
+
+  <div><!-- ---------------------------------------------- left: configure -->
+
+    <div class="card">
+      <h2>Presets</h2>
+      <div id="vpresets"></div>
+    </div>
+
+    <div class="card">
+      <h2>Vehicle</h2>
+      <div class="row">
+        <div><label for="vname">name</label><input id="vname" value="Sable (builder)"></div>
+        <div><label for="diameter">core diameter [m]</label><input id="diameter" value="1.8"></div>
+      </div>
+      <div class="row">
+        <div><label for="fairing" title="off flies the spacecraft in the open, the
+             way Apollo, Dragon and Starship do: no shroud mass to carry or drop,
+             and a blunt capsule on the nose instead of an ogive — which costs
+             drag through the transonic in proportion to how much of the stack's
+             frontal area the capsule actually is">fairing
+          <input type="checkbox" id="fairing_on" checked
+                 style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label>
+          <input id="fairing" value="150"></div>
+        <div><label for="payload_kind" title="a CAPSULE is a spacecraft that comes
+             home behind a heat shield, at the masses real ones flew at. A BUS is
+             the uncrewed alternative: probe core, flight computers, power, comms
+             and structure — everything a payload needs before it carries
+             anything useful.">payload</label>
+          <select id="payload_kind">
+            <option value="capsule">capsule</option>
+            <option value="bus" selected>uncrewed bus</option>
+          </select></div>
+      </div>
+      <div class="row">
+        <div id="pod_mass_box"><label for="pod_mass" title="the capsule's own mass
+             — the vehicle, not what is stowed in it. Pick one below and this is
+             what that capsule actually weighed.">capsule [kg]</label>
+          <input id="pod_mass" value="900"></div>
+        <div id="bus_mass_box" hidden><label for="bus_mass" title="dry mass of the
+             probe core: flight computers, power, comms, harness and structure.
+             200 kg is a small but real interplanetary-class bus.">probe core [kg]</label>
+          <input id="bus_mass" value="200"></div>
+        <div><label for="cargo_mass" title="anything carried IN ADDITION to the
+             spacecraft. It rides the whole ascent, eats the kick stage's margin
+             and re-enters with the spacecraft — inside the same envelope, so it
+             raises the ballistic coefficient rather than the frontal area.">cargo
+             [kg]</label>
+          <input id="cargo_mass" value="150"></div>
+      </div>
+      <div class="row">
+        <div><label for="pod_dia" title="the payload's body diameter. Blank or 0
+             works it out from the SPACECRAFT's mass (a cube-root fit that misses
+             the big ones badly — Apollo by nearly a metre). Cargo does not widen
+             it: it is stowed inside. Pick a capsule below and this is set to what
+             that capsule actually was.">payload &oslash; [m]
+          </label><input id="pod_dia" value="" placeholder="auto"></div>
+        <div id="crewed_box"><label for="crewed" title="whether there are people
+             in the capsule. Off, there is no cabin and no interior view in the
+             launch page, because there is no interior.">crew aboard
+          <input type="checkbox" id="crewed" checked
+                 style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label>
+          <div class="sub" id="crew_note" style="margin:6px 0 0">crew capsule</div>
+        </div>
+      </div>
+      <div id="podpresets" style="margin:2px 0 0"></div>
+      <div class="sub" id="pod_note" style="margin:4px 0 0">&mdash;</div>
+      <div class="sub" id="load_note" style="margin:4px 0 0"></div>
+      <div class="row">
+        <div><label for="kick_deg" title="pitch-over kick [deg] — the one guidance
+             number that does not scale with the vehicle">pitch-over kick [&deg;]</label>
+          <input id="kick_deg" value="8"></div>
+        <div><label style="display:flex;gap:6px;align-items:center;margin-top:20px"
+             title="solves the ascent at a ladder of kick angles and keeps the one
+             that puts the most mass in orbit — about 2 s, and the difference
+             between orbit and a perigee underground on a high-thrust stack">
+          <input type="checkbox" id="opt_kick" style="width:auto;margin:0" checked>
+          search for the best kick</label></div>
+      </div>
+    </div>
+
+    <div class="card hidden" id="lander_card">
+      <h2>Lunar lander payload</h2>
+      <div class="sub">the payload the launcher carries and the geometry shown in its adapter/bay</div>
+      <div class="row3">
+        <div><label for="l_dry">dry [kg]</label><input id="l_dry" value="3500"></div>
+        <div><label for="l_prop">propellant [kg]</label><input id="l_prop" value="9000"></div>
+        <div><label for="l_diameter">deployed ø [m]</label><input id="l_diameter" value="4.2"></div>
+      </div>
+      <div class="row3">
+        <div><label for="l_thrust_kn">thrust [kN]</label><input id="l_thrust_kn" value="45"></div>
+        <div><label for="l_isp">Isp [s]</label><input id="l_isp" value="311"></div>
+        <div><label for="l_throttle_min">min throttle [%]</label><input id="l_throttle_min" value="10"></div>
+      </div>
+      <div class="sub" id="lander_note" style="margin:6px 0 0">12.5 t wet lander</div>
+    </div>
+    <div class="card">
+      <h2>Stages <span class="derived" style="display:inline" id="nstages_note"></span></h2>
+      <div id="stagebox"></div>
+      <div style="margin-top:10px"><button id="addstage">+ add stage</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Strap-on boosters</h2>
+      <label for="nboost">count (0 = none)</label>
+      <select id="nboost"><option value="0" selected>0</option><option>2</option>
+        <option>3</option><option>4</option><option>5</option><option>6</option>
+        <option>7</option><option>8</option></select>
+      <div id="boostbox"></div>
+    </div>
+  </div>
+
+  <div class="mid"><!-- ------------------------------------ center: the model -->
+    <canvas id="view"></canvas>
+    <div class="status" id="state">requesting geometry&hellip;</div>
+  </div>
+
+  <div><!-- ------------------------------------------------- right: numbers -->
+    <div class="card">
+      <h2>Totals</h2>
+      <div class="tiles" id="totals"></div>
+      <div class="status" id="verdict"></div>
+    </div>
+    <div class="card">
+      <h2>Stages</h2>
+      <div id="stagestats"></div>
+    </div>
+    <div class="card hidden" id="booststats_card">
+      <h2>Strap-on set</h2>
+      <div id="booststats"></div>
+    </div>
+    <div class="card">
+      <h2>Notes</h2>
+      <div class="sub" style="margin:0">
+        A named engine owns its mixture &mdash; pick one and the mixture
+        locks to it; the server rejects a mismatch outright. Drag the model
+        to orbit, scroll to zoom; it spins on its own until you take it.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+'use strict';
+import { fin, fmt, fmtMass } from '/static/fmt.js';
+import * as api from '/static/api.js';
+import * as vehicle from '/static/vehicle.js';
+import { own } from '/static/vehicle.js';
+import { busy, fail, reportUncaught } from '/static/busy.js';
+import { suite, report, requested } from '/static/selftest.js';
+
+const $ = id => document.getElementById(id);
+reportUncaught();
+
+// ------------------------------------------------------------ form model --
+// The panel's exact role table, so a stage added here matches a stage the
+// panel would have generated at the same position (panelapp.jl STAGE_ROLE /
+// stage_scale mirror).
+const ROLE = {
+  booster: { label: 'booster', prop: 42000, dry: 3800, thrust: 950,
+             isp: 305, mix: 'kerolox', engines: 5 },
+  upper:   { label: 'upper', prop: 9500, dry: 900, thrust: 95,
+             isp: 345, mix: 'kerolox', engines: 1 },
+  kick:    { label: 'kick stage', prop: 950, dry: 140, thrust: 15,
+             isp: 315, mix: 'hypergolic', engines: 1 },
+  strap:   { label: 'strap-on set', prop: 12000, dry: 900, thrust: 380,
+             isp: 285, mix: 'kerolox', engines: 2 },
+};
+const roleOf = (k, n) => k === 1 ? ROLE.booster : k === n ? ROLE.kick : ROLE.upper;
+// upper stages shrink geometrically with height, as the panel's do
+const roleAt = (k, n) => {
+  const r = roleOf(k, n), f = r === ROLE.upper ? Math.pow(0.25, k - 2) : 1;
+  return { label: r.label, mix: r.mix, engines: r.engines,
+           prop: Math.round(r.prop*f), dry: Math.round(r.dry*f),
+           thrust: +(r.thrust*f).toFixed(1), isp: r.isp };
+};
+
+const STAGE_FIELDS = ['prop','dry','thrust_kn','isp','propellant','engines','engine',
+                      'diameter','size_by','len','dry_auto'];
+const BOOST_FIELDS = STAGE_FIELDS.concat(['throttle','ign_delay','sep_delay']);
+
+let CATALOGUE = { engines: [], propellants: [] };
+let NSTAGES = 3;
+const nBoost = () => +($('nboost').value || 0);
+// query keys this page does not own (mission, kick, lander fields) ride
+// along untouched, so the round trip to mission control loses nothing
+let PASSTHRU = new URLSearchParams();
+const landingMode = () => PASSTHRU.get('mode') === 'landing';
+
+// ------------------------------------------------- pure, selftestable bits --
+function payloadFrac(pod, liftoff) {
+  return liftoff > 0 ? pod/liftoff : 0;
+}
+function stageMassRatio(dry, prop) {
+  return dry > 0 ? (dry + prop)/dry : 0;
+}
+// How far the dry mass entered is from what a stage of this size, propellant
+// and engine count would actually weigh. The server does that estimate from
+// tank volumes, insulation, engine mass and thrust structure, so this is a
+// comparison against a build, not against a rule of thumb — which is what
+// makes it worth showing next to a number the operator is free to type.
+function dryOff(s) {
+  const est = +s.dry_est_kg;
+  return est > 0 ? (+s.dry_kg - est)/est : 0;
+}
+function dryClass(s) {
+  const o = Math.abs(dryOff(s));
+  return o > 0.45 ? 'bad' : o > 0.22 ? 'warn' : 'good';
+}
+function dryNote(s) {
+  const o = dryOff(s), est = fmtMass(+s.dry_est_kg);
+  if (Math.abs(o) <= 0.22) return `about what it should weigh (${est})`;
+  return o < 0 ? `${Math.round(-o*100)}% lighter than buildable — a stage this `
+                 + `size works out near ${est}`
+               : `${Math.round(o*100)}% heavier than it needs to be (${est})`;
+}
+// remove stage k of n from a {s1_..sn_} value map: everything above slides down
+function removeStageVals(vals, k, n) {
+  const out = {};
+  for (let i = 1; i <= n; i++) {
+    const from = i < k ? i : i + 1;
+    if (from > n) continue;
+    for (const f of STAGE_FIELDS)
+      if (vals[`s${from}_${f}`] !== undefined) out[`s${i}_${f}`] = vals[`s${from}_${f}`];
+  }
+  return out;
+}
+// insert a fresh stage before the kick stage: the kick's values slide up
+function insertStageVals(vals, n) {
+  const out = {};
+  for (let i = 1; i <= n + 1; i++) {
+    const from = i <= n - 1 ? i : i === n ? undefined : n;  // n -> new, n+1 <- old n
+    if (from === undefined) continue;
+    for (const f of STAGE_FIELDS)
+      if (vals[`s${from}_${f}`] !== undefined) out[`s${i}_${f}`] = vals[`s${from}_${f}`];
+  }
+  return out;
+}
+function faceNormal(ax, ay, az, bx, by, bz, cx, cy, cz) {
+  const ux = bx-ax, uy = by-ay, uz = bz-az, vx = cx-ax, vy = cy-ay, vz = cz-az;
+  let nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
+  const l = Math.hypot(nx, ny, nz) || 1;
+  return [nx/l, ny/l, nz/l];
+}
+
+// ------------------------------------------------------------- form build --
+function stageBlock(pre, title, r, dia) {
+  const mixOpts = CATALOGUE.propellants
+    .map(p => `<option value="${p.name}">${p.name} &middot; ${Math.round(p.bulk)} kg/m&sup3;</option>`).join('');
+  // engines grouped by their mixture, so the coupling is visible before you pick
+  const byMix = {};
+  for (const e of CATALOGUE.engines) (byMix[e.propellant] = byMix[e.propellant] || []).push(e);
+  const engOpts = '<option value="manual">manual (use the fields above)</option>' +
+    Object.keys(byMix).map(m => `<optgroup label="${m}">` +
+      byMix[m].map(e => `<option value="${e.name}">${e.name} &middot; ${Math.round(e.thrust_kn)} kN &middot; Isp ${Math.round(e.isp_vac)} s</option>`).join('') +
+      '</optgroup>').join('');
+  return `<div class="stagehdr" id="${pre}hdr">${title}
+      <span class="rm" id="${pre}rm" title="remove this stage">&#10005; remove</span></div>
+    <span class="derived" id="${pre}derived"></span>
+    <div class="row">
+      <div><label for="${pre}size_by">size by</label>
+        <select id="${pre}size_by">
+          <option value="prop">propellant mass</option>
+          <option value="length">tank length</option></select></div>
+      <div><label for="${pre}diameter">diameter [m]</label><input id="${pre}diameter" value="${dia}"></div>
+    </div>
+    <div class="row">
+      <div><label for="${pre}prop">propellant [kg]</label><input id="${pre}prop" value="${r.prop}"></div>
+      <div><label for="${pre}len">tank length [m]</label><input id="${pre}len" value="10"></div>
+    </div>
+    <div class="row">
+      <div><label for="${pre}dry">dry mass [kg]</label><input id="${pre}dry" value="${r.dry}"></div>
+      <div><label for="${pre}engines">engines</label><input id="${pre}engines" value="${r.engines}"></div>
+    </div>
+    <label style="display:flex;gap:6px;align-items:center;margin:6px 0 0"
+           title="tanks, insulation, engines, thrust structure and systems for a
+                  stage this size — naming an engine should give you that
+                  engine's stage, not a number left over from the last one">
+      <input type="checkbox" id="${pre}dry_auto" checked style="width:auto;margin:0">
+      estimate dry mass from the design</label>
+    <div class="row">
+      <div><label for="${pre}thrust_kn">vac thrust [kN]</label><input id="${pre}thrust_kn" value="${r.thrust}"></div>
+      <div><label for="${pre}isp">vac Isp [s]</label><input id="${pre}isp" value="${r.isp}"></div>
+    </div>
+    <div class="row">
+      <div style="grid-column:1/-1"><label for="${pre}propellant">mixture</label>
+        <select id="${pre}propellant">${mixOpts}</select></div>
+    </div>
+    <div class="row">
+      <div style="grid-column:1/-1"><label for="${pre}engine">engine (overrides thrust/Isp; sets the mixture)</label>
+        <select id="${pre}engine">${engOpts}</select></div>
+    </div>`;
+}
+
+function grabVals(box) {
+  const vals = {};
+  for (const el of box.querySelectorAll('input,select'))
+    vals[el.id] = el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
+  return vals;
+}
+function setVals(vals) {
+  for (const id in vals) {
+    const el = $(id);
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = vals[id] === '1' || vals[id] === 'true' || vals[id] === true;
+    else el.value = vals[id];
+  }
+}
+
+function buildStages(keep) {
+  const box = $('stagebox');
+  const vals = keep || grabVals(box);
+  const dia = $('diameter').value || 1.8;
+  let html = '';
+  for (let k = 1; k <= NSTAGES; k++)
+    html += stageBlock(`s${k}_`, `stage ${k} &mdash; ${roleAt(k, NSTAGES).label}`, roleAt(k, NSTAGES), dia);
+  box.innerHTML = html;
+  // a select with no kept value falls to the catalogue's first option, which
+  // is whatever order the server sent — the role's own mixture is the default
+  for (let k = 1; k <= NSTAGES; k++)
+    if (vals[`s${k}_propellant`] === undefined)
+      $(`s${k}_propellant`).value = roleAt(k, NSTAGES).mix;
+  setVals(vals);
+  for (let k = 1; k <= NSTAGES; k++) {
+    const kk = k;
+    $(`s${k}_rm`).onclick = () => removeStage(kk);
+    $(`s${k}_rm`).style.display = NSTAGES > 2 ? '' : 'none';
+  }
+  $('addstage').disabled = NSTAGES >= 5;
+  $('nstages_note').textContent = ` ${NSTAGES} of 5`;
+  wire(box);
+  syncLocks();
+}
+function buildBoost(keep) {
+  const box = $('boostbox');
+  const vals = keep || grabVals(box);
+  if (nBoost() === 0) { box.innerHTML = ''; return; }
+  const dia = +($('diameter').value || 1.8);
+  box.innerHTML =
+    stageBlock('b_', `${nBoost()} &times; ${ROLE.strap.label}`, ROLE.strap, +(dia*0.85).toFixed(2)) +
+    `<div class="row3">
+      <div><label for="b_throttle">core throttle [%]</label><input id="b_throttle" value="100"></div>
+      <div><label for="b_ign_delay">ignition delay [s]</label><input id="b_ign_delay" value="0"></div>
+      <div><label for="b_sep_delay">sep delay [s]</label><input id="b_sep_delay" value="0"></div>
+    </div>`;
+  $('b_rm').style.display = 'none';
+  if (vals['b_propellant'] === undefined) $('b_propellant').value = ROLE.strap.mix;
+  setVals(vals);
+  wire(box);
+  syncLocks();
+}
+function removeStage(k) {
+  const vals = removeStageVals(grabVals($('stagebox')), k, NSTAGES);
+  NSTAGES--;
+  buildStages(vals);
+  fetchGeo();
+}
+$('addstage').onclick = () => {
+  if (NSTAGES >= 5) return;
+  const vals = insertStageVals(grabVals($('stagebox')), NSTAGES);
+  NSTAGES++;
+  buildStages(vals);
+  fetchGeo();
+};
+$('nboost').addEventListener('change', () => { buildBoost(); fetchGeo(); });
+function wire(box) {
+  for (const el of box.querySelectorAll('input,select'))
+    el.addEventListener('change', () => { syncLocks(); fetchGeo(); });
+}
+
+// the size-by switch and the engine&harr;mixture lock, as on the panel: a
+// named engine owns its mixture, and the form must never show one the server
+// would not fly
+function syncLocks() {
+  // The shroud's mass is only a number when there IS a shroud. Same rule as
+  // the size-by and engine locks below — a control the server will ignore has
+  // to look ignored — and this one was the exception: unticking the fairing
+  // left its mass box fully lit and editable, on the vehicles (Saturn V,
+  // Starship) that fly without one.
+  const fairOn = $('fairing_on').checked;
+  $('fairing').disabled = !fairOn;
+  $('fairing').style.opacity = fairOn ? 1 : .45;
+
+  const pres = Array.from({length: NSTAGES}, (_, i) => `s${i+1}_`);
+  if (nBoost()) pres.push('b_');
+  for (const p of pres) {
+    if (!$(p + 'prop')) continue;
+    const byLen = $(p + 'size_by').value === 'length';
+    $(p + 'prop').disabled = byLen;   $(p + 'prop').style.opacity = byLen ? .45 : 1;
+    $(p + 'len').disabled = !byLen;   $(p + 'len').style.opacity = byLen ? 1 : .45;
+    const engSel = $(p + 'engine'), eng = engSel.value !== 'manual';
+    const auto = $(p + 'dry_auto');
+    auto.disabled = !eng;
+    auto.parentElement.style.opacity = eng ? 1 : .45;
+    $(p + 'dry').disabled = eng && auto.checked;
+    $(p + 'dry').style.opacity = eng && auto.checked ? .45 : 1;
+    for (const f of ['thrust_kn', 'isp']) {
+      $(p + f).disabled = eng;
+      $(p + f).style.opacity = eng ? .45 : 1;
+    }
+    const mix = $(p + 'propellant');
+    if (eng) {
+      const cat = CATALOGUE.engines.find(e => e.name === engSel.value);
+      if (cat) mix.value = cat.propellant;
+    }
+    mix.disabled = eng;
+    mix.style.opacity = eng ? .45 : 1;
+    mix.title = eng ? 'set by the engine — a named engine owns its mixture' : '';
+  }
+}
+
+// ------------------------------------------------------------- encoding --
+function params() {
+  const u = new URLSearchParams(PASSTHRU);
+  u.set('vname', $('vname').value);
+  u.set('nstages', NSTAGES);
+  u.set('nboost', nBoost());
+  for (const id of ['diameter', 'fairing', 'pod_mass', 'bus_mass', 'cargo_mass',
+                    'pod_dia', 'kick_deg',
+                    'l_dry', 'l_prop', 'l_diameter', 'l_thrust_kn', 'l_isp',
+                    'l_throttle_min'])
+    u.set(id, $(id).value);
+  u.set('payload_kind', $('payload_kind').value);
+  u.set('opt_kick', $('opt_kick').checked ? '1' : '0');
+  u.set('fairing_on', $('fairing_on').checked ? '1' : '0');
+  // a bus has nobody in it whatever the box says
+  u.set('crewed', (!isBus() && $('crewed').checked) ? '1' : '0');
+  const fields = [];
+  for (let k = 1; k <= NSTAGES; k++) fields.push(...STAGE_FIELDS.map(f => `s${k}_${f}`));
+  if (nBoost()) fields.push(...BOOST_FIELDS.map(f => `b_${f}`));
+  for (const f of fields) {
+    const el = $(f);
+    if (el) u.set(f, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
+  }
+  return u;
+}
+// the keys this page owns; everything else in an inbound query is mission
+// The wire to mission control: every good edit lands in localStorage, and the
+// panel (in any other tab) applies it on its storage event — so the mission
+// page's geometry view follows this page live. Which keys travel, and why
+// only those, is documented in /static/vehicle.js.
+function saveVehicle() { vehicle.save(params()); }
+function refreshLinks() {
+  $('backlink').href = '/?' + params();
+  // The launch view and the analysis page READ a flown trajectory; neither
+  // takes a vehicle and starts one. Linking them with this form's
+  // configuration made both of them fly a mission on arrival — twelve seconds
+  // of simulation as the side effect of clicking a navigation link, and a
+  // flight nobody had asked to fly.
+  //
+  // Bare, they resolve to the most recent run, or explain themselves when
+  // there is none. Mission control is where a vehicle becomes a flight, and
+  // `backlink` above carries this exact form to it.
+}
+
+// ------------------------------------------------------------- geometry --
+let geo = null, fetchTimer = 0, inflight = 0;
+function fetchGeo() {
+  clearTimeout(fetchTimer);
+  fetchTimer = setTimeout(doFetchGeo, 150);   // one request per burst of edits
+}
+async function doFetchGeo() {
+  refreshLinks();
+  const my = ++inflight;
+  try {
+    // transport-level, not api.geometry: the staleness check has to happen
+    // between parsing and validating, or a reply that a newer edit already
+    // superseded raises an error banner for a request nobody is waiting on
+    const j = await api.post('/api/geometry', params());
+    if (my !== inflight) return;               // a newer edit superseded this
+    if (!j.ok) {
+      $('state').className = 'status err';
+      $('state').textContent = j.error || 'geometry failed';
+      return;
+    }
+    geo = j;
+    saveVehicle();
+    $('state').className = 'status';
+    $('state').textContent =
+      `${(j.stages || []).length} stages` +
+      (j.boosters && j.boosters.length ? ` + ${j.boosters[0].count} strap-ons` : '') +
+      ` · ${(+j.length).toFixed(1)} m · ${(j.liftoff_mass_kg/1000).toFixed(1)} t`;
+    renderStats(j);
+    buildMesh(j);
+  } catch (e) {
+    if (my !== inflight) return;
+    $('state').className = 'status err';
+    $('state').textContent = 'no answer from the server: ' + e.message;
+    // The status line is one line at the bottom of a column and the next
+    // successful edit overwrites it. A dropped server should not be something
+    // you only notice because the numbers stopped moving.
+    fail(e, 'geometry');
+  }
+}
+
+// ---------------------------------------------------------------- stats --
+function renderStats(j) {
+  const pod = +(j.payload || {}).mass_kg || payloadKg();
+  const twr = +j.liftoff_twr, dvt = +j.total_dv_mps;
+  const pf = payloadFrac(pod, +j.liftoff_mass_kg);
+  // the load check needs the flown lift-off mass, which only the server knows
+  // (stages that size themselves do it there)
+  LIFTOFF_KG = +j.liftoff_mass_kg || 0;
+  loadNote();
+  $('totals').innerHTML = [
+    ['stack height', fmt(j.length) + ' m'],
+    ['liftoff mass', fmt(j.liftoff_mass_kg/1000) + ' t'],
+    ['pad T/W', `<span class="${twr < 1.15 ? 'bad' : twr < 1.25 ? 'warn' : 'good'}">${fmt(twr, 2)}</span>`],
+    ['total &Delta;v', `<span class="${dvt < 11500 ? 'warn' : 'good'}">${fmt(dvt/1000, 2)} km/s</span>`],
+    ['payload fraction', fmt(pf*100, 2) + ' %'],
+    ['core diameter', fmt(j.diameter, 2) + ' m'],
+  ].map(t => `<div class="tile"><div class="v">${t[1]}</div><div class="k">${t[0]}</div></div>`).join('');
+  $('verdict').innerHTML =
+    (twr < 1.15 ? '<span class="bad">will not lift off</span> — more first-stage thrust or strap-ons' :
+     twr < 1.25 ? '<span class="warn">sluggish off the pad</span>' :
+     '<span class="good">lifts off cleanly</span>') +
+    (dvt < 11500 ? ' · <span class="warn">&Delta;v is thin for a Moon shot</span>' : '');
+
+  $('stagestats').innerHTML = '<table><tr><th></th><th>prop</th><th>dry</th>' +
+    '<th>dry %</th><th>len</th><th>&Delta;v</th><th>T/W</th><th>burn</th><th>MR</th></tr>' +
+    (j.stages || []).map((s, i) => `<tr>
+      <td>S${i+1}</td>
+      <td>${fmt(s.prop_kg/1000)} t</td>
+      <td>${fmt(s.dry_kg/1000)} t</td>
+      <td class="${dryClass(s)}" title="${dryNote(s)}">${fmt(100*s.dry_frac, 1)}%</td>
+      <td>${fmt(s.length_m)} m</td>
+      <td>${Math.round(s.dv_mps)}</td>
+      <td class="${i === 0 && s.twr < 1.15 ? 'bad' : ''}">${fmt(s.twr, 2)}</td>
+      <td>${Math.round(s.burn_s)} s</td>
+      <td>${fmt(stageMassRatio(+s.dry_kg, +s.prop_kg), 1)}</td></tr>`).join('') + '</table>';
+  for (let k = 1; k <= NSTAGES; k++) {
+    const el = $(`s${k}_derived`), s = (j.stages || [])[k-1];
+    if (!s) continue;
+    // Show what will actually FLY in the dry-mass box. A stage that sizes
+    // itself had its dry mass computed on the server while the form went on
+    // showing the role default it was seeded with — a Falcon-class kick stage
+    // read 140 kg while a heavier stage flew. The field is the trajectory now.
+    const inp = $(`s${k}_dry`);
+    if (inp && inp.disabled) inp.value = Math.round(+s.dry_kg);
+    if (el) el.innerHTML =
+      `${fmt(s.length_m)} m &middot; ${Math.round(s.dv_mps)} m/s &middot; ` +
+      `${s.propellant}${s.interstage_m > 0.01 ? ` &middot; +${fmt(s.interstage_m)} m adapter` : ''}` +
+      ` &middot; <span class="${dryClass(s)}">${fmt(100*s.dry_frac, 1)}% dry</span>` +
+      ` &middot; builds out near ${fmtMass(+s.dry_est_kg)}`;
+  }
+  const bs = (j.boosters || [])[0];
+  $('booststats_card').classList.toggle('hidden', !bs);
+  if (bs) {
+    $('booststats').innerHTML =
+      `${bs.count} &times; ${fmt(bs.prop_kg/1000)} t prop &middot; ` +
+      `${fmt(bs.length_m)} m &times; ${fmt(bs.diameter_m, 2)} m<br>` +
+      `set ${fmt(bs.set_mass_kg/1000)} t &middot; adds ${Math.round(bs.dv_mps)} m/s &middot; ` +
+      `burn ${Math.round(bs.burn_s)} s &middot; core at ${Math.round(bs.core_throttle*100)}%`;
+    const el = $('b_derived');
+    if (el) el.innerHTML = `${fmt(bs.length_m)} m each &middot; set ${fmt(bs.set_mass_kg/1000)} t`;
+  }
+}
+
+// ------------------------------------------------------------ the model --
+// Flat-shaded WebGL over the server's triangles. tris is 9 floats per
+// triangle, +x = nose axis, metres; sections name 1-based inclusive
+// triangle ranges. Winding is not guaranteed, so faces are lit two-sided
+// and culling stays off.
+const cv = $('view');
+const gl = cv.getContext('webgl', { antialias: true });
+function compile(vs, fs) {
+  const mk = (t, src) => {
+    const s = gl.createShader(t);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, mk(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+let prog = null, aP, aN, aC, uMVP, uRot, nVerts = 0, vbuf = null;
+if (gl) {
+  prog = compile(`
+    attribute vec3 aP, aN, aC;
+    uniform mat4 uMVP; uniform mat3 uRot;
+    varying vec3 vN, vC;
+    void main(){ vN = uRot*aN; vC = aC; gl_Position = uMVP*vec4(aP, 1.0); }`, `
+    precision mediump float;
+    varying vec3 vN, vC;
+    void main(){
+      vec3 n = normalize(vN);
+      vec3 key = normalize(vec3(0.55, 0.65, 0.52));
+      vec3 fil = normalize(vec3(-0.6, -0.2, -0.75));
+      float d = abs(dot(n, key))*0.85 + abs(dot(n, fil))*0.25 + 0.16;
+      gl_FragColor = vec4(pow(vC*d, vec3(0.9)), 1.0);
+    }`);
+  aP = gl.getAttribLocation(prog, 'aP');
+  aN = gl.getAttribLocation(prog, 'aN');
+  aC = gl.getAttribLocation(prog, 'aC');
+  uMVP = gl.getUniformLocation(prog, 'uMVP');
+  uRot = gl.getUniformLocation(prog, 'uRot');
+  vbuf = gl.createBuffer();
+} else {
+  $('state').className = 'status err';
+  $('state').textContent = 'WebGL is unavailable — the numbers still work, the picture does not';
+}
+// hull tones per section kind; interior sections are not part of a silhouette
+function styleOf(name) {
+  if (/^booster/.test(name)) return [0.78, 0.74, 0.70];
+  if (name === 'fairing')    return [0.92, 0.90, 0.86];
+  if (name === 'pod')        return [0.80, 0.63, 0.48];
+  if (name === 'lander')     return [0.78, 0.62, 0.32];
+  if (/^stage(\d+)/.test(name))
+    return +name.slice(5) % 2 ? [0.90, 0.89, 0.86] : [0.72, 0.73, 0.76];
+  return [0.8, 0.8, 0.8];
+}
+let vLen = 10;                    // stack height, for framing
+let userZoomed = false;
+function buildMesh(j) {
+  if (!gl) return;
+  const skip = { cabin: 1, glass: 1 };
+  const out = [];
+  vLen = Math.max(4, +j.length || 10);
+  // hold the whole stack in frame as it grows or shrinks — until the user
+  // takes the wheel, at which point their distance is theirs
+  if (!userZoomed) dist = vLen*2.1;
+  for (const s of (j.sections || [])) {
+    if (skip[s.name]) continue;
+    const col = styleOf(s.name);
+    for (let t = s.t0 - 1; t < s.t1; t++) {
+      const T = j.tris[t];
+      if (!T) continue;
+      const n = faceNormal(...T);
+      for (let v = 0; v < 3; v++)
+        out.push(T[v*3], T[v*3+1], T[v*3+2], n[0], n[1], n[2], col[0], col[1], col[2]);
+    }
+  }
+  nVerts = out.length/9;
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(out), gl.STATIC_DRAW);
+}
+// mat4 helpers, column-major, just enough for one model on one camera
+function mMul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+    o[c*4+r] = a[r]*b[c*4] + a[4+r]*b[c*4+1] + a[8+r]*b[c*4+2] + a[12+r]*b[c*4+3];
+  return o;
+}
+const mPersp = (fov, asp, n, f) => {
+  const t = 1/Math.tan(fov/2), d = 1/(n - f);
+  return new Float32Array([t/asp,0,0,0, 0,t,0,0, 0,0,(n+f)*d,-1, 0,0,2*n*f*d,0]);
+};
+let yaw = 0.6, pitch = 0.12, dist = 0, lastDrag = 0;
+function draw(now) {
+  requestAnimationFrame(draw);
+  if (!gl || !nVerts) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth*dpr | 0, h = cv.clientHeight*dpr | 0;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0.075, 0.075, 0.07, 1);
+  gl.enable(gl.DEPTH_TEST);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (now - lastDrag > 2500) yaw += 0.004;          // idle: a slow turntable
+  // model: nose (+x) up, spun by yaw about the vertical, tipped by pitch,
+  // centred on the stack's middle, backed off far enough to hold it all
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  // the 3x3 model rotation: M = Rx(pitch) * Ry(yaw) * (x->y,y->z,z->x)
+  const B = [0,1,0, 0,0,1, 1,0,0];                  // axis shuffle: nose +x -> up
+  const Ry = [cy,0,-sy, 0,1,0, sy,0,cy];
+  const Rx = [1,0,0, 0,cp,sp, 0,-sp,cp];
+  const m3 = (a, b) => {
+    const o = new Array(9);
+    for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++)
+      o[c*3+r] = a[r]*b[c*3] + a[3+r]*b[c*3+1] + a[6+r]*b[c*3+2];
+    return o;
+  };
+  const rot = m3(Rx, m3(Ry, B));
+  if (!dist) dist = vLen*2.1;
+  const M = new Float32Array([
+    rot[0], rot[1], rot[2], 0,
+    rot[3], rot[4], rot[5], 0,
+    rot[6], rot[7], rot[8], 0,
+    -(rot[0]*0 + rot[3]*0 + rot[6]*0), 0, 0, 1]);
+  // translate model so the stack's centre sits at the origin BEFORE rotating:
+  // fold the pre-translation (-vLen/2 along model x) into the matrix
+  const tx = -vLen/2;
+  M[12] = rot[0]*tx; M[13] = rot[1]*tx; M[14] = rot[2]*tx;
+  const V = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-dist,1]);
+  const P = mPersp(0.5, w/h, 0.1, dist*40);
+  const MVP = mMul(P, mMul(V, M));
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(uMVP, false, MVP);
+  gl.uniformMatrix3fv(uRot, false, new Float32Array(rot));
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+  for (const [loc, off] of [[aP, 0], [aN, 12], [aC, 24]]) {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 36, off);
+  }
+  gl.drawArrays(gl.TRIANGLES, 0, nVerts);
+}
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  yaw += (e.clientX - drag[0])*0.008;
+  pitch = Math.min(1.35, Math.max(-1.35, pitch + (e.clientY - drag[1])*0.006));
+  drag = [e.clientX, e.clientY];
+  lastDrag = performance.now();
+});
+cv.addEventListener('pointerup', () => drag = null);
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  userZoomed = true;
+  if (!dist) dist = vLen*2.1;
+  dist = Math.min(vLen*8, Math.max(vLen*0.25, dist*(e.deltaY > 0 ? 1.12 : 0.89)));
+}, { passive: false });
+
+// -------------------------------------------------------------- presets --
+// Whole-launcher presets, moved here from the panel with the rest of the
+// vehicle editing. Each carries the pitch-over kick too — the one guidance
+// number that decides whether some of these fly at all (the Falcon-class
+// stack lofts on the reference 8° and arrives with its perigee underground).
+// Every preset states its own payload. It used to omit it, so whatever was in
+// the box carried over — which is how a Falcon-class stack sat there claiming
+// to fly 350 kg, a payload two orders of magnitude under what it lifts, on a
+// launcher whose whole point is that it carries a crew capsule.
+const VEHICLES = {
+  'Sable (reference)': {
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    // 350 kg is not a capsule — the smallest thing anyone has flown people in
+    // is 900 kg — so it is stated as what it can only be: a probe core with a
+    // brick of cargo on it. Same 350 kg up the hill, same trajectory; it just
+    // now says what it is. This stack throws 395 kg onto a free return.
+    payload_kind: 'bus', bus_mass: 200, cargo_mass: 150,
+  },
+  // The strap-ons buy MARGIN, not payload. This carried 900 kg, and the kick
+  // stage it inherits from the reference is sized for 350: strap-ons add
+  // thrust off the pad and nothing at all to the trans-lunar burn, so the
+  // heavier pod simply ran the kick stage dry at 2005 m/s of a 3100 m/s
+  // injection and the flight coasted out to 358,000 km without a lunar
+  // encounter. At the reference payload it flies with the kick stage to
+  // spare — which is what the extra boosters actually give you.
+  'Sable + 4 strap-ons': {
+    nstages: 3, nboost: 4, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    payload_kind: 'bus', bus_mass: 200, cargo_mass: 150,
+    b_engine: 'manual', b_prop: 12000, b_dry: 900, b_thrust_kn: 380, b_isp: 285,
+      b_engines: 2, b_propellant: 'kerolox', b_diameter: 1.53, b_throttle: 60,
+  },
+  // Two stages, because that is what this vehicle is: the Merlin Vacuum
+  // second stage does the injection itself, the way the real one does.
+  //
+  // It shipped as three, with a 2,200 kg AJ10 on top doing trans-lunar
+  // injection for a 12.5 t Crew Dragon — an injection that stage cannot do at
+  // any payload, because 2.2 t of propellant under 12.5 t of capsule is 500
+  // m/s of a 3,100 m/s burn. It ran dry every time and the flight never
+  // reached the Moon. And a Falcon-class launcher genuinely cannot send a
+  // crewed Dragon around it; 4.2 t is about what it can throw, so the payload
+  // is the cargo Dragon, at its real width.
+  'Falcon-class (Merlin)': {
+    nstages: 2, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: true,
+    payload_kind: 'capsule', pod_mass: 4200, cargo_mass: 0, pod_dia: 3.66,
+    s1_engine: 'merlin_1d', s1_engines: 9, s1_prop: 411000, s1_dry_auto: true,
+      s1_diameter: 3.7,
+    s2_engine: 'merlin_1d_vac', s2_engines: 1, s2_prop: 108000, s2_dry_auto: true,
+      s2_diameter: 3.7,
+  },
+  // The one vehicle in here that was actually built to land on the Moon, at
+  // its real masses: a 2,077 t S-IC on five F-1s, a 451 t S-II on five J-2s,
+  // and a 107 t S-IVB on one — which is the stage that does TLI, so it is the
+  // kick stage. Dry masses are given rather than estimated: the conceptual
+  // sizing curve is calibrated around a Falcon-class first stage and a 2,000 t
+  // one is two orders of magnitude outside it.
+  //
+  // No fairing. Apollo flew its spacecraft exposed, under an escape tower,
+  // with the lander in an adapter below it — which is exactly the case the
+  // fairing switch exists for.
+  'Saturn V (Apollo)': {
+    // 1 degree, not the reference 8 and not the 4 this shipped with. At a
+    // lift-off thrust-to-weight of 1.20 this is the slowest-accelerating stack
+    // in the catalogue, and it has to stay near vertical long enough to get out
+    // of the thick air; at 2 degrees it does not insert at all. The kick search
+    // finds it now — its ladder used to start at 4 — but the number is stated
+    // so the vehicle also flies with the search turned off.
+    nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 1,
+    opt_kick: true, payload_kind: 'capsule', pod_mass: 45000, cargo_mass: 0,
+    s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000,
+      s1_diameter: 10.1,
+    s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000,
+      s2_diameter: 10.1,
+    s3_engine: 'j2', s3_engines: 1, s3_prop: 106600, s3_dry: 13500,
+      s3_diameter: 6.6,
+  },
+  'Starship (expendable)': {
+    nstages: 2, nboost: 0, diameter: 9.0, fairing_on: false, kick_deg: 5,
+    opt_kick: true, payload_kind: 'capsule', pod_mass: 50000, cargo_mass: 0,
+    s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
+      s1_diameter: 9.0,
+    s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
+      s2_diameter: 9.0,
+  },
+  // The point of this one is the RL10 second stage, but the payload it states
+  // is 450 kg against a kick stage sized for 350 — and the reference kick
+  // stage has about 30 kg of margin, not 100. It fell 140 m/s short of
+  // injection and coasted to 281,000 km. The kick stage grows to carry the
+  // heavier pod; the hydrolox upper, which is the thing being demonstrated,
+  // is untouched.
+  'hydrolox upper': {
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    payload_kind: 'bus', bus_mass: 200, cargo_mass: 250,
+    s2_engine: 'rl10b2', s2_propellant: 'hydrolox', s2_engines: 1, s2_prop: 9500,
+    s2_dry_auto: true,
+    s3_prop: 1200, s3_dry: 170,
+  },
+};
+// The capsules this repo's pod geometry is fitted against, so "payload" stops
+// being an abstract number: pick one and the drawn capsule is that capsule.
+//
+// [name, re-entry mass kg, body diameter m]. The diameters are the flown
+// vehicles' maximum body width, and they are given EXPLICITLY because the mass
+// fit does not reproduce them. r = 0.086 m^(1/3) lands Mercury and Crew Dragon
+// within a couple of centimetres and then misses badly at both ends of the
+// heavy range: Apollo comes out 3.05 m against a real 3.91, and Orion 3.75
+// against 5.02. Capsule mass is dominated by the heat shield and the systems
+// inside, neither of which scales with the cube of the width, so no single
+// power law was ever going to hold across the set. Stating the number is the
+// honest fix — and a capsule you pick by name should be the size it was.
+const PODS = [
+  ['minimal 1-crew',  900,  1.60],
+  ['Mercury',        1400,  1.89],
+  ['Soyuz DM',       2950,  2.20],
+  ['Gemini',         3850,  2.32],
+  ['Shenzhou DM',    3240,  2.52],
+  ['Dragon 1 cargo', 4200,  3.66],
+  ['Apollo CM',      5560,  3.91],
+  ['Crew Dragon',   12500,  4.00],
+  ['Starliner',     13000,  4.56],
+  ['Orion CM',      10400,  5.02],
+];
+// The vehicle-level fields a preset is allowed to state, and what the page
+// says they are before any preset is applied. Captured at load — this runs
+// before the rehydrate below fills the form — because applying a preset has to
+// RESET these and then lay the preset's own keys over the top, which is the
+// rule buildStages({}) already follows for the stages.
+//
+// Leaving them alone instead is how a stated capsule diameter outlived the
+// vehicle it was stated for: no preset sets `pod_dia`, so picking the Orion CM
+// chip and then any other vehicle kept the 5.02 m capsule forever, through
+// reloads (it is saved under ssjl.vehicle). That is not cosmetic — pod_dia
+// sets the stack's reference area, so a 1.8 m Sable quietly flew the drag of a
+// five-metre capsule and stopped reaching the Moon at all.
+const VFIELDS = ['diameter', 'fairing', 'kick_deg', 'pod_mass', 'bus_mass',
+                 'cargo_mass', 'pod_dia'];
+const VDEFAULTS = Object.fromEntries(VFIELDS.map(id => [id, $(id).value]));
+function applyPreset(name) {
+  const o = VEHICLES[name];
+  NSTAGES = Math.min(5, Math.max(2, Math.round(+o.nstages || 3)));
+  $('nboost').value = String(o.nboost || 0);
+  $('vname').value = name.replace(/\s*\(.*\)$/, '');
+  for (const id of VFIELDS)
+    $(id).value = o[id] !== undefined ? o[id] : VDEFAULTS[id];
+  $('opt_kick').checked = !!o.opt_kick;
+  // a preset states only what it changes, and a shroud is the default — so
+  // this reads "unless the preset says otherwise", not "unless it says yes"
+  $('fairing_on').checked = o.fairing_on !== false;
+  $('crewed').checked = o.crewed !== false;
+  $('payload_kind').value = o.payload_kind || 'capsule';
+  payloadUI();
+  crewNote();
+  podNote();
+  // reset to the role defaults, then lay the preset's own keys over them —
+  // a preset states only what it changes
+  const vals = {};
+  for (const k in o) if (/^s\d+_/.test(k) || /^b_/.test(k)) vals[k] = o[k];
+  buildStages({});
+  buildBoost({});
+  setVals(vals);
+  syncLocks();
+  fetchGeo();
+  for (const el of $('vpresets').querySelectorAll('.chip'))
+    el.classList.toggle('sel', el.dataset.p === name);
+}
+function initPresets() {
+  $('vpresets').innerHTML = Object.keys(VEHICLES)
+    .map(k => `<span class="chip" data-p="${k}">${k}</span>`).join('');
+  for (const el of $('vpresets').querySelectorAll('.chip'))
+    el.onclick = () => applyPreset(el.dataset.p);
+  $('podpresets').innerHTML = PODS
+    .map(([k, m, d]) => `<span class="chip" data-m="${m}" data-d="${d}">${k}</span>`)
+    .join('');
+  for (const el of $('podpresets').querySelectorAll('.chip'))
+    el.onclick = () => {
+      $('pod_mass').value = el.dataset.m;
+      $('pod_dia').value = el.dataset.d;      // the size it actually was
+      podNote(); fetchGeo();
+    };
+  for (const id of ['pod_mass', 'bus_mass', 'cargo_mass', 'pod_dia',
+                    'l_dry', 'l_prop', 'l_diameter'])
+    $(id).addEventListener('input', podNote);
+  $('payload_kind').addEventListener('change', () => {
+    // A bus is the case a shroud exists for. That rule used to hang off the
+    // crew tick-box, which is where "uncrewed" was expressed; it is expressed
+    // here now, and the box is hidden for a bus — so left there it would have
+    // become unreachable. Ticked rather than forced: untick it again and fly
+    // a bare bus if that is what you meant.
+    if (isBus()) $('fairing_on').checked = true;
+    payloadUI(); crewNote(); podNote(); fetchGeo();
+  });
+  payloadUI();
+  podNote();
+}
+
+// --------------------------------------------------------- the payload --
+//
+// Payload is a spacecraft plus its cargo, not one lump. A capsule is a vehicle
+// that comes home; a bus is the probe core that any uncrewed payload needs
+// before it carries anything. The cargo is the brick either of them lifts.
+const isBus = () => $('payload_kind').value === 'bus';
+const spacecraftKg = () => Math.max(0, +$(isBus() ? 'bus_mass' : 'pod_mass').value || 0);
+const cargoKg = () => Math.max(0, +$('cargo_mass').value || 0);
+const payloadKg = () => spacecraftKg() + cargoKg();
+
+function payloadUI() {
+  const bus = isBus();
+  $('pod_mass_box').hidden = bus;
+  $('bus_mass_box').hidden = !bus;
+  // A bus has no crew, so the control that says whether it does is noise. The
+  // capsule presets stay visible either way — they are the only size reference
+  // the page has, and a bus is still a body with a diameter.
+  $('crewed_box').hidden = bus;
+}
+// Capsule radius from mass, the same r = 0.086*m^(1/3) the mesh is built on
+// (see pod_radius in mesh.jl), so the box says what the model will do before
+// the server is asked.
+const podR = m => Math.min(3.0, Math.max(0.30, 0.086*Math.cbrt(Math.max(m, 1))));
+function crewNote() {
+  const c = $('crewed').checked;
+  $('crew_note').textContent = c ? 'crew capsule'
+    : 'uncrewed bus — no cabin, and no interior view';
+  $('crew_note').style.color = c ? '' : '#d9a95c';
+}
+function podNote() {
+  if (landingMode()) {
+    const m = (+$('l_dry').value || 0) + (+$('l_prop').value || 0);
+    const d = +$('l_diameter').value || 4.2;
+    $('pod_note').textContent = `lunar lander ${(m/1000).toFixed(1)} t wet · ${d.toFixed(2)} m envelope`;
+    $('lander_note').textContent = `${(m/1000).toFixed(1)} t wet · ${(+$('l_prop').value || 0).toFixed(0)} kg descent propellant`;
+    return;
+  }
+  // The envelope is fitted to the SPACECRAFT, not to spacecraft + cargo: a
+  // capsule's size is set by the vehicle, and cargo is stowed inside it.
+  const sc = spacecraftKg(), cargo = cargoKg(), tot = payloadKg();
+  const d = +$('pod_dia').value || 0, dia = d > 0 ? d : 2*podR(sc);
+  const near = PODS.reduce((a, b) =>
+    Math.abs(Math.log(b[1]/Math.max(sc,1))) < Math.abs(Math.log(a[1]/Math.max(sc,1))) ? b : a);
+  // a chip is selected only when BOTH of its numbers are in the boxes: the
+  // mass alone no longer says which capsule this is
+  for (const el of $('podpresets').querySelectorAll('.chip'))
+    el.classList.toggle('sel', !isBus() && +el.dataset.m === sc &&
+                               Math.abs(+el.dataset.d - d) < 1e-9);
+  const bus = isBus();
+  $('pod_note').innerHTML = tot < 1 ? 'no payload' :
+    `${bus ? 'probe core' : 'capsule'} ${fmtMass(sc)}` +
+    (cargo > 0 ? ` + ${fmtMass(cargo)} cargo = <b>${fmtMass(tot)}</b> lifted` : '') +
+    ` &middot; ${fmt(dia, 2)} m across` +
+    (d > 0 ? ' (stated)' : ' (from the spacecraft mass; state one to override)') +
+    (bus
+      ? ' &mdash; probe core, flight computers, power and comms. No cabin, and ' +
+        'the flown capsules below are only a size reference.'
+      : ' &mdash; the capsule is the payload, and it is what re-enters. ' +
+        `Nearest flown by mass: ${near[0]} (${fmtMass(near[1])}, ${fmt(near[2], 2)} m).`) +
+    (cargo > 0 && !bus && cargo > 0.5*sc
+      ? ' <span class="warn">Cargo is over half the capsule\'s own mass — real ' +
+        'downmass runs well under that.</span>' : '');
+  loadNote();
+}
+
+// How much of what this stack could lift is actually being lifted.
+//
+// A payload fraction is the cleanest statement of that, because it needs no
+// second simulation: it is what the vehicle already reports. The bands are
+// what launchers of this class actually achieve — and they depend on the
+// DESTINATION, which is the whole reason one number could never be right for
+// both. This stack throws 1,951 kg to low orbit and 395 kg onto a free
+// return; 350 kg is a sensible lunar payload and a nearly empty LEO one.
+const LOAD_BANDS = {
+  orbit:      [0.015, 0.05,  'low orbit'],
+  suborbital: [0.015, 0.06,  'a suborbital lob'],
+  flyby:      [0.004, 0.015, 'a free return'],
+  landing:    [0.003, 0.012, 'a lunar landing'],
+};
+let LIFTOFF_KG = 0;
+function loadNote() {
+  const el = $('load_note');
+  if (!el) return;
+  const mode = (PASSTHRU.get && PASSTHRU.get('mode')) || 'flyby';
+  const band = LOAD_BANDS[mode] || LOAD_BANDS.flyby;
+  const tot = landingMode() ? (+$('l_dry').value || 0) + (+$('l_prop').value || 0)
+                            : payloadKg();
+  if (!(LIFTOFF_KG > 0) || !(tot > 0)) { el.textContent = ''; return; }
+  const f = tot / LIFTOFF_KG;
+  const [lo, hi, what] = band;
+  const pct = fmt(f*100, 2) + '%';
+  el.innerHTML = f < lo
+    ? `<span class="warn">light for this stack</span> — ${fmtMass(tot)} is ${pct} of ` +
+      `lift-off mass, under the ${fmt(lo*100,1)}–${fmt(hi*100,1)}% a launcher this ` +
+      `size typically sends to ${what}. It will fly; it is carrying air.`
+    : f > hi
+    ? `<span class="warn">heavy for this stack</span> — ${fmtMass(tot)} is ${pct} of ` +
+      `lift-off mass, over the ${fmt(lo*100,1)}–${fmt(hi*100,1)}% typical for ${what}. ` +
+      `Expect it to run the kick stage dry.`
+    : `<span class="good">well loaded</span> — ${fmtMass(tot)} is ${pct} of lift-off ` +
+      `mass, inside the ${fmt(lo*100,1)}–${fmt(hi*100,1)}% typical for ${what}.`;
+}
+
+// The one failure mode this repo's serving model creates: pages come off disk
+// per request and the module is compiled into the process, so a server left
+// running across an edit serves a page whose controls it cannot read. Nothing
+// errors — the field is simply absent from the query the server understands,
+// and the control silently does nothing. Name it instead.
+const NEEDS = ['fairing_on', 'crewed', 'pod_dia', 'l_diameter',
+               'payload_kind', 'bus_mass', 'cargo_mass'];
+function staleCheck() {
+  const have = (CATALOGUE && CATALOGUE.features) || [];
+  const missing = NEEDS.filter(f => !have.includes(f));
+  if (!missing.length) return;
+  const b = document.createElement('div');
+  b.className = 'status err';
+  b.style.cssText = 'padding:8px 10px;border:1px solid #e66767;border-radius:8px;margin-bottom:10px';
+  b.textContent = 'This server is older than this page — it does not understand ' +
+    missing.join(', ') + '. Those controls will do nothing until you restart it ' +
+    '(pages are re-read per request; the simulator is compiled into the process).';
+  document.querySelector('.app').prepend(b);
+}
+
+// --------------------------------------------------------------- startup --
+async function boot() {
+  const done = busy('loading the parts catalogue…');
+  try {
+    CATALOGUE = await api.catalogue();
+    staleCheck();
+  } catch (e) {
+    $('state').className = 'status err';
+    $('state').textContent = 'no catalogue from the server: ' + e.message;
+    fail(e, 'catalogue');
+    return;
+  } finally {
+    done();
+  }
+  // Rehydrate from an inbound query (the panel links here with its whole
+  // form); with no vehicle in the query, the last stored vehicle applies —
+  // opening /build cold shows the vehicle you actually have, not a default.
+  // Stack shape first — it decides which fields exist to fill.
+  const q = new URLSearchParams(location.search);
+  for (const [k, v] of q)
+    if (!own(k) && k !== 'selftest') PASSTHRU.set(k, v);
+  $('lander_card').classList.toggle('hidden', !landingMode());
+  let src = q;
+  if (![...q.keys()].some(own)) {
+    const s = vehicle.load();
+    if (s) src = new URLSearchParams(s);
+  }
+  if (src.has('nstages')) NSTAGES = Math.min(5, Math.max(2, Math.round(+src.get('nstages') || 3)));
+  if (src.has('nboost')) $('nboost').value =
+    [...$('nboost').options].some(o => o.value === src.get('nboost')) ? src.get('nboost') : 0;
+  const vals = {};
+  for (const [k, v] of src) {
+    if (!own(k) || k === 'nstages' || k === 'nboost') continue;
+    vals[k] = v;
+  }
+  buildStages(vals);
+  buildBoost(vals);
+  setVals(vals);           // vname/diameter/fairing/pod_mass/kick + anything missed
+  initPresets();
+  for (const id of ['vname', 'diameter', 'fairing', 'fairing_on', 'pod_mass',
+                    'pod_dia', 'kick_deg', 'opt_kick', 'crewed', 'l_dry', 'l_prop',
+                    'l_diameter', 'l_thrust_kn', 'l_isp', 'l_throttle_min'])
+    // syncLocks too: toggling the fairing decides whether its mass box is a
+    // live control, the same way the size-by switch decides for prop/length
+    $(id).addEventListener('change', () => { syncLocks(); fetchGeo(); });
+  // An uncrewed payload is the case a shroud exists for, so unticking the crew
+  // ticks the fairing back on — stated here rather than silently in the server,
+  // because the operator can then untick it again and fly a bare bus if that is
+  // what they meant.
+  $('crewed').addEventListener('change', () => {
+    if (!$('crewed').checked) $('fairing_on').checked = true;
+    crewNote(); podNote();
+  });
+  crewNote();
+  // the core diameter carries stage diameters that were tracking it, as on
+  // the panel
+  let lastDia = $('diameter').value;
+  $('diameter').addEventListener('change', () => {
+    for (let k = 1; k <= NSTAGES; k++) {
+      const el = $(`s${k}_diameter`);
+      if (el && Math.abs(+el.value - +lastDia) < 1e-9) el.value = $('diameter').value;
+    }
+    const b = $('b_diameter');
+    if (b && Math.abs(+b.value - +(+lastDia*0.85).toFixed(2)) < 1e-9)
+      b.value = +(+$('diameter').value*0.85).toFixed(2);
+    lastDia = $('diameter').value;
+    fetchGeo();
+  });
+  syncLocks();
+  fetchGeo();
+  requestAnimationFrame(draw);
+}
+boot();
+
+// -------------------------------------------------------------- selftest --
+window.__selftest = function () {
+  const out = suite(), eq = out.eq;
+  eq('payload fraction', () => payloadFrac(350, 70000), 0.005);
+  eq('payload fraction of nothing', () => payloadFrac(350, 0), 0);
+  eq('mass ratio', () => stageMassRatio(1000, 9000), 10);
+  eq('mass ratio of no stage', () => stageMassRatio(0, 9000), 0);
+  eq('roles: first is the booster', () => roleAt(1, 3).label, 'booster');
+  eq('roles: last is the kick', () => roleAt(3, 3).label, 'kick stage');
+  eq('roles: uppers shrink with height', () => roleAt(3, 4).prop, Math.round(9500*0.25));
+  const vals = { s1_prop: 'a', s2_prop: 'b', s3_prop: 'c' };
+  eq('removing stage 2 slides stage 3 down',
+     () => removeStageVals(vals, 2, 3).s2_prop, 'c');
+  eq('and keeps stage 1', () => removeStageVals(vals, 2, 3).s1_prop, 'a');
+  eq('inserting before the kick moves the kick up',
+     () => insertStageVals(vals, 3).s4_prop, 'c');
+  eq('and leaves the new slot empty',
+     () => insertStageVals(vals, 3).s3_prop === undefined, true);
+  eq('face normal of the xy triangle points at +z',
+     () => faceNormal(0,0,0, 1,0,0, 0,1,0)[2], 1);
+
+  // A preset owns every vehicle-level field, including the ones it does not
+  // mention. A capsule diameter stated for one vehicle must not follow you to
+  // the next: it sets the stack's reference area, so carrying 5.02 m onto a
+  // 1.8 m Sable silently flew the wrong drag.
+  const podDiaWas = $('pod_dia').value, presetWas = $('vname').value;
+  eq('a preset clears a pod diameter it does not state', () => {
+    $('pod_dia').value = '5.02';
+    applyPreset('Sable (reference)');
+    return $('pod_dia').value;
+  }, VDEFAULTS.pod_dia);
+  eq('a preset still applies the fields it does state', () => {
+    applyPreset('Saturn V (Apollo)');
+    return $('pod_mass').value;
+  }, '45000');
+  eq('and resets ones the next preset omits', () => {
+    applyPreset('Sable (reference)');       // states pod_mass, not fairing_on
+    return $('fairing').value;
+  }, '150');
+  $('pod_dia').value = podDiaWas;
+  if (VEHICLES[presetWas]) applyPreset(presetWas);
+
+  // This page's own copy of fmt had no null check, and the server sends a
+  // NaN dimension as JSON null — so an unbuildable stack reported "0.0 m"
+  // long and 0.00 m across, which reads as a measurement rather than as a
+  // refusal. The shared module is the fix; these hold it in place.
+  eq('fmt of null', () => fmt(null), '—');
+  eq('fmt of undefined', () => fmt(undefined), '—');
+  eq('fmt of NaN', () => fmt(NaN), '—');
+  eq('fmt of a number', () => fmt(6.25, 2), '6.25');
+  eq('fmt does not manufacture a minus', () => fmt(-0.004, 2), '0.00');
+  eq('fmtMass of null', () => fmtMass(null), '—');
+  eq('fmtMass in kg', () => fmtMass(350), '350 kg');
+  eq('fmtMass in tonnes', () => fmtMass(45000), '45.0 t');
+  eq('fin rejects null', () => fin(null), false);
+  eq('fin accepts a number', () => fin(0), true);
+
+  // The vehicle/mission boundary decides what crosses to the panel. A
+  // mission field leaking into storage comes back on the next cold load and
+  // silently re-flies a mission you had already changed.
+  eq('stage fields are the vehicle', () => own('s2_prop'), true);
+  eq('booster fields are the vehicle', () => own('b_thrust_kn'), true);
+  eq('lander fields are the vehicle', () => own('l_dry'), true);
+  eq('the pod diameter is the vehicle', () => own('pod_dia'), true);
+  eq('the mode is not the vehicle', () => own('mode'), false);
+  eq('the epoch is not the vehicle', () => own('epoch'), false);
+  eq('packing keeps only vehicle keys', () => {
+    const p = new URLSearchParams({ s1_prop: '9', mode: 'flyby', pod_dia: '3.9' });
+    return vehicle.pack(p).toString();
+  }, 's1_prop=9&pod_dia=3.9');
+
+  return report(out);
+};
+if (requested()) setTimeout(window.__selftest, 0);
+</script>
+</body>
+</html>

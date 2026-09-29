@@ -15,11 +15,24 @@ const TYPES = {
   '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.geojson': 'application/geo+json; charset=utf-8',
+};
+
+// The Julia panel served extensionless routes (/launch, /build, /analysis) and
+// mission control at /. Reproduce those so the pages' own links keep working.
+const ROUTES = {
+  '/': '/panel_page.html',
+  '/panel': '/panel_page.html',
+  '/launch': '/launch_page.html',
+  '/build': '/build_page.html',
+  '/analysis': '/analysis_page.html',
+  '/home': '/index.html',
 };
 
 createServer(async (req, res) => {
   const url = decodeURIComponent((req.url || '/').split('?')[0]);
-  const rel = normalize(url === '/' ? '/index.html' : url).replace(/^(\.\.[/\\])+/, '');
+  const target = ROUTES[url] || (url === '/' ? '/index.html' : url);
+  const rel = normalize(target).replace(/^(\.\.[/\\])+/, '');
   const file = join(root, rel);
   if (!file.startsWith(root)) { res.writeHead(403).end('forbidden'); return; }
   try {
