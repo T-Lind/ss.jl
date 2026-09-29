@@ -30,6 +30,10 @@ jobs:
           cp web/*.html _site/
           cp -r web/src _site/src
           cp -r web/static _site/static
+          # Mission control is the app's front door; the reentry demo stays at
+          # /demo.html. The pages link "mission control" to ./, which is this.
+          mv _site/index.html _site/demo.html
+          cp web/panel_page.html _site/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
