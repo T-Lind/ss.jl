@@ -1,0 +1,1029 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ss.jl analysis</title>
+<link rel="stylesheet" href="./static/tokens.css">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--text);
+         font: 13.5px/1.45 var(--sans); }
+  .wrap { max-width: 1480px; margin: 0 auto; padding: var(--s4);
+          display: flex; flex-direction: column; gap: var(--s5); }
+
+  /* --- the run being analysed ------------------------------------------
+   * A sweep of "pod mass" means nothing without saying which vehicle and
+   * which mission it is a sweep OF, and this page flies its own run rather
+   * than inheriting one, so it has to state what it flew. */
+  .runhdr { display: flex; align-items: baseline; gap: var(--s4);
+            flex-wrap: wrap; }
+  .runhdr .who { font-family: var(--mono); font-size: var(--t-body);
+                 font-weight: 600; }
+  .runhdr .who .mode { color: var(--amber); }
+  .runhdr .facts { color: var(--text-2); font-size: 12.5px;
+                   font-variant-numeric: tabular-nums; }
+  .runhdr .facts b { color: var(--text); font-family: var(--mono);
+                     font-weight: 600; }
+  .runhdr .act { margin-left: auto; display: flex; gap: var(--s2); }
+
+  section { display: flex; flex-direction: column; gap: var(--s3); }
+  .sec-h { display: flex; align-items: baseline; gap: var(--s3);
+           border-bottom: 1px solid var(--line); padding-bottom: var(--s2); }
+  .sec-h h2 { font-family: var(--mono); font-size: var(--t-label); margin: 0;
+              letter-spacing: .18em; text-transform: uppercase;
+              color: var(--text-2); font-weight: 600; }
+  .sec-h .hint { color: var(--text-3); font-size: 12px; }
+
+  /* Charts get room. At 150px in a two-up grid these were postage stamps with
+   * six numbers on the axes; the point of moving them off mission control was
+   * to stop treating them as decoration. */
+  .plots { display: grid; gap: var(--s3);
+           grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .plot { background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: var(--s2);
+          box-shadow: inset 0 1px rgba(255,255,255,.02); position:relative; }
+  .plot canvas { width: 100%; height: 245px; display: block; cursor:crosshair; }
+  .plot.wide { grid-column: 1 / -1; }
+  .plot.wide canvas { height: 300px; }
+  .plot-note { color:var(--text-3); font-size:11px; padding:2px 8px 5px }
+  .plot-break { grid-column:1 / -1; color:var(--text-2); font:600 11px var(--mono);
+                letter-spacing:.16em; text-transform:uppercase; margin-top:var(--s2) }
+  .plot-break small { color:var(--text-3); font:400 11px var(--sans);
+                      letter-spacing:0; text-transform:none; margin-left:8px }
+  .chart-tools { position:absolute; z-index:3; top:5px; right:6px; display:flex;
+                 gap:3px; opacity:.25; transition:opacity .12s ease }
+  .plot:hover .chart-tools, .chart-tools:focus-within { opacity:1 }
+  .chart-tools button { min-width:25px; padding:2px 6px; border-radius:3px;
+                        background:color-mix(in srgb,var(--surface) 88%,transparent);
+                        color:var(--text-2); font:10px var(--mono); font-weight:600 }
+  .chart-tools button:hover { color:var(--text); border-color:var(--text-3) }
+
+  .legend { display: flex; gap: var(--s4); font-size: 11.5px;
+            color: var(--text-2); flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 13px; height: 3px; border-radius: 2px;
+              vertical-align: middle; margin-right: 5px; }
+
+  .diag-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+                gap:var(--s2) }
+  .diag { background:linear-gradient(145deg,var(--surface),color-mix(in srgb,var(--surface) 82%,#17304a));
+          border:1px solid var(--line); border-radius:var(--radius); padding:12px 14px }
+  .diag b { display:block; color:var(--text); font:600 20px/1.2 var(--mono);
+            font-variant-numeric:tabular-nums }
+  .diag span { color:var(--text-3); font-size:10px; letter-spacing:.11em;
+               text-transform:uppercase }
+  .track-shell { background:var(--surface); border:1px solid var(--line);
+                 border-radius:var(--radius); overflow:hidden }
+  #groundmap { display:block; width:100%; height:360px; cursor:crosshair }
+  .track-tools { display:grid; grid-template-columns:auto minmax(120px,1fr) auto;
+                 align-items:center; gap:12px; padding:9px 12px;
+                 border-top:1px solid var(--line); background:var(--raise) }
+  .track-tools button { padding:4px 12px; min-width:58px }
+  .track-tools input { padding:0; accent-color:var(--amber) }
+  .track-readout { color:var(--text-2); font:11px var(--mono); white-space:nowrap }
+  .station-shell { background:var(--surface); border:1px solid var(--line);
+                   border-radius:var(--radius); overflow:hidden }
+  #stationview { display:block; width:100%; height:430px; cursor:grab }
+  #stationview:active { cursor:grabbing }
+  .station-tools { display:grid; grid-template-columns:repeat(4,minmax(100px,1fr));
+                   gap:9px 12px; align-items:end; padding:10px 12px;
+                   border-top:1px solid var(--line); background:var(--raise) }
+  .station-tools .time { grid-column:1 / -1; display:grid;
+                         grid-template-columns:auto 1fr; gap:12px; align-items:center }
+  .station-tools input { padding:0; accent-color:var(--amber) }
+  .station-tools button.on { color:#12151a; background:var(--amber); border-color:var(--amber) }
+  .station-readout { grid-column:1 / -1; color:var(--text-2); font:11px var(--mono) }
+
+  .studies { display: grid; gap: var(--s3);
+             grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+             align-items: start; }
+
+  label { display: block; color: var(--text-3); font-size: var(--t-label);
+          letter-spacing: .04em; margin: 0 0 3px;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  input, select { width: 100%; background: var(--ground); color: var(--text);
+    border: 1px solid var(--line); border-radius: var(--radius-sm);
+    padding: 5px 8px; font: inherit; font-variant-numeric: tabular-nums; }
+  input:focus, select:focus, button:focus-visible {
+    outline: 2px solid var(--amber); outline-offset: 1px; }
+  .row  { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--s2); }
+  button { background: var(--raise); color: var(--text);
+           border: 1px solid var(--line); border-radius: var(--radius);
+           padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover { background: var(--line); }
+  button:disabled { opacity: .5; cursor: wait; }
+  /* Re-running the mission is the one action here that flies something, so it
+     is the one that gets the live-mission colour. */
+  #rerun { background: var(--amber); border-color: var(--amber); color: #12151A; }
+  #rerun:hover { background: #ffb71a; }
+
+  .out { font-size: 12.5px; color: var(--text-2); min-height: 17px; }
+  .out.err { color: var(--failed); }
+  .out b { color: var(--text); font-family: var(--mono); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px;
+          font-variant-numeric: tabular-nums; }
+  td, th { text-align: left; padding: 4px 10px 4px 0;
+           border-bottom: 1px solid var(--line); }
+  th { color: var(--text-3); font-weight: 500; font-size: var(--t-label);
+       letter-spacing: .1em; text-transform: uppercase; }
+  td.ph { font-family: var(--mono); color: var(--text-2); }
+  td.t  { font-family: var(--mono); text-align: right; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<nav class="appnav">
+  <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
+  <span class="appnav-links">
+    <a class="navlink" id="nav_home" href="./">mission control</a>
+    <a class="navlink" id="nav_build" href="build_page.html">vehicle builder</a>
+    <!-- same order on every page: the bar is only worth having if the link you
+         want is in the place you last saw it -->
+    <a class="navlink" href="#" aria-current="page">analysis</a>
+    <a class="navlink" id="nav_launch" href="launch_page.html">launch view</a>
+  </span>
+  <span class="appnav-end u-label" id="nav_note">analysis</span>
+</nav>
+
+<div class="wrap">
+  <div class="runhdr" id="runhdr">
+    <span class="who">analysis · <span class="mode" id="hdr_mode">—</span></span>
+    <span class="facts" id="hdr_facts">loading…</span>
+    <span class="act"><button id="rerun">Re-run</button></span>
+  </div>
+  <div class="diag-strip" id="diag_strip"></div>
+
+  <!-- Arrived with nothing to analyse. Not an error, and not a reason to
+       invent a mission: this page reads a trajectory and there is not one
+       yet. -->
+  <section class="empty" id="empty" hidden>
+    <h2>No run to analyse yet</h2>
+    <p id="empty_lead">Analysis reads a trajectory that has already been flown.
+      Fly one from mission control and it appears here — with the ascent and
+      entry profiles, the event log, and the sweep and solve tools.</p>
+    <div class="empty-runs" id="empty_runs"></div>
+    <p><a class="chip" href="./">Go to mission control &rarr;</a></p>
+  </section>
+
+  <!-- Powered descent leads on a landing mission: it is the fifteen kilometres
+       the whole flight exists to fly, and burying it under six ascent and
+       entry charts said the opposite. -->
+  <section id="sec_descent" class="hidden">
+    <div class="sec-h">
+      <h2>Powered descent</h2>
+      <span class="hint" id="desc_note">—</span>
+    </div>
+    <div class="legend">
+      <span><i style="background:#c98500"></i>braking (full thrust)</span>
+      <span><i style="background:#d55181"></i>terminal (throttled)</span>
+      <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>high gate</span>
+    </div>
+    <div class="plots">
+      <div class="plot wide"><canvas id="c_desc_prof"></canvas></div>
+      <div class="plot"><canvas id="c_desc_v"></canvas></div>
+      <div class="plot"><canvas id="c_desc_thr"></canvas></div>
+      <div class="plot"><canvas id="c_desc_mass"></canvas></div>
+      <div class="plot"><canvas id="c_desc_att"></canvas></div>
+      <div class="plot wide"><canvas id="c_desc_nav"></canvas></div>
+    </div>
+  </section>
+
+  <section id="sec_profiles">
+    <div class="sec-h">
+      <h2>Flight profiles</h2>
+      <span class="hint">inspect values · wheel or +/− to zoom · drag to pan · export CSV/PNG</span>
+    </div>
+    <div class="plots">
+      <div class="plot-break">Ascent <small>guidance, loads, propulsion and staging performance</small></div>
+      <div class="plot"><canvas id="c_asc_h"></canvas></div>
+      <div class="plot"><canvas id="c_asc_q"></canvas></div>
+      <div class="plot"><canvas id="c_asc_v"></canvas></div>
+      <div class="plot"><canvas id="c_asc_g"></canvas></div>
+      <div class="plot"><canvas id="c_asc_mach"></canvas></div>
+      <div class="plot"><canvas id="c_asc_gamma"></canvas></div>
+      <div class="plot"><canvas id="c_asc_mass"></canvas></div>
+      <div class="plot"><canvas id="c_asc_thrust"></canvas></div>
+      <div class="plot wide"><canvas id="c_asc_path"></canvas></div>
+      <div class="plot-break hidden" id="h_coast">Orbit / coast <small>geometry, relative motion and specific energy</small></div>
+      <div class="plot" id="w_dist"><canvas id="c_dist"></canvas></div>
+      <div class="plot" id="w_coast_v"><canvas id="c_coast_v"></canvas></div>
+      <div class="plot" id="w_energy"><canvas id="c_energy"></canvas></div>
+      <div class="plot" id="w_lunar"><canvas id="c_lunar"></canvas></div>
+      <div class="plot-break hidden" id="h_entry">Atmospheric entry <small>aerodynamic, thermal and guidance envelope</small></div>
+      <div class="plot" id="w_corridor"><canvas id="c_corridor"></canvas></div>
+      <div class="plot" id="w_ent_g"><canvas id="c_ent_g"></canvas></div>
+      <div class="plot" id="w_ent_q"><canvas id="c_ent_q"></canvas></div>
+      <div class="plot" id="w_ent_h"><canvas id="c_ent_h"></canvas></div>
+      <div class="plot" id="w_ent_v"><canvas id="c_ent_v"></canvas></div>
+      <div class="plot" id="w_ent_qbar"><canvas id="c_ent_qbar"></canvas></div>
+      <div class="plot" id="w_ent_mach"><canvas id="c_ent_mach"></canvas></div>
+      <div class="plot" id="w_ent_alpha"><canvas id="c_ent_alpha"></canvas></div>
+      <div class="plot" id="w_ent_heat"><canvas id="c_ent_heat"></canvas></div>
+      <div class="plot" id="w_ent_wall"><canvas id="c_ent_wall"></canvas></div>
+      <div class="plot wide" id="w_ent_range"><canvas id="c_ent_range"></canvas></div>
+      <div class="plot-break hidden" id="h_rcs">Attitude control <small>consumption, reserve and firing demand</small></div>
+      <div class="plot wide hidden" id="w_rcs"><canvas id="c_rcs"></canvas>
+        <div class="plot-note" id="rcs_note"></div>
+      </div>
+      <div class="plot hidden" id="w_rcs_remaining"><canvas id="c_rcs_remaining"></canvas></div>
+      <div class="plot hidden" id="w_rcs_rate"><canvas id="c_rcs_rate"></canvas></div>
+    </div>
+  </section>
+
+  <section id="sec_track" class="hidden">
+    <div class="sec-h">
+      <h2>Earth ground track</h2>
+      <span class="hint">drag across the map or scrub mission time</span>
+    </div>
+    <div class="track-shell">
+      <canvas id="groundmap"></canvas>
+      <div class="track-tools">
+        <button data-track-play>play</button>
+        <input data-track-time type="range" min="0" max="1" value="0" aria-label="ground track time">
+        <span class="track-readout" data-track-readout>—</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="sec_station" class="hidden">
+    <div class="sec-h">
+      <h2>Ground observation station</h2>
+      <span class="hint">launch-site PTZ optics · drag to pan/tilt · wheel to zoom</span>
+    </div>
+    <div class="station-shell">
+      <canvas id="stationview"></canvas>
+      <div class="station-tools">
+        <button data-station-track class="on">tracking</button>
+        <div><label>pan / azimuth [°]</label><input data-station-pan type="range" min="0" max="360" step="0.1" value="90"></div>
+        <div><label>tilt / elevation [°]</label><input data-station-tilt type="range" min="0" max="90" step="0.1" value="15"></div>
+        <div><label>optical zoom</label><input data-station-zoom type="range" min="1" max="80" step="1" value="8"></div>
+        <div><label>cloud opacity [%]</label><input data-station-cloud type="range" min="0" max="100" step="1" value="20"></div>
+        <div class="time"><label>mission time</label><input data-station-time type="range" min="0" max="1" value="0" aria-label="ground station mission time"></div>
+        <div class="station-readout" data-station-readout>—</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="sec_studies">
+    <div class="sec-h">
+      <h2>Studies</h2>
+      <span class="hint">each point below flies a whole mission — these take
+        seconds, not milliseconds</span>
+    </div>
+    <div class="studies">
+      <div class="panel">
+        <div class="panel-h">Parameter sweep</div>
+        <div class="row3">
+          <div><label for="sweep_param">parameter</label>
+            <select id="sweep_param" data-solvable></select></div>
+          <div><label for="sweep_min">min</label><input id="sweep_min" value="250"></div>
+          <div><label for="sweep_max">max</label><input id="sweep_max" value="450"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label for="sweep_n">steps</label><input id="sweep_n" value="9"></div>
+          <div><label for="sweep_metric">metric</label>
+            <select id="sweep_metric"></select></div>
+        </div>
+        <div style="margin-top:10px"><button id="sweepbtn">Run sweep</button></div>
+        <div class="out" id="sweep_out" style="margin-top:6px">—</div>
+        <canvas id="sweepchart" style="width:100%;height:200px;margin-top:6px"></canvas>
+      </div>
+
+      <div class="panel">
+        <div class="panel-h">Solve for a target</div>
+        <div class="out" style="margin-bottom:8px">
+          Lock everything else and search one field until a mission metric
+          reaches a value.
+        </div>
+        <div class="row">
+          <div><label for="solve_param">vary</label>
+            <select id="solve_param" data-solvable></select></div>
+          <div><label for="solve_metric">until</label>
+            <select id="solve_metric"></select></div>
+        </div>
+        <div class="row3" style="margin-top:6px">
+          <div><label for="solve_target">equals</label><input id="solve_target" value="3000"></div>
+          <div><label for="solve_min">search from</label><input id="solve_min" value="1000"></div>
+          <div><label for="solve_max">to</label><input id="solve_max" value="4000"></div>
+        </div>
+        <div style="margin-top:10px"><button id="solvebtn">Solve</button></div>
+        <div class="out" id="solve_out" style="margin-top:6px">—</div>
+        <canvas id="solvechart" style="width:100%;height:170px;margin-top:6px"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <section id="sec_events">
+    <div class="sec-h">
+      <h2>Event log</h2>
+      <span class="hint" id="ev_count"></span>
+    </div>
+    <div class="panel" style="overflow-x:auto"><table id="events"></table></div>
+  </section>
+</div>
+
+<script type="module">
+'use strict';
+import { fin, fmt } from './static/fmt.js';
+import * as api from './static/api.js';
+import { drawLine, niceStep, fmtTick, fmtPeak } from './static/charts.js';
+import { drawGroundTrack } from './static/groundtrack.js';
+import { drawGroundStation } from './static/groundstation.js';
+import { busy, fail, clearFailures, reportUncaught } from './static/busy.js';
+import * as runs from './static/runs.js';
+import { METRIC_LABEL, SFIELD_LABEL, PARAM_LABEL, SPARAM_LABEL, LPARAM_LABEL,
+         paramLabel, metricLabel } from './static/metrics.js';
+import { suite, report, requested } from './static/selftest.js';
+
+const $ = id => document.getElementById(id);
+reportUncaught();
+
+// How this page gets a mission, in the order it tries:
+//
+//   ?run=<id>   a flight that has already been flown. This is the normal
+//               case — mission control links here with the id of the run on
+//               screen, and the point is to analyse THAT run rather than a
+//               freshly computed one that merely shares its configuration.
+//   ?pod_mass=… a configuration, but not a flight. It is kept for builder and
+//               study context, while the page asks for an explicit run.
+//   nothing     nothing has been flown, so there is nothing to analyse. It
+//               says so and offers the history, instead of quietly flying a
+//               default mission the user never asked for.
+//
+// There is no configuration form here on purpose: a page that both analyses a
+// run and lets you edit it is two pages.
+const RUN_ID = new URLSearchParams(location.search).get('run');
+const Q = (() => {
+  const q = new URLSearchParams(location.search);
+  q.delete('selftest');
+  q.delete('run');
+  return q;
+})();
+// Not const: loading a stored run adopts ITS mode, which is only known once
+// the payload arrives. Every chart below branches on this.
+let MODE = Q.get('mode') || 'flyby';
+const landing = () => MODE === 'landing';
+const subm = () => MODE === 'suborbital';
+const orbitm = () => MODE === 'orbit';
+const nStages = () => Math.max(1, +Q.get('nstages') || 3);
+
+// Carry this run to the other pages, so moving between them never silently
+// changes which flight you are looking at. The builder gets the configuration
+// instead — it edits a vehicle, and a run id means nothing to it.
+function syncLinks() {
+  const rq = run && run.id ? '?run=' + encodeURIComponent(run.id) : '';
+  $('nav_home').href = '/' + rq;
+  $('nav_launch').href = 'launch_page.html' + rq;
+  $('nav_build').href = 'build_page.html?' + Q.toString();
+}
+// NOT called here: `run` is declared below, and reading a `let` above its
+// declaration throws — which in a module aborts everything after it, so the
+// page loaded with dead nav links and no charts. It is called once `run`
+// exists, and again whenever the run changes.
+
+const ACC = '#3987e5';
+let run = null, sweepData = null;
+syncLinks();      // now that `run` exists — see the note above
+
+// ------------------------------------------------------------- the run --
+
+/**
+ * Point the page at a run.
+ *
+ * The studies below sweep and solve from `Q`, so adopting a stored run has to
+ * adopt its parameters too — otherwise a sweep launched from a restored run
+ * would vary a field of whatever configuration happened to be in the URL and
+ * plot it against a trajectory from a different vehicle.
+ */
+function adopt(j) {
+  run = j;
+  if (j.params) {
+    for (const k of [...Q.keys()]) Q.delete(k);
+    for (const [k, v] of Object.entries(j.params)) Q.set(k, v);
+  }
+  MODE = j.mode || Q.get('mode') || 'flyby';
+}
+
+/** Show the analysis, hide the "nothing here yet" state. */
+function showRun() {
+  $('empty').hidden = true;
+  $('diag_strip').hidden = false;
+  // sec_descent is included, but whether it is SEEN stays with renderCharts
+  // and its `hidden` class — only a landing run has a powered descent.
+  for (const id of ['sec_descent', 'sec_profiles', 'sec_track', 'sec_station', 'sec_studies', 'sec_events'])
+    $(id).hidden = false;
+  $('runhdr').hidden = false;
+}
+
+async function fly(refly = false) {
+  $('rerun').disabled = true;
+  $('hdr_facts').textContent = refly || !RUN_ID
+    ? 'flying the mission…' : 'loading the run…';
+  const done = busy($('hdr_facts').textContent);
+  try {
+    // A stored run is fetched, not re-flown. Re-flying is what made "open the
+    // analysis of this flight" produce a second, subtly different flight.
+    if (!RUN_ID && !refly) throw new Error('no trajectory has been selected');
+    const j = (RUN_ID && !refly) ? await runs.get(RUN_ID) :
+              await api.run(Q, { onProgress: done.progress });
+    adopt(j);
+    clearFailures();
+    showRun();
+    renderHeader();
+    renderDiagnostics();
+    renderCharts();
+    renderEvents();
+    syncLinks();
+  } catch (e) {
+    $('hdr_facts').innerHTML =
+      `<span style="color:var(--failed)">${String(e.message || e)}</span>`;
+    fail(e, 'analysis');
+  } finally {
+    done();
+    $('rerun').disabled = false;
+  }
+}
+
+/**
+ * Nothing has been flown, so there is nothing to analyse.
+ *
+ * This page used to fly a default mission on arrival to have something to
+ * draw. That is seconds of simulation to answer a question nobody asked, and
+ * it made the charts look like results when they were a placeholder.
+ */
+async function showEmpty() {
+  const list = await runs.list();
+  $('runhdr').hidden = true;
+  $('diag_strip').hidden = true;
+  for (const id of ['sec_descent', 'sec_profiles', 'sec_track', 'sec_station', 'sec_studies', 'sec_events'])
+    $(id).hidden = true;
+  $('empty').hidden = false;
+  const host = $('empty_runs');
+  const hasConfig=[...Q.keys()].length>0;
+  if (hasConfig) {
+    $('empty_lead').textContent =
+      'This configuration has no trajectory yet. Return to mission control and press Run mission; changing a mission or vehicle never simulates it automatically.';
+  } else if (!list.length) {
+    host.innerHTML = '';
+    return;
+  }
+  if(!hasConfig) $('empty_lead').textContent = 'Pick one of the runs from this session:';
+  host.replaceChildren(...list.map((d, i) => {
+    const a = document.createElement('a');
+    a.className = 'chip hchip is-' + runs.verdict(d);
+    a.href = 'analysis_page.html?run=' + encodeURIComponent(d.id);
+    a.innerHTML = `<b>#${list.length - i}</b> <span class="hv"></span> <span class="hd"></span>`;
+    a.querySelector('.hv').textContent = d.vname || '';
+    a.querySelector('.hd').textContent = runs.describe(d);
+    return a;
+  }));
+}
+
+function renderHeader() {
+  const m = run.metrics || {};
+  $('hdr_mode').textContent =
+    landing() ? 'lunar landing' : orbitm() ? 'Earth orbit' :
+    subm() ? 'suborbital' : 'circumlunar free return';
+  $('nav_note').textContent = Q.get('vname') || 'Sable';
+  // The facts a reader needs to know WHICH run these plots are of. Not a
+  // second metrics panel — mission control owns that — just enough identity
+  // that a sweep chart below can be trusted to belong to this vehicle.
+  const bits = [`<b>${Q.get('vname') || 'Sable'}</b>`];
+  if (fin(m.liftoff_t)) bits.push(`<b>${fmt(m.liftoff_t, 1)}</b> t on the pad`);
+  if (fin(m.peak_g)) bits.push(`<b>${fmt(m.peak_g, 1)}</b> g peak`);
+  if (fin(m.t_days)) bits.push(`<b>${fmt(m.t_days, 1)}</b> d`);
+  bits.push(run.outcome === 'nominal' && m.on_target
+    ? '<span style="color:var(--nominal)">nominal</span>'
+    : `<span style="color:var(--failed)">${run.outcome || 'off target'}</span>`);
+  $('hdr_facts').innerHTML = bits.join(' · ');
+}
+
+function renderDiagnostics() {
+  const A=run.ascent||{}, E=run.entry||{}, m=run.metrics||{};
+  const max=(a=[])=>a.reduce((v,x)=>isFinite(x)&&x>v?x:v,-Infinity);
+  const imax=(a=[])=>a.reduce((best,x,i)=>isFinite(x)&&(best<0||x>a[best])?i:best,-1);
+  const iq=imax(A.qbar||[]), ig=imax(A.g||[]);
+  const cards=[
+    ['max dynamic pressure', max(A.qbar), ' kPa', 1],
+    ['max-q time', (A.t||[])[iq], ' s', 1],
+    ['max ascent load', max(A.g), ' g', 2],
+    ['peak ascent-g time', (A.t||[])[ig], ' s', 1],
+    ['max Mach', max(A.mach), '', 2],
+    ['peak altitude', max(A.h), ' km', 0],
+    ['ascent cutoff mass', (A.m||[]).at?.(-1)/1000, ' t', 2],
+  ];
+  if(E.g&&E.g.length) cards.push(['peak entry load', fin(m.peak_g)?m.peak_g:max(E.g), ' g', 2]);
+  if(E.qbar&&E.qbar.length) cards.push(['peak entry q', max(E.qbar), ' kPa', 1]);
+  if(E.q&&E.q.length) cards.push(['peak heat flux', fin(m.peak_q_wcm2)?m.peak_q_wcm2:max(E.q), ' W/cm²', 1]);
+  if(E.heat&&E.heat.length) cards.push(['integrated heat', E.heat[E.heat.length-1], ' MJ/m²', 1]);
+  if(E.twall&&E.twall.length) cards.push(['peak wall temperature', max(E.twall), ' K', 0]);
+  if(fin(m.rcs_used_kg)) cards.push(['RCS budget used', m.rcs_used_kg, ' kg', 2]);
+  if(fin(m.rcs_margin_kg)) cards.push(['RCS margin', m.rcs_margin_kg, ' kg', 2]);
+  $('diag_strip').innerHTML=cards.filter(x=>isFinite(x[1])).map(([label,v,unit,d])=>
+    `<div class="diag"><b>${(+v).toFixed(d)}${unit}</b><span>${label}</span></div>`).join('');
+}
+
+// ---------------------------------------------------------------- plots --
+
+function renderCharts() {
+  const A = run.ascent, E = run.entry, D = run.cis;
+  drawLine('c_asc_h', [{xs: A.t, ys: A.h, color: ACC, unit: 'km'}],
+           'ascent altitude vs time', {xu: 's', yu: 'km'});
+  drawLine('c_asc_q', [{xs: A.t, ys: A.qbar, color: ACC, unit: 'kPa'}],
+           'ascent dynamic pressure vs time', {xu: 's', yu: 'kPa'});
+  drawLine('c_asc_v', [{xs:A.t,ys:A.v.map(v=>v/1000),color:'#8fbef0',unit:'km/s'}],
+           'ascent speed vs time', {xu:'s',yu:'km/s'});
+  const ag=A.g&&A.g.length===A.t.length?A.g:A.thrust.map((v,i)=>v/Math.max(A.m[i],1)/9.80665);
+  drawLine('c_asc_g', [{xs:A.t,ys:ag,color:'#f0a500',unit:'g'}],
+           'ascent proper acceleration vs time', {xu:'s',yu:'g',y0:0});
+  drawLine('c_asc_mach', [{xs:A.t,ys:A.mach,color:'#8fbef0',unit:'Mach'}],
+           'ascent Mach number vs time', {xu:'s',yu:'Mach',y0:0});
+  drawLine('c_asc_gamma', [{xs:A.t,ys:A.gamma.map(x=>x*180/Math.PI),color:'#c98500',unit:'°'}],
+           'flight-path angle vs time', {xu:'s',yu:'deg'});
+  drawLine('c_asc_mass', [{xs:A.t,ys:A.m.map(x=>x/1000),color:'#199e70',unit:'t'}],
+           'vehicle mass vs time', {xu:'s',yu:'t',y0:0,nopeak:true});
+  drawLine('c_asc_thrust', [{xs:A.t,ys:A.thrust.map(x=>x/1e6),color:'#d95926',unit:'MN'}],
+           'delivered thrust vs time', {xu:'s',yu:'MN',y0:0,nopeak:true});
+  drawLine('c_asc_path', [{xs:A.dr.map(x=>x/1000),ys:A.h,color:ACC,unit:'km'}],
+           'ascent altitude vs downrange', {xu:'km',yu:'km',y0:0});
+  // Full-mission geometry exists only for orbital and cislunar missions. A
+  // suborbital run has ascent + entry but deliberately no `cis` leg.
+  const hasDistance = D && D.t && D.t.length;
+  $('h_coast').classList.toggle('hidden', !hasDistance);
+  $('w_dist').classList.toggle('hidden', !hasDistance);
+  for (const id of ['w_coast_v','w_energy']) $(id).classList.toggle('hidden',!hasDistance);
+  $('w_lunar').classList.toggle('hidden', !hasDistance || orbitm());
+  if (hasDistance) {
+    const td = D.t.map(t => t/86400);
+    const rE = D.x.map((x, i) => Math.hypot(x, D.y[i], D.z[i]));
+    const dM = D.dm&&D.dm.length===D.t.length ? D.dm : D.x.map((x, i) =>
+      Math.hypot(x - D.mx[i], D.y[i] - D.my[i], D.z[i] - D.mz[i]));
+    const speed=(x,y,z)=>x.map((_,i)=>{
+      const a=Math.max(0,i-1),b=Math.min(x.length-1,i+1),dt=Math.max(D.t[b]-D.t[a],1e-9);
+      return Math.hypot(x[b]-x[a],y[b]-y[a],z[b]-z[a])*1000/dt;
+    });
+    const vE=D.vx&&D.vx.length===D.t.length
+      ? D.vx.map((x,i)=>Math.hypot(x,D.vy[i],D.vz[i]))
+      : speed(D.x,D.y,D.z);
+    const rx=D.x.map((x,i)=>x-D.mx[i]),ry=D.y.map((x,i)=>x-D.my[i]),rz=D.z.map((x,i)=>x-D.mz[i]);
+    const vM=speed(rx,ry,rz);
+    if (orbitm()) {
+      drawLine('c_dist', [
+        {xs: td, ys: rE.map(r => (r - 6.371)*1000), color: ACC,
+         label: 'altitude', unit: 'km'},
+      ], 'orbital altitude vs time', {y0: 0, xu: 'd', yu: 'km'});
+    } else drawLine('c_dist', [
+        {xs: td, ys: dM, color: '#199e70', label: 'to Moon', unit: 'k km'},
+        {xs: td, ys: rE, color: ACC, label: 'to Earth', unit: 'k km'},
+      ], 'distance from Earth and Moon', {y0: 0, xu: 'd', yu: 'k km'});
+    drawLine('c_coast_v', orbitm()
+      ? [{xs:td,ys:vE,color:ACC,label:'Earth-relative',unit:'km/s'}]
+      : [{xs:td,ys:vE,color:ACC,label:'Earth-relative',unit:'km/s'},
+         {xs:td,ys:vM,color:'#c98500',label:'Moon-relative',unit:'km/s'}],
+      'coast speed vs time', {xu:'d',yu:'km/s',y0:0});
+    const energy=rE.map((r,i)=>(0.5*(vE[i]*1000)**2-3.986004418e14/(r*1e6))/1e6);
+    drawLine('c_energy',[{xs:td,ys:energy,color:'#d55181',unit:'MJ/kg'}],
+      'Earth-relative specific orbital energy', {xu:'d',yu:'MJ/kg',nopeak:true});
+    if(!orbitm()){
+      const ip=dM.reduce((best,x,i)=>x<dM[best]?i:best,0),tp=D.t[ip];
+      const keep=D.t.map((t,i)=>[t,i]).filter(([t])=>Math.abs(t-tp)<=36*3600);
+      drawLine('c_lunar',[{xs:keep.map(([t])=>(t-tp)/3600),
+                           ys:keep.map(([,i])=>(dM[i]-1.7374)*1000),
+                           color:'#c98500',unit:'km'}],
+        'lunar encounter altitude around perilune', {xu:'h from perilune',yu:'km',y0:0});
+    }
+  }
+  const hasEntry = E && E.t && E.t.length;
+  $('h_entry').classList.toggle('hidden',!hasEntry);
+  for (const id of ['w_corridor', 'w_ent_g', 'w_ent_q','w_ent_h','w_ent_v',
+                    'w_ent_qbar','w_ent_mach','w_ent_alpha','w_ent_heat',
+                    'w_ent_wall','w_ent_range'])
+    $(id).classList.toggle('hidden', !hasEntry);
+  if (hasEntry) {
+    // the classic entry corridor: altitude vs velocity
+    drawLine('c_corridor',
+             [{xs: E.v.map(v => v/1000), ys: E.h, color: '#d55181', unit: 'km'}],
+             'entry altitude vs velocity', {xu: 'km/s', yu: 'km'});
+    drawLine('c_ent_g', [{xs: E.t, ys: E.g, color: ACC, unit: 'g'}],
+             'entry g-load vs time', {xu: 's', yu: 'g'});
+    drawLine('c_ent_q', [{xs: E.t, ys: E.q, color: ACC, unit: 'W/cm²'}],
+             'entry heating vs time', {xu: 's', yu: 'W/cm²'});
+    drawLine('c_ent_h', [{xs:E.t,ys:E.h,color:'#8fbef0',unit:'km'}],
+             'entry altitude vs time', {xu:'s',yu:'km',y0:0});
+    drawLine('c_ent_v', [{xs:E.t,ys:E.v.map(x=>x/1000),color:'#199e70',unit:'km/s'}],
+             'entry relative speed vs time', {xu:'s',yu:'km/s',y0:0,nopeak:true});
+    drawLine('c_ent_qbar', [{xs:E.t,ys:E.qbar,color:'#f0a500',unit:'kPa'}],
+             'entry dynamic pressure vs time', {xu:'s',yu:'kPa',y0:0});
+    drawLine('c_ent_mach', [{xs:E.t,ys:E.mach,color:'#8fbef0',unit:'Mach'}],
+             'entry Mach number vs time', {xu:'s',yu:'Mach',y0:0,nopeak:true});
+    drawLine('c_ent_alpha', [
+        {xs:E.t,ys:E.alpha,color:'#d55181',label:'angle of attack',unit:'°'},
+        {xs:E.t,ys:E.qrate,color:'#c98500',label:'pitch rate',unit:'°/s'},
+      ], 'entry attitude response', {xu:'s',yu:'deg / deg/s',nopeak:true});
+    drawLine('c_ent_heat', [{xs:E.t,ys:E.heat,color:'#d95926',unit:'MJ/m²'}],
+             'integrated heat load vs time', {xu:'s',yu:'MJ/m²',y0:0});
+    drawLine('c_ent_wall', [{xs:E.t,ys:E.twall,color:'#c98500',unit:'K'}],
+             'radiative-equilibrium wall temperature', {xu:'s',yu:'K',y0:0});
+    const lat0=E.lat[0]*Math.PI/180,lon0=E.lon[0]*Math.PI/180;
+    const range=E.lat.map((la,i)=>{
+      const lat=la*Math.PI/180,dl=(E.lon[i]*Math.PI/180)-lon0;
+      const c=Math.acos(Math.max(-1,Math.min(1,Math.sin(lat0)*Math.sin(lat)+Math.cos(lat0)*Math.cos(lat)*Math.cos(dl))));
+      return 6371*c;
+    });
+    drawLine('c_ent_range',[{xs:range,ys:E.h,color:'#d55181',unit:'km'}],
+             'entry altitude vs surface range from interface', {xu:'km',yu:'km',y0:0});
+  }
+  const R=run.rcs,hasRcs=R&&R.t&&R.t.length;
+  $('h_rcs').classList.toggle('hidden',!hasRcs);
+  $('w_rcs').classList.toggle('hidden',!hasRcs);
+  $('w_rcs_remaining').classList.toggle('hidden',!hasRcs);
+  $('w_rcs_rate').classList.toggle('hidden',!hasRcs);
+  if(hasRcs){
+    const td=R.t.map(t=>t/86400);
+    // The steps are the point of this chart. Slews and ullage burns are
+    // seconds-to-minutes of firing at epochs the mission already knows, and
+    // they are most of the budget — drawing them as a smooth ramp said the
+    // opposite, that the tank drains on continuous housekeeping.
+    const marks=(R.events||[]).map(e=>{
+      let y=0;for(let i=0;i<R.t.length;i++){if(R.t[i]<=e.t)y=R.used[i];else break;}
+      return {x:e.t/86400,y,color:'#d9a95c',label:`${e.what} +${(+e.kg).toFixed(2)} kg`};
+    });
+    // Only what is spent. Drawing the tank level beside it puts a 0.26 kg
+    // curve on a 5.2 kg axis and flattens the very steps this chart exists to
+    // show — and the tank level is a straight subtraction anyway. What is
+    // left is a number, and it is in the note and the diagnostics strip.
+    drawLine('c_rcs',[
+      {xs:td,ys:R.used,color:'#f0a500',label:'attitude propellant spent',unit:'kg'},
+    ],'attitude-control propellant vs time',
+      {xu:'d',yu:'kg',y0:0,nopeak:true,labelAt:'start',marks});
+    drawLine('c_rcs_remaining',[{xs:td,ys:R.remaining,color:'#199e70',unit:'kg'}],
+      'attitude-control propellant reserve', {xu:'d',yu:'kg',y0:0,nopeak:true});
+    const rt=[],rr=[];
+    for(let i=1;i<R.t.length;i++){
+      const dt=R.t[i]-R.t[i-1];if(dt<=0)continue;
+      rt.push((R.t[i]+R.t[i-1])/2/86400);
+      rr.push((R.used[i]-R.used[i-1])/(dt/86400));
+    }
+    drawLine('c_rcs_rate',[{xs:rt,ys:rr,color:'#d95926',unit:'kg/day'}],
+      'average RCS demand between budget events', {xu:'d',yu:'kg/day',y0:0});
+    const T=+R.disturbance_nm||0;
+    $('rcs_note').innerHTML =
+      `${(+R.total).toFixed(2)} kg of a ${(+R.capacity).toFixed(1)} kg tank, ` +
+      `${(+R.margin).toFixed(2)} kg spare. ` +
+      `Continuous term ${(+R.hold).toFixed(3)} kg &mdash; ` +
+      (T>0 && R.dump>=R.limit_cycle
+        ? `dumping the momentum a ${T.toFixed(3)} N&middot;m disturbance torque ` +
+          `(gravity gradient + residual drag) pumps in, which is what governs in ` +
+          `low orbit; deadband cycling alone would be ${(+R.limit_cycle).toFixed(4)} kg.`
+        : `deadband limit cycling, with no disturbance torque worth the name out here.`) +
+      ` Steps: ${R.n_slews} slews of ${(+R.slew_s).toFixed(0)} s ` +
+      `(${(+R.slews).toFixed(2)} kg)` +
+      (+R.settling > 0
+        ? ` and ${(+R.settling).toFixed(2)} kg of ullage settling before each ignition.`
+        : `, and no ignitions to settle propellant for.`) +
+      ` Individual valve pulses are not resolved.`;
+  }
+  const track=[];
+  if(A.lat&&A.lon)track.push({t:A.t,lat:A.lat,lon:A.lon,h:A.h,color:'#f0a500',label:'ascent'});
+  if(D&&D.lat&&D.lon){
+    const h=D.x.map((x,i)=>(Math.hypot(x,D.y[i],D.z[i])-6.371)*1000);
+    track.push({t:D.t,lat:D.lat,lon:D.lon,h,color:'#3987e5',label:orbitm()?'orbit':'coast'});
+  }
+  if(hasEntry&&E.lat&&E.lon){
+    const ei=(run.events||[]).find(e=>e.name==='entry_interface');
+    const t0=ei?ei.t:(D&&D.t&&D.t.length?D.t[D.t.length-1]:A.t[A.t.length-1]);
+    track.push({t:E.t.map(t=>t+t0),lat:E.lat,lon:E.lon,h:E.h,color:'#d55181',label:'entry'});
+  }
+  // Every flown ground-referenced leg is useful here: parking orbits on lunar
+  // missions, the full Earth-orbit cases, and suborbital arcs alike.
+  const showTrack=track.some(s=>s.t.length>2);
+  $('sec_track').classList.toggle('hidden',!showTrack);
+  $('sec_station').classList.toggle('hidden',!showTrack);
+  if(showTrack){
+    const station={lat:+(run.sites||{}).launch_lat||0,lon:+(run.sites||{}).launch_lon||0};
+    drawGroundTrack('groundmap',track,station);
+    drawGroundStation('stationview',track,station);
+  }
+  drawDescent();
+}
+
+// Altitude against downrange, in the plane the descent actually flies. The
+// braking phase and the throttled terminal phase are drawn as separate series
+// because they are separate control laws, and the seam between them is high
+// gate — the moment the vehicle stops being a decelerating orbit and starts
+// being a landing.
+function drawDescent() {
+  const d = run.descent, m = run.metrics;
+  const has = !!(d && d.t && d.t.length);
+  $('sec_descent').classList.toggle('hidden', !has);
+  if (!has) return;
+  const gate = m.gate_s;
+  const iGate = Math.max(1, d.t.findIndex(t => t >= gate));
+  const seg = (a, b) => ({ xs: d.dr.slice(a, b), ys: d.h.slice(a, b) });
+  const s1 = seg(0, iGate + 1), s2 = seg(iGate, d.t.length);
+  // the section's own legend names the two phases, so the series carry no
+  // labels here — they would land on top of the high-gate callout
+  drawLine('c_desc_prof', [
+      { xs: s1.xs, ys: s1.ys, color: '#c98500', unit: 'km' },
+      { xs: s2.xs, ys: s2.ys, color: '#d55181', unit: 'km' },
+    ], 'descent altitude vs downrange', { y0: 0, xu: 'km', yu: 'km', nopeak: true,
+        labelAt: 'start',
+        marks: [{ x: d.dr[iGate], y: d.h[iGate], color: '#8fbef0', label: 'high gate' }] });
+  drawLine('c_desc_v', [
+      { xs: d.t, ys: d.vh, color: '#c98500', label: 'horizontal', unit: 'm/s' },
+      { xs: d.t, ys: d.vv, color: '#8fbef0', label: 'vertical', unit: 'm/s' },
+    ], 'descent velocity vs time', { xu: 's', yu: 'm/s', nopeak: true, labelAt: 'start' });
+  drawLine('c_desc_thr', [{ xs: d.t, ys: d.thr, color: ACC, unit: '%' }],
+      'commanded throttle vs time', { y0: 0, xu: 's', yu: '%', nopeak: true });
+  drawLine('c_desc_mass', [{xs:d.t,ys:d.m.map(x=>x/1000),color:'#199e70',unit:'t'}],
+      'lander mass vs time', {y0:0,xu:'s',yu:'t',nopeak:true});
+  drawLine('c_desc_att', [
+      {xs:d.t,ys:d.pitch,color:'#c98500',label:'pitch',unit:'°'},
+      // `elev` is ground elevation in metres, not an angle — derive the
+      // velocity elevation the label promises from the horizontal/vertical
+      // components the server already sends.
+      {xs:d.t,ys:d.vv.map((v,i)=>Math.atan2(v,d.vh[i])*180/Math.PI),
+       color:'#8fbef0',label:'velocity elevation',unit:'°'},
+    ], 'descent attitude and flight-path elevation', {xu:'s',yu:'deg',nopeak:true});
+  drawLine('c_desc_nav', [{xs:d.t,ys:d.navdh,color:'#d55181',unit:'m'}],
+      'navigation altitude residual vs time', {xu:'s',yu:'m',nopeak:true});
+  const bad = m.outcome !== 'touchdown';
+  $('desc_note').innerHTML = bad
+    ? `<span style="color:var(--failed)">${m.outcome}</span> — arrived at ` +
+      `${fmt(m.touchdown_v,1)} m/s sink, ${fmt(m.touchdown_vh,1)} m/s lateral`
+    : `braking ${fmt(m.braking_dv,0)} m/s for ${fmt(m.gate_s,0)} s, then ` +
+      `${fmt(m.terminal_dv,0)} m/s throttled to ${fmt(m.touchdown_v,2)} m/s of ` +
+      `sink · ${fmt(m.prop_left_kg,0)} kg left · ${fmt(m.hover_s,0)} s of hover`;
+}
+
+function renderEvents() {
+  const clock = seconds => {
+    const n=Math.max(0,Math.round(+seconds||0)),d=Math.floor(n/86400);
+    const h=Math.floor(n%86400/3600),m=Math.floor(n%3600/60),s=n%60;
+    const hh=String(h).padStart(2,'0'),mm=String(m).padStart(2,'0'),ss=String(s).padStart(2,'0');
+    return d?`${d}d ${hh}:${mm}:${ss}`:`${hh}:${mm}:${ss}`;
+  };
+  const rows = (run.events || []).map(e =>
+    `<tr><td class="ph">${e.phase}</td><td>${e.name}</td>` +
+    `<td class="t">${clock(e.t)}</td>` +
+    `<td class="t">${(e.t/86400).toFixed(2)}</td></tr>`);
+  $('events').innerHTML =
+    '<tr><th>phase</th><th>event</th><th style="text-align:right">T+ clock</th>' +
+    '<th style="text-align:right">T+ days</th></tr>' + rows.join('');
+  $('ev_count').textContent = `${rows.length} events`;
+}
+
+// --------------------------------------------------------- sweep & solve --
+
+// Exactly the numeric fields this configuration has, so a four-stage vehicle
+// immediately makes its fourth stage's propellant load solvable.
+function fillParams() {
+  const opts = Object.keys(PARAM_LABEL).map(k => [k, PARAM_LABEL[k]]);
+  if (landing()) for (const k in LPARAM_LABEL) opts.push([k, LPARAM_LABEL[k]]);
+  if (subm()) for (const k in SPARAM_LABEL) opts.push([k, SPARAM_LABEL[k]]);
+  for (let k = 1; k <= nStages(); k++)
+    for (const f in SFIELD_LABEL) opts.push([`s${k}_${f}`, `stage ${k} ${SFIELD_LABEL[f]}`]);
+  const html = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+  for (const el of document.querySelectorAll('select[data-solvable]')) {
+    el.innerHTML = html;
+    el.value = landing() ? 'l_prop' : subm() ? 'sub_apogee_km' : 'pod_mass';
+  }
+  $('solve_param').value = landing() ? 'l_prop' : subm() ? 'sub_apogee_km' : 'hp_moon_km';
+  if (landing()) { $('sweep_min').value = 6000; $('sweep_max').value = 12000; }
+
+  // A sweep and a solve do not accept the same metrics on the flyby. Perilune
+  // and return perigee are COMMANDED — the corrector drives them to the target
+  // — so charting one is useful (the flat line, then the cliff where the
+  // design stops closing) and root-finding against one is meaningless. The
+  // server keeps the two lists apart; so does this.
+  const base = landing() ? CATALOGUE.landing_metrics :
+               subm() ? CATALOGUE.suborbital_metrics : null;
+  for (const id of ['solve_metric', 'sweep_metric']) {
+    const ms = (base || (id === 'sweep_metric' ? CATALOGUE.sweep_metrics
+                                               : CATALOGUE.solve_metrics))
+               || Object.keys(METRIC_LABEL);
+    const sel = $(id);
+    sel.innerHTML = ms.map(m => `<option value="${m}">${metricLabel(m)}</option>`).join('');
+    const want = landing() ? (id === 'sweep_metric' ? 'hover_s' : 'prop_left_kg')
+               : subm()    ? (id === 'sweep_metric' ? 'peak_g' : 'apogee_km')
+               :             (id === 'sweep_metric' ? 'perilune_km' : 'prop_margin_kg');
+    sel.value = ms.includes(want) ? want : ms[0];
+  }
+  // start the sweep from where this configuration actually is, so the first
+  // run brackets something real instead of a number typed into the markup
+  const cur = +Q.get($('sweep_param').value);
+  if (isFinite(cur) && cur > 0) {
+    $('sweep_min').value = +(cur * 0.7).toPrecision(3);
+    $('sweep_max').value = +(cur * 1.3).toPrecision(3);
+  }
+}
+
+let CATALOGUE = { propellants: [], engines: [], solve_metrics: [] };
+
+async function doSweep() {
+  $('sweepbtn').disabled = true;
+  $('sweep_out').className = 'out';
+  $('sweep_out').textContent = 'sweeping — each step flies a whole mission…';
+  const done = busy('running parameter sweep…');
+  try {
+    const u = new URLSearchParams(Q);
+    for (const f of ['sweep_param','sweep_min','sweep_max','sweep_n'])
+      u.set(f, $(f).value);
+    sweepData = await api.sweep(u, { onProgress: done.progress });
+    drawSweep();
+    const nOk = sweepData.runs.filter(x => x.ok && x.metrics.on_target).length;
+    $('sweep_out').innerHTML = `<b>${nOk}</b>/${sweepData.runs.length} on target` +
+      (nOk < sweepData.runs.length ? ' — off-target runs are left out of the chart' : '');
+  } catch (e) {
+    $('sweep_out').className = 'out err';
+    $('sweep_out').textContent = String(e.message || e);
+  }
+  finally { done(); $('sweepbtn').disabled = false; }
+}
+
+function drawSweep() {
+  if (!sweepData) return;
+  const j = sweepData, key = $('sweep_metric').value;
+  const xs = [], ys = [];
+  for (let i = 0; i < j.values.length; i++)
+    if (j.runs[i].ok && j.runs[i].metrics.on_target && isFinite(j.runs[i].metrics[key])) {
+      xs.push(j.values[i]); ys.push(j.runs[i].metrics[key]);
+    }
+  drawLine('sweepchart', [{xs, ys, color: ACC, unit: ''}],
+    `${metricLabel(key)} vs ${paramLabel($('sweep_param').value)}`);
+}
+
+async function doSolve() {
+  $('solvebtn').disabled = true;
+  $('solve_out').className = 'out';
+  $('solve_out').textContent = 'searching — each step flies a whole mission…';
+  const done = busy('searching for the target…');
+  try {
+    const u = new URLSearchParams(Q);
+    for (const f of ['solve_param','solve_metric','solve_target','solve_min','solve_max'])
+      u.set(f, $(f).value);
+    const j = await api.solve(u, { onProgress: done.progress });
+    const pl = paramLabel(j.param), ml = metricLabel(j.metric);
+    // an end that produced no valid mission was walked inward; saying so
+    // matters, because then the fix is not "widen the range"
+    const shrank = Math.abs(j.hi - j.asked_hi) > 1e-9 ||
+                   Math.abs(j.lo - j.asked_lo) > 1e-9;
+    const note = shrank
+      ? ` Part of the range flies no valid mission, so the search was ` +
+        `confined to ${(+j.lo).toPrecision(4)}–${(+j.hi).toPrecision(4)}.`
+      : '';
+    $('solve_out').innerHTML = j.status === 'converged'
+      ? `${pl} = <b>${(+j.x).toPrecision(5)}</b> gives ${ml} = ` +
+        `${(+j.value).toPrecision(4)} (target ${j.target}) — ${j.iterations} runs.` + note
+      : j.status === 'no_bracket'
+      ? `${ml} never reaches ${j.target} over that range; closest is ` +
+        `${pl} = ${(+j.x).toPrecision(5)} at ${(+j.value).toPrecision(4)}.` +
+        (shrank ? note : ' Try a wider range.')
+      : `no valid mission anywhere in that range — try bounds nearer the ` +
+        `current configuration.`;
+    drawSolve(j);
+  } catch (e) {
+    $('solve_out').className = 'out err';
+    $('solve_out').textContent = String(e.message || e);
+  }
+  finally { done(); $('solvebtn').disabled = false; }
+}
+
+// the search path is most of the information when each point costs a second
+function drawSolve(j) {
+  const cv = $('solvechart'), ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const pts = ((j && j.history) || []).filter(p => isFinite(p.value));
+  if (pts.length < 2) return;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.value).concat([j.target]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const px = v => 34 + (w - 44) * (x1 > x0 ? (v - x0)/(x1 - x0) : 0.5);
+  const py = v => h - 20 - (h - 32) * (y1 > y0 ? (v - y0)/(y1 - y0) : 0.5);
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath(); ctx.moveTo(30, py(j.target)); ctx.lineTo(w - 6, py(j.target));
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '10px system-ui';
+  ctx.fillText('target', 32, py(j.target) - 3);
+  // evaluations in the order they were taken: early wide, late clustered
+  pts.forEach((p, i) => {
+    const t = i/(pts.length - 1);
+    ctx.fillStyle = `rgba(240,165,0,${0.35 + 0.65*t})`;
+    ctx.beginPath(); ctx.arc(px(p.x), py(p.value), 3.2, 0, 7); ctx.fill();
+  });
+  if (j.status === 'converged') {
+    ctx.strokeStyle = '#F0A500'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(px(j.x), 8); ctx.lineTo(px(j.x), h - 18); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText(x0.toPrecision(4), 30, h - 6);
+  ctx.fillText(x1.toPrecision(4), w - 46, h - 6);
+}
+
+// ---------------------------------------------------------------- wire up --
+// Re-run always flies, even when the page arrived by id: that is what the
+// button is for — the same configuration, simulated again.
+$('rerun').onclick = () => fly(true);
+$('sweepbtn').onclick = doSweep;
+$('sweep_metric').onchange = drawSweep;
+$('solvebtn').onclick = doSolve;
+// charts are sized from their container, so a resized window has to redraw
+let rz = null;
+window.addEventListener('resize', () => {
+  clearTimeout(rz);
+  rz = setTimeout(() => { if (run) renderCharts(); drawSweep(); }, 120);
+});
+
+// the page is useful the moment the run lands; the catalogue only feeds the
+// study pickers, so the two are fetched together rather than in sequence
+api.catalogue().then(c => { CATALOGUE = c || CATALOGUE; fillParams(); });
+// Only an id identifies a trajectory. A configuration in the URL is not a
+// request to fly it; it stays available to the builder/studies, while this
+// page shows the explicit no-run state.
+if (RUN_ID) {
+  fly();
+} else {
+  // Opened bare: show the most recent flight if there is one, so this is not
+  // a dead end for anyone who arrives without an id. Only a session that has
+  // never flown anything gets the empty state.
+  if ([...Q.keys()].length) showEmpty();
+  else runs.list().then(list => {
+      if (list.length) location.replace('analysis_page.html?run=' + encodeURIComponent(list[0].id));
+      else showEmpty();
+    });
+}
+
+// A module's top-level bindings are not on `window`, which is right — but it
+// also means none of this is reachable from devtools, and this page's whole
+// job is asynchronous. One explicit handle, rather than leaking the module.
+window.__debug = {
+  get run() { return run; },
+  get sweep() { return sweepData; },
+  params: Q, mode: MODE, fly, redraw: renderCharts,
+};
+
+// -------------------------------------------------------------- selftest --
+window.__selftest = function () {
+  const out = suite(), eq = out.eq;
+
+  // The vocabulary is shared with mission control now. These pin the parts
+  // that are GENERATED rather than listed, because a stage field's label is
+  // built from a regex and nothing else would notice it drifting.
+  eq('a plain parameter keeps its name', () => paramLabel('pod_mass'), 'pod mass');
+  eq('a stage field names its stage', () => paramLabel('s2_prop'), 'stage 2 prop');
+  eq('and expands the short field name', () => paramLabel('s3_thrust_kn'), 'stage 3 thrust');
+  eq('a booster field says booster', () => paramLabel('b_isp'), 'booster Isp');
+  eq('an unknown parameter is still readable', () => paramLabel('some_new_knob'),
+     'some new knob');
+  eq('a metric carries its unit', () => metricLabel('peak_g'), 'peak entry g');
+  eq('an unknown metric is still readable', () => metricLabel('new_metric'),
+     'new metric');
+
+  // The chart axis ladder. A tick step off this ladder is what turns gridlines
+  // into arbitrary numbers, and it is pure arithmetic, so it can be pinned.
+  // The ladder rounds UP to the next allowed step, so a raw 3.33 becomes 5,
+  // not 2.5. Both rungs are asserted because rounding the wrong way is the
+  // failure that would still produce a plausible-looking chart.
+  eq('a raw step of 3.33 rounds up to five', () => niceStep(10, 3), 5);
+  eq('and a raw step of 2.5 stays on that rung', () => niceStep(7.5, 3), 2.5);
+  eq('a raw step just over 2.5 goes to five', () => niceStep(7.8, 3), 5);
+  eq('a tick above a thousand abbreviates', () => fmtTick(2500), '2.5k');
+  eq('a round thousand drops the decimal', () => fmtTick(3000), '3k');
+  eq('a small value keeps precision', () => fmtTick(0.25), '0.25');
+  eq('an exact zero is just zero', () => fmtTick(0), '0');
+
+  // The peak callout is the one number a reader takes away from a chart, and
+  // toPrecision alone renders every entry altitude in this app as "2.01e+3".
+  eq('a large peak is grouped, not exponential', () => fmtPeak(2010), '2,010');
+  eq('a peak in the hundreds keeps three figures', () => fmtPeak(249.31), '249');
+  eq('a small peak keeps its decimals', () => fmtPeak(5.653), '5.65');
+  eq('a peak of zero is zero', () => fmtPeak(0), '0');
+  eq('a missing peak is an em-dash, not NaN', () => fmtPeak(NaN), '—');
+
+  // This page flies its own run from a query string. If that plumbing breaks
+  // the page silently analyses the WRONG vehicle, which is the one failure
+  // here that would not look like a failure.
+  eq('the mission mode came from the query', () => typeof MODE, 'string');
+  eq('the query carries a mode', () => Q.has('mode') || MODE === 'flyby', true);
+  eq('nav links carry the configuration',
+     () => $('nav_build').getAttribute('href').startsWith('build_page.html?'), true);
+  eq('and the selftest flag is not carried into the run',
+     () => Q.has('selftest'), false);
+
+  return report(out);
+};
+// Every assertion above is synchronous on purpose. This page's content
+// arrives from a mission that takes a second or two to fly, and a suite that
+// waited for it would either be flaky or would be asserting the simulator's
+// speed. Whether the run RENDERS is checked by looking at the page.
+if (requested()) setTimeout(window.__selftest, 0);
+</script>
+</body>
+</html>

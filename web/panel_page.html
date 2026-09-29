@@ -1,0 +1,2484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ss.jl mission control</title>
+<link rel="stylesheet" href="./static/tokens.css">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  /* ground, ink and rules come from ./static/tokens.css so this page and the
+     builder and the launch view are one product rather than three that happen
+     to be dark. Only what is genuinely local to this page stays here. */
+  body { margin: 0; background: var(--ground); color: var(--text);
+         font: 13.5px/1.45 var(--sans); }
+  .app { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px;
+         max-width: 1560px; margin: 0 auto; padding: 16px; }
+  @media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
+  h1 { color: var(--text); font-size: 17px; margin: 0 0 2px; }
+  h2 { color: var(--text); font-family: var(--mono); font-size: var(--t-label);
+       margin: 0; letter-spacing: .18em; text-transform: uppercase;
+       font-weight: 600; }
+  h2 + * { margin-top: 8px; }
+  .sub { color: var(--text-2); font-size: 12px; margin-bottom: 10px; }
+  .card { background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
+  /* a card header that collapses its body: the launcher form is long, and a
+     panel you have to scroll past to reach Run is a panel you fight */
+  .card > h2.fold { cursor: pointer; user-select: none; display: flex;
+                    align-items: center; gap: 6px; }
+  .card > h2.fold::before { content: '▾'; font-size: 10px; color: #898781;
+                            transition: transform .12s; }
+  .card.closed > h2.fold::before { transform: rotate(-90deg); }
+  .card.closed > *:not(h2) { display: none; }
+  .card > h2.fold .count { margin-left: auto; color: #898781; font-weight: 400;
+                           font-size: 10.5px; letter-spacing: 0; }
+  label { display: block; color: #898781; font-size: 11px; margin: 7px 0 2px;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stagehdr { color: #c3c2b7; font-size: 11.5px; font-weight: 600;
+              letter-spacing: .03em; margin: 12px 0 0;
+              border-top: 1px solid #2c2c2a; padding-top: 8px; }
+  .stagehdr:first-of-type { border-top: 0; margin-top: 2px; padding-top: 0; }
+  /* the per-stage verdict gets its own line. Floated right it collided with
+     the row below at this column width, which is exactly the width the
+     sidebar always has. */
+  .derived { display: block; color: #898781; font-size: 10.5px;
+             font-weight: 400; letter-spacing: 0; margin: 2px 0 0;
+             font-variant-numeric: tabular-nums; }
+  input, select { width: 100%; background: #0d0d0d; color: #fff;
+    border: 1px solid rgba(255,255,255,.15); border-radius: 6px;
+    padding: 5px 8px; font: inherit; font-variant-numeric: tabular-nums; }
+  input:focus, select:focus, button:focus { outline: 2px solid #3987e5; outline-offset: 1px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  button { background: #3987e5; color: #fff; border: 0; border-radius: var(--radius);
+           padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; width: 100%; }
+  button:hover { background: #4a94ee; }
+  /* The armed control, and the only button on the page that starts a mission.
+     Amber is reserved for live mission state, and "press this and it flies" is
+     that. The other buttons stay as they are: a toggle like "rotating frame"
+     is not a mission action and making every button shout dilutes the one
+     that should. Restyling the rest is a component pass, not this. */
+  #run { background: var(--amber); color: #12151A; }
+  #run:hover { background: #ffb71a; }
+  button.ghost { background: #2a2a28; border: 1px solid rgba(255,255,255,.15); }
+  button.ghost:hover { background: #383835; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .status { font-size: 12px; color: var(--text-2); margin-top: 8px; min-height: 17px; }
+  .status.err { color: var(--failed); }
+  /* the static vehicle check (T/W, Δv budget) speaks the same three-colour
+     language as the mission verdict, because "this will not lift off" and
+     "this did not reach orbit" are the same kind of statement */
+  .good { color: var(--nominal); }
+  .warn { color: var(--marginal); }
+  .bad  { color: var(--failed); }
+  /* the metric strip is .mgroups / .mrow in ./static/tokens.css now — grouped
+     by mission phase in flight order rather than eleven equal-weight tiles */
+  /* The two live views, side by side. The trajectory needs the width — a
+     trans-lunar transfer is 60 Earth radii long — and the stack needs the
+     height, so they want opposite aspect ratios and this gives each one the
+     one it wants. Below 1150px they stack and both go full width. */
+  .stage { display: grid; grid-template-columns: minmax(0, 1fr) 300px;
+           gap: 12px; align-items: start; margin-bottom: 12px; }
+  .stage .card { margin-bottom: 0; }
+  @media (max-width: 1150px) { .stage { grid-template-columns: 1fr; } }
+  #scene { width: 100%; height: 470px; display: block; cursor: grab;
+           touch-action: none; border-radius: 8px; background: #131312; }
+  #geo { width: 100%; height: 380px; display: block; cursor: grab;
+         touch-action: none; }
+  @media (max-width: 1150px) { #geo { height: 260px; } }
+  .bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  .bar button { width: auto; }
+  input[type=range] { flex: 1; min-width: 120px; accent-color: var(--amber);
+                      padding: 0; border: 0; background: none; }
+  .legend { display: flex; gap: 12px; font-size: 11.5px; margin: 6px 0 8px;
+            flex-wrap: wrap; }
+  /* sits in the legend's place so hiding one and showing the other does not
+     move the canvas below them */
+  .scenehint { font-size: 11.5px; margin: 6px 0 8px; color: var(--text-3); }
+  .legend i { display: inline-block; width: 13px; height: 3px; border-radius: 2px;
+              vertical-align: middle; margin-right: 4px; }
+
+  /* The one thing at the bottom of the page, and it is a door rather than a
+     dead end: mission control now answers "did it work", and everything that
+     answers "why" is one click away. */
+  .gonext { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px;
+            align-items: baseline; text-decoration: none; color: inherit; }
+  .gonext:hover { border-color: var(--amber); }
+  .gonext:hover .gonext-t { color: var(--amber); }
+  .gonext-k { grid-row: 1 / 3; align-self: center; }
+  .gonext-t { font-family: var(--mono); font-size: var(--t-body);
+              font-weight: 600; }
+  .gonext-w { color: var(--text-2); font-size: 12px; }
+
+  /* keyboard reference, on demand */
+  #helpdlg { background: var(--surface); color: var(--text);
+             border: 1px solid var(--line); border-radius: var(--radius);
+             padding: 18px 20px; max-width: 460px; }
+  #helpdlg::backdrop { background: rgba(0,0,0,.55); }
+  #helpdlg h3 { margin: 0 0 12px; font-family: var(--mono);
+                font-size: var(--t-label); letter-spacing: .18em;
+                text-transform: uppercase; color: var(--text-2); }
+  #helpdlg button { width: auto; }
+  .helpbtn { width: 22px; height: 22px; padding: 0; border-radius: 50%;
+             background: var(--raise); color: var(--text-2);
+             border: 1px solid var(--line); font-size: 12px; line-height: 1;
+             font-weight: 600; cursor: pointer; }
+  .helpbtn:hover { background: var(--line); color: var(--text); }
+  .chip { display: inline-block; background: #2a2a28; border: 1px solid rgba(255,255,255,.12);
+          border-radius: 6px; padding: 4px 9px; margin: 0 6px 6px 0; font-size: 11.5px;
+          cursor: pointer; font-variant-numeric: tabular-nums; }
+  .chip:hover { background: #383835; }
+  .chip.sel, .chip.on { border-color: #3987e5; color: #fff; }
+  /* mission-mode switch: two missions share every launch field, so they are
+     one page with a switch rather than two pages */
+  /* Two by two, not four across. In a 300px column four labels ranging from
+     "suborbital" to "free-return flyby" wrapped to two lines each and made the
+     control twice as tall as it needed to be, with a ragged bottom edge. The
+     1px gap over a rule-coloured ground draws the hairlines between cells, so
+     there are no per-button borders to get out of step. */
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+         margin: 8px 0 0; border-radius: var(--radius); overflow: hidden;
+         border: 1px solid var(--line); background: var(--line); }
+  .seg button { border-radius: 0; background: var(--raise); color: var(--text-2);
+                font-weight: 500; padding: 7px 4px; }
+  /* amber, not blue: this is the same "you have chosen this one" the nav and
+     the preset chips say, and it was being said in a third colour here. Blue
+     is reserved for plotted data — the ascent leg on the trajectory below is
+     blue, and a selected control that matches a data series reads as a key. */
+  .seg button.on { background: var(--amber); color: #12151A; font-weight: 600; }
+  .runbar { position: sticky; top: 8px; z-index: 5; }
+  .kbd { background: #0d0d0d; border: 1px solid rgba(255,255,255,.18);
+         border-bottom-width: 2px; border-radius: 4px; padding: 0 4px;
+         font: 11px ui-monospace, Consolas, monospace; color: #c3c2b7; }
+  .helprow { display: grid; grid-template-columns: 84px 1fr; gap: 6px 10px;
+             font-size: 12px; color: var(--text-2); align-items: baseline; }
+  .ro { font-variant-numeric: tabular-nums; font-size: 12px; color: #c3c2b7; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<!-- One bar, same place and order on all three pages. They still open as
+     separate tabs on purpose — mission control and the launch view are meant
+     to sit side by side — but nothing previously told you what the other two
+     were or which one you were looking at, which is what made three windows
+     read as scattered rather than as one tool. -->
+<nav class="appnav">
+  <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
+  <span class="appnav-links">
+    <a class="navlink" href="./" aria-current="page">mission control</a>
+    <a class="navlink" id="nav_build" href="build_page.html">vehicle builder</a>
+    <a class="navlink" id="nav_analysis" href="analysis_page.html">analysis</a>
+    <a class="navlink" id="nav_launch" href="launch_page.html">launch view</a>
+  </span>
+  <span class="appnav-end">
+    <span class="u-label" id="nav_note">circumlunar free return</span>
+    <button class="helpbtn" id="helpbtn" title="keyboard shortcuts — key ?"
+            aria-label="keyboard shortcuts">?</button>
+  </span>
+</nav>
+
+<!-- The shortcut list was a permanent card in the sidebar: reference material,
+     read once, occupying the same space as the controls you use every run.
+     Native <dialog> so Escape closes it and focus is trapped without any of
+     that being written here. -->
+<dialog id="helpdlg">
+  <h3>Keys</h3>
+  <div class="helprow">
+    <span><span class="kbd">R</span></span><span>run the mission</span>
+    <span><span class="kbd">space</span></span><span>play / pause the timeline</span>
+    <span><span class="kbd">←</span> <span class="kbd">→</span></span><span>step the timeline</span>
+    <span><span class="kbd">F</span></span><span>inertial ⇄ rotating frame</span>
+    <span><span class="kbd">E</span> <span class="kbd">C</span> <span class="kbd">Z</span></span><span>zoom to Earth / to the craft / fit the whole trajectory</span>
+    <span><span class="kbd">M</span></span><span>Moon-centred frame (lunar landing)</span>
+    <span><span class="kbd">A</span></span><span>open the analysis page</span>
+    <span><span class="kbd">L</span></span><span>open the cinematic launch view</span>
+    <span><span class="kbd">B</span></span><span>open the vehicle builder</span>
+  </div>
+  <p class="sub" style="margin:12px 0 0">Drag the 3D views to orbit the camera,
+    scroll to zoom. Everything on this page is a live run of the simulator —
+    no canned data anywhere.</p>
+  <div style="margin-top:14px"><button id="helpclose" class="ghost">Close</button></div>
+</dialog>
+<div class="app">
+  <!-- every control that describes the mission lives in here, which is what
+       lets one listener notice that the run on screen is now out of date -->
+  <div id="sideform">
+
+    <div class="card">
+      <h2>Mission</h2>
+      <div class="seg" id="modeswitch">
+        <button data-mode="suborbital">suborbital</button>
+        <button data-mode="orbit">Earth orbit</button>
+        <button data-mode="flyby" class="on">free-return flyby</button>
+        <button data-mode="landing">lunar landing</button>
+      </div>
+      <div class="sub" id="modenote" style="margin:6px 0 0">a pod around the
+        Moon and home — nothing is left behind and nothing has to stop</div>
+      <!-- Presets were their own card, which made choosing a mission a
+           two-card decision: the mode here, the preset below it. They are one
+           choice — "what am I flying" — so they are one card. -->
+      <div class="u-label" style="margin:14px 0 7px">presets</div>
+      <div id="presets"></div>
+      <div class="sub" style="margin:2px 0 0">one click configures · Run mission flies it</div>
+    </div>
+
+    <div class="card hidden" id="card_suborbital">
+      <h2>Suborbital profile</h2>
+      <div class="seg" id="subswitch">
+        <button data-sub="hop" class="on">straight up</button>
+        <button data-sub="downrange">downrange</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label for="sub_apogee_km" title="the apogee a hop closes on">
+          apogee [km]</label><input id="sub_apogee_km" value="100"></div>
+        <div id="sub_range_wrap"><label for="sub_range_km"
+          title="great-circle ground range a shot closes on">downrange [km]</label>
+          <input id="sub_range_km" value="400"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div id="sub_loft_wrap"><label for="sub_loft_deg" title="the attitude the
+             shot holds once the gravity turn has delivered it — near 40° is
+             range-optimal; steeper trades range for altitude">loft [°]</label>
+          <input id="sub_loft_deg" value="40"></div>
+        <div><label for="sub_azimuth_deg">azimuth [°]</label>
+          <input id="sub_azimuth_deg" value="90"></div>
+      </div>
+      <div class="sub" id="sub_note" style="margin:6px 0 0"></div>
+    </div>
+
+    <div class="card hidden" id="card_orbit">
+      <h2>Orbit target</h2>
+      <label for="orbit">target orbit</label>
+      <select id="orbit"></select>
+      <div class="sub" id="orbit_note" style="margin:4px 0 0"></div>
+      <div class="row3 hidden" id="custom_orbit_fields" style="margin-top:6px">
+        <div><label for="orbit_perigee_km">perigee [km]</label><input id="orbit_perigee_km" value="200"></div>
+        <div><label for="orbit_apogee_km">apogee [km]</label><input id="orbit_apogee_km" value="200"></div>
+        <div><label for="orbit_incl_deg">inclination [°]</label><input id="orbit_incl_deg" value="28.5"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label for="n_orbits">revolutions on station</label><input id="n_orbits" value="2"></div>
+        <div><label for="hp_entry_km" title="vacuum perigee the deorbit burn aims for">entry perigee [km]</label><input id="hp_entry_km" value="25"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div style="flex:1"><label style="display:flex;gap:6px;align-items:center">
+          <input type="checkbox" id="deorbit" style="width:auto;margin:0">
+          deorbit and re-enter after the last revolution</label></div>
+      </div>
+      <div class="sub" style="margin:6px 0 0">GEO asks ~4.3 km/s of the kick
+        stage — size it in the builder or expect an honest "propellant
+        depleted".</div>
+    </div>
+
+    <div class="card" id="card_flyby">
+      <h2>Mission targets</h2>
+      <div class="row">
+        <div style="flex:1"><label for="h_park_km">parking orbit [km]</label><input id="h_park_km" value="200"></div>
+      </div>
+      <div class="row3">
+        <div><label for="incl_deg">inclination [°]</label><input id="incl_deg" value="28.5"></div>
+        <div><label for="hp_moon_km">perilune [km]</label><input id="hp_moon_km" value="2000"></div>
+        <div><label for="hp_return_km" title="return perigee [km]">return perigee [km]</label><input id="hp_return_km" value="50"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label for="tli_mag_err_pct">TLI Δv error [%]</label><input id="tli_mag_err_pct" value="0"></div>
+        <div><label for="tli_point_err_deg">TLI pointing error [°]</label><input id="tli_point_err_deg" value="0"></div>
+      </div>
+      <div class="sub" style="margin:6px 0 0">nonzero TLI errors fly a dispersed
+        cruise with an automatic mid-course correction at T+24 h</div>
+    </div>
+
+    <div class="card hidden" id="card_landing">
+      <h2>Lander &amp; descent</h2>
+      <div class="row3">
+        <div><label for="l_dry">lander dry [kg]</label><input id="l_dry" value="3500"></div>
+        <div><label for="l_prop">lander propellant [kg]</label><input id="l_prop" value="9000"></div>
+        <div><label for="l_diameter">deployed ø [m]</label><input id="l_diameter" value="4.2"></div>
+      </div>
+      <div class="row3">
+        <div><label for="l_thrust_kn">thrust [kN]</label><input id="l_thrust_kn" value="45"></div>
+        <div><label for="l_isp">Isp [s]</label><input id="l_isp" value="311"></div>
+        <div><label for="l_throttle_min" title="deepest throttle [%]">min throttle [%]</label><input id="l_throttle_min" value="10"></div>
+      </div>
+      <div class="sub" id="l_derived" style="margin:6px 0 0">—</div>
+      <div class="row3" style="margin-top:6px">
+        <div><label for="h_moon_park_km">lunar orbit [km]</label><input id="h_moon_park_km" value="100"></div>
+        <div><label for="h_pdi_km">descent orbit [km]</label><input id="h_pdi_km" value="15"></div>
+        <div><label for="n_rev">revs before DOI</label><input id="n_rev" value="1"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <!-- flex:1 to claim the row the way the other checkbox lines do, and
+             white-space:normal to undo the global `label` rule: that rule's
+             nowrap + overflow:hidden is right for a one-word field label above
+             an input, but here it defeated this label's own flex-wrap and cut
+             the sentence to "...perfect navigat". -->
+        <label for="plain_moon" style="display:flex;gap:7px;align-items:flex-start;
+               flex:1;flex-wrap:wrap;white-space:normal;overflow:visible;
+               cursor:pointer" title="fly the descent onto a smooth
+               sphere with perfect navigation, as everything here did before
+               terrain existed">
+          <input type="checkbox" id="plain_moon" style="width:auto;margin:2px 0 0">
+          <span>smooth sphere, perfect navigation</span></label>
+      </div>
+      <!-- Two lines, not eight. The mode note at the top of the sidebar
+           already says what a landing mission IS; what belongs here is the one
+           thing a reader cannot infer from the controls — that the default is
+           the hard version. -->
+      <div class="sub" style="margin:6px 0 0"><b>Lands on the real thing by
+        default</b>: terrain, mascons, navigation error corrected by landing
+        radar, hazard avoidance at high gate. The box above takes all of that
+        away.</div>
+    </div>
+
+    <div class="card" id="card_launcher">
+      <!-- Read-only, on purpose: the vehicle is EDITED in the builder and
+           FLOWN from here. The float:right chip that used to sit in this
+           header wrapped the paragraph under it into an L shape at every
+           sidebar width, which is every width this column has. -->
+      <h2>Launcher</h2>
+      <div class="sub" id="lv_count" style="margin:8px 0 0">—</div>
+      <div class="sub" id="pod_note" style="margin:4px 0 0">—</div>
+      <div style="margin-top:9px">
+        <span class="chip" id="buildbtn" title="the vehicle is configured there
+              and syncs back here live — key B">&#128736; edit in the vehicle builder</span>
+      </div>
+      <!-- The whole launcher form still exists and still feeds params() and
+           the presets; it is only no longer ON SCREEN. The visible editor is
+           /build, and its state arrives here through localStorage. -->
+      <div id="lv_form" class="hidden">
+      <div class="row">
+        <div><label for="nstages">stages</label>
+          <select id="nstages">
+            <option>2</option><option selected>3</option>
+            <option>4</option><option>5</option></select></div>
+        <div><label for="nboost">strap-on boosters</label>
+          <select id="nboost">
+            <option value="0" selected>none</option>
+            <option value="2">2</option><option value="3">3</option>
+            <option value="4">4</option><option value="5">5</option>
+            <option value="6">6</option><option value="7">7</option>
+            <option value="8">8</option></select></div>
+      </div>
+      <!-- stage blocks are generated from the stage count -->
+      <div id="stagebox"></div>
+      <div class="row3" style="margin-top:8px">
+        <div><label for="fairing" title="untick to fly the spacecraft in the open —
+             no shroud mass, and a blunt capsule on the nose instead of an ogive">fairing
+          <input type="checkbox" id="fairing_on" checked
+                 style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label>
+          <input id="fairing" value="150"></div>
+        <div><label for="diameter">diameter [m]</label><input id="diameter" value="1.8"></div>
+        <div><label for="kick_deg" title="pitch-over kick [deg]">kick [°]</label><input id="kick_deg" value="8"></div>
+      </div>
+      <!-- The payload IS the crew capsule, so it belongs with the vehicle and
+           not under "mission targets": it is what the launcher carries, what
+           re-enters, and what sets how big the capsule is drawn. It lives in
+           the (hidden) launcher form with the rest of the vehicle, edited in
+           the builder like everything else there, and this page reports it —
+           it used to be an editable box in BOTH places, which is two truths
+           for one number. -->
+      <div class="row" style="margin-top:6px">
+        <div style="flex:1"><label for="pod_mass">payload / capsule [kg]</label>
+          <input id="pod_mass" value="350"></div>
+        <!-- The payload is spacecraft + cargo (see the builder). These carry
+             that composition through this page's round-trip; leave them out
+             and every run launched from mission control quietly reverts to a
+             350 kg capsule regardless of what was built. -->
+        <select id="payload_kind" hidden>
+          <option value="capsule">capsule</option><option value="bus">bus</option>
+        </select>
+        <input id="bus_mass" value="200" hidden>
+        <input id="cargo_mass" value="0" hidden>
+        <div style="flex:1"><label for="pod_dia" title="the payload's body diameter;
+             blank works it out from the mass. The builder has the flown ones.">
+          payload &oslash; [m]</label>
+          <input id="pod_dia" value="" placeholder="auto"></div>
+        <div style="flex:1"><label for="crewed" title="off flies an uncrewed bus:
+             no cabin, and no interior view in the launch page">crew aboard
+          <input type="checkbox" id="crewed" checked
+                 style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div style="flex:1"><label style="display:flex;gap:6px;align-items:center"
+             title="solves the ascent at a ladder of kick angles and keeps the one
+             that puts the most mass in orbit — about 2 s on top of the run, and
+             the difference between orbit and a perigee underground on anything
+             with a high liftoff thrust-to-weight">
+          <input type="checkbox" id="opt_kick" style="width:auto;margin:0" checked>
+          search for the best pitch-over kick</label></div>
+      </div>
+      </div>
+    </div>
+
+    <div class="card runbar">
+      <button id="run">Run mission</button>
+      <div class="status" id="status">idle</div>
+    </div>
+  </div>
+
+  <div>
+    <!-- The outcome, stated. This is the page's primary output and it used to
+         live as a sentence of grey body text below the fold, under the button
+         that started the run. -->
+    <div class="verdict" id="verdict" hidden>
+      <span class="verdict-state" id="verdict_state">—</span>
+      <span class="verdict-why" id="verdict_why"></span>
+    </div>
+    <!-- Nothing re-flies on its own, so something has to say when what is on
+         screen has stopped describing what the form says. Without this, the
+         cost of not auto-running is a dashboard that quietly shows the wrong
+         vehicle's numbers. -->
+    <div class="stale" id="stale" hidden>
+      <span id="stale_why">the configuration has changed since this run</span>
+      <button id="stale_run">Run mission</button>
+    </div>
+    <!-- hidden until there is a run: an empty bordered box under a "NO RUN
+         YET" verdict reads as a panel that failed to load -->
+    <div class="panel" id="tilespanel" style="margin-bottom:12px" hidden>
+      <div class="mgroups" id="tiles"></div>
+    </div>
+
+    <!-- The stage: the two live views, side by side, driven by one clock.
+         The vehicle used to sit in the sidebar under the controls, which put
+         a 3D view of the stack among the boxes you type into and left the
+         trajectory alone in a column twice as wide as it needed. They are
+         both pictures of the same instant of the same flight. -->
+    <div class="stage">
+      <div class="card stagemain">
+        <div class="legend" id="legend"></div>
+        <!-- the scene is a black rectangle before anything has flown; say why
+             rather than leaving it to be read as a broken canvas -->
+        <div class="scenehint" id="scenehint">no trajectory yet</div>
+        <canvas id="scene"></canvas>
+        <div class="bar">
+          <button id="play" class="ghost">&#9654; play</button>
+          <input id="scrub" type="range" min="0" max="1000" value="1000">
+          <button id="frame" class="ghost">rotating frame</button>
+          <span class="chip" data-zoom="30" title="key E">Earth</span>
+          <span class="chip" data-zoom="0.4" title="key C — a 400 km frame that
+                follows the craft; the only way to see a suborbital arc">craft</span>
+          <span class="chip" data-zoom="fit" title="key Z — frame the whole trajectory">fit</span>
+          <span class="chip hidden" id="moonview" title="the lunar phase, Moon-centred">&#127765; Moon</span>
+          <span class="chip" id="launchbtn" title="cinematic pad-cam liftoff, flown from this run's parameters">&#128640; launch view</span>
+          <span class="ro" id="readout"></span>
+        </div>
+        <div class="sub" style="margin:6px 0 0">drag to orbit the camera · scroll to
+          zoom · dots ride the rotating surface (zoom in on Earth to see them)</div>
+      </div>
+
+      <div class="card stageside">
+        <h2>Vehicle</h2>
+        <canvas id="geo"></canvas>
+        <div class="sub" id="geo_state" style="margin:6px 0 0">full stack</div>
+        <div class="sub" id="geo_info" style="margin:2px 0 0">—</div>
+        <div class="sub" id="geo_perf" style="margin:2px 0 0">—</div>
+        <div class="sub" style="margin:8px 0 0">stages, fairing and the kick
+          stage drop off as the timeline passes their separation events</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Run history</h2>
+      <div id="history"><span class="sub">runs appear here — click to restore</span></div>
+    </div>
+
+    <!-- Where the plots went. The six profile charts, the descent charts, the
+         event log, the sweep and the solver all moved to /analysis: they are
+         what you read AFTER a run, not what you watch during one, and having
+         them here meant the answer to "did it work" was four screens above
+         the tools for asking why. -->
+    <a class="card gonext" id="analysislink" href="analysis_page.html">
+      <span class="gonext-k u-label">next</span>
+      <span class="gonext-t">Analysis &rarr;</span>
+      <span class="gonext-w">ascent, entry and descent profiles · the event log ·
+        parameter sweeps · solve a field for a target</span>
+    </a>
+  </div>
+</div>
+
+<script type="module">
+'use strict';
+import { fin, fmt, fmtKm } from './static/fmt.js';
+import * as api from './static/api.js';
+import * as vehicle from './static/vehicle.js';
+// The metric vocabulary and the limit table are shared with /analysis, which
+// names the same quantities in its sweep and solve pickers.
+import { V, limit } from './static/metrics.js';
+// Loading and failure are shared surfaces: a mission takes seconds, and a
+// page that is thinking must not look like a page that is broken.
+import { busy, fail, clearFailures, reportUncaught } from './static/busy.js';
+import * as runs from './static/runs.js';
+import { suite, report, requested } from './static/selftest.js';
+
+reportUncaught();
+
+const $ = id => document.getElementById(id);
+const BASE_FIELDS =['pod_mass','payload_kind','bus_mass','cargo_mass',
+  'pod_dia','crewed','h_park_km','incl_deg','hp_moon_km','hp_return_km',
+  'fairing','fairing_on','diameter','nstages','nboost','opt_kick','kick_deg',
+  'tli_mag_err_pct','tli_point_err_deg'];
+// the landing mission adds a lander and a descent plan; everything else — the
+// launcher, the ascent, the trans-lunar leg — is the same mission underneath
+const LANDING_FIELDS = ['l_dry','l_prop','l_thrust_kn','l_isp','l_throttle_min','l_diameter',
+  'h_moon_park_km','h_pdi_km','n_rev','plain_moon'];
+const ORBIT_FIELDS = ['orbit','orbit_perigee_km','orbit_apogee_km','orbit_incl_deg',
+  'n_orbits','deorbit','hp_entry_km'];
+// a suborbital flight has no orbit to describe, only a profile and its target
+const SUB_FIELDS = ['sub_profile','sub_apogee_km','sub_range_km','sub_loft_deg',
+                    'sub_azimuth_deg'];
+let MODE = 'flyby';
+let VNAME = 'Sable';
+let SUBPROF = 'hop';
+const landing = () => MODE === 'landing';
+const orbitm = () => MODE === 'orbit';
+const subm = () => MODE === 'suborbital';
+const STAGE_FIELDS = ['prop','dry','thrust_kn','isp','propellant','engines','engine',
+                      'diameter','size_by','len','dry_auto'];
+// A booster set is configured exactly like a stage, plus how it behaves in
+// parallel with the core.
+const BOOST_FIELDS = STAGE_FIELDS.concat(['throttle','ign_delay','sep_delay']);
+// The whole form is derived from the stage count, so nothing here has to
+// know how tall the stack is.
+const nStages = () => +($('nstages') || {}).value || 3;
+const nBoost = () => +($('nboost') || {}).value || 0;
+const FIELDS = () => BASE_FIELDS.concat(
+  [].concat(...Array.from({length: nStages()}, (_, i) =>
+    STAGE_FIELDS.map(f => `s${i+1}_${f}`))),
+  nBoost() ? BOOST_FIELDS.map(f => `b_${f}`) : [],
+  LANDING_FIELDS, ORBIT_FIELDS, SUB_FIELDS.filter(f => f !== 'sub_profile'));
+
+// Stage 1 is the booster, the last is the kick stage that does TLI, and
+// anything between is an upper stage — the same roles the server uses.
+const ROLE = {
+  booster: { label: 'booster',              prop: 42000, dry: 3800, thrust: 950,
+             isp: 305, mix: 'kerolox',    engines: 5 },
+  upper:   { label: 'upper',                prop:  9500, dry:  900, thrust:  95,
+             isp: 345, mix: 'kerolox',    engines: 1 },
+  kick:    { label: 'kick stage (TLI + TCM)', prop: 950, dry:  140, thrust:  15,
+             isp: 315, mix: 'hypergolic', engines: 1 },
+};
+ROLE.strap = { label: 'strap-on set', prop: 12000, dry: 900, thrust: 380,
+               isp: 285, mix: 'kerolox', engines: 2 };
+const roleOf = (k, n) => k === 1 ? ROLE.booster : k === n ? ROLE.kick : ROLE.upper;
+// stage 2 keeps the reference figures; each inserted stage above it starts a
+// quarter the size, so raising the stack height leaves a flyable vehicle
+const roleAt = (k, n) => {
+  const r = roleOf(k, n), f = (r === ROLE.upper) ? Math.pow(0.25, k - 2) : 1;
+  const rnd = v => +(v * f).toPrecision(3);
+  return Object.assign({}, r, { prop: rnd(r.prop), dry: rnd(r.dry),
+                                thrust: rnd(r.thrust) });
+};
+
+let CATALOGUE = { propellants: [], engines: [], solve_metrics: [] };
+async function fillCatalogues() {
+  CATALOGUE = await api.catalogue();
+  // the orbit picker comes from the same catalogue, so the page can never
+  // offer an orbit the simulator does not fly
+  const sel = $('orbit');
+  if (sel && CATALOGUE.orbits) {
+    sel.innerHTML = CATALOGUE.orbits.map(o =>
+      `<option value="${o.name}">${o.name} · ${Math.round(o.perigee_km)}×${Math.round(o.apogee_km)} km · ${o.incl_deg.toFixed(1)}°</option>`).join('') +
+      '<option value="custom">custom · define elements below</option>';    sel.value = 'leo';
+    sel.addEventListener('change', orbitNote);
+    orbitNote();
+  }
+}
+function orbitNote() {
+  const custom = ($('orbit') || {}).value === 'custom';
+  const o = (CATALOGUE.orbits || []).find(x => x.name === ($('orbit') || {}).value);
+  if ($('custom_orbit_fields')) $('custom_orbit_fields').classList.toggle('hidden', !custom);
+  if ($('orbit_note')) $('orbit_note').textContent = custom
+    ? 'finite burns target the requested perigee, apogee, and inclination'
+    : (o ? o.note : '');
+}
+// rebuild the stage form, keeping whatever the user already typed
+// whichever of propellant mass / tank length is *derived* is greyed out, so
+// it is always clear which one you are driving
+function syncSizeBy() {
+  const pre = Array.from({length: nStages()}, (_, i) => `s${i+1}_`);
+  if (nBoost()) pre.push('b_');
+  for (const p of pre) {
+    const byLen = $(p + 'size_by') && $(p + 'size_by').value === 'length';
+    if (!$(p + 'prop')) continue;
+    $(p + 'prop').disabled = byLen;
+    $(p + 'len').disabled = !byLen;
+    $(p + 'prop').style.opacity = byLen ? 0.45 : 1;
+    $(p + 'len').style.opacity = byLen ? 1 : 0.45;
+    // an engine-less stage has no design to estimate a dry mass from, and a
+    // stage whose dry mass is estimated should not look like you typed it
+    const eng = $(p + 'engine') && $(p + 'engine').value !== 'manual';
+    const auto = $(p + 'dry_auto');
+    if (auto) {
+      auto.disabled = !eng;
+      auto.parentElement.style.opacity = eng ? 1 : 0.45;
+      $(p + 'dry').disabled = eng && auto.checked;
+      $(p + 'dry').style.opacity = eng && auto.checked ? 0.45 : 1;
+    }
+    // A named engine owns its mixture — the server now rejects a form that
+    // says otherwise — so the mixture select follows the engine and locks.
+    // This is what keeps every preset and every stale dropdown honest: the
+    // form can no longer show a propellant the server is not flying.
+    const mix = $(p + 'propellant');
+    if (mix) {
+      if (eng) {
+        const cat = (CATALOGUE.engines || []).find(e => e.name === $(p + 'engine').value);
+        if (cat) mix.value = cat.propellant;
+      }
+      mix.disabled = eng;
+      mix.style.opacity = eng ? 0.45 : 1;
+      mix.title = eng ? 'set by the engine — a named engine owns its mixture' : '';
+    }
+  }
+}
+function buildStages() {
+  const n = nStages(), box = $('stagebox');
+  const DIA0 = ($('diameter') || {}).value || 1.8;
+  const keep = {};
+  for (const el of box.querySelectorAll('input,select'))
+    keep[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+  const mixOpts = CATALOGUE.propellants
+    .map(p => `<option value="${p.name}">${p.name} · ${Math.round(p.bulk)} kg/m³</option>`)
+    .join('');
+  const engOpts = '<option value="manual">manual (use the fields above)</option>' +
+    CATALOGUE.engines.map(e =>
+      `<option value="${e.name}">${e.name} · ${Math.round(e.thrust_kn)} kN · ` +
+      `Isp ${Math.round(e.isp_vac)} s · ${e.propellant}</option>`).join('');
+  // one block of markup, used for a serial stage and for a strap-on set
+  // alike — they are configured by the same numbers
+  const block = (title, p, r, dia) => `<div class="stagehdr">${title}
+        <span class="derived" id="${p}derived"></span></div>
+      <div class="row">
+        <div><label for="${p}size_by">size by</label>
+          <select id="${p}size_by">
+            <option value="prop">propellant mass</option>
+            <option value="length">tank length</option></select></div>
+        <div><label for="${p}diameter">diameter [m]</label><input id="${p}diameter" value="${dia}"></div>
+      </div>
+      <div class="row">
+        <div><label for="${p}prop">propellant [kg]</label><input id="${p}prop" value="${r.prop}"></div>
+        <div><label for="${p}len">tank length [m]</label><input id="${p}len" value="10"></div>
+      </div>
+      <div class="row">
+        <div><label for="${p}dry">dry mass [kg]</label><input id="${p}dry" value="${r.dry}"></div>
+        <div><label for="${p}engines">engines</label><input id="${p}engines" value="${r.engines}"></div>
+      </div>
+      <label style="display:flex;gap:6px;align-items:center;margin:6px 0 0">
+        <input type="checkbox" id="${p}dry_auto" style="width:auto;margin:0">
+        estimate dry mass from the design</label>
+      <div class="row">
+        <div><label for="${p}thrust_kn">vac thrust [kN]</label><input id="${p}thrust_kn" value="${r.thrust}"></div>
+        <div><label for="${p}isp">vac Isp [s]</label><input id="${p}isp" value="${r.isp}"></div>
+      </div>
+      <div class="row">
+        <div style="flex:1"><label for="${p}propellant">mixture</label>
+          <select id="${p}propellant">${mixOpts}</select></div>
+      </div>
+      <div class="row">
+        <div style="flex:1"><label for="${p}engine">engine (overrides thrust/Isp)</label>
+          <select id="${p}engine">${engOpts}</select></div>
+      </div>`;
+  let html = '';
+  for (let k = 1; k <= n; k++)
+    html += block(`stage ${k} — ${roleAt(k, n).label}`, `s${k}_`, roleAt(k, n), DIA0);
+  const nb = nBoost();
+  if (nb) {
+    // Each of these numbers describes ONE booster; the set contributes them
+    // `nb` times over. The core throttle is the Falcon-Heavy trick: hold the
+    // first stage down while the sides carry the stack, so it still has
+    // propellant when they go.
+    html += block(`${nb} × strap-on booster`, 'b_', ROLE.strap,
+                  +(DIA0 * 0.85).toFixed(2)) + `
+      <div class="row">
+        <div><label for="b_throttle">core throttle [%]</label><input id="b_throttle" value="100"></div>
+        <div><label for="b_sep_delay">sep delay [s]</label><input id="b_sep_delay" value="0"></div>
+      </div>
+      <div class="row">
+        <div><label for="b_ign_delay">ignition delay [s]</label><input id="b_ign_delay" value="0"></div>
+        <div></div>
+      </div>
+      <div class="sub">the numbers above are per booster · the set burns in
+        parallel with stage 1 and separates together</div>`;
+  }
+  box.innerHTML = html;
+  const init = (p, r, fields) => {
+    $(p + 'propellant').value = r.mix;
+    $(p + 'engine').value = 'manual';
+    for (const f of fields)
+      if (keep[p + f] !== undefined) setField(p + f, keep[p + f]);
+  };
+  for (let k = 1; k <= n; k++) init(`s${k}_`, roleAt(k, n), STAGE_FIELDS);
+  if (nb) init('b_', ROLE.strap, BOOST_FIELDS);
+  // anything that changes the vehicle's physical shape redraws the viewer
+  for (const el of box.querySelectorAll('input,select'))
+    el.addEventListener('change', () => { syncSizeBy(); fetchGeo(); });
+  syncSizeBy();
+}
+
+// trajectory phase colors: 4 ascent, 0 parking coast, 1 TLI burn,
+// 2 outbound, 3 return, 5 entry
+const COL = {4:'#8fbef0',0:'#3987e5',1:'#d95926',2:'#199e70',3:'#c98500',5:'#d55181'};
+// scene ink. `INK` and `ACC` left with the charts — the only things drawn on
+// this page now are the trajectory and the stack, and both carry their own
+// phase colours from COL above.
+const INK2='#c3c2b7', MUTED='#898781', GRID='#2c2c2a';
+const OMEGA_E = 7.2921159e-5;                 // Earth rotation [rad/s]
+const N_MOON = 2*Math.PI/(27.321661*86400);   // lunar mean motion [rad/s]
+const RE_MM = 6.371, RM_MM = 1.7374;          // radii in 1000 km
+
+const PRESETS = {
+  'nominal':        {},
+  // heavier by CARGO, not by growing the probe core: the spacecraft is the
+  // same spacecraft, it is just carrying 70 kg more
+  'heavy pod':      {payload_kind: 'bus', bus_mass: 200, cargo_mass: 220},
+  'low flyby':      {hp_moon_km: 500},
+  // 500 metres, and the units are the point: this is a clearance against the
+  // MEAN SPHERE, and the Moon's relief runs to about +/- 8 km, so a real one
+  // would be flown at a longitude with nothing standing up in it. The designer
+  // takes it seriously — its acceptance band is 2% of the target rather than a
+  // flat 25 km — and closest approach is interpolated rather than sampled,
+  // because at 13 s a step the vehicle covers 30 km either side of it.
+  'grazing flyby':  {hp_moon_km: 0.5},
+  'high flyby':     {hp_moon_km: 6000},
+  'steep entry':    {hp_return_km: 15},
+  'shallow entry':  {hp_return_km: 65},
+  'high parking':   {h_park_km: 350},
+  'inclined 50°':   {incl_deg: 50},
+  'dispersed TLI':  {tli_mag_err_pct: 0.3, tli_point_err_deg: 0.25},
+};
+// Orbit presets pick a target from the server's catalogue; "LEO re-entry"
+// is the round trip — up, a few revolutions, a deorbit burn, and home.
+const ORBIT_PRESETS = {
+  'LEO':          {orbit: 'leo', n_orbits: 2, deorbit: false},
+  'polar':        {orbit: 'polar', n_orbits: 2, deorbit: false},
+  'Molniya':      {orbit: 'molniya', n_orbits: 2, deorbit: false},
+  'GEO':          {orbit: 'geo', n_orbits: 2, deorbit: false},
+  'LEO re-entry': {orbit: 'leo', n_orbits: 3, deorbit: true},
+};
+// Suborbital presets are the flights people actually name. A preset carries
+// its own PROFILE, because "the Karman line" is a hop and "downrange 1000 km"
+// is a shot, and picking one without the other is picking half a mission.
+const SUB_PRESETS = {
+  'Kármán line':   {_p: 'hop', sub_apogee_km: 100},
+  'high hop':      {_p: 'hop', sub_apogee_km: 250},
+  'sounding shot': {_p: 'hop', sub_apogee_km: 500},
+  '400 km range':  {_p: 'downrange', sub_range_km: 400, sub_loft_deg: 40},
+  '1000 km range': {_p: 'downrange', sub_range_km: 1000, sub_loft_deg: 40},
+  'depressed':     {_p: 'downrange', sub_range_km: 400, sub_loft_deg: 22},
+  'lofted':        {_p: 'downrange', sub_range_km: 400, sub_loft_deg: 62},
+};
+// Landing presets move the things a landing mission actually trades: where
+// you park, how long you loiter before starting down, and how much lander
+// there is to put down.
+const LANDING_PRESETS = {
+  'nominal':        {},
+  'low orbit':      {h_moon_park_km: 60},
+  'high orbit':     {h_moon_park_km: 200},
+  'long loiter':    {n_rev: 4},
+  'direct descent': {n_rev: 0},
+  'heavy lander':   {l_dry: 6000, l_prop: 16000, l_thrust_kn: 75},
+  'light lander':   {l_dry: 1200, l_prop: 3400, l_thrust_kn: 16},
+  'thin margins':   {l_prop: 7200},
+};
+
+// Vehicle presets. Each is the whole launcher: stack height, engines,
+// propellant loads, diameters, and the pitch-over kick the stack needs —
+// which is the field that most often decides whether a configuration flies
+// at all. Engines come from the server's catalogue, so `dry_auto` lets the
+// mass-estimating relations size the stage rather than a typed-in number.
+const VEHICLES = {
+  'Sable (reference)': {
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    s1_engine: 'manual', s1_prop: 42000, s1_dry: 3800, s1_thrust_kn: 950, s1_isp: 305,
+      s1_engines: 5, s1_propellant: 'kerolox', s1_diameter: 1.8,
+    s2_engine: 'manual', s2_prop: 9500, s2_dry: 900, s2_thrust_kn: 95, s2_isp: 345,
+      s2_engines: 1, s2_propellant: 'kerolox', s2_diameter: 1.8,
+    s3_engine: 'manual', s3_prop: 950, s3_dry: 140, s3_thrust_kn: 15, s3_isp: 315,
+      s3_engines: 1, s3_propellant: 'hypergolic', s3_diameter: 1.8,
+  },
+  'Sable + 4 strap-ons': {
+    nstages: 3, nboost: 4, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    b_engine: 'manual', b_prop: 12000, b_dry: 900, b_thrust_kn: 380, b_isp: 285,
+      b_engines: 2, b_propellant: 'kerolox', b_diameter: 1.53, b_throttle: 60,
+  },
+  // 6°, not 8°: this stack lofts on the reference kick and arrives at orbital
+  // energy with its perigee underground. The kick search finds the same thing
+  // in a few seconds if you would rather not take the number on faith.
+  'Falcon-class (Merlin)': {
+    nstages: 3, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: true,
+    s1_engine: 'merlin_1d', s1_engines: 9, s1_prop: 411000, s1_dry_auto: true,
+      s1_diameter: 3.7,
+    s2_engine: 'merlin_1d_vac', s2_engines: 1, s2_prop: 108000, s2_dry_auto: true,
+      s2_diameter: 3.7,
+    s3_engine: 'aj10', s3_engines: 1, s3_prop: 2200, s3_dry_auto: true,
+      s3_diameter: 2.4,
+  },
+  // The one vehicle in here that was built to land on the Moon, at its real
+  // masses: 2,077 t of S-IC on five F-1s, 451 t of S-II on five J-2s, and a
+  // 107 t S-IVB on one — which does trans-lunar injection, so it is the kick
+  // stage. Dry masses are stated rather than estimated: the conceptual sizing
+  // curve is calibrated around a Falcon-class first stage, and a 2,000 t one is
+  // two orders of magnitude outside it. No fairing — Apollo flew its spacecraft
+  // exposed under an escape tower, with the lander in an adapter below.
+  'Saturn V (Apollo)': {
+    // 1 degree, not the reference 8 and not the 4 this shipped with. At a
+    // lift-off thrust-to-weight of 1.20 this is the slowest-accelerating stack
+    // in the catalogue, and it has to stay near vertical long enough to get out
+    // of the thick air; at 2 degrees it does not insert at all. The kick search
+    // finds it now — its ladder used to start at 4 — but the number is stated
+    // so the vehicle also flies with the search turned off.
+    nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 1,
+    opt_kick: true, pod_mass: 45000,
+    s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000,
+      s1_diameter: 10.1,
+    s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000,
+      s2_diameter: 10.1,
+    s3_engine: 'j2', s3_engines: 1, s3_prop: 106600, s3_dry: 13500,
+      s3_diameter: 6.6,
+  },
+  'Starship (expendable)': {
+    nstages: 2, nboost: 0, diameter: 9.0, fairing_on: false, kick_deg: 5,
+    opt_kick: true,
+    s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
+      s1_diameter: 9.0,
+    s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
+      s2_diameter: 9.0,
+  },
+  'hydrolox upper': {
+    nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
+    s2_engine: 'rl10b2', s2_propellant: 'hydrolox', s2_engines: 1, s2_prop: 9500,
+    s2_dry_auto: true,
+  },
+};
+let DEFAULTS = null;         // captured from the page's initial values
+
+let run = null;              // current run payload
+let history = [];
+let ti = 0, playing = false, lastTs = 0;
+let rotFrame = false, camYaw = 0.6, camPitch = 1.05, camDist = 1150;
+// The scene frames whatever the run turned out to be rather than a fixed
+// number: a 2000 km flyby and a 60 km lunar orbit are five orders of
+// magnitude apart, and a default zoom can only be right for one of them.
+let autoFit = true, moonView = null, moonDist = 12000;
+// The tightest frame: 40 km across, which is a suborbital apogee filling the
+// view. It was 30,000 km, one Earth diameter of headroom, so the scale bar
+// bottomed out at 5000 km and a 100 km hop was three pixels tall.
+const CAM_MIN = 0.04;
+{ const z = new URLSearchParams(location.search).get('zoom');
+  if (z) { camDist = Math.min(2400, Math.max(CAM_MIN, +z)); autoFit = false; } }
+
+function params() {
+  const u = new URLSearchParams();
+  u.set('mode', MODE);
+  u.set('vname', VNAME);
+  u.set('sub_profile', SUBPROF);
+  for (const f of FIELDS()) {
+    const el = $(f);
+    if (!el) continue;
+    u.set(f, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
+  }
+  return u;
+}
+
+async function doRun() {
+  $('run').disabled = true;
+  $('status').className = 'status';
+  $('status').textContent = 'designing + flying mission…';
+  showVerdict('running', 'RUNNING', 'designing and flying the mission…');
+  // A mission is seven to twelve seconds of real simulation. Before this the
+  // only sign it had started was a status line at the bottom of a sidebar.
+  const done = busy('designing and flying the mission…');
+  const t0 = performance.now();
+  try {
+    const j = await api.run(params(), { onProgress: done.progress });
+    j._params = Object.fromEntries(params());
+    run = j;
+    clearFailures();
+    clearStale();
+    // A partial mission (ascent failed, coast timed out) is served with every
+    // leg that flew; the dashboard renders what exists. A render throw on a
+    // partial is survivable — the status line and the launch view are the
+    // product there — but on a nominal run it is a real bug and stays fatal.
+    try { renderAll(); }
+    catch (err) {
+      if (j.outcome && j.outcome !== 'nominal') console.warn('partial render:', err);
+      else throw err;
+    }
+    setVerdict(j);
+    $('status').textContent = `done in ${((performance.now()-t0)/1000).toFixed(1)} s`;
+    // the server files every run it flies; re-read rather than mirror it, so
+    // one list is the truth and eviction happens in one place
+    loadHistory();
+  } catch (e) {
+    $('status').className = 'status err';
+    $('status').textContent = String(e.message || e);
+    showVerdict('failed', 'RUN FAILED', String(e.message || e));
+    fail(e, 'mission');
+  } finally {
+    done();
+    $('run').disabled = false;
+  }
+}
+
+// ------------------------------------------------------------- the verdict --
+// Did it work? Every branch below already existed as status-line prose; this
+// gives the same wording a place at the top of the results where it is the
+// first thing read, and a colour that means one thing.
+
+function showVerdict(kind, state, why) {
+  const el = $('verdict');
+  el.hidden = false;
+  el.className = 'verdict is-' + kind;
+  $('verdict_state').textContent = state;
+  $('verdict_why').textContent = why || '';
+}
+
+/** Before anything has been flown. Says what to press, and why it is empty. */
+function showIdle() {
+  showVerdict('idle', 'NO RUN YET',
+              history.length
+                ? 'press Run mission, or pick one of the earlier runs below'
+                : 'press Run mission — nothing is simulated until you ask');
+  $('status').className = 'status';
+  $('status').textContent = 'ready';
+  // Everything that describes a flight stays out of the way until there is
+  // one. The vehicle card is the exception and stays: the stack is real
+  // whether or not it has flown.
+  $('tilespanel').hidden = true;
+  $('legend').hidden = true;
+  $('scenehint').hidden = false;
+}
+
+/** A run is on screen: bring back everything showIdle put away. */
+function showRunUI() {
+  $('tilespanel').hidden = false;
+  $('legend').hidden = false;
+  $('scenehint').hidden = true;
+}
+
+/**
+ * The run on screen no longer matches the form.
+ *
+ * The alternative to auto-running is not "do nothing", it is "say so".
+ * Silence here would mean editing the vehicle and reading the previous
+ * vehicle's numbers without a single thing on the page having changed.
+ */
+function markStale(why) {
+  // A configuration with no trajectory still needs the same explicit handoff:
+  // changing Earth orbit to suborbital must not fly, but it also must not look
+  // as though the new selection already has a result behind it.
+  $('stale_why').textContent = run ? why :
+    why.replace(/ since this run$/, '') + ' — run the mission to generate its trajectory';
+  $('stale_run').textContent = run ? 'Run it again' : 'Run mission';
+  $('stale').hidden = false;
+}
+function clearStale() { $('stale').hidden = true; }
+
+function setVerdict(j) {
+  const m = j.metrics || {};
+  if (j.outcome && j.outcome !== 'nominal' && j.mode !== 'landing') {
+    // Three of these are genuinely different failures and used to read as one
+    // undifferentiated error line.
+    const why =
+      j.outcome === 'ascent_failed'
+        ? 'the ascent never reached orbit'
+      // the capsule reached the atmosphere and did not stay in it: too much
+      // mass behind too little frontal area to decelerate, so it skipped back
+      // out. Worth saying, because every number BEFORE entry is good.
+      : j.outcome === 'entry_timeout'
+        ? 'the capsule never came down — it skipped back out of the atmosphere ' +
+          'instead of decelerating'
+      // the corrector never closed on the requested perilune/perigee, so there
+      // is no designed trajectory to fly. Not flown, and not a failure of the
+      // vehicle: the targeting did not converge on this configuration.
+      : j.outcome === 'design_failed'
+        ? 'free-return targeting did not converge — no trajectory reaches the ' +
+          'requested perilune, so nothing flew past the parking orbit'
+      : `the mission ended in "${j.outcome}"`;
+    const state = j.outcome === 'design_failed' ? 'NO TRAJECTORY' :
+                  j.outcome === 'ascent_failed' ? 'DID NOT REACH ORBIT' :
+                  j.outcome === 'entry_timeout' ? 'DID NOT COME HOME' : 'FAILED';
+    return showVerdict('failed', state,
+                       why + ' · press L for the launch view to fly what was simulated');
+  }
+  if (j.mode === 'landing' && !m.on_target)
+    return showVerdict('failed', 'DESCENT FAILED',
+                       `the descent ended in "${m.outcome}" — see the descent card ` +
+                       'for what ran out');
+  if (!m.on_target)
+    return showVerdict('failed', 'OFF TARGET',
+                       'targeting could not reach the requested perilune/perigee with ' +
+                       'this configuration — check the prop margin');
+  // On target, and the target is one where "above the surface" stops meaning
+  // what it usually means. Perilune here is measured against the MEAN SPHERE,
+  // and the Moon's relief runs to roughly ±8 km — so a clearance under about
+  // ten is a clearance over a smooth Moon, and the real one has mountains in
+  // it. Said out loud rather than left in a metric nobody reads.
+  if (m.grazing)
+    return showVerdict('marginal', 'GRAZING',
+                       `${(m.perilune_km*1000).toFixed(0)} m above the MEAN SPHERE, and ` +
+                       'lunar relief runs to ±8 km. The free return also gives up its ' +
+                       'return corridor this low.');
+  // Converged is the ordinary case, but "outside tolerance" is also routine —
+  // the reference Sable and the Saturn V both land there — so it is reported
+  // rather than hidden, without being dressed up as a failure.
+  const drift = m.design_status && m.design_status !== 'converged' &&
+                m.design_status !== 'no_design'
+    ? ` · targeting ${String(m.design_status).replace(/_/g, ' ')}` : '';
+  const where = isFinite(m.splash_lat)
+    ? `splashdown ${fmt(m.splash_lat,1)}°, ${fmt(m.splash_lon,1)}°`
+    : j.mode === 'landing' && isFinite(m.land_lat)
+    ? `touchdown ${fmt(m.land_lat,1)}°, ${fmt(m.land_lon,1)}°` : 'on target';
+  showVerdict('nominal', 'NOMINAL',
+              `${where}${isFinite(m.t_days) ? ' · ' + fmt(m.t_days,1) + ' d' : ''}${drift}`);
+}
+
+function renderAll() {
+  if (!run) return;
+  showRunUI();
+  const m = run.metrics;
+  const groups = run.mode === 'landing' ? [
+    ['launch', [
+      ['liftoff mass', V(m.liftoff_t,1,'t')],
+      ['lander wet mass', V(m.lander_wet_t,1,'t')],
+      ['TLI Δv', V(m.tli_dv,0,'m/s')],
+      ['launcher margin', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
+      ['pad to surface', V(m.t_days,2,'d')],
+    ]],
+    ['lunar orbit', [
+      ['lunar orbit', V(m.perilune_km,0,'km')],
+      ['insertion Δv', V(m.loi_dv,0,'m/s')],
+      ['descent-orbit Δv', V(m.doi_dv,1,'m/s')],
+    ]],
+    ['descent', [
+      ['descent Δv', V(m.descent_dv,0,'m/s')],
+      ['descent time', V(m.descent_s,0,'s')],
+      ['downrange', V(m.downrange_km,0,'km')],
+      ['deepest throttle', V(m.min_throttle_pct,0,'%')],
+      ['propellant left', V(m.prop_left_kg,0,'kg')],
+      ['hover margin', V(m.hover_s,0,'s'), limit('hover_s',m.hover_s)],
+    ]],
+    ['touchdown', [
+      ['sink rate', V(m.touchdown_v,2,'m/s'), limit('touchdown_v',m.touchdown_v)],
+      ['lateral rate', V(m.touchdown_vh,2,'m/s'), limit('touchdown_vh',m.touchdown_vh)],
+      ['landing site', fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°'],
+      ['ground off sphere', (m.ground_elev_m>=0?'+':'')+V(m.ground_elev_m,0,'m')],
+      ['slope', V(m.ground_slope_deg,1,'°')],
+      ['nav altitude error', V(m.nav_alt_err_m,0,'m')],
+      ['site chosen (was)', m.redesignate_m>0
+        ? fmt(m.site_score_deg,1)+'° ← '+fmt(m.site_was_deg,1)+'°' : '—'],
+      ['aim point moved', m.redesignate_m>0 ? V(m.redesignate_m,0,'m') : '—'],
+    ]],
+  ] : run.mode === 'suborbital' ? [
+    ['launch', [
+      ['liftoff mass', V(m.liftoff_t,1,'t')],
+      ['cutoff altitude', V(m.cutoff_h_km,1,'km')],
+      ['cutoff flight path', V(m.cutoff_gamma_deg,1,'°')],
+      ['peak load', V(m.peak_g,1,'g'), limit('peak_g',m.peak_g)],
+      ['propellant left', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
+    ]],
+    // what was asked for next to what it did, because on a suborbital flight
+    // the target is the whole point and the miss is the whole answer
+    ['trajectory', [
+      ['apogee reached', V(m.apogee_km,1,'km')],
+      ['asked for', (run.suborbital||{}).profile === 'hop'
+        ? V(m.target_apogee_km,0,'km') : V(m.target_range_km,0,'km')],
+      ['miss', (run.suborbital||{}).profile === 'hop'
+        ? V(m.apogee_err_km,1,'km') : V(m.range_err_km,1,'km')],
+      ['ground range', V(m.range_km,1,'km')],
+      ['coast to apogee', V(m.t_apogee_s,0,'s')],
+    ]],
+    ['entry', [
+      ['peak heating', V(m.peak_q_wcm2,1,'W/cm²')],
+      ['splash speed', V(m.v_splash,1,'m/s'), limit('v_splash',m.v_splash)],
+    ]],
+  ] : run.mode === 'orbit' ? [
+    ['launch', [
+      ['liftoff mass', V(m.liftoff_t,1,'t')],
+      ['parking orbit', V(m.park_perigee_km,0,'')+'×'+V(m.park_apogee_km,0,'km')],
+      ['prop margin', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
+    ]],
+    ['orbit', [
+      ['achieved orbit', V(m.orbit_rp_km,0,'')+'×'+V(m.orbit_ra_km,0,'km')],
+      ['inclination', V(m.orbit_incl_deg,2,'°')],
+      ['period', V(m.period_min,0,'min')],
+      ['transfer Δv', V(m.burn_dv_total,0,'m/s')],
+      ['mission time', V(m.t_days,2,'d')],
+    ]],
+    ['entry', [
+      ['peak load', V(m.peak_g,1,'g'), limit('peak_g',m.peak_g)],
+      ['splash speed', V(m.v_splash,1,'m/s'), limit('v_splash',m.v_splash)],
+    ]],
+  ] : [
+    ['launch', [
+      ['liftoff mass', V(m.liftoff_t,1,'t')],
+      ['parking orbit', V(m.park_perigee_km,0,'')+'×'+V(m.park_apogee_km,0,'km')],
+      ['prop margin', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
+    ]],
+    ['transit', [
+      ['TLI Δv', V(m.tli_dv,0,'m/s')],
+      ['perilune', V(m.perilune_km,0,'km')],
+      ['return perigee', V(m.vac_perigee_km,1,'km')],
+      ['mission time', V(m.t_days,1,'d')],
+    ]],
+    ['entry', [
+      ['entry speed', V(m.ei_v_ms/1000,2,'km/s')],
+      ['peak load', V(m.peak_g,1,'g'), limit('peak_g',m.peak_g)],
+      ['peak heating', V(m.peak_q_wcm2,0,'W/cm²')],
+      ['splashdown', fmt(m.splash_lat,1)+'°, '+fmt(m.splash_lon,1)+'°'],
+      ['splash speed', V(m.v_splash,1,'m/s'), limit('v_splash',m.v_splash)],
+    ]],
+  ];
+  // A dispersed cruise adds a correction burn. It belongs with the transit
+  // group it happened in, not appended after the entry numbers as the flat
+  // strip did — which put a mid-course event after splashdown.
+  if (m.tcm_dv != null) {
+    const t = groups.find(g => g[0] === 'transit') || groups[groups.length - 1];
+    t[1].push(['TCM Δv', V(m.tcm_dv,1,'m/s')],
+              ['TCM propellant', V(m.tcm_prop_kg,1,'kg')],
+              ['cruise RCS margin', V(m.rcs_margin_kg,1,'kg')]);
+  }
+  $('tiles').innerHTML = groups.map(([name, rows]) =>
+    `<div class="mgroup"><div class="mgroup-h">${name}</div>` +
+    rows.map(([k, v, cls]) =>
+      `<div class="mrow ${cls || ''}"><span class="mrow-k">${k}</span>` +
+      `<span class="mrow-v">${v}</span></div>`).join('') +
+    '</div>').join('');
+
+  precompute();
+  ti = S.n - 1;
+  geoFollow = false;                 // back to the full stack for a new run
+  if (run.moon) {                    // frame the lunar orbit, not empty space
+    let r = 0;
+    for (let i = 0; i < run.moon.orbit.x.length; i++)
+      r = Math.max(r, Math.hypot(run.moon.orbit.x[i], run.moon.orbit.y[i],
+                                 run.moon.orbit.z[i]));
+    moonDist = 2.7 * r;
+  }
+  $('scrub').value = 1000;
+  if (autoFit) fitCamera();
+  renderHistory();
+  syncLinks();
+}
+
+// --------------------------------------------------------------- history --
+//
+// The server owns this list (`RUNS` in panelapp.jl) and the page reads it.
+// It used to be an array of payloads living in this tab, which meant history
+// died on every navigation — and now that the pages navigate in place rather
+// than opening tabs, that would be every time you looked at a trajectory.
+
+async function loadHistory() {
+  history = await runs.list();
+  renderHistory();
+  syncLinks();
+}
+
+function renderHistory() {
+  const host = $('history');
+  if (!history.length) {
+    host.innerHTML = '<span class="sub">no runs yet — press ' +
+                     '<b>Run mission</b> and this fills in</span>';
+    return;
+  }
+  host.replaceChildren(...history.map((h, i) => {
+    const el = document.createElement('span');
+    // `sel` marks the run currently on screen, which after a restore is the
+    // whole point: it says WHICH of these you are looking at.
+    el.className = 'chip hchip is-' + runs.verdict(h) +
+                   (run && run.id === h.id ? ' sel' : '');
+    el.dataset.id = h.id;
+    el.title = `${runs.modeLabel(h.mode)} — ${runs.ago(h.at)}`;
+    el.innerHTML =
+      `<b>#${history.length - i}</b> <span class="hv">${h.vname || ''}</span> ` +
+      `<span class="hd"></span>`;
+    el.querySelector('.hd').textContent = runs.describe(h);
+    el.onclick = () => restore(h.id);
+    return el;
+  }));
+}
+
+/**
+ * Put an earlier run back on screen — the trajectory AND the form that made
+ * it, so the next edit starts from what you are looking at rather than from
+ * whatever the form happened to say.
+ *
+ * The full payload is fetched rather than kept: twelve trajectories is
+ * megabytes, and the server already has them.
+ */
+async function restore(id) {
+  const done = busy('loading run…');
+  try {
+    const j = await runs.get(id);
+    run = j;
+    if (j.params) applyParams(j.params);
+    clearFailures();
+    // applyParams just fired input events all over the form; the run on
+    // screen is what those values produced, so it is not stale.
+    clearStale();
+    renderAll();
+    setVerdict(j);
+    $('status').className = 'status';
+    $('status').textContent = `showing run ${id}`;
+    fetchGeo();
+  } catch (e) {
+    fail(e, 'run history');
+  } finally {
+    done();
+  }
+}
+
+/** Set the whole form from a stored run's parameters. */
+function applyParams(p) {
+  const q = new URLSearchParams(p);
+  if (q.get('mode')) setMode(q.get('mode'));
+  if (q.get('sub_profile')) { SUBPROF = q.get('sub_profile'); subNote(); }
+  if (q.has('nstages')) setField('nstages', q.get('nstages'));
+  if (q.has('nboost')) setField('nboost', q.get('nboost'));
+  buildStages();
+  for (const [k, v] of q) {
+    if (['mode', 'zoom', 'nstages', 'nboost', 'sub_profile'].includes(k)) continue;
+    if (k === 'vname') { VNAME = v; continue; }
+    setField(k, v);
+  }
+  syncSizeBy();
+  podNote();
+  updateLanderNote();
+}
+
+
+// ---------------------------------------------------------- textured globe --
+// 256x128 equirect land mask (1 bit/px, GLOBE/NOAA-derived dataset),
+// packed row-major north-to-south
+const LAND_B64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//AABf/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/v0f/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAT9v8H////9AAABfgAAAAAABaAAAAAAAAAAAAAAAAAEGx/+f/////gAAAXQAAAAAAAAHgAAAAAAAAAAAAAAAcAAE/A//////gAAAQAAAAAAAAAMAAAAAAAAAAAAAAAAeY4Y4AA////8AAAAAAAAA8AAA//4AAfAAAAAAAAAAA4AAAAAAA////gAAAAAAAAcAAB//9AAAAAAAAAAAAAAD2GW5/wAB///0AAAAAAAADAAB/////8AAAAADAAAAAAO/8DO/4AF//+4AAAAAAAAcA6//////y/+AAAQAH/6AUB/8OLXwAX//3AAAAAvAAACDv/////////4AAgD/////+yBPcHwAP//gAAAAf/+AE/3X////////////wD//////v9/xH4D//AAAAAB//+T//7/////////////x/////////aA9wP/wBvAAAf/+H////////////////BAP////////cT8AP4AD8AAH+f7////////////////wAH////////wADQA/AAAAAA/n//////////////////gA////////8AHgAB4AAAAAP8f///////////////j/gAH/2P/////gAfgAAgAAAAA/5x//////////////8GIAABGAC/////AD9YAAAAAAADvB/////////////8ABgAAAAsAB////8AD/wAAAAAB4AcX/////////////gAeAAAAYAAH/////AP/gAAAAABAJB/////////////4AD4AAAEAAAD/////z//gAAAAA3Akv/////////////wAPAAACAAAAn/////v//AAAAAHcP///////////////wAYAAAAAAAAf////+//8AAAAAT5////////////////QBAAAAAAAAB///////jQAAAAAIf///////////////9AAAAAAAAAAB//////7DwAAAAAH////////////////iAAAAAAAAAAD//////8BgAAAAA////////////////+AAAAAAAAAAAP///////AAAAAAB///8n///////////wAAAAAAAAAAA//////9gAAAAAAH/n/gf//////////+IAAAAAAAAAAD//////AAAAAAAf8nP8Af//////////h4AAAAAAAAAAP/////8AAAAAAA/wmPxg//////////wEAAAAAAAAAAA//////AAAAAAAD8CG4//////////+eAQAAAAAAAAAAD/////4AAAAAAAfwARn//////////gYBAAAAAAAAAAAH/////AAAAAAAA+AGGf//////////YwMAAAAAAAAAAAP////8AAAAAAAAD+AAB/////////+DDwAAAAAAAAAAAf////wAAAAAAAH/8AAH/////////4RuAAAAAAAAAAAAf///8AAAAAAAA//wAAf/////////xYAAAAAAAAAAAAB////AAAAAAAAH//48B//////////AgAAAAAAAAAAAAC///8AAAAAAAAf//7///////////8CAAAAAAAAAAAAAF/+AYAAAAAAAB//////8////////wAAAAAAAAAAAAAAT/gBgAAAAAAAf////9/5////////AAAAAAAAAAAAAAAn+ACAAAAAAAD/////z/wf//////4IAAAAAAAAAAAAADf4AAAAAAAAAf/////v/EA//////AAAAAAAAAAAAAAAAfgAAAAAAAAB/////+f/8B/////5AAAAAAAAAAAAAAAB+ABgAAAAAAP/////8//wG//f/8AAAAAAAAAAAAAAAAH4OBgAAAAAA//////z/+AD/w/8AAAAAAAAAAAQAAAAAPxwA4AAAAAD//////H/4AP8D/kAAAAAAAAAAAAAAAAAP+AAAAAAAAH/////+P+AA/gH+AGAAAAAAAAAAAAAAAAP4AACAAAAA//////8/gAD8AX+AYAAAAAAAAAAAAAAAAD+AAAAAACD//////78AAHgAf4BgAAAAAAAAAAAAAAAAB4AAAAAAAP//////2AAAeAAvgHAAIAAAAAAAAAAAAAABgEAAAAAA///////gAAB4AC+ACAAAAAAAAAAAAAAAAAGB84AAAAA//////+8AADgEBwA4AAAAAAAAAAAAAAAAAFu/gAAAAB///////wAAMAACABAAAAAAAAAAAAAAAAAAB//AAAAAH//////+AAAEACAADAAAAAAAAAAAAAAAAAAH/+AAAAAP/f////4AAAQAEAIIAAAAAAAAAAAAAAAAAAf//gAAAAMg/////AAAAACYBwAAAAAAAAAAAAAAAAAAB///AAAAAAAf///4AAAAAEgPAAAAAAAAAAAAAAAAAAAP//8AAAAAAB////AAAAAAtB8AAAAAAAAAAAAAAAAAAB///wAAAAAAH///4AAAAAA8fnIAAAAAAAAAAAAAAAAQH///4AAAAAA////AAAAAABh+AmAAAAAAAAAAAAAAAAAf///wAAAAAB///4AAAAAAHDzAJgAAAAAAAAAAAAAAAB////8AAAAAD///AAAAAAAOBCS/wAAAAAAAAAAAAAAAH////8AAAAAP//8AAAAAAAYAAAfhAAAAAAAAAAAAAAAf////4AAAAAf//wAAAAAAAYAAA/gAAAAAAAAAAAAAAA/////gAAAAB///AAAAAAAAOAQD2AgAAAAAAAAAAAAAD////+AAAAAH//8AAAAAAAAACAAMAAAAAAAAAAAAAAAH////wAAAAAP//4AAAAAAAAAAAAIAAAAAAAAAAAAAAAf///+AAAAAA///gAAAAAAAAAA4AAAAAAAAAAAAAAAAA////wAAAAAH//+CAAAAAAAAAPjAAAAAAAAAAAAAAAAD////AAAAAAf//4MAAAAAAAAG8OAAAAAAAAAAAAAAAAD///8AAAAAD///HgAAAAAAAA/84AAAAAAAAAAAAAAAAH///wAAAAAP//weAAAAAAAAH//wAAAgAAAAAAAAAAAAP///AAAAAAf/+B4AAAAAAAA///AAAAAAAAAAAAAAAAA///4AAAAAB//4HAAAAAAAAP//+ACAAAAAAAAAAAAAAD///gAAAAAD//gcAAAAAAAH///8AAAAAAAAAAAAAAAAP//wAAAAAAP/+BwAAAAAAAf///4AAAAAAAAAAAAAAAA//8AAAAAAA//4GAAAAAAAB////wAAAAAAAAAAAAAAAD//wAAAAAAB/+AAAAAAAAAH////AAAAAAAAAAAAAAAAP//AAAAAAAH/4AAAAAAAAAf///+AAAAAAAAAAAAAAAB//4AAAAAAAP/AAAAAAAAAB////4AAAAAAAAAAAAAAAH//AAAAAAAA/8AAAAAAAAAD////AAAAAAAAAAAAAAAAf/4AAAAAAAB/gAAAAAAAAAP+P/8AAAAAAAAAAAAAAAB//gAAAAAAAH8AAAAAAAAAA/Ab/gAAAAAAAAAAAAAAAH/sAAAAAAAAAAAAAAAAAAADAAf+AAAAAAAAAAAAAAAA/+AAAAAAAAAAAAAAAAAAAAAAAfwAAQAAAAAAAAAAAAD/8AAAAAAAAAAAAAAAAAAAAAAB/AAAgAAAAAAAAAAAAP+AAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAAAAAA/wAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAGAADAAAAAAAAAAAAAfwAAAAAAAAAAAAAAAAAAAAAAAAQAAQAAAAAAAAAAAAA/AAAAAAAAAAAAAAAAAAAAAAAAAAAGAAAAAAAAAAAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAAAAAfgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWBgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAAAAAAAAAAAfwAAf//+///wAAAAAAAAAAAAAAAAAYAAAAAAAAAAAB///gf////////QAAAAAAAAAAAAAACfwAAAAAAAAAAH///+P/////////8AAAAAAAAAAAAAAH/AAAAAB/v///////7///////////wAAAAAAAAAAAYCg+AAAAAP/////////////////////AAAAAAAAQED////wAAAAB/////////////////////gAAAAAP////////8AAAAH/////////////////////4AAAAOL////////AAAAAf//////////////////////wAAAAP///////+4EAD4P///////////////////////gAAAAD////////gAAfgB//////////////////////wAAAAD//////////gAA////////////////////////AAAAAP//////////h//////////////////////////wAAAH///////////////////////////////////////7//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////w==';
+const LAND = (() => {
+  const raw = atob(LAND_B64);
+  const b = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) b[i] = raw.charCodeAt(i);
+  return b;
+})();
+const LW = 256, LH = 128;
+function isLand(lat, lon) {
+  lon = ((lon + Math.PI) % (2*Math.PI) + 2*Math.PI) % (2*Math.PI);
+  let x = Math.min(LW-1, Math.max(0, Math.floor(lon / (2*Math.PI) * LW)));
+  let y = Math.min(LH-1, Math.max(0, Math.floor((Math.PI/2 - lat) / Math.PI * LH)));
+  const idx = y*LW + x;
+  return (LAND[idx >> 3] >> (7 - (idx & 7))) & 1;
+}
+let globeCv = null, globeCtx = null;
+// G maps camera axes (screen-x, screen-y, depth) -> ECEF: v_ecef = Gᵀ·u_cam,
+// where G = Rc·A (camera rotation times the ECEF->scene orientation)
+// Only the part of the disc that is actually on screen is rasterised. The whole
+// disc used to be, and that is the real reason this view could not zoom past a
+// 30,000 km frame: at a 200 km frame the Earth is 80,000 px across, and a
+// full-disc buffer for it is a 6.4-gigapixel allocation. Clipped to the
+// viewport the cost is bounded by the canvas however far you zoom in.
+function drawGlobe(ctx, cx, cy, R, G, w, h) {
+  const x0 = Math.max(0, Math.floor(cx - R)), x1 = Math.min(w, Math.ceil(cx + R));
+  const y0 = Math.max(0, Math.floor(cy - R)), y1 = Math.min(h, Math.ceil(cy + R));
+  const Dw = x1 - x0, Dh = y1 - y0;
+  if (Dw <= 0 || Dh <= 0) return;
+  if (!globeCv || globeCv.width < Dw || globeCv.height < Dh) {
+    globeCv = document.createElement('canvas');
+    globeCv.width = Math.max(Dw, globeCv.width || 0);
+    globeCv.height = Math.max(Dh, globeCv.height || 0);
+    globeCtx = globeCv.getContext('2d');
+  }
+  const img = globeCtx.createImageData(Dw, Dh);
+  const px = img.data;
+  for (let j = 0; j < Dh; j++) {
+    for (let i = 0; i < Dw; i++) {
+      const nx = (x0 + i + 0.5 - cx) / R, nyS = -(y0 + j + 0.5 - cy) / R;
+      const rr = nx*nx + nyS*nyS;
+      if (rr > 1) continue;
+      const nz = Math.sqrt(1 - rr);          // toward the viewer
+      const ux = nx, uy = nyS, uz = -nz;     // (screen-x, screen-y, depth)
+      const ex = G[0][0]*ux + G[1][0]*uy + G[2][0]*uz;
+      const ey = G[0][1]*ux + G[1][1]*uy + G[2][1]*uz;
+      const ez = G[0][2]*ux + G[1][2]*uy + G[2][2]*uz;
+      const lat = Math.asin(Math.max(-1, Math.min(1, ez)));
+      const lon = Math.atan2(ey, ex);
+      const land = isLand(lat, lon);
+      const sh = 0.45 + 0.55*nz;              // limb shading
+      let r, g, b;
+      if (land) { r = 92*sh; g = 128*sh; b = 84*sh; }
+      else      { r = 34*sh; g = 74*sh;  b = 112*sh; }
+      const o = (j*Dw + i) * 4;
+      px[o] = r; px[o+1] = g; px[o+2] = b; px[o+3] = 255;
+    }
+  }
+  globeCtx.putImageData(img, 0, 0);
+  ctx.drawImage(globeCv, 0, 0, Dw, Dh, x0, y0, Dw, Dh);
+}
+
+// ------------------------------------------------------------- 3D scene --
+// The scene is true ECI geometry (units: 1000 km, scene z = Earth's pole).
+// `S` is the combined pad-to-splash track: ascent + cislunar + entry.
+let S = null;
+
+const dot3 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const cross3 = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+function norm3(a) {
+  const n = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0]/n, a[1]/n, a[2]/n];
+}
+function rotAxis(v, k, ang) {           // Rodrigues rotation of v about unit k
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const kv = cross3(k, v), kd = dot3(k, v)*(1-c);
+  return [v[0]*c + kv[0]*s + k[0]*kd,
+          v[1]*c + kv[1]*s + k[1]*kd,
+          v[2]*c + kv[2]*s + k[2]*kd];
+}
+const matmul = (A, B) => A.map((r, i) => B[0].map((_, j) =>
+  r[0]*B[0][j] + r[1]*B[1][j] + r[2]*B[2][j]));
+const matvec = (A, v) => [dot3(A[0], v), dot3(A[1], v), dot3(A[2], v)];
+
+function precompute() {
+  // a partial run may carry no cislunar leg and no entry — the scene is then
+  // the ascent alone, with the Moon parked at its mean distance for scale
+  const A3 = run.asc3d, C = run.cis, E = run.ent3d || { t: [], x: [], y: [], z: [] };
+  const t = [], x = [], y = [], z = [], ph = [];
+  const t0c = C ? C.t[0] : Infinity, tec = C ? C.t[C.t.length-1] : -Infinity;
+  for (let i = 0; i < A3.t.length; i++) if (A3.t[i] < t0c) {
+    t.push(A3.t[i]); x.push(A3.x[i]); y.push(A3.y[i]); z.push(A3.z[i]); ph.push(4);
+  }
+  if (C) for (let i = 0; i < C.t.length; i++) {
+    t.push(C.t[i]); x.push(C.x[i]); y.push(C.y[i]); z.push(C.z[i]); ph.push(C.ph[i]);
+  }
+  for (let i = 0; i < E.t.length; i++) if (E.t[i] > tec) {
+    t.push(E.t[i]); x.push(E.x[i]); y.push(E.y[i]); z.push(E.z[i]); ph.push(5);
+  }
+  const N = t.length, n = C ? norm3(C.n) : [0, 0, 1];
+  // Moon at every combined sample (circular ephemeris: rotate the nearest
+  // cislunar sample about the plane normal at the lunar mean motion)
+  const mx = new Float64Array(N), my = new Float64Array(N), mz = new Float64Array(N);
+  let j = 0;
+  for (let i = 0; i < N; i++) {
+    if (!C) { mx[i] = 384.4; my[i] = 0; mz[i] = 0; continue; }
+    while (j < C.t.length-1 && C.t[j+1] <= t[i]) j++;
+    const m = rotAxis([C.mx[j], C.my[j], C.mz[j]], n, N_MOON*(t[i] - C.t[j]));
+    mx[i] = m[0]; my[i] = m[1]; mz[i] = m[2];
+  }
+  // rotating-frame coordinates: components on (e1 = unit(moon), e2 = n×e1, n)
+  const rx = new Float64Array(N), ry = new Float64Array(N), rz = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const e1 = norm3([mx[i], my[i], mz[i]]), e2 = cross3(n, e1);
+    const p = [x[i], y[i], z[i]];
+    rx[i] = dot3(p, e1); ry[i] = dot3(p, e2); rz[i] = dot3(p, n);
+  }
+  S = { n: N, t, x, y, z, ph, mx, my, mz, rx, ry, rz, nrm: n,
+        moonR: C ? Math.hypot(C.mx[0], C.my[0], C.mz[0]) : 384.4 };
+}
+const P  = i => rotFrame ? [S.rx[i], S.ry[i], S.rz[i]] : [S.x[i], S.y[i], S.z[i]];
+const Pm = i => rotFrame ? [S.moonR, 0, 0] : [S.mx[i], S.my[i], S.mz[i]];
+
+// orthographic orbit camera; returns [screen x, screen y, px per unit, depth]
+// (depth > 0 is behind the Earth's center plane, used for occlusion)
+function camMatrix() {
+  const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+  const sp = Math.sin(camPitch), cp = Math.cos(camPitch);
+  return [[cy, -sy, 0], [sy*sp, cy*sp, cp], [sy*cp, cy*cp, -sp]];
+}
+// Where the frame is centred, in scene units. Earth's centre while the planet
+// still fits; past that the frame follows the craft, because a 200 km-wide view
+// centred on the Earth's core is a view from inside the mantle — which is what
+// made zooming in beyond a 30,000 km frame pointless as well as expensive.
+let camCen = [0, 0, 0];
+const FOCUS_HI = 26, FOCUS_LO = 9;   // Mm of frame width: hand-over band
+function focusCentre(p) {
+  if (!p || camDist >= FOCUS_HI) return [0, 0, 0];
+  const u = camDist <= FOCUS_LO ? 1 :
+            (FOCUS_HI - camDist) / (FOCUS_HI - FOCUS_LO);
+  const k = u*u*(3 - 2*u);           // smoothstep, so the pan has no corner in it
+  return [p[0]*k, p[1]*k, p[2]*k];
+}
+function project(cv, p0) {
+  const p = [p0[0] - camCen[0], p0[1] - camCen[1], p0[2] - camCen[2]];
+  const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+  const sp = Math.sin(camPitch), cp = Math.cos(camPitch);
+  const X = p[0]*cy - p[1]*sy;
+  const Yh = p[0]*sy + p[1]*cy;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.width/dpr, h = cv.height/dpr;
+  const f = Math.min(w, h) * 0.95 / camDist;
+  // Depth stays measured from the EARTH's centre, not from wherever the frame
+  // is centred: it is what decides whether a trajectory segment is behind the
+  // globe, and that plane belongs to the globe. Panning the origin with the
+  // craft and leaving depth attached to it put the near half of a parking orbit
+  // behind the planet.
+  const Yh0 = p0[0]*sy + p0[1]*cy;
+  return [w/2 + X*f, h*0.52 - (Yh*sp + p[2]*cp)*f, f, Yh0*cp - p0[2]*sp];
+}
+
+function circle(ctx, x, y, r, fill) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 2*Math.PI); ctx.fillStyle = fill; ctx.fill();
+}
+
+// Zoom so the whole flown trajectory fits, with the Earth still legible.
+function fitCamera() {
+  if (!S) return;
+  let r = 0;
+  for (let i = 0; i < S.n; i++) {
+    const p = P(i);
+    r = Math.max(r, Math.hypot(p[0], p[1], p[2]));
+  }
+  camDist = Math.max(CAM_MIN, Math.min(2400, 2.3 * r));
+}
+
+// ------------------------------------------------------- Moon-centred view --
+// A 15 km descent is invisible next to a 384,000 km transfer, so the lunar
+// phase gets its own frame: Moon at the origin, everything in km.
+function drawMoonScene(cv, ctx, w, h) {
+  const M = run.moon;
+  const O = M.orbit, D = M.descent;
+  const RM = M.r_km;
+  const f = Math.min(w, h) * 0.9 / moonDist;
+  const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+  const sp = Math.sin(camPitch), cp = Math.cos(camPitch);
+  const pj = (x, y, z) => {
+    const X = x*cy - y*sy, Yh = x*sy + y*cy;
+    return [w/2 + X*f, h*0.52 - (Yh*sp + z*cp)*f, Yh*cp - z*sp];
+  };
+  // the Moon itself, shaded, with the Earth-facing side marked
+  const pm = pj(0, 0, 0), rM = RM*f;
+  const g = ctx.createRadialGradient(pm[0]-rM*.35, pm[1]-rM*.35, rM*.15, pm[0], pm[1], rM);
+  g.addColorStop(0, '#9a9990'); g.addColorStop(1, '#3f3f3a');
+  circle(ctx, pm[0], pm[1], rM, g);
+  const seg = (xs, ys, zs, i0, i1, col, wid) => {
+    ctx.strokeStyle = col; ctx.lineWidth = wid; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    let started = false;
+    for (let i = i0; i < i1; i++) {
+      const q = pj(xs[i], ys[i], zs[i]);
+      // hide what is behind the Moon
+      if (q[2] > 0 && Math.hypot(q[0]-pm[0], q[1]-pm[1]) < rM) { started = false; continue; }
+      started ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
+      started = true;
+    }
+    ctx.stroke();
+  };
+  // parking orbit then the descent ellipse, in the colours the legend uses
+  let iSplit = O.ph.findIndex(p => p === 1);
+  if (iSplit < 0) iSplit = O.x.length;
+  seg(O.x, O.y, O.z, 0, iSplit + 1, '#c98500', 1.6);
+  seg(O.x, O.y, O.z, Math.max(0, iSplit - 1), O.x.length, '#e0a94e', 1.6);
+  seg(D.x, D.y, D.z, 0, D.x.length, '#d55181', 2.4);
+  // which way Earth lies — the Moon keeps the same face to it, so this is
+  // also the zero of the longitude the summary reports
+  const mp = [S.mx[S.n-1], S.my[S.n-1], S.mz[S.n-1]];
+  const eDir = norm3([-mp[0], -mp[1], -mp[2]]);
+  const e0 = pj(eDir[0]*RM*1.15, eDir[1]*RM*1.15, eDir[2]*RM*1.15);
+  const e1 = pj(eDir[0]*RM*1.75, eDir[1]*RM*1.75, eDir[2]*RM*1.75);
+  ctx.strokeStyle = '#8fbef0'; ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.moveTo(e0[0], e0[1]); ctx.lineTo(e1[0], e1[1]); ctx.stroke();
+  ctx.fillStyle = '#8fbef0'; ctx.font = '11px system-ui';
+  ctx.fillText('to Earth', e1[0] + 5, e1[1] + 3);
+
+  // touchdown
+  const n = D.x.length - 1;
+  if (n > 0) {
+    const q = pj(D.x[n], D.y[n], D.z[n]);
+    const occulted = q[2] > 0 && Math.hypot(q[0]-pm[0], q[1]-pm[1]) < rM;
+    if (!occulted) {
+      circle(ctx, q[0], q[1], 3.4, '#fff');
+      ctx.fillStyle = INK2; ctx.font = '11px system-ui';
+      ctx.fillText('touchdown', q[0] + 8, q[1] + 3);
+    }
+  }
+  // scale bar, because at this zoom nothing else says how big the frame is
+  const km = 500;
+  ctx.strokeStyle = MUTED; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(14, h-14); ctx.lineTo(14 + km*f, h-14); ctx.stroke();
+  ctx.fillStyle = MUTED; ctx.font = '10px system-ui';
+  ctx.fillText(km + ' km', 16, h-18);
+  const m = run.metrics;
+  $('readout').textContent =
+    `Moon frame · ${fmt(m.perilune_km,0)} km orbit → ${fmt(m.downrange_km,0)} km ` +
+    `descent · touchdown ${fmt(m.land_lat,1)}°, ${fmt(m.land_lon,1)}°`;
+}
+
+function drawScene() {
+  const cv = $('scene'), ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!run || !S) return;
+  if (moonView && run.moon) { drawMoonScene(cv, ctx, w, h); return; }
+  const N = S.n, i0 = Math.min(ti, N-1);
+  const tNow = S.t[i0];
+  camCen = focusCentre(P(i0));         // everything below projects through this
+
+  const Rc = camMatrix();
+  // globe orientation, ECEF -> scene
+  const th = OMEGA_E * tNow, c = Math.cos(th), s = Math.sin(th);
+  let A = [[c, -s, 0], [s, c, 0], [0, 0, 1]];
+  if (rotFrame) {
+    const e1 = norm3([S.mx[i0], S.my[i0], S.mz[i0]]), e2 = cross3(S.nrm, e1);
+    A = matmul([e1, e2, S.nrm], A);
+  }
+
+  // lunar orbit ring (in the true mission plane)
+  ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+  ctx.beginPath();
+  const e10 = norm3([S.mx[0], S.my[0], S.mz[0]]), e20 = cross3(S.nrm, e10);
+  for (let a = 0; a <= 128; a++) {
+    const t2 = a/128*2*Math.PI, ca = Math.cos(t2)*S.moonR, sa = Math.sin(t2)*S.moonR;
+    const p = rotFrame ? [ca, sa, 0]
+      : [ca*e10[0]+sa*e20[0], ca*e10[1]+sa*e20[1], ca*e10[2]+sa*e20[2]];
+    const q = project(cv, p);
+    a ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
+  }
+  ctx.stroke();
+
+  // trajectory in two depth passes so the globe occludes the far side but
+  // never hides near-side lines (parking orbit, TLI, entry)
+  ctx.lineCap = 'round';
+  const drawSegs = behind => {
+    let prev = null;
+    for (let i = 0; i < N; i++) {
+      const pr = project(cv, P(i));
+      if (prev && ((pr[3] + prev[3]) > 0) === behind) {
+        ctx.globalAlpha = i <= ti ? 1 : 0.35;
+        ctx.strokeStyle = COL[S.ph[i]] || INK2;
+        ctx.lineWidth = S.ph[i] === 1 ? 3 : 1.7;
+        ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(pr[0], pr[1]); ctx.stroke();
+      }
+      prev = pr;
+    }
+    ctx.globalAlpha = 1;
+  };
+  drawSegs(true);                             // far side of the Earth
+
+  // Earth
+  const pe = project(cv, [0, 0, 0]);
+  const rE = Math.max(3, RE_MM*pe[2]);
+  if (rE >= 7) {
+    drawGlobe(ctx, pe[0], pe[1], rE, matmul(Rc, A), w, h);
+  } else {
+    const g = ctx.createRadialGradient(pe[0]-rE*.3, pe[1]-rE*.3, rE*.2, pe[0], pe[1], rE);
+    g.addColorStop(0, '#4a7fa8'); g.addColorStop(1, '#193349');
+    circle(ctx, pe[0], pe[1], rE, g);
+  }
+
+  // launch & splashdown markers fixed to the rotating surface
+  if (rE >= 9 && run.sites) {
+    const site = (latD, lonD, col, label) => {
+      if (latD == null || !isFinite(latD)) return;
+      const la = latD*Math.PI/180, lo = lonD*Math.PI/180;
+      const u = [Math.cos(la)*Math.cos(lo), Math.cos(la)*Math.sin(lo), Math.sin(la)];
+      const uc = matvec(Rc, matvec(A, u));
+      if (uc[2] >= 0) return;                 // far hemisphere
+      const px_ = pe[0] + uc[0]*rE, py_ = pe[1] - uc[1]*rE;
+      circle(ctx, px_, py_, 3.0, col);
+      ctx.strokeStyle = col; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(px_, py_, 5.5, 0, 2*Math.PI); ctx.stroke();
+      if (rE > 26) {
+        ctx.fillStyle = col; ctx.font = '11px system-ui';
+        ctx.fillText(label, px_ + 8, py_ + 3);
+      }
+    };
+    site(run.sites.launch_lat, run.sites.launch_lon, '#8fbef0', 'launch');
+    site(run.sites.splash_lat, run.sites.splash_lon, '#f2c14e', 'splash');
+  }
+
+  // Moon
+  const pm = project(cv, Pm(i0));
+  const rM = Math.max(2.5, RM_MM*pm[2]*3);
+  const g2 = ctx.createRadialGradient(pm[0]-rM*.3, pm[1]-rM*.3, rM*.2, pm[0], pm[1], rM);
+  g2.addColorStop(0, '#8d8d86'); g2.addColorStop(1, '#4a4a45');
+  circle(ctx, pm[0], pm[1], rM, g2);
+
+  drawSegs(false);                            // near side, over the globe
+
+  // Landing missions carry a lunar phase that lives in a Moon-centred frame.
+  // Put it back where it belongs: each sample is offset by the Moon's own
+  // position at that moment, so zooming in on the Moon shows the parking
+  // orbit and the descent arc in the same scene as the transfer.
+  if (run.moon && rM > 6) {
+    const M = run.moon;
+    const mm = t => {                    // Moon position at mission time t
+      let j = S.n - 1;
+      while (j > 0 && S.t[j] > t) j--;
+      return rotAxis([S.mx[j], S.my[j], S.mz[j]], S.nrm, N_MOON*(t - S.t[j]));
+    };
+    const lun = (X, Y, Z, ts, col, wid) => {
+      ctx.strokeStyle = col; ctx.lineWidth = wid;
+      ctx.beginPath();
+      for (let i = 0; i < X.length; i++) {
+        const c = mm(ts ? ts[i] : S.t[S.n-1]);
+        const q = project(cv, [c[0] + X[i]/1000, c[1] + Y[i]/1000, c[2] + Z[i]/1000]);
+        i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
+      }
+      ctx.stroke();
+    };
+    lun(M.orbit.x, M.orbit.y, M.orbit.z, M.orbit.t, '#c98500', 1.4);
+    lun(M.descent.x, M.descent.y, M.descent.z, null, '#d55181', 2.0);
+  }
+
+  // pod (hollow + dim when behind the globe)
+  const pd = project(cv, P(i0));
+  if (pd[3] > 0 && Math.hypot(pd[0]-pe[0], pd[1]-pe[1]) < rE) {
+    ctx.globalAlpha = 0.45; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(pd[0], pd[1], 3.2, 0, 2*Math.PI); ctx.stroke();
+    ctx.globalAlpha = 1;
+  } else {
+    circle(ctx, pd[0], pd[1], 3.2, '#fff');
+  }
+
+  // Moon label, so the grey disc is identified rather than inferred
+  if (rM > 3) {
+    ctx.fillStyle = MUTED; ctx.font = '11px system-ui';
+    ctx.fillText('Moon', pm[0] + rM + 5, pm[1] + 3);
+  }
+  // scale bar: the frame spans five orders of magnitude across a mission,
+  // so a bar that adapts is the only honest way to show it
+  const target = camDist * 0.25;
+  const p10 = Math.pow(10, Math.floor(Math.log10(target)));
+  const barMm = [1, 2, 5, 10].map(k => k*p10).reduce((a, b) =>
+    Math.abs(b - target) < Math.abs(a - target) ? b : a);
+  const barPx = barMm * pe[2];
+  if (barPx > 24 && barPx < w - 40) {
+    ctx.strokeStyle = MUTED; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(14, h-12); ctx.lineTo(14 + barPx, h-12); ctx.stroke();
+    ctx.fillStyle = MUTED; ctx.font = '10px system-ui';
+    ctx.fillText(fmtKm(barMm), 16, h-16);
+  }
+
+  const dm = Math.hypot(S.x[i0]-S.mx[i0], S.y[i0]-S.my[i0], S.z[i0]-S.mz[i0]);
+  const re_ = Math.hypot(S.x[i0], S.y[i0], S.z[i0]);
+  $('readout').textContent =
+    `T+${(tNow/86400).toFixed(2)} d · r⊕ ${fmtKm(re_)} · Moon ${fmtKm(dm)}`;
+}
+
+function tick(ts) {
+  if (playing && S) {
+    const N = S.n;
+    ti = Math.min(N-1, ti + Math.max(1, Math.round(N/600)));
+    $('scrub').value = (1000*ti/(N-1))|0;
+    if (ti >= N-1) togglePlay(false);
+  }
+  lastTs = ts;
+  drawScene();
+  drawGeoLive();
+  requestAnimationFrame(tick);
+}
+function togglePlay(on) {
+  playing = on === undefined ? !playing : on;
+  if (playing && S && ti >= S.n-1) ti = 0;
+  $('play').innerHTML = playing ? '&#10074;&#10074; pause' : '&#9654; play';
+}
+
+// ------------------------------------------------------- vehicle geometry --
+// The viewer follows the mission clock: stages, fairing, and finally the
+// kick stage drop off as the scrubbed time passes their separation events.
+let geo = null, geoYaw = -0.9, geoPitch = 0.30, geoKey = '', geoFollow = false;
+// stages get progressively lighter up the stack, whatever the stack height
+const GEO_COL = { pod: [126,146,168], lander: [196,168,104], fairing: [201,199,186] };
+const GEO_SHORT = { pod: 'pod', lander: 'lander', fairing: 'fairing' };
+function geoStyle(name) {
+  const b = /^booster(\d+)$/.exec(name);
+  if (b) return { col: [148, 132, 118], short: 'B' + b[1] };  // warmer than the core
+  const m = /^stage(\d+)$/.exec(name);
+  if (!m) return { col: GEO_COL[name] || GEO_COL.fairing,
+                   short: GEO_SHORT[name] || name };
+  const k = +m[1], f = Math.min(1, (k - 1)/4);
+  const v = 119 + 52*f;
+  return { col: [v, v, v - 8], short: 'S' + k };
+}
+
+async function fetchGeo() {
+  try {
+    const j = await api.geometry(params());
+    geo = j;
+    geoKey = '';
+    const ds = (j.stages || []).map(s => +s.diameter_m);
+    const wide = ds.length ? Math.max(...ds) : +j.diameter;
+    const stepped = ds.length && Math.min(...ds) < wide - 1e-6;
+    $('geo_info').textContent =
+      `${j.length.toFixed(1)} m long × ${wide.toFixed(2)} m` +
+      (stepped ? ' (stepped)' : '') + ' — ' +
+      j.sections.filter(s => !['pod','cabin','glass'].includes(s.name))
+        .map(s => `${s.name} ${(s.x1 - s.x0).toFixed(1)} m`).join(' · ');
+    // Static verdict, so a stack that cannot fly says so before it is flown:
+    // what it weighs, whether it can leave the pad, and what it has to spend.
+    // Ideal delta-v is Tsiolkovsky with no losses — a circumlunar mission
+    // wants roughly 12.5 km/s of it once gravity and drag are paid for.
+    const twr = +j.liftoff_twr, dvt = +j.total_dv_mps;
+    $('lv_count').textContent =
+      `${(j.stages || []).length} stages · ${(+j.length).toFixed(0)} m · ` +
+      `${(j.liftoff_mass_kg/1000).toFixed(0)} t`;
+    $('geo_perf').innerHTML =
+      `${Math.round(j.liftoff_mass_kg).toLocaleString()} kg on the pad · ` +
+      `T/W <b class="${twr < 1.15 ? 'bad' : twr < 1.25 ? 'warn' : 'good'}">` +
+      `${twr.toFixed(2)}</b>` +
+      (twr < 1.15 ? ' (will not lift off)' : twr < 1.25 ? ' (sluggish)' : '') +
+      ` · Δv <b class="${dvt < 11500 ? 'warn' : 'good'}">` +
+      `${(dvt / 1000).toFixed(2)} km/s</b> ideal` +
+      (dvt < 11500 ? ' (thin for a Moon shot)' : '');
+    // per-stage read-out: whichever of mass/length you did not type, plus
+    // what the stage buys and whether it can move the mass above it
+    for (const [i, s] of (j.stages || []).entries()) {
+      const el = $(`s${i+1}_derived`);
+      if (!el) continue;
+      const t = +s.twr, inter = +s.interstage_m;
+      el.innerHTML =
+        `${Math.round(s.prop_kg).toLocaleString()} kg · ${(+s.length_m).toFixed(1)} m` +
+        ` · ${(+s.volume_m3).toFixed(1)} m³ · Δv ${Math.round(s.dv_mps).toLocaleString()}` +
+        ` · T/W <b class="${i === 0 && t < 1.15 ? 'bad' : ''}">${t.toFixed(2)}</b>` +
+        ` · ${Math.round(s.burn_s)} s` +
+        (inter > 0.01 ? ` · +${inter.toFixed(2)} m adapter` : '');
+    }
+    // the strap-on read-out reports the whole set, since a set is what flies
+    const bel = $('b_derived'), bs = (j.boosters || [])[0];
+    if (bel && bs) bel.textContent =
+      `${bs.count} × ${Math.round(bs.prop_kg).toLocaleString()} kg` +
+      ` · ${(+bs.length_m).toFixed(1)} m × ${(+bs.diameter_m).toFixed(2)} m` +
+      ` · set ${Math.round(bs.set_mass_kg).toLocaleString()} kg` +
+      ` · ${Math.round(bs.burn_s)} s` +
+      (bs.core_throttle < 1 ? ` · core ${Math.round(bs.core_throttle*100)}%` : '');
+    drawGeo();
+  } catch (e) {
+    $('geo_info').textContent = 'geometry: ' + String(e.message || e);
+  }
+  // fetchGeo runs on every change that alters the vehicle, which makes it the
+  // one place that always knows the configuration has moved
+  syncLinks();
+}
+
+// which sections are still attached / burning at mission time t [s]
+// Which bodies are still attached, and which is burning, at mission time t.
+// Event names carry the sim's own stage names, so the k-th separation is
+// what drops stage k — nothing here counts stages itself.
+function geoConfigAt(tsec) {
+  const cfg = { gone: {}, burn: null, bburn: [], t: tsec };
+  if (!run || tsec == null) return cfg;
+  const ev = {};
+  const seps = [], igns = [];
+  // Strap-ons separate mid-ascent, so their sep_ events sit in the middle of
+  // the core's. Matching them by the set's own stage name keeps the
+  // positional mapping of core separations to core stages intact — counting
+  // sep_ events alone would drop stage 1 when the boosters went.
+  const bnames = ((geo && geo.boosters) || []).map(b => b.name);
+  const bsep = [], bign = [];
+  for (const e of run.events) {
+    ev[e.name] = e.t;
+    if (e.phase !== 'ascent') continue;
+    if (e.name.startsWith('sep_')) {
+      const bi = bnames.indexOf(e.name.slice(4));
+      bi >= 0 ? (bsep[bi] = e.t) : seps.push(e.t);
+    } else if (e.name.startsWith('ignition_')) {
+      const bi = bnames.indexOf(e.name.slice(9));
+      bi >= 0 ? (bign[bi] = e.t) : igns.push(e.t);
+    }
+  }
+  seps.sort((a, b) => a - b); igns.sort((a, b) => a - b);
+  const nst = (geo ? geo.sections.filter(s => /^stage\d+$/.test(s.name)).length : 0)
+              || seps.length + 1;
+  const drop = { fairing: ev.fairing_jettison };
+  seps.forEach((t, i) => { if (i < nst) drop['stage' + (i+1)] = t; });
+  bnames.forEach((_, i) => {
+    drop['booster' + (i+1)] = bsep[i];
+    cfg.bburn[i] = bign[i] != null && tsec >= bign[i] &&
+                   tsec < (bsep[i] ?? Infinity);
+  });
+  // whatever is still flying at SECO hands over to the kick stage, which
+  // goes at the entry handoff
+  if (nst >= 2 && drop['stage' + (nst-1)] == null) drop['stage' + (nst-1)] = ev.seco;
+  // the last stage goes at the entry handoff on a flyby, and right after the
+  // trans-lunar burn on a landing mission — from there the lander is alone
+  if (nst >= 1) drop['stage' + nst] = ev.entry_handoff ??
+    (ev.loi != null ? ev.tli_cutoff : undefined);
+  for (const k in drop) if (drop[k] != null && tsec >= drop[k]) cfg.gone[k] = true;
+
+  if (ev.tli_ignition != null && tsec >= ev.tli_ignition &&
+      tsec < (ev.tli_cutoff ?? Infinity)) cfg.burn = 'stage' + nst;
+  else if (tsec < (seps[0] ?? Infinity)) cfg.burn = 'stage1';
+  else if (tsec < (ev.seco ?? -Infinity)) {
+    // the stage lit by the most recent ignition is the one running
+    let k = 1;
+    for (let i = 0; i < igns.length; i++) if (tsec >= igns[i]) k = i + 2;
+    cfg.burn = 'stage' + Math.min(k, nst);
+  }
+  return cfg;
+}
+
+// redraw only when the orientation or the staging configuration changed
+function drawGeoLive() {
+  if (!geo) return;
+  // The viewer follows the mission clock — but only once you drive it. A
+  // fresh run parks the timeline at the end, and a "vehicle geometry" card
+  // showing the bare pod that came home is not what you asked to look at.
+  const tsec = (S && run && geoFollow) ? S.t[Math.min(ti, S.n-1)] : null;
+  const cfg = geoConfigAt(tsec);
+  const key = [geoYaw.toFixed(3), geoPitch.toFixed(3), Object.keys(cfg.gone).join(','),
+               cfg.burn, cfg.burn ? (performance.now()/120|0) : 0,   // flame flicker
+               $('geo').clientWidth].join('|');
+  if (key === geoKey) return;
+  geoKey = key;
+  drawGeo(cfg);
+}
+
+function drawGeo(cfg) {
+  cfg = cfg || geoConfigAt((S && run) ? S.t[Math.min(ti, S.n-1)] : null);
+  const cv = $('geo'), ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!geo) return;
+  // the cabin and window panes are capsule internals — they live inside the
+  // pod's outline and never show in this exterior side view
+  const HIDE = { cabin: 1, glass: 1 };
+  const secs = geo.sections.filter(s => !cfg.gone[s.name] && !HIDE[s.name]);
+  if (!secs.length) return;
+  // fit the *attached* stack: after staging the view recenters on what's left
+  let xlo = Infinity, xhi = -Infinity;
+  for (const s of secs) { xlo = Math.min(xlo, s.x0); xhi = Math.max(xhi, s.x1); }
+  const span = Math.max(xhi - xlo, 4.0), half = (xlo + xhi)/2;
+  const f = (h - 26) / span;
+  const cyw = Math.cos(geoYaw), syw = Math.sin(geoYaw);
+  const cpt = Math.cos(geoPitch), spt = Math.sin(geoPitch);
+  // model: +x = nose axis. Spin about x by yaw, tip by pitch, x maps up-screen.
+  const xf = v => {
+    const a = v[0] - half;
+    const y1 = v[1]*cyw - v[2]*syw, z1 = v[1]*syw + v[2]*cyw;
+    return [w/2 + y1*f, h/2 - (a*cpt - z1*spt)*f, a*spt + z1*cpt];
+  };
+  // engine flame under the lowest attached section while a stage burns, and
+  // one under each strap-on that is lit — a parallel-burn lift-off shows the
+  // whole cluster, not just the core
+  const plume = (y, z, wid, len) => {
+    const flick = 0.85 + 0.3*Math.random();
+    const a = xf([xlo, y, z]), b = xf([xlo - len*span*flick, y, z]);
+    const g = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
+    g.addColorStop(0, 'rgba(255,214,140,0.95)');
+    g.addColorStop(0.35, 'rgba(245,150,60,0.55)');
+    g.addColorStop(1, 'rgba(245,150,60,0)');
+    const dx = b[0]-a[0], dy = b[1]-a[1], dl = Math.hypot(dx, dy) || 1;
+    const px_ = -dy/dl * wid*f, py_ = dx/dl * wid*f;
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(a[0]-px_, a[1]-py_); ctx.lineTo(a[0]+px_, a[1]+py_);
+    ctx.lineTo(b[0], b[1]); ctx.closePath(); ctx.fill();
+  };
+  if (cfg.burn && !cfg.gone[cfg.burn]) plume(0, 0, 0.42*(+geo.diameter), 0.30);
+  const bl = (geo.boosters || [])[0];
+  if (bl && cfg.bburn && cfg.bburn[0]) {
+    const rc = (geo.stages[0] ? +geo.stages[0].diameter_m : +geo.diameter) / 2;
+    const rb = +bl.diameter_m / 2, R = rc + rb;
+    for (let j = 0; j < bl.count; j++) {
+      const th = 2*Math.PI*j/bl.count;
+      plume(R*Math.cos(th), R*Math.sin(th), 0.42*rb*2, 0.24);
+    }
+  }
+  const light = norm3([-0.45, 0.55, -0.9]);
+  const tris = [];
+  for (const s of secs) {
+    const col0 = geoStyle(s.name).col;
+    for (let k = s.t0 - 1; k < s.t1; k++) {
+      const t = geo.tris[k];
+      const p1 = xf([t[0], t[1], t[2]]), p2 = xf([t[3], t[4], t[5]]), p3 = xf([t[6], t[7], t[8]]);
+      // screen-space normal for backface culling + shading
+      const ux = p2[0]-p1[0], uy = p2[1]-p1[1], uz = p2[2]-p1[2];
+      const vx = p3[0]-p1[0], vy = p3[1]-p1[1], vz = p3[2]-p1[2];
+      const nz = ux*vy - uy*vx;
+      if (nz >= 0) continue;                  // backface (screen y is flipped)
+      const nrm = norm3([uy*vz - uz*vy, uz*vx - ux*vz, nz]);
+      const sh = 0.35 + 0.65*Math.max(0, -dot3(nrm, light));
+      tris.push({ p1, p2, p3, depth: (p1[2]+p2[2]+p3[2])/3,
+                  fill: `rgb(${col0[0]*sh|0},${col0[1]*sh|0},${col0[2]*sh|0})` });
+    }
+  }
+  tris.sort((a, b) => b.depth - a.depth);     // painter's algorithm
+  for (const t of tris) {
+    ctx.fillStyle = t.fill;
+    ctx.beginPath();
+    ctx.moveTo(t.p1[0], t.p1[1]); ctx.lineTo(t.p2[0], t.p2[1]); ctx.lineTo(t.p3[0], t.p3[1]);
+    ctx.closePath(); ctx.fill();
+  }
+  // scale bar: 10 m
+  ctx.strokeStyle = MUTED; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(12, h-10); ctx.lineTo(12 + 10*f, h-10); ctx.stroke();
+  ctx.fillStyle = MUTED; ctx.font = '10px system-ui';
+  ctx.fillText('10 m', 14, h-14);
+  // configuration readout under the canvas
+  const names = secs.map(s => geoStyle(s.name).short).join('+');
+  const tl = cfg.t == null ? '' :
+    cfg.t < 3600 ? `T+${Math.floor(cfg.t/60)}:${String(Math.floor(cfg.t%60)).padStart(2,'0')} · ` :
+    `T+${(cfg.t/86400).toFixed(2)} d · `;
+  $('geo_state').textContent = tl + names +
+    (cfg.burn && !cfg.gone[cfg.burn] ? ` · ${geoStyle(cfg.burn).short} burning` : '');
+}
+
+// ---------------------------------------------------------------- presets --
+// Applying a preset means: back to the page defaults, then this preset's
+// fields on top. A preset that changes the stack height has to rebuild the
+// stage form before its own stage fields exist to be written.
+function applyPreset(o, opts) {
+  opts = opts || {};
+  if (o.nstages !== undefined) $('nstages').value = o.nstages;
+  else if (opts.reset && DEFAULTS.nstages !== undefined) $('nstages').value = DEFAULTS.nstages;
+  if (o.nboost !== undefined) $('nboost').value = o.nboost;
+  else if (opts.reset && DEFAULTS.nboost !== undefined) $('nboost').value = DEFAULTS.nboost;
+  buildStages();
+  if (opts.reset)
+    for (const f of FIELDS())
+      if (DEFAULTS[f] !== undefined && $(f)) setField(f, DEFAULTS[f]);
+  for (const k in o) if ($(k)) setField(k, o[k]);
+  syncSizeBy();
+  podNote(); updateLanderNote();
+}
+function setField(id, v) {
+  const el = $(id);
+  if (!el) return;
+  if (el.type === 'checkbox') el.checked = !!v && v !== '0' && v !== 'false';
+  else el.value = v;
+}
+function initPresets() {
+  DEFAULTS = {};
+  for (const f of FIELDS()) if ($(f))
+    DEFAULTS[f] = $(f).type === 'checkbox' ? $(f).checked : $(f).value;
+  const chips = (host, keys, run) => {
+    $(host).innerHTML = keys.map(k => `<span class="chip" data-p="${k}">${k}</span>`).join('');
+    for (const el of $(host).querySelectorAll('.chip')) el.onclick = () => run(el.dataset.p);
+  };
+  const presetsFor = () => landing() ? LANDING_PRESETS : orbitm() ? ORBIT_PRESETS :
+                           subm() ? SUB_PRESETS : PRESETS;
+  renderMissionPresets = () => chips('presets', Object.keys(presetsFor()), k => {
+      // a mission preset resets only mission fields — it must not undo the
+      // vehicle you just picked
+      const o = presetsFor()[k];
+      const keep = ['pod_mass','payload_kind','bus_mass','cargo_mass',
+                    'h_park_km','incl_deg','hp_moon_km','hp_return_km',
+                    'tli_mag_err_pct','tli_point_err_deg']
+                   .concat(LANDING_FIELDS, ORBIT_FIELDS, SUB_FIELDS);
+      for (const f of keep) if (DEFAULTS[f] !== undefined) setField(f, DEFAULTS[f]);
+      for (const kk in o) if (kk !== '_p') setField(kk, o[kk]);
+      if (o._p) SUBPROF = o._p;
+      orbitNote(); subNote();
+      fetchGeo();
+      markStale('a mission preset has changed since this run');
+    });
+  renderMissionPresets();
+  // vehicle presets moved to the builder page with the rest of the vehicle
+  // editing; VEHICLES stays because the landing-mode boot still applies one
+}
+let renderMissionPresets = () => {};
+
+// ------------------------------------------------------------ mission mode --
+function setMode(m) {
+  MODE = m;
+  for (const b of $('modeswitch').querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.mode === m);
+  $('card_flyby').classList.toggle('hidden', MODE !== 'flyby');
+  $('card_orbit').classList.toggle('hidden', !orbitm());
+  $('card_suborbital').classList.toggle('hidden', !subm());
+  $('card_landing').classList.toggle('hidden', !landing());
+  $('moonview').classList.toggle('hidden', !landing());
+  subNote();
+  // the cinematic view flies the pad-to-splashdown profile; say so rather
+  // than quietly showing a different mission
+  $('launchbtn').title = landing()
+    ? 'cinematic launch view — flies this vehicle on the free-return profile, pad to splashdown'
+    : "cinematic pad-cam liftoff, flown from this run's parameters";
+  // the nav bar states the mission being flown, so what the page is for is
+  // legible without reading the mode switch
+  $('nav_note').textContent = landing() ? 'lunar landing'
+    : orbitm() ? 'Earth orbit'
+    : subm() ? 'suborbital'
+    : 'circumlunar free return';
+  $('modenote').textContent = landing()
+    ? 'the lander stops at the Moon: insertion at perilune, a lunar parking orbit, then a guided descent to touchdown'
+    : orbitm()
+    ? 'the goal is a target Earth orbit — LEO, polar, Molniya, GEO — or a stay and a re-entry; the Moon is scenery'
+    : subm()
+    ? 'no orbit is attempted: the engines cut the moment the arc they have built reaches the apogee — or the ground range — you asked for, and the capsule flies the rest ballistically'
+    : 'a pod around the Moon and home — nothing is left behind and nothing has to stop';
+  if (landing() && moonView === null) moonView = false;
+  podNote();
+  renderMissionPresets();
+  renderLegend();
+  updateLanderNote();
+  syncLinks();
+}
+// Which target the profile actually closes on. A vehicle has one degree of
+// freedom at cutoff, so it can be given one target and one only — the other
+// number comes out of the flight and is reported, not commanded. Saying that
+// plainly is the difference between a greyed-out box and a confusing one.
+// The same r = 0.086*m^(1/3) the mesh is built on (pod_radius in mesh.jl), so
+// the field says what the capsule will be before the server is asked.
+function podNote() {
+  if (!$('pod_note')) return;
+  if (landing()) {
+    const m = (+$('l_dry').value || 0) + (+$('l_prop').value || 0);
+    const d = +$('l_diameter').value || 4.2;
+    $('pod_note').textContent = `payload ${(m/1000).toFixed(1)} t — lunar lander, ` +
+      `${d.toFixed(2)} m deployed envelope, carried in the launch stack`;
+    return;
+  }
+  // spacecraft + cargo, the same composition the builder edits
+  const bus = $('payload_kind') && $('payload_kind').value === 'bus';
+  const sc = Math.max(0, +$(bus ? 'bus_mass' : 'pod_mass').value || 0);
+  const cargo = Math.max(0, +($('cargo_mass') || {}).value || 0);
+  const m = sc + cargo;
+  const kg = v => v >= 1000 ? (v/1000).toFixed(1) + ' t' : Math.round(v) + ' kg';
+  $('pod_note').textContent = m < 1 ? 'no payload' :
+    `payload ${kg(m)} — ${kg(sc)} ${bus ? 'probe core' : 'capsule'}` +
+    (cargo > 0 ? ` + ${kg(cargo)} cargo` : '') +
+    `, drawn ${(2*Math.min(3.0, Math.max(0.30, 0.086*Math.cbrt(Math.max(sc,1))))).toFixed(2)} m ` +
+    `across, and the thing that comes home`;
+}
+function subNote() {
+  if (!$('card_suborbital')) return;
+  const hop = SUBPROF === 'hop';
+  for (const b of $('subswitch').querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.sub === SUBPROF);
+  $('sub_range_wrap').style.opacity = hop ? 0.42 : 1;
+  $('sub_loft_wrap').style.opacity = hop ? 0.42 : 1;
+  $('sub_range_km').disabled = hop;
+  $('sub_loft_deg').disabled = hop;
+  $('sub_apogee_km').disabled = !hop;
+  // A vehicle has one degree of freedom at cutoff, so one of these two numbers
+  // is commanded and the other falls out of the flight. Which is which is the
+  // only thing this note has to say — the greyed-out field says the rest.
+  $('sub_note').textContent = hop
+    ? 'vertical all the way; cutoff on the apogee above. Where it lands is a consequence.'
+    : 'cutoff when the free-flight arc reaches the range above. Apogee is a consequence.';
+}
+function renderLegend() {
+  const items = landing() ? [
+    ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'TLI burn'],
+    ['#199e70', 'outbound'], ['#c98500', 'lunar orbit'], ['#d55181', 'descent'],
+  ] : orbitm() ? [
+    ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'burn'],
+    ['#199e70', 'transfer'], ['#c98500', 'on orbit'], ['#d55181', 'entry'],
+  ] : subm() ? [
+    ['#8fbef0', 'ascent'], ['#d55181', 'ballistic arc + entry'],
+  ] : [
+    ['#8fbef0', 'ascent'], ['#3987e5', 'parking orbit'], ['#d95926', 'TLI burn'],
+    ['#199e70', 'outbound'], ['#c98500', 'return'], ['#d55181', 'entry'],
+  ];
+  const dots = landing()
+    ? [['#6b6b66', 'Moon'], ['#8fbef0', 'launch site']]
+    : [['#6b6b66', 'Moon'], ['#8fbef0', 'launch site'], ['#f2c14e', 'splashdown']];
+  $('legend').innerHTML =
+    items.map(([c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join('') +
+    dots.map(([c, t]) =>
+      `<span><i style="background:${c};height:8px;width:8px;border-radius:50%"></i>${t}</span>`).join('');
+}
+// what the lander carries, before anything is flown — the number that decides
+// whether the mission is possible at all
+function updateLanderNote() {
+  if (!landing() || !$('l_derived')) return;
+  const dry = +$('l_dry').value, pr = +$('l_prop').value;
+  const isp = +$('l_isp').value, T = +$('l_thrust_kn').value * 1000;
+  const wet = dry + pr;
+  const dv = 9.80665 * isp * Math.log(wet / dry);
+  // insertion from a free return plus a descent is about 2.8 km/s
+  const need = 2800;
+  const twr = T / (wet * 1.625);
+  $('l_derived').innerHTML =
+    `${(wet/1000).toFixed(1)} t wet · Δv <b class="${dv < need ? 'bad' : dv < need*1.15 ? 'warn' : 'good'}">` +
+    `${Math.round(dv)} m/s</b> ideal (needs ≈ ${need})` +
+    ` · lunar T/W <b class="${twr < 1.05 ? 'bad' : ''}">${twr.toFixed(2)}</b> at ignition`;
+}
+
+// ---------------------------------------------------------------- wire up --
+//
+// Two different things get carried out of this page, and conflating them is
+// what made the analysis and launch views re-fly a mission that had already
+// been flown, seconds after flying it.
+//
+//   * The BUILDER wants the configuration — it edits the vehicle this form
+//     describes, whether or not anything has been flown.
+//   * ANALYSIS and the LAUNCH VIEW want a RUN. They read a trajectory; they
+//     are not a second place to start one. Linked by run id, they load the
+//     flight already on screen instead of computing their own copy of it.
+//
+// With nothing flown yet the run pages are linked bare, and say so when they
+// open. That is deliberate: a launch view is a view OF something.
+//
+// Real hrefs rather than click handlers, so the browser's own affordances
+// (hover target, back button, middle click) keep working.
+function runQuery() {
+  return run && run.id ? '?run=' + encodeURIComponent(run.id) : '';
+}
+function syncLinks() {
+  const cfg = '?' + params(), rq = runQuery();
+  for (const [id, base, q] of [['nav_analysis', 'analysis_page.html', rq],
+                               ['analysislink', 'analysis_page.html', rq],
+                               ['nav_launch',   'launch_page.html',   rq],
+                               ['nav_build',    'build_page.html',    cfg]]) {
+    const el = $(id);
+    if (!el) continue;
+    el.href = base + q;
+    // Dimmed only when there is genuinely nothing to show — a bare link
+    // resolves to the most recent run, so history alone keeps it live. The
+    // link always works; this says whether it leads anywhere yet.
+    el.classList.toggle('is-empty',
+                        base !== 'build_page.html' && !run && !history.length);
+  }
+}
+/** Navigate to one of the run pages, carrying the run on screen. */
+function go(base) { location.href = base + runQuery(); }
+$('run').onclick = () => { fetchGeo(); doRun(); };
+$('play').onclick = () => { geoFollow = true; togglePlay(); };
+$('scrub').oninput = e => {
+  geoFollow = true;
+  if (S) ti = Math.round(e.target.value/1000*(S.n-1));
+};
+$('frame').onclick = e => {
+  rotFrame = !rotFrame;
+  e.target.classList.toggle('on', rotFrame);
+  e.target.textContent = rotFrame ? 'inertial frame' : 'rotating frame';
+};
+for (const el of document.querySelectorAll('[data-zoom]'))
+  el.onclick = () => {
+    moonView = false;
+    $('moonview').classList.remove('on');
+    if (el.dataset.zoom === 'fit') { autoFit = true; fitCamera(); }
+    else { autoFit = false; camDist = +el.dataset.zoom; }
+  };
+$('moonview').onclick = () => {
+  moonView = !moonView;
+  $('moonview').classList.toggle('on', moonView);
+};
+for (const b of $('subswitch').querySelectorAll('button'))
+  b.onclick = () => {
+    if (b.dataset.sub === SUBPROF) return;
+    SUBPROF = b.dataset.sub;
+    subNote();
+    markStale('the suborbital profile has changed since this run');
+  };
+for (const b of $('modeswitch').querySelectorAll('button'))
+  b.onclick = () => {
+    if (b.dataset.mode === MODE) return;
+    setMode(b.dataset.mode);
+    // a landing mission needs a launcher that can throw a lander; the
+    // reference vehicle cannot, and saying so with a failed run is worse
+    // than starting from one that can. The Saturn V is the one vehicle in the
+    // catalogue that was actually built for this, so it is the one a landing
+    // mission starts from.
+    if (landing() && +$('diameter').value < 5) {
+      VNAME = 'Saturn V';
+      applyPreset(VEHICLES['Saturn V (Apollo)'], { reset: true });
+      // Vehicle presets moved to the dedicated builder. Older versions of
+      // this handler still tried to recolour the removed in-panel preset row,
+      // throwing before fetchGeo/doRun and leaving an Earth-orbit result under
+      // lunar-landing controls. Keep compatibility if that row ever exists,
+      // but never make the mission switch depend on it.
+      const presetRow = $('vpresets');
+      if (presetRow)
+        for (const el of presetRow.querySelectorAll('.chip'))
+          el.classList.toggle('sel', el.dataset.p === 'Saturn V (Apollo)');
+    }
+    fetchGeo();
+    markStale('the mission type has changed since this run');
+  };
+// Every mission flies AS itself. The launch page derives its phases from
+// whatever the run actually contains, and a landing run contains a powered
+// descent — so downgrading `landing` to `flyby` here, which is what this used
+// to do, meant the one mission whose whole point is the last fifteen
+// kilometres was the one mission that never showed them. The page had the
+// moon world, the terrain and the lander the entire time; nothing ever asked
+// the server for a descent to put in them.
+//
+// `go` rather than window.open: a WebView2 with no NewWindowRequested handler
+// refuses to open one and reports nothing, so every one of these was a button
+// that did nothing at all in the shipped application. See `syncLinks`.
+$('launchbtn').onclick = () => go('launch_page.html');
+// the builder opens on this form's exact configuration; stopPropagation
+// because the chip lives inside a fold header that would otherwise collapse
+$('buildbtn').onclick = e => {
+  e.stopPropagation();
+  location.href = 'build_page.html?' + params();
+};
+for (const f of ['l_dry','l_prop','l_isp','l_thrust_kn','l_throttle_min','l_diameter'])
+  $(f).addEventListener('input', updateLanderNote);
+// keyboard: the timeline and the camera are things you drive, not click.
+// Running is deliberately absent: only a visible Run button may start a
+// trajectory calculation, so an accidental keypress cannot spend seconds
+// flying a new mission or replace the result under inspection.
+window.addEventListener('keydown', e => {
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test((e.target.tagName || ''))) return;
+  const k = e.key.toLowerCase();
+  if (e.key === ' ') { togglePlay(); e.preventDefault(); }
+  else if (e.key === 'ArrowRight' && S) { geoFollow = true; ti = Math.min(S.n-1, ti + Math.max(1, S.n/200|0)); $('scrub').value = 1000*ti/(S.n-1); }
+  else if (e.key === 'ArrowLeft' && S) { geoFollow = true; ti = Math.max(0, ti - Math.max(1, S.n/200|0)); $('scrub').value = 1000*ti/(S.n-1); }
+  else if (k === 'f') $('frame').click();
+  else if (k === 'e') { moonView = false; autoFit = false; camDist = 30; }
+  else if (k === 'c') { moonView = false; autoFit = false; camDist = 0.4; }
+  else if (k === 'z') { moonView = false; autoFit = true; fitCamera(); }
+  else if (k === 'l') $('launchbtn').click();
+  else if (k === 'b') $('buildbtn').click();
+  else if (k === 'a') go('analysis_page.html');
+  else if (k === 'm' && landing()) $('moonview').click();
+  else if (e.key === '?') $('helpdlg').showModal();
+});
+const scene = $('scene');
+let drag = null;
+scene.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; scene.setPointerCapture(e.pointerId); });
+scene.addEventListener('pointermove', e => {
+  if (!drag) return;
+  camYaw += (e.clientX - drag[0]) * 0.005;
+  camPitch = Math.min(1.55, Math.max(0.15, camPitch + (e.clientY - drag[1]) * 0.004));
+  drag = [e.clientX, e.clientY];
+});
+scene.addEventListener('pointerup', () => drag = null);
+scene.addEventListener('wheel', e => {
+  e.preventDefault();
+  const f = e.deltaY > 0 ? 1.12 : 0.89;
+  if (moonView) moonDist = Math.min(60000, Math.max(1900, moonDist * f));
+  else { autoFit = false; camDist = Math.min(2400, Math.max(CAM_MIN, camDist * f)); }
+}, { passive: false });
+const geoCv = $('geo');
+let gdrag = null;
+geoCv.addEventListener('pointerdown', e => { gdrag = [e.clientX, e.clientY]; geoCv.setPointerCapture(e.pointerId); });
+geoCv.addEventListener('pointermove', e => {
+  if (!gdrag) return;
+  geoYaw += (e.clientX - gdrag[0]) * 0.01;
+  geoPitch = Math.min(1.2, Math.max(-1.2, geoPitch + (e.clientY - gdrag[1]) * 0.008));
+  gdrag = [e.clientX, e.clientY];   // drawGeoLive picks the new angles up next frame
+});
+geoCv.addEventListener('pointerup', () => gdrag = null);
+// the vehicle diameter carries stages that have not been given their own
+let lastDia = $('diameter').value;
+$('diameter').addEventListener('change', () => {
+  for (let k = 1; k <= nStages(); k++) {
+    const el = $(`s${k}_diameter`);
+    if (el && Math.abs(+el.value - +lastDia) < 1e-9) el.value = $('diameter').value;
+  }
+  lastDia = $('diameter').value;
+  fetchGeo();
+});
+$('nstages').addEventListener('change', () => { buildStages(); fetchGeo(); });
+$('nboost').addEventListener('change', () => {
+  // Strap-ons make the reference 8-degree kick badly wrong — the stack lofts
+  // and the free-return design has nothing to work with. Turn the search on
+  // with them (visibly, so it can still be turned off).
+  if (nBoost() > 0) $('opt_kick').checked = true;
+  buildStages(); fetchGeo();
+});
+// the keyboard reference, on demand rather than permanently parked in the
+// sidebar. showModal so Escape closes it and focus stays inside.
+$('helpbtn').onclick = () => $('helpdlg').showModal();
+$('helpclose').onclick = () => $('helpdlg').close();
+// the capsule's size follows this number, so the note follows the box
+$('pod_mass').addEventListener('input', podNote);
+$('pod_mass').addEventListener('change', () => { podNote(); fetchGeo(); });
+
+// collapsible cards: click the header, and the state is remembered for the
+// session so a page you have arranged stays arranged
+for (const hd of document.querySelectorAll('h2.fold'))
+  hd.onclick = () => {
+    const c = hd.parentElement;
+    c.classList.toggle('closed');
+    try { sessionStorage.setItem('fold:' + c.id, c.classList.contains('closed')); }
+    catch (e) {}
+  };
+for (const c of document.querySelectorAll('.card')) {
+  try {
+    // only cards that still HAVE a fold header can be restored closed — a
+    // stale stored state must not permanently hide a card that lost its fold
+    if (c.id && c.querySelector('h2.fold') &&
+        sessionStorage.getItem('fold:' + c.id) === 'true')
+      c.classList.add('closed');
+  } catch (e) {}
+}
+
+// The vehicle is EDITED on /build and FLOWN from here; localStorage is the
+// wire between them. The builder writes the whole vehicle as a query string
+// under this key on every change; this page applies it into the (hidden)
+// launcher form, so params(), the presets, and the geometry card all keep
+// reading the fields they always read — they just show the builder's truth.
+const VEHICLE_KEY = vehicle.KEY;
+function applyVehicleConfig(qs) {
+  if (!qs) return false;
+  const q = new URLSearchParams(qs);
+  if (![...q.keys()].length) return false;
+  if (q.has('nstages')) setField('nstages', q.get('nstages'));
+  if (q.has('nboost')) setField('nboost', q.get('nboost'));
+  buildStages();
+  for (const [k, v] of q) {
+    if (k === 'nstages' || k === 'nboost') continue;
+    if (k === 'vname') { VNAME = v; continue; }
+    setField(k, v);
+  }
+  // strap-ons loft the stack off the reference kick; mirror the rule the
+  // visible nboost control applied when it lived on this page
+  if (nBoost() > 0) $('opt_kick').checked = true;
+  syncSizeBy();
+  podNote();          // the builder may have just changed the capsule's size
+  return true;
+}
+requestAnimationFrame(tick);
+// catalogues first: the stage form has no options until they arrive
+fillCatalogues().then(() => {
+  buildStages();
+  initPresets();
+  const qmode = new URLSearchParams(location.search).get('mode');
+  const qsub = new URLSearchParams(location.search).get('sub_profile');
+  if (qsub === 'downrange' || qsub === 'hop') SUBPROF = qsub;
+  setMode(qmode === 'landing' ? 'landing' : qmode === 'orbit' ? 'orbit' :
+          qmode === 'suborbital' ? 'suborbital' : 'flyby');
+  if (landing()) {
+    VNAME = 'Saturn V';
+    applyPreset(VEHICLES['Saturn V (Apollo)'], { reset: true });
+  }
+  // Rehydrate from an inbound query first — an explicit configuration in the
+  // URL outranks everything, including the landing preset above. With no
+  // vehicle in the URL, the builder's stored vehicle applies instead (unless
+  // the landing preset just configured a Saturn V, which stays the mode's own
+  // default until the builder writes again).
+  const q = new URLSearchParams(location.search);
+  if ([...q.keys()].some(k => k !== 'mode' && k !== 'zoom')) {
+    if (q.has('nstages')) setField('nstages', q.get('nstages'));
+    if (q.has('nboost')) setField('nboost', q.get('nboost'));
+    buildStages();
+    for (const [k, v] of q) {
+      if (['mode', 'zoom', 'nstages', 'nboost'].includes(k)) continue;
+      if (k === 'vname') { VNAME = v; continue; }
+      setField(k, v);
+    }
+    syncSizeBy();
+    // the URL just set the capsule's mass, so the note that describes the
+    // capsule has to be recomputed — applyVehicleConfig (the localStorage
+    // path) has always done both, and this branch did only the first. Arriving
+    // from the builder's own "mission control" link therefore read
+    // "payload 350 kg ... 1.21 m across" while flying a 45 t capsule.
+    podNote();
+    updateLanderNote();
+  } else if (!landing()) {
+    applyVehicleConfig(vehicle.load());
+  }
+  fetchGeo();
+  // NOTHING FLIES ON LOAD.
+  //
+  // This used to call doRun(), so opening mission control — including merely
+  // passing through it on the way back from the launch view — spent seven to
+  // twelve seconds simulating a mission nobody had asked for, and the page sat
+  // there looking broken while it did. A trajectory is now something you ask
+  // for: an explicit Run button. Presets, mode changes and field edits only
+  // invalidate the result on screen and reveal the stale-result banner.
+  //
+  // `?run=<id>` is not an exception to that. It displays a flight that has
+  // already happened, which is exactly what returning from another page means.
+  const rid = new URLSearchParams(location.search).get('run');
+  loadHistory().then(() => rid ? restore(rid) : showIdle());
+});
+// live sync: the builder saves on every edit, and a storage event fires in
+// every OTHER tab on the same origin — so the geometry card follows the
+// builder as you drag its numbers, without this page polling anything
+window.addEventListener('storage', e => {
+  if (e.key !== VEHICLE_KEY || !e.newValue) return;
+  applyVehicleConfig(e.newValue);
+  fetchGeo();
+  markStale('the vehicle changed in the builder');
+});
+// Any edit to the mission form does the same. Deliberately NOT a re-run: each
+// one is seven to twelve seconds of simulation and this fires per keystroke.
+for (const ev of ['input', 'change'])
+  $('sideform').addEventListener(ev, () =>
+    markStale('the mission has been edited since this run'));
+$('stale_run').onclick = () => { fetchGeo(); doRun(); };
+
+// -------------------------------------------------------------- selftest --
+// Load with ?selftest=1. This page had none, which is how `fmt` — the one
+// function every metric tile on the dashboard goes through — carried both of
+// the formatting faults below unnoticed.
+window.__selftest = function () {
+  const out = suite(), eq = out.eq;
+
+  // A missing metric is an em-dash, never a number. `isFinite` alone is not
+  // this test — Number(null) is 0, so isFinite(null) is true — and the launch
+  // page's copy of this guard, which lacked the null check, died on it.
+  eq('fmt of null', () => fmt(null), '—');
+  eq('fmt of undefined', () => fmt(undefined), '—');
+  eq('fmt of NaN', () => fmt(NaN), '—');
+  eq('fmt of Infinity', () => fmt(Infinity), '—');
+  eq('fmt of a number', () => fmt(6.25, 2), '6.25');
+  eq('fmt of zero', () => fmt(0, 1), '0.0');
+  eq('fmt of a string number', () => fmt('6.5', 1), '6.5');
+
+  // Rounding must not invent a minus sign. A nav error of -4 cm is 0 m, and a
+  // landing site on the prime meridian is 0.0 deg — both printed "-0" before.
+  eq('fmt does not print negative zero', () => fmt(-0.04, 0), '0');
+  eq('nor at one decimal', () => fmt(-0.004, 1), '0.0');
+  eq('nor for an exact -0', () => fmt(-0, 1), '0.0');
+  eq('but keeps a real negative', () => fmt(-10.3, 1), '-10.3');
+  eq('and keeps a small real negative that still shows', () => fmt(-0.06, 1), '-0.1');
+
+  eq('fmtKm below the switch', () => fmtKm(1.5), '1500 km');
+  eq('fmtKm above it', () => fmtKm(384.4), '384k km');
+  eq('fmtKm of a missing distance', () => fmtKm(null), '—');
+
+  // This page and the builder both read the vehicle out of storage under the
+  // same key, using the same notion of which fields belong to the vehicle. A
+  // drift between two copies of that boundary is invisible until a mission
+  // field starts surviving a reload.
+  eq('the storage key is the shared one', () => vehicle.KEY, 'ssjl.vehicle');
+  eq('stage fields are the vehicle', () => vehicle.own('s1_prop'), true);
+  eq('the mode is not the vehicle', () => vehicle.own('mode'), false);
+
+  // A value and its unit, and the case that matters: a leg that never flew
+  // must not render as a blank measurement with units attached.
+  eq('a value carries its unit', () => V(58.5, 1, 't'),
+     '58.5<span class="u-unit">t</span>');
+  eq('a missing value carries no unit', () => V(null, 1, 'm/s'), '—');
+  eq('a missing value with no unit is still a dash', () => V(NaN, 0, ''), '—');
+
+  // The limit table is the only thing that colours a metric, so a threshold
+  // drifting silently would quietly stop flagging a real problem.
+  eq('a negative prop margin is a failure', () => limit('prop_margin_kg', -5), 'is-failed');
+  eq('a thin prop margin is marginal', () => limit('prop_margin_kg', 20), 'is-marginal');
+  eq('a healthy prop margin is unmarked', () => limit('prop_margin_kg', 400), '');
+  eq('an Apollo-like entry load is unmarked', () => limit('peak_g', 6.5), '');
+  eq('a crushing entry load is a failure', () => limit('peak_g', 13), 'is-failed');
+  eq('a hard touchdown is marginal', () => limit('touchdown_v', 3.4), 'is-marginal');
+  eq('a missing metric is never flagged', () => limit('peak_g', null), '');
+  eq('an unlisted metric is never flagged', () => limit('perilune_km', 1e9), '');
+
+  // The verdict states the outcome. These pin the mapping from an outcome the
+  // server can send to what the reader is told, because every one of these
+  // used to be the same undifferentiated red status line.
+  const verdictFor = j => { setVerdict(j); return $('verdict_state').textContent; };
+  const kindFor = j => { setVerdict(j); return $('verdict').className; };
+  eq('a converged run is nominal',
+     () => verdictFor({ outcome: 'nominal', metrics: { on_target: true, t_days: 6.6,
+                                                       splash_lat: -27.1, splash_lon: -137.6 } }),
+     'NOMINAL');
+  eq('a failed design says there is no trajectory',
+     () => verdictFor({ outcome: 'design_failed', metrics: {} }), 'NO TRAJECTORY');
+  eq('a failed ascent says so',
+     () => verdictFor({ outcome: 'ascent_failed', metrics: {} }), 'DID NOT REACH ORBIT');
+  eq('a skip-out says the capsule never came home',
+     () => verdictFor({ outcome: 'entry_timeout', metrics: {} }), 'DID NOT COME HOME');
+  eq('on target but off tolerance is still nominal',
+     () => verdictFor({ outcome: 'nominal',
+                        metrics: { on_target: true, design_status: 'outside_tolerance' } }),
+     'NOMINAL');
+  eq('and says the targeting drifted', () => {
+    setVerdict({ outcome: 'nominal',
+                 metrics: { on_target: true, design_status: 'outside_tolerance' } });
+    return /outside tolerance/.test($('verdict_why').textContent);
+  }, true);
+  eq('a grazing pass is marginal, not failed',
+     () => kindFor({ outcome: 'nominal',
+                     metrics: { on_target: true, grazing: true, perilune_km: 0.1 } }),
+     'verdict is-marginal');
+  eq('an off-target run is a failure',
+     () => kindFor({ outcome: 'nominal', metrics: { on_target: false } }),
+     'verdict is-failed');
+  // restore whatever the page was actually showing
+  if (run) setVerdict(run); else $('verdict').hidden = true;
+
+  return report(out);
+};
+if (requested()) setTimeout(window.__selftest, 0);
+</script>
+</body>
+</html>

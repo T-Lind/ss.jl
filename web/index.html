@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SatelliteSim — browser port</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0f16; color:#e4e9f0;
+         font:14px/1.55 system-ui,sans-serif; }
+  header { padding:34px 26px 20px; border-bottom:1px solid #1e2836; }
+  h1 { margin:0; font-size:22px; letter-spacing:.02em; }
+  header p { margin:8px 0 0; color:#8b97a8; max-width:60ch; }
+  main { padding:26px; max-width:1100px; display:grid;
+         grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; }
+  a.card { display:block; text-decoration:none; color:inherit;
+           background:#121821; border:1px solid #1e2836; border-radius:8px;
+           padding:16px 18px; transition:border-color .12s, transform .12s; }
+  a.card:hover { border-color:#3a4a60; transform:translateY(-1px); }
+  a.card b { display:block; font-size:16px; margin-bottom:6px; }
+  a.card span { color:#8b97a8; font-size:12.5px; }
+  footer { padding:10px 26px 30px; color:#6f7b8c; font-size:12px; }
+  code { color:#f0a500; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SatelliteSim — browser port</h1>
+  <p>A server-less static build of the mission-control panel. The whole
+     simulation is ES modules under <code>web/src/</code>, parity-tested against
+     the Julia package; the four pages below run it in-process.</p>
+</header>
+<main>
+  <a class="card" href="panel_page.html">
+    <b>mission control</b>
+    <span>Configure, fly, and explore a mission: free return, Earth orbit,
+          suborbital hop or lunar landing.</span>
+  </a>
+  <a class="card" href="build_page.html">
+    <b>vehicle builder</b>
+    <span>Stack stages, strap-ons and engines, and see the rocket the numbers
+          actually imply.</span>
+  </a>
+  <a class="card" href="analysis_page.html">
+    <b>analysis</b>
+    <span>Telemetry plots, the event log, parameter sweeps and the solver.</span>
+  </a>
+  <a class="card" href="launch_page.html">
+    <b>launch view</b>
+    <span>The 3D ascent, cislunar coast, entry and lunar descent.</span>
+  </a>
+</main>
+<footer>Serve <code>web/</code> at the root (e.g. <code>node web/serve.mjs</code>)
+        so the pages' absolute <code>./static/…</code> imports resolve.</footer>
+</body>
+</html>
