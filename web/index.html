@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SatelliteSim — browser port (reentry)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0f16; color:#e4e9f0;
+         font:13px/1.5 system-ui,sans-serif; }
+  header { padding:18px 22px; border-bottom:1px solid #1e2836; }
+  h1 { margin:0; font-size:16px; letter-spacing:.02em; }
+  header p { margin:4px 0 0; color:#8b97a8; }
+  main { padding:18px 22px; max-width:1100px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+          gap:10px; margin:14px 0; }
+  .card { background:#121821; border:1px solid #1e2836; border-radius:6px;
+          padding:10px 12px; }
+  .card b { display:block; font-size:18px; }
+  .card span { color:#8b97a8; font-size:11px; }
+  canvas { width:100%; height:220px; display:block; background:#0e141d;
+           border:1px solid #1e2836; border-radius:6px; margin:10px 0; }
+  code { color:#f0a500; }
+  .ok { color:#3fbf7f; } .bad { color:#e5534b; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SatelliteSim — browser port</h1>
+  <p>Pure ES modules, no server. Flying the reference LEO reentry locally.</p>
+</header>
+<main>
+  <div id="status">flying…</div>
+  <div class="grid" id="summary"></div>
+  <canvas id="c_alt"></canvas>
+  <canvas id="c_g"></canvas>
+  <p><code>web/src/</code> is a line-for-line port of <code>src/</code>, parity-tested against the Julia package.</p>
+</main>
+<script type="module">
+import { west_coast_scenario } from './src/scenarios.js';
+
+const $ = id => document.getElementById(id);
+const fmt = (x, d = 1) => Number.isFinite(x) ? x.toFixed(d) : '—';
+const deg = r => r * 180 / Math.PI;
+
+function line(canvas, series, label) {
+  const dpr = devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const xs = series[0].xs, all = series.flatMap(s => s.ys);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  let y0 = Math.min(...all), y1 = Math.max(...all);
+  if (y1 - y0 < 1e-9) y1 = y0 + 1;
+  const L = 46, R = 12, T = 14, B = 22;
+  const px = v => L + (w - L - R) * (v - x0) / (x1 - x0);
+  const py = v => h - B - (h - T - B) * (v - y0) / (y1 - y0);
+  ctx.strokeStyle = '#1e2836'; ctx.fillStyle = '#8b97a8';
+  ctx.font = '10px system-ui';
+  for (let i = 0; i <= 4; i++) {
+    const y = T + (h - T - B) * i / 4;
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
+    ctx.fillText(fmt(y1 - (y1 - y0) * i / 4, 0), 4, y + 3);
+  }
+  for (const s of series) {
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.6; ctx.beginPath();
+    s.ys.forEach((v, i) => i ? ctx.lineTo(px(s.xs[i]), py(v)) : ctx.moveTo(px(s.xs[i]), py(v)));
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#e4e9f0'; ctx.fillText(label, L, 11);
+  ctx.fillStyle = '#8b97a8'; ctx.fillText('t [s]', w - 40, h - 6);
+}
+
+try {
+  const t0 = performance.now();
+  const { scn, res } = west_coast_scenario();
+  const ms = Math.round(performance.now() - t0);
+  $('status').innerHTML =
+    `<span class="${res.terminated === 'splashdown' ? 'ok' : 'bad'}">` +
+    `${res.terminated}</span> — ${res.log.t.length} samples in ${ms} ms (in-browser)`;
+
+  const cards = [
+    ['splashdown T+', fmt(res.t_splash / 60, 1) + ' min'],
+    ['splashdown', `${fmt(deg(res.lat_splash), 2)}°, ${fmt(deg(res.lon_splash), 2)}°`],
+    ['miss distance', fmt(res.miss_km, 1) + ' km'],
+    ['splash speed', fmt(res.v_splash, 1) + ' m/s'],
+    ['peak g-load', fmt(res.peak_gload, 2) + ' g'],
+    ['peak heat rate', fmt(res.peak_qdot / 1e4, 0) + ' W/cm²'],
+    ['heat load', fmt(res.heat_load / 1e6, 1) + ' MJ/m²'],
+    ['peak dyn. press.', fmt(res.peak_qbar / 1000, 1) + ' kPa'],
+  ];
+  $('summary').innerHTML = cards.map(([label, v]) =>
+    `<div class="card"><b>${v}</b><span>${label}</span></div>`).join('');
+
+  const td = res.log.t;
+  line($('c_alt'), [{ xs: td, ys: res.log.h.map(v => v / 1000), color: '#8fbef0' }],
+       'altitude vs time [km]');
+  line($('c_g'), [{ xs: td, ys: res.log.gload, color: '#f0a500' }],
+       'aero g-load vs time [g]');
+} catch (e) {
+  $('status').innerHTML = `<span class="bad">failed: ${e.message}</span>`;
+  throw e;
+}
+</script>
+</body>
+</html>
