@@ -1235,7 +1235,7 @@ function rocket_mesh(; diameter::Float64 = 1.8,
         D = diameters[k]                         # this stage's own diameter
         r = D / 2
         A = pi * r^2
-        len = mp / (rho * A) * 1.15 + 0.9D       # tank + ullage + engine bay
+        len = barrel_length(mp, rho, D)          # tank + ullage + engine bay
         # Transition to the stage above: the adapter belongs to the lower
         # stage (it is the top of its structure and departs with it), and is
         # a cone whenever the two diameters differ — necking down or flaring

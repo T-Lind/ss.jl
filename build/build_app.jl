@@ -91,12 +91,14 @@ end
 # The check is trivial and it runs at build time, which is the last moment
 # anyone is looking.
 let missing_assets = String[]
-    for f in readdir(SHARE)
-        endswith(f, ".html") || continue
-        page = read(joinpath(SHARE, f), String)
-        for m in eachmatch(r"['\"]/static/([A-Za-z0-9_-]+\.(?:js|css))['\"]", page)
+    sources = [joinpath(SHARE, f) for f in readdir(SHARE) if endswith(f, ".html")]
+    append!(sources, [joinpath(SHARE, "static", f)
+                      for f in readdir(joinpath(SHARE, "static")) if endswith(f, ".js")])
+    for source in sources
+        page = read(source, String)
+        for m in eachmatch(r"['\"]/static/([A-Za-z0-9_-]+\.(?:js|css|geojson))['\"]", page)
             isfile(joinpath(SHARE, "static", m[1])) ||
-                push!(missing_assets, "$f imports /static/$(m[1])")
+                push!(missing_assets, "$(basename(source)) imports /static/$(m[1])")
         end
     end
     isempty(missing_assets) ||

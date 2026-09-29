@@ -72,8 +72,17 @@ enum UserEvent {
 #[derive(Clone)]
 struct UpdateInfo {
     version: String,
-    url: String,
-    sha_url: String,
+    source: UpdateSource,
+}
+
+#[derive(Clone)]
+enum UpdateSource {
+    /// Public release assets: every installed copy can update without another
+    /// program or a GitHub account.
+    Direct { url: String, sha_url: String },
+    /// Owner/developer fallback for a private repository. `gh` owns the token;
+    /// it is never copied into this process, a script, a URL or a log.
+    GithubCli { tag: String },
 }
 
 #[derive(Clone)]
@@ -94,7 +103,7 @@ fn main() {
     let proxy = event_loop.create_proxy();
 
     let window = match WindowBuilder::new()
-        .with_title("ss.jl")
+        .with_title(format!("ss.jl v{}", env!("CARGO_PKG_VERSION")))
         .with_inner_size(LogicalSize::new(1600.0, 1000.0))
         .with_min_inner_size(LogicalSize::new(960.0, 640.0))
         .with_window_icon(Some(app_icon()))
@@ -358,6 +367,28 @@ fn send_update(
     }));
 }
 
+fn offer_update(
+    proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+    available: &Arc<Mutex<Option<UpdateInfo>>>,
+    info: UpdateInfo,
+    message: &str,
+) {
+    if semver(&info.version) > semver(env!("CARGO_PKG_VERSION")) {
+        let version = info.version.clone();
+        if let Ok(mut slot) = available.lock() {
+            *slot = Some(info);
+        }
+        send_update(proxy, "available", message, &version);
+    } else {
+        send_update(
+            proxy,
+            "current",
+            "you are on the latest release",
+            env!("CARGO_PKG_VERSION"),
+        );
+    }
+}
+
 fn semver(s: &str) -> (u32, u32, u32) {
     let mut n = s.trim_start_matches('v').split('.').map(|x| {
         x.chars()
@@ -373,6 +404,16 @@ fn semver(s: &str) -> (u32, u32, u32) {
     )
 }
 
+fn release_version(tag: &str) -> Option<String> {
+    let v = tag.trim().trim_start_matches('v');
+    let parts: Vec<_> = v.split('.').collect();
+    (parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())))
+    .then(|| v.to_string())
+}
+
 #[cfg(windows)]
 fn powershell(script: &str) -> Result<std::process::Output, String> {
     use std::os::windows::process::CommandExt;
@@ -384,15 +425,59 @@ fn powershell(script: &str) -> Result<std::process::Output, String> {
 }
 
 #[cfg(windows)]
+fn github_cli(args: &[&str]) -> Result<std::process::Output, String> {
+    use std::os::windows::process::CommandExt;
+    Command::new("gh.exe")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|_| "GitHub CLI is not installed".to_string())
+}
+
+/// Read a private release through the user's existing GitHub CLI session.
+///
+/// This is intentionally a fallback, not the distribution contract. Public
+/// builds must update on machines that have never installed developer tools;
+/// a repository owner testing a private release can opt into authentication by
+/// signing `gh` in, without the application ever seeing or storing the token.
+#[cfg(windows)]
+fn private_release() -> Result<(String, String), String> {
+    let jq = r#"[.tag_name, ([.assets[] | select(.name == "ssjl-windows-x64.zip")] | length), ([.assets[] | select(.name == "ssjl-windows-x64.zip.sha256")] | length)] | @tsv"#;
+    let out = github_cli(&["api", "repos/T-Lind/ss.jl/releases/latest", "--jq", jq])?;
+    if !out.status.success() {
+        return Err("GitHub CLI is not signed in for this private repository".into());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<_> = text.trim().split('\t').collect();
+    if fields.len() != 3 || fields[1] != "1" || fields[2] != "1" {
+        return Err("the latest private release has no verified Windows package".into());
+    }
+    let version = release_version(fields[0]).ok_or("GitHub returned an invalid release tag")?;
+    Ok((version, fields[0].to_string()))
+}
+
+#[cfg(windows)]
 fn check_for_update(
     proxy: tao::event_loop::EventLoopProxy<UserEvent>,
     available: Arc<Mutex<Option<UpdateInfo>>>,
 ) {
+    if let Ok(mut slot) = available.lock() {
+        *slot = None;
+    }
     send_update(&proxy, "checking", "checking GitHub Releases...", "");
     let script = format!(
         r#"$ErrorActionPreference='Stop';
 $h=@{{'User-Agent'='ssjl/{}'}};
-$r=Invoke-RestMethod -Headers $h -Uri 'https://api.github.com/repos/T-Lind/ss.jl/releases/latest';
+try {{
+  $r=Invoke-RestMethod -Headers $h -Uri 'https://api.github.com/repos/T-Lind/ss.jl/releases/latest';
+}} catch {{
+  $status=try {{ [int]$_.Exception.Response.StatusCode }} catch {{ 0 }};
+  if($status -eq 404) {{
+    [Console]::Error.WriteLine('the GitHub release feed is not public');
+    exit 44;
+  }};
+  throw;
+}};
 $a=$r.assets | Where-Object {{$_.name -eq 'ssjl-windows-x64.zip'}} | Select-Object -First 1;
 $s=$r.assets | Where-Object {{$_.name -eq 'ssjl-windows-x64.zip.sha256'}} | Select-Object -First 1;
 if($null -eq $a -or $null -eq $s){{throw 'the latest release has no verified Windows package'}};
@@ -403,46 +488,46 @@ Write-Output $r.tag_name; Write-Output $a.browser_download_url; Write-Output $s.
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
             let mut lines = text.lines().map(str::trim).filter(|x| !x.is_empty());
-            let version = lines
-                .next()
-                .unwrap_or("")
-                .trim_start_matches('v')
-                .to_string();
+            let version = lines.next().and_then(release_version);
             let url = lines.next().unwrap_or("").to_string();
             let sha_url = lines.next().unwrap_or("").to_string();
-            if version.is_empty()
+            if version.is_none()
                 || !url.starts_with("https://github.com/T-Lind/ss.jl/releases/download/")
                 || !sha_url.starts_with("https://github.com/T-Lind/ss.jl/releases/download/")
             {
                 return send_update(&proxy, "error", "GitHub returned an invalid release", "");
             }
-            if semver(&version) > semver(env!("CARGO_PKG_VERSION")) {
-                if let Ok(mut slot) = available.lock() {
-                    *slot = Some(UpdateInfo {
-                        version: version.clone(),
-                        url,
-                        sha_url,
-                    });
-                }
-                send_update(
-                    &proxy,
-                    "available",
-                    "a tested Windows build is ready",
-                    &version,
-                );
-            } else {
-                send_update(
-                    &proxy,
-                    "current",
-                    "you are on the latest release",
-                    env!("CARGO_PKG_VERSION"),
-                );
-            }
+            offer_update(
+                &proxy,
+                &available,
+                UpdateInfo {
+                    version: version.unwrap(),
+                    source: UpdateSource::Direct { url, sha_url },
+                },
+                "a tested Windows build is ready",
+            );
         }
-        Ok(out) => send_update(
+        Ok(out) if out.status.code() == Some(44) => match private_release() {
+            Ok((version, tag)) => offer_update(
+                &proxy,
+                &available,
+                UpdateInfo {
+                    version,
+                    source: UpdateSource::GithubCli { tag },
+                },
+                "an authenticated private Windows build is ready",
+            ),
+            Err(_) => send_update(
+                &proxy,
+                "unavailable",
+                "this release feed is private; sign in with GitHub CLI to test owner updates, or publish the repository/feed for installs that update without developer tools",
+                "",
+            ),
+        },
+        Ok(_) => send_update(
             &proxy,
             "error",
-            String::from_utf8_lossy(&out.stderr).trim(),
+            "could not read the GitHub release feed; check your connection and try again",
             "",
         ),
         Err(e) => send_update(&proxy, "error", &e, ""),
@@ -492,12 +577,70 @@ fn prepare_update(
     let zip = base.join(format!("ssjl-{}.zip", info.version));
     let sha = base.join(format!("ssjl-{}.sha256", info.version));
     let stage = base.join(format!("ssjl-{}", info.version));
-    let script = format!(
-        r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';
-New-Item -ItemType Directory -Force -Path {base} | Out-Null;
-if(Test-Path -LiteralPath {stage}){{Remove-Item -LiteralPath {stage} -Recurse -Force}};
+    if std::fs::create_dir_all(&base).is_err() {
+        return send_update(
+            &proxy,
+            "error",
+            "the update directory could not be created",
+            "",
+        );
+    }
+    let downloaded = match &info.source {
+        UpdateSource::Direct { url, sha_url } => {
+            let script = format!(
+                r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';
 Invoke-WebRequest -Headers @{{'User-Agent'='ssjl/{current}'}} -Uri '{url}' -OutFile {zip};
-Invoke-WebRequest -Headers @{{'User-Agent'='ssjl/{current}'}} -Uri '{sha_url}' -OutFile {sha};
+Invoke-WebRequest -Headers @{{'User-Agent'='ssjl/{current}'}} -Uri '{sha_url}' -OutFile {sha}"#,
+                current = env!("CARGO_PKG_VERSION"),
+                url = url.replace('\'', "%27"),
+                sha_url = sha_url.replace('\'', "%27"),
+                zip = ps_quote(&zip),
+                sha = ps_quote(&sha),
+            );
+            powershell(&script).is_ok_and(|out| out.status.success())
+        }
+        UpdateSource::GithubCli { tag } => {
+            let repo = "T-Lind/ss.jl";
+            let zip_path = zip.to_string_lossy().to_string();
+            let sha_path = sha.to_string_lossy().to_string();
+            let a = github_cli(&[
+                "release",
+                "download",
+                tag,
+                "--repo",
+                repo,
+                "--pattern",
+                "ssjl-windows-x64.zip",
+                "--output",
+                &zip_path,
+                "--clobber",
+            ]);
+            let b = github_cli(&[
+                "release",
+                "download",
+                tag,
+                "--repo",
+                repo,
+                "--pattern",
+                "ssjl-windows-x64.zip.sha256",
+                "--output",
+                &sha_path,
+                "--clobber",
+            ]);
+            a.is_ok_and(|out| out.status.success()) && b.is_ok_and(|out| out.status.success())
+        }
+    };
+    if !downloaded {
+        return send_update(
+            &proxy,
+            "error",
+            "the release package could not be downloaded; check the connection and GitHub sign-in",
+            &info.version,
+        );
+    }
+    let script = format!(
+        r#"$ErrorActionPreference='Stop';
+if(Test-Path -LiteralPath {stage}){{Remove-Item -LiteralPath {stage} -Recurse -Force}};
 $expected=((Get-Content -LiteralPath {sha} -Raw).Trim().Split()[0]).ToUpperInvariant();
 $actual=(Get-FileHash -LiteralPath {zip} -Algorithm SHA256).Hash.ToUpperInvariant();
 if($expected -ne $actual){{throw 'the downloaded package failed its SHA-256 check'}};
@@ -506,13 +649,9 @@ $root={stage};
 if(!(Test-Path -LiteralPath (Join-Path $root 'ssjl.exe'))){{$d=Get-ChildItem -LiteralPath $root -Directory | Select-Object -First 1;if($d){{$root=$d.FullName}}}};
 if(!(Test-Path -LiteralPath (Join-Path $root 'ssjl.exe')) -or !(Test-Path -LiteralPath (Join-Path $root 'bin\ssjl-server.exe'))){{throw 'the release package is incomplete'}};
 Write-Output $root"#,
-        base = ps_quote(&base),
         stage = ps_quote(&stage),
         zip = ps_quote(&zip),
         sha = ps_quote(&sha),
-        current = env!("CARGO_PKG_VERSION"),
-        url = info.url.replace('\'', "%27"),
-        sha_url = info.sha_url.replace('\'', "%27")
     );
     match powershell(&script) {
         Ok(out) if out.status.success() => {
@@ -530,10 +669,10 @@ Write-Output $root"#,
                 &info.version,
             );
         }
-        Ok(out) => send_update(
+        Ok(_) => send_update(
             &proxy,
             "error",
-            String::from_utf8_lossy(&out.stderr).trim(),
+            "the downloaded update could not be verified or unpacked",
             &info.version,
         ),
         Err(e) => send_update(&proxy, "error", &e, &info.version),
@@ -851,6 +990,7 @@ const UPDATE_UI: &str = concat!(
     const toast = document.createElement('div'); toast.id = 'host-update-note';
     toast.style.cssText = 'display:none;position:fixed;z-index:120;right:14px;top:66px;max-width:340px;padding:10px 12px;background:var(--surface,#131922);color:var(--text,#e4e9f0);border:1px solid var(--amber,#f0a500);border-radius:5px;box-shadow:0 12px 34px #0008;font:12px/1.45 system-ui';
     document.body.appendChild(toast);
+    toast.title='Click to dismiss';toast.onclick=()=>toast.style.display='none';
     const send = m => window.ipc && window.ipc.postMessage(m);
     const action = m => { b.onclick = () => send(m); b.disabled = false; };
     b.onclick = () => send('update:check');
@@ -858,7 +998,8 @@ const UPDATE_UI: &str = concat!(
       const d=e.detail||{}, v=d.version ? ' v'+d.version : '';
       b.title=d.message||'Update status'; toast.textContent=d.message||'';
       if(d.state==='checking'){b.textContent='checking...';b.disabled=true}
-      else if(d.state==='current'){b.textContent='v'+current;action('update:check');toast.style.display='none'}
+      else if(d.state==='current'){b.textContent='v'+current+' · current';action('update:check');toast.style.display='none'}
+      else if(d.state==='unavailable'){b.textContent='v'+current+' · private';action('update:check');toast.style.display='block'}
       else if(d.state==='available'){b.textContent='update'+v;action('update:download');toast.textContent=`${d.message}. Click “update${v}” to download it.`;toast.style.display='block'}
       else if(d.state==='downloading'){b.textContent='downloading'+v;b.disabled=true;toast.style.display='block'}
       else if(d.state==='ready'){b.textContent='restart to update';action('update:install');toast.style.display='block'}
@@ -923,4 +1064,31 @@ fn failure_page(why: &str) -> String {
   incompletely — unzip the whole folder and keep it together.</div>
 </div></body></html>"#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_tags_are_strict_semver_triplets() {
+        assert_eq!(release_version("v0.4.1"), Some("0.4.1".into()));
+        assert_eq!(release_version("0.12.3"), Some("0.12.3".into()));
+        assert_eq!(release_version("main"), None);
+        assert_eq!(release_version("v0.4"), None);
+        assert_eq!(release_version("v0.4.1-rc1"), None);
+    }
+
+    #[test]
+    fn semantic_versions_compare_numerically() {
+        assert!(semver("0.10.0") > semver("0.9.9"));
+        assert!(semver("v1.0.0") > semver("0.99.99"));
+    }
+
+    #[test]
+    fn update_control_always_carries_the_build_version() {
+        assert!(UPDATE_UI.contains("host-update"));
+        assert!(UPDATE_UI.contains("Check for updates"));
+        assert!(UPDATE_UI.contains(env!("CARGO_PKG_VERSION")));
+    }
 }

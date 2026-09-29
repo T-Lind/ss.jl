@@ -140,6 +140,61 @@ end
 "Loaded propellant volume of a stage [m^3] — what sets its physical size."
 stage_volume(st::Stage) = st.mprop / bulk_density(st.prop)
 
+"""
+    barrel_length(mprop, density, diameter) -> Float64
+
+Structural length [m] a stage needs: its propellant's own volume in a barrel
+of that diameter, plus 15% for ullage and tank domes, plus an engine bay of
+0.9 diameters.
+
+`rocket_mesh` sizes the drawn barrels with exactly this call. That sharing is
+the point — the vehicle on screen and the vehicle whose inertia sets the RCS
+budget have to be one vehicle, and a second copy of this rule is how they
+would quietly stop being that.
+
+Note it takes LOADED propellant: a tank does not get shorter as it drains, so
+this is the right length for a stage at any point in its life.
+"""
+barrel_length(mprop::Real, density::Real, diameter::Real) =
+    mprop / (density * pi * (diameter / 2)^2) * 1.15 + 0.9 * diameter
+
+"Length [m] of stage `st`'s structure at core diameter `dc`."
+stage_length(st::Stage, dc::Real) =
+    barrel_length(st.mprop, bulk_density(st.prop), stage_diameter(st, dc))
+
+"""
+    cruise_inertia(lv, m_stack, payload_diameter; payload_mass) -> (I_roll, I_transverse)
+
+Inertia [kg·m²] of the stack that actually coasts: the kick stage — dry
+structure plus whatever propellant is still aboard — with the payload on top
+of it.
+
+This replaced a hardcoded 1000 kg·m². The constant was not merely imprecise,
+it was *inert*: transverse inertia is the only route by which vehicle
+geometry reaches the attitude-control budget, so with it pinned, building a
+different spacecraft moved the RCS numbers not at all. It is also the term
+that pulls hardest in both directions — limit-cycle propellant goes as 1/I
+while slews go as √I — so an inertia an order of magnitude low does not err
+in a single safe direction.
+"""
+function cruise_inertia(lv::LaunchVehicle, m_stack::Real, payload_diameter::Real;
+                        payload_mass::Real = lv.payload_mass)
+    kick = lv.stages[end]
+    dc = core_diameter(lv)
+    dk = stage_diameter(kick, dc)
+    Lk = barrel_length(kick.mprop, bulk_density(kick.prop), dk)
+    # what is left of the stack once the payload is subtracted; never less
+    # than the stage's own dry mass, so a mass bookkeeping slip cannot produce
+    # a weightless kick stage
+    mk = max(Float64(m_stack) - payload_mass, kick.mdry)
+    dp = max(Float64(payload_diameter), 0.1)
+    # a capsule is roughly as tall as it is wide (Apollo CM: 3.9 m across,
+    # 3.5 m high), and a bus in the same envelope is no worse an assumption
+    Lp = dp
+    stack_inertia(((mk, dk / 2, Lk, Lk / 2),
+                   (Float64(payload_mass), dp / 2, Lp, Lk + Lp / 2)))
+end
+
 "Total lift-off mass [kg], strap-on boosters included."
 liftoff_mass(lv::LaunchVehicle) =
     sum(s.mdry + s.mprop for s in lv.stages) + lv.fairing_mass + lv.payload_mass +

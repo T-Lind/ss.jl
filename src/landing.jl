@@ -191,7 +191,7 @@ that decide whether the vehicle survived it.
 """
 struct DescentResult
     log::DescentLog
-    outcome::Symbol             # :touchdown | :crash | :tipped | :propellant | :diverged
+    outcome::Symbol             # :touchdown | :timeout | :crash | :tipped | :propellant | :diverged
     t_touchdown::Float64        # seconds from PDI
     t_gate::Float64             # seconds from PDI to high gate (end of braking)
     v_vertical::Float64         # touchdown sink rate [m/s] (positive = down)
@@ -579,7 +579,11 @@ function _descent_leg(l::Lander, r0::V3, v0::V3, m0::Float64,
     m_dry = m0 - l.mprop
     h0 = _alt(cfg, r0, 0.0)
     hhat = _descent_normal(r0, v0)
-    outcome = :gate
+    # :gate is a *result*, set only by the two gate-crossing breaks below. The
+    # initial value is the failure the loop can fall out of: running `t_max`
+    # out still above the gate and still fast. It used to be :gate, which
+    # reported a clock exhaustion as a hit and let an unflyable leg through.
+    outcome = :timeout
     kount = 0
     radar = nav === nothing || cfg.nav === nothing ? nothing : cfg.nav.radar
 
@@ -844,7 +848,9 @@ function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
     mdot_full = lander_mdot(l)
     hhat = _descent_normal(r0, v0)
     min_thr = 1.0
-    outcome = :touchdown
+    # As in `_descent_leg`: :touchdown is set only by the ground-contact breaks.
+    # Falling out of the loop on `t_max` is a timeout, not a landing.
+    outcome = :timeout
     kount = 0
     radar = nav === nothing || cfg.nav === nothing ? nothing : cfg.nav.radar
 
@@ -1025,7 +1031,7 @@ function powered_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
     # so it either saves the landing or it does not, and the touchdown state
     # says which. Only a leg that never reached the gate is unflyable.
     if leg.outcome !== :gate
-        return DescentResult(L, leg.outcome === :gate ? :diverged : leg.outcome,
+        return DescentResult(L, leg.outcome,
                              leg.t, leg.t, -leg.vv, leg.vh,
                              isempty(L.downrange) ? 0.0 : L.downrange[end],
                              dv_brake, 0.0, m0 - leg.m, leg.m - m_dry, 0.0, 1.0,

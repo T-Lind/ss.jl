@@ -22,6 +22,14 @@
 # dynamic pressure is still negligible — exactly how a real pod nulls tipoff
 # rates before entry interface — and draws real propellant.
 
+"""
+Rate-damping time constant [s]: the PWM law runs at full duty against any
+body rate it could not null within this long, and scales the duty down below
+it. Multiplied by an angular acceleration (`torque/inertia`) to get the
+saturation RATE, so it is seconds and not a dimensionless gain.
+"""
+const RATE_NULL_S = 2.0
+
 struct Entry6Log
     t::Vector{Float64};  h::Vector{Float64}
     lat::Vector{Float64}; lon::Vector{Float64}
@@ -182,7 +190,12 @@ function _entry6_deriv!(dx, x, scn::Scenario, ctx::FlightContext,
             pd(i) = clamp(kp * e[i] - kd * w[i], -1.0, 1.0)
             cmd = (pd(1), pd(2), pd(3))
         else
-            wsat = 2.0 * auth[2] / inertia[2]
+            # Saturation rate: the rate the thrusters can null in
+            # RATE_NULL_S of continuous firing. auth/I is an angular
+            # ACCELERATION, so the constant carries units of seconds — it
+            # read as a bare `2.0` and looked dimensionless, which is how a
+            # rate and an acceleration came to be compared.
+            wsat = RATE_NULL_S * auth[2] / inertia[2]
             cmd = rate_damp_command(w, rate_db, wsat)
         end
         if cmd != (0.0, 0.0, 0.0)
@@ -191,7 +204,15 @@ function _entry6_deriv!(dx, x, scn::Scenario, ctx::FlightContext,
             duty = (auth[1] > 0 ? abs(cmd[1]) : 0.0) +
                    (auth[2] > 0 ? abs(cmd[2]) : 0.0) +
                    (auth[3] > 0 ? abs(cmd[3]) : 0.0)
-            dmrcs = rcs_mdot(rcs, 2) * duty
+            # `+=`, not `=`. The two RCS blocks are meant to be exclusive —
+            # this one passivates at entry interface, where bank-hold takes
+            # over — but `ctx.entered` is flipped once per STEP while the
+            # aerodynamic block above gates on instantaneous altitude, so on
+            # the RK4 substeps that straddle the crossing both can run. An
+            # assignment silently discarded the bank-hold flow for that
+            # evaluation. The magnitude is one substep's worth of propellant;
+            # the reason to fix it is that it was an accident either way.
+            dmrcs += rcs_mdot(rcs, 2) * duty
         end
     end
 

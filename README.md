@@ -121,6 +121,38 @@ closed-form results — which immediately re-sized the kick stage's thrusters:
 the first cut (25 N, 20 ms pulses) would have emptied its tank limit-cycling
 across a multi-week cruise.
 
+The coast budget is sized from the vehicle rather than from constants, in
+three places that each used to be a fixed number:
+
+- **Inertia** comes from the stack that actually coasts (`cruise_inertia`):
+  the kick stage barrel, sized by its loaded propellant with the same rule
+  that draws it, plus the payload on its nose, composed through the
+  parallel-axis theorem. Across the preset catalogue that ranges from
+  **399 kg·m²** (the reference vehicle's half-tonne cruise stack) to
+  **2.0 × 10⁶** (a Saturn V's), where a single hardcoded 1000 had stood in
+  for all of them. The error does not cancel: limit-cycle propellant goes as
+  1/I and slews as √I.
+- **Hardware** is sized to that inertia (`sized_kick_rcs`): control torque
+  set so any stack turns around in ~120 s, thrusters on the skin so the arm
+  is the body radius, and a tank at 1% of coast mass. For a Saturn V that
+  gives 267 N thrusters and a 600 kg tank against Apollo's real ~445 N and
+  ~450 kg. Held at the reference 12 kg tank instead, the model reports a
+  vehicle that flew to the Moon nine times as unable to hold attitude.
+- **The environment** is evaluated where the vehicle is (`orbit_rcs_budget`).
+  Out past the Moon nothing torques the stack and the tank pays only for
+  deadband chatter. In a 200 km orbit, gravity gradient plus residual drag
+  pump in momentum continuously and *dumping it* is the budget — larger than
+  the deadband term by a factor of ~50 on the reference stack, and falling by
+  more than two orders of magnitude by GEO. A single "orbit" number could
+  never have been right for both, and a 44-minute LEO flight used to be
+  billed the same 0.88 kg as a 24-hour one.
+
+The served history steps rather than ramps: slews and ullage burns are
+seconds to minutes of firing at epochs the mission already knows (TLI, the
+TCM, entry interface), and they are most of the budget. Drawn as a smooth
+accumulation they said the opposite — that the tank drains on continuous
+housekeeping.
+
 **Execution dispersions & mid-course correction** (`translunar.jl`): the TLI
 burn accepts magnitude and pointing errors, and they matter enormously — a
 0.3% overburn alone moves perilune by +10,000 km and drops the return
@@ -633,13 +665,20 @@ installation, no `Pkg.instantiate`, no terminal, no browser. Download the
 release zip, unpack it, run `ssjl.exe`, and a window opens on mission control.
 Close the window and everything exits.
 
-The application checks the official GitHub Releases feed in the background
-and reports an available version in the navigation bar. **Download update**
-fetches the release asset, verifies its published SHA-256 checksum and stages
-it outside the running installation; **Restart to update** atomically swaps
-the application directory and keeps the previous copy until the new process
-has launched. Releases are produced by `.github/workflows/release.yml` from
-`v*` tags, with the zip and matching checksum names expected by the host.
+The application shows its version both in the native window title and in a
+clickable navigation-bar update control. It checks the official GitHub Releases
+feed in the background; **Download update** fetches the release asset, verifies
+its published SHA-256 checksum and stages it outside the running installation;
+**Restart to update** atomically swaps the application directory and keeps the
+previous copy until the new process has launched. Releases are produced by
+`.github/workflows/release.yml` from `v*` tags, with the zip and matching
+checksum names expected by the host.
+
+Anonymous updates require a public repository or public release feed. While
+the repository is private, an owner/developer build falls back to an existing
+authenticated GitHub CLI session; the app delegates the private download to
+`gh` and never reads or stores its token. This fallback is for testing private
+releases, not a viable dependency for general distribution.
 
 ```powershell
 julia --project=build build/build_app.jl      # -> dist/ssjl (~685 MB; build time varies)
@@ -1141,6 +1180,44 @@ actual payload limit of the default launcher. Runs that fly but miss the
 requested perilune/perigee (e.g. a prop-starved TLI) are flagged **off
 target** rather than silently plotted.
 
+### The payload is a spacecraft and its cargo
+
+`pod_mass` was one number doing three jobs: what the launcher lifts, what
+re-enters, and what the capsule's size is fitted from. One number cannot be
+both a spacecraft and its cargo, which is how the reference vehicle came to
+describe a "350 kg capsule" — lighter than anything anyone has flown a person
+in, and 18% of what that stack puts in low orbit.
+
+It composes now:
+
+    payload = spacecraft + cargo
+
+The spacecraft is either a **capsule** — a vehicle that comes home behind a
+heat shield, at the masses the flown ones actually had (900 kg for the
+smallest single-seat design up to 13 t for Starliner) — or a **bus**: the
+probe core, flight computers, power, comms and structure that any uncrewed
+payload needs before it carries anything useful, defaulting to 200 kg.
+**Cargo** is the rest.
+
+Cargo is carried, not annotated. It rides the whole ascent and eats the kick
+stage's margin, and it re-enters *inside* the spacecraft's envelope rather
+than widening it — the capsule diameter is fitted from the spacecraft's mass
+alone, because a capsule's size is set by the vehicle and not by what is
+stowed in it. So loading cargo raises the ballistic coefficient: on the
+reference flyby, 150 kg of cargo behind a 200 kg bus takes peak heat flux
+from 239 to 318 W/cm².
+
+The builder states whether the result is plausible for the stack it is on,
+as a payload fraction against what launchers of that class achieve to that
+destination — bands that necessarily differ, since the reference vehicle
+throws **1,951 kg** to low orbit and **395 kg** onto a free return. The
+warning is predictive rather than decorative: a 900 kg capsule with 150 kg of
+cargo is flagged *heavy for this stack*, and flying it returns
+`design_failed` with a perilune of 368,545 km.
+
+A bare `pod_mass` in a query string still flies exactly as it did, so saved
+runs and hand-written URLs are unaffected.
+
 Programmatic use:
 
 ```julia
@@ -1292,9 +1369,9 @@ authority and saturates in **0.11 s**. RCS at 26 N·m is also under the aero
 torque — and does not need to match it, because the capsule is
 aerodynamically stable in pitch and yaw and self-trims. Roll is the only axis
 with no restoring moment, so roll is the only axis worth spending propellant
-on. For the cruise, RCS spends 1.04 kg over 6.5 days against an 11 kg margin,
-so wheels would save about a kilogram while costing more than that in mass,
-plus RCS for desaturation anyway.
+on. For the cruise, RCS spends 0.25 kg over 6.6 days against a 5.2 kg tank,
+so wheels would save a quarter of a kilogram while costing more than that in
+mass, plus RCS for desaturation anyway.
 
 ### Verification
 

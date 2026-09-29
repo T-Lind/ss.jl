@@ -474,7 +474,7 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
     reached = false
     h_cut = NaN; gam_cut = NaN
     ev!(name) = begin
-        d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
+        d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0, atmosphere)
         push!(events, AscentEvent(name, t, d.h, d.vrel, x[7]))
         d
     end
@@ -489,7 +489,7 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
 
     while t < t_max
         # --- phase transitions ------------------------------------------------
-        d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
+        d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0, atmosphere)
         if ctx.phase === :vertical && d.vrel >= guid.v_pitchover
             ctx.phase = :kick; ctx.t_kick0 = t
             ev!(:pitchover)
@@ -546,12 +546,12 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
             # The inverse ellipsoid conversion is approximate; close the final
             # few metres explicitly so the logged state is on h = 0.
             for _ in 1:4
-                d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
+                d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0, atmosphere)
                 abs(d.h) < 1e-6 && break
                 rh = vunit((x[1], x[2], x[3]))
                 x[1] -= d.h * rh[1]; x[2] -= d.h * rh[2]; x[3] -= d.h * rh[3]
             end
-            d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
+            d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0, atmosphere)
             h_cut = 0.0; gam_cut = d.gamma
             ctx.burning = false; ctx.phase = :coast
             reached = false
@@ -672,13 +672,28 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
             dts = min(dts, stage_burn_time(b.stage) - (t - ctx.b_tign[i]))
         end
         dts = clamp(dts, 1e-6, dt)
+        m_before = x[7]
         _rk4_ascent!(xnew, x, t, dts, w, lv, guid, ctx, atmosphere, gravity, theta_g0)
         copyto!(x, xnew); t += dts
-        ctx.burning && ctx.stage >= 1 &&
-            (ctx.burned += thr_now * stage_mdot(lv.stages[ctx.stage]) * dts)
+        if ctx.burning && ctx.stage >= 1
+            # Bill the stage what actually left the tank. `thr_now` is the
+            # throttle at the START of the step; with the acceleration limiter
+            # engaged it falls as mass is consumed, so `thr_now * mdot * dt`
+            # over-bills and depletion fires while propellant is still aboard —
+            # a phantom mass the stage never actually carries away.
+            #
+            # With no boosters every kilogram the step removed is core
+            # propellant, so the integrator's own mass change is the exact
+            # figure. With boosters the limiter is disabled (`core_throttle`
+            # only limits when there are none) and the throttle is constant, so
+            # the rated rate is already exact.
+            ctx.burned += isempty(lv.boosters) ?
+                (m_before - x[7]) :
+                thr_now * stage_mdot(lv.stages[ctx.stage]) * dts
+        end
     end
     # final log point
-    d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0)
+    d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0, atmosphere)
     logrec!(d)
 
     r = (x[1], x[2], x[3]); v = (x[4], x[5], x[6])
@@ -686,7 +701,8 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
     AscentResult(L, events, r, v, x[7], t, el, prop_left, reached, h_cut, gam_cut)
 end
 
-function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0)
+function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0,
+                      atm::AbstractAtmosphere = USSA76())
     r = (x[1], x[2], x[3]); v = (x[4], x[5], x[6])
     theta = earth_rotation_angle(theta_g0, t)
     lat, lon, h = geodetic_from_ecef(rot_z(r, theta))
@@ -695,7 +711,10 @@ function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0
     Vr = vnorm(vrel)
     rho = 0.0; asnd = 300.0; pamb = 0.0
     if h < 150e3
-        rho, _, pamb, asnd = atmosphere_state(USSA76(), max(h, 0.0))
+        # The SAME model the dynamics integrate, not a hardcoded standard one:
+        # otherwise a dispersed ascent flies scaled air while its guidance,
+        # events, step-trim and logs are computed for standard air.
+        rho, _, pamb, asnd = atmosphere_state(atm, max(h, 0.0))
     end
     qbar = 0.5 * rho * Vr * Vr
     rhat = vunit(r)

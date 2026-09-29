@@ -186,6 +186,24 @@ end
     @test 180e3 < fast.elements.ra - RE_MEAN < 220e3
     @test sum(fast.prop_left) > sum(nominal.prop_left) + 100.0
 
+    # The acceleration limiter throttles *down* through a step as mass is
+    # consumed, so billing the stage the start-of-step rate over-billed and
+    # left unburned propellant riding into the next stage (6.7 kg on this
+    # stack). Separation mass must be exact for a throttled stack, not just
+    # for the unthrottled reference.
+    sepf = fast.events[findfirst(e -> e.name === :sep_sable1, fast.events)]
+    @test isapprox(sepf.m,
+                   liftoff_mass(scaled) - scaled.stages[1].mprop -
+                   scaled.stages[1].mdry; atol = 1e-6)
+
+    # A dispersed atmosphere must reach the guidance, events and logs, not only
+    # the derivative: `_ascent_data` used to hardcode USSA76, so a half-density
+    # ascent still logged standard-air dynamic pressure.
+    std = simulate_ascent(base, AscentGuidance())
+    thin = simulate_ascent(base, AscentGuidance();
+                           atmosphere = ScaledAtmosphere(USSA76(), 0.5))
+    @test maximum(thin.log.qbar) < 0.55 * maximum(std.log.qbar)
+
     heavy = LaunchVehicle(
         name = "underpowered heavy Sable",
         stages = [Stage(s.name, s.mdry, 2s.mprop, s.thrust_vac, s.isp_vac,
@@ -494,6 +512,20 @@ end
                    throttle_min = 1.0)
     d2 = powered_descent(stiff, (rpdi, 0.0, 0.0), (0.0, vpdi, 0.0), 9200.0)
     @test d2.outcome != :touchdown
+
+    # --- a clock exhaustion is a timeout, not a success --------------------
+    # Both descent loops used to return their success label if `t_max` ran
+    # out: the braking leg called a timeout a gate hit, the terminal phase
+    # called one a touchdown. A leg that neither reaches the gate nor
+    # contacts the ground must say so, or the shooter scores it as converged
+    # and the mission is booked as landed from mid-air.
+    timed = S._descent_leg(lander, (R_MOON + 3000.0, 0.0, 0.0), (0.0, 400.0, 0.0),
+                           9200.0, deg2rad_(10.0), 0.0; vh_gate = 0.0, t_max = 0.5)
+    @test timed.outcome === :timeout
+    midair = S.terminal_descent(lander, (R_MOON + 1000.0, 0.0, 0.0),
+                                (0.0, 0.0, 0.0), 9200.0;
+                                m_dry = 3500.0, t_max = 0.5)
+    @test midair.outcome === :timeout
 
     # --- the whole mission -------------------------------------------------
     lnd = default_lander()
@@ -899,17 +931,151 @@ end
         F = F .+ t.thrust .* t.dir
     end
     @test all(abs.(F) .< 1e-9)
-    # limit cycle: hand formula
-    lc = limit_cycle_prop(1000.0, 28.0, 220.0, 0.01, deg2rad_(5.0), 86400.0;
-                          nthr = 2, thrust = 10.0)
-    w = 28.0 * 0.01 / 1000.0
-    cycles = 86400.0 / (2 * deg2rad_(5.0) / w)
-    @test isapprox(lc, cycles * 2 * 10.0 / (9.80665 * 220.0) * 0.01; rtol = 1e-12)
+    # Limit cycle, checked against a DIRECTLY INTEGRATED one rather than
+    # against the closed form re-typed.
+    #
+    # This test used to restate `limit_cycle_prop`'s own expression, which
+    # made it an assertion that the code equals itself: it passed happily
+    # while the formula billed twice the propellant it should have. Stepping
+    # the actual limit cycle — coast at constant rate, fire at the deadband
+    # edge to reverse — is independent of how the closed form is written and
+    # would have caught it.
+    # Twenty days rather than one: the closed form is a rate, the integration
+    # counts whole pulses, and over a single day the 69th pulse landing inside
+    # or outside the window is a 0.4% disagreement all by itself. Long enough
+    # that pulse quantisation is below the tolerance, coarse enough to run in
+    # a second.
+    let I = 1000.0, T = 28.0, isp = 220.0, t_mib = 0.01,
+        th_db = deg2rad_(5.0), dur = 20 * 86400.0, F = 10.0
+        mdot = 2 * F / (9.80665 * isp)
+        theta, w, t, ontime = 0.0, T * t_mib / (2I), 0.0, 0.0
+        dt = 1.0
+        while t < dur
+            if abs(theta) >= th_db && sign(w) == sign(theta)
+                w -= sign(w) * T * t_mib / I      # one MIB pulse pair, impulsive
+                ontime += t_mib
+            end
+            theta += w * dt
+            t += dt
+        end
+        lc = limit_cycle_prop(I, T, isp, t_mib, th_db, dur; nthr = 2, thrust = F)
+        @test isapprox(lc, mdot * ontime; rtol = 3e-3)
+        # and the bug this replaced a self-referential test to catch: the old
+        # formula coasted at the full impulse bit instead of half of it
+        @test !isapprox(lc, 2 * mdot * ontime; rtol = 0.1)
+    end
+    # ...and the closed form still has to scale the way the physics does:
+    # propellant per unit time goes as t_mib^2 (impulse bit squared) and as
+    # 1/I, which is why the kick stage wants small thrusters and short pulses.
+    base = limit_cycle_prop(1000.0, 28.0, 220.0, 0.01, deg2rad_(5.0), 86400.0;
+                            nthr = 2, thrust = 10.0)
+    @test isapprox(limit_cycle_prop(1000.0, 28.0, 220.0, 0.02, deg2rad_(5.0),
+                                    86400.0; nthr = 2, thrust = 10.0),
+                   4 * base; rtol = 1e-12)
+    @test isapprox(limit_cycle_prop(4000.0, 28.0, 220.0, 0.01, deg2rad_(5.0),
+                                    86400.0; nthr = 2, thrust = 10.0),
+                   base / 4; rtol = 1e-12)
     # slew: bang-bang time
     p, ts = slew_prop(1000.0, 28.0, 220.0, 1.0 * pi)
     @test isapprox(ts, 2 * sqrt(pi * 1000.0 / 28.0); rtol = 1e-12)
     b = cruise_rcs_budget(default_kick_rcs(), 1000.0; duration = 20 * 86400.0)
     @test b.margin > 0                             # sized for the cruise
+
+    # --- the budget carries its events in time ----------------------------
+    # A slew is under a minute of firing. Drawn as part of a smooth ramp
+    # across a six-day cruise it says the opposite of what the model says, so
+    # the curve has to STEP.
+    bb = cruise_rcs_budget(default_kick_rcs(), 1000.0; duration = 6 * 86400.0,
+                           t_tli = 500.0, t_events = [500.0 + 2 * 86400.0])
+    @test bb.t[1] ≈ 500.0
+    @test bb.used[1] ≈ 0.0 atol = 1e-12
+    @test bb.used[end] ≈ bb.total rtol = 1e-9
+    @test issorted(bb.used)                        # nothing ever un-burns
+    d = diff(bb.used)
+    @test maximum(d) > 50 * minimum(d)             # steps, not a ramp
+    # one slew each end plus one per burn, and a settling burn per burn
+    @test bb.n_slews == 3
+    @test length(bb.events) == 4
+    @test count(e -> e.what == "ullage settling", bb.events) == 1
+    @test all(e -> 500.0 <= e.t <= 500.0 + 6 * 86400.0, bb.events)
+
+    # --- disturbance torque, and where it takes over ----------------------
+    # Momentum dumping is deadband-independent: it is set by how fast the
+    # environment pumps momentum in, not by how finely the response is chopped.
+    sys = default_kick_rcs()
+    T = torque_authority(sys)[3]
+    @test momentum_dump_prop(sys, T, 0.0, 1e4) == 0.0
+    @test isapprox(momentum_dump_prop(sys, T, 0.028, 1000.0),
+                   rcs_mdot(sys, 2) * 0.001 * 1000.0; rtol = 1e-12)
+    # gravity gradient falls off as 1/r^3
+    g1 = gravity_gradient_torque(MU_EARTH, RE_MEAN + 200e3, 4e4)
+    g2 = gravity_gradient_torque(MU_EARTH, 2 * (RE_MEAN + 200e3), 4e4)
+    @test isapprox(g1 / g2, 8.0; rtol = 1e-12)
+    # The environment falls away with altitude, and with it the share of the
+    # budget that is momentum dumping rather than deadband chatter. Which of
+    # the two actually governs at a given altitude also depends on control
+    # authority — raising torque cuts the dump term and raises the limit-cycle
+    # term — so what is asserted here is the trend, not a fixed crossover.
+    low  = orbit_rcs_budget(sys, 4e4, 3e3; duration = 6 * 3600.0, alt = 200e3,
+                            v = 7784.0, area = 2.5, body_length = 12.0,
+                            atmosphere = USSA76())
+    high = orbit_rcs_budget(sys, 4e4, 3e3; duration = 6 * 3600.0, alt = 35786e3,
+                            v = 3075.0, area = 2.5, body_length = 12.0,
+                            atmosphere = USSA76())
+    @test low.disturbance_torque > 100 * high.disturbance_torque
+    @test low.dump > 100 * high.dump
+    @test low.hold > high.hold
+    @test low.dump > low.limit_cycle                 # dumping governs down there
+    # the deadband term does not care about altitude at all, so the ratio is
+    # the whole of the difference
+    @test isapprox(low.limit_cycle, high.limit_cycle; rtol = 1e-12)
+    @test low.dump / low.limit_cycle > 100 * (high.dump / high.limit_cycle)
+    # up there it is pure gravity gradient: no atmosphere left to torque against
+    @test isapprox(high.disturbance_torque,
+                   gravity_gradient_torque(MU_EARTH, RE_MEAN + 35786e3, 4e4 - 3e3);
+                   rtol = 1e-9)
+
+    # --- hardware sized to the stack --------------------------------------
+    # The reference set is 12 x 10 N against a 12 kg tank. Held fixed it
+    # reports a Saturn V's cruise stack as unable to hold attitude.
+    small = sized_kick_rcs(400.0, 0.9, 520.0)
+    big   = sized_kick_rcs(2.0e6, 3.3, 60_000.0)
+    @test big.thrusters[1].thrust > 10 * small.thrusters[1].thrust
+    @test big.prop > 10 * small.prop
+    @test small.thrusters[1].thrust >= 5.0           # the buildable floor
+    # a 180 deg slew takes about the same time on both, which is the rule
+    for (s, I) in ((small, 400.0), (big, 2.0e6))
+        _, ts = slew_prop(I, torque_authority(s)[3], s.isp, 1.0 * pi;
+                          nthr = 2, thrust = s.thrusters[1].thrust)
+        @test ts <= SatelliteSim.SLEW_180_S * 1.01
+    end
+    @test cruise_rcs_budget(big, 2.0e6; duration = 6 * 86400.0).margin > 0
+end
+
+@testset "stack inertia" begin
+    # a single cylinder about its own centre
+    m, r, L = 1000.0, 1.0, 6.0
+    ir, it = stack_inertia(((m, r, L, 0.0),))
+    @test isapprox(ir, 0.5 * m * r^2; rtol = 1e-12)
+    @test isapprox(it, m * (3r^2 + L^2) / 12; rtol = 1e-12)
+    # two equal masses split apart: the parallel-axis term is m*d^2 each
+    ir2, it2 = stack_inertia(((500.0, 1.0, 2.0, -3.0), (500.0, 1.0, 2.0, 3.0)))
+    @test isapprox(it2, 2 * (500.0 * (3 + 4) / 12 + 500.0 * 9); rtol = 1e-12)
+    @test isapprox(ir2, 2 * 0.5 * 500.0; rtol = 1e-12)
+    @test stack_inertia(()) == (0.0, 0.0)
+
+    # the real thing: a bigger vehicle has more of it, and it is the term the
+    # attitude budget was blind to while it was pinned at 1000
+    lv = default_moon_rocket(payload = 350.0)
+    _, i_small = cruise_inertia(lv, 520.0, 1.2; payload_mass = 350.0)
+    _, i_heavy = cruise_inertia(lv, 2000.0, 2.4; payload_mass = 1500.0)
+    @test i_heavy > 3 * i_small
+    @test 50.0 < i_small < 5000.0                    # a half-tonne stack
+    # the tank does not shrink as it drains, so barrel length is set by the
+    # LOADED propellant — the mesh sizes the drawn barrels the same way
+    @test barrel_length(10_000.0, 1000.0, 2.0) >
+          barrel_length(1_000.0, 1000.0, 2.0)
+    @test isapprox(barrel_length(0.0, 1000.0, 2.0), 1.8; rtol = 1e-12)
 end
 
 @testset "6-DOF entry vs 4-DOF" begin

@@ -20,6 +20,10 @@ export const own = k =>
   k === 'nstages' || k === 'nboost' || k === 'vname' ||
   k === 'diameter' || k === 'fairing' || k === 'fairing_on' ||
   k === 'pod_mass' || k === 'pod_dia' || k === 'crewed' ||
+  // the payload is spacecraft + cargo, and all three keys describe the thing
+  // being flown rather than the flight — leave any of them out and the
+  // builder's payload silently reverts on the next page load
+  k === 'payload_kind' || k === 'bus_mass' || k === 'cargo_mass' ||
   k === 'kick_deg' || k === 'opt_kick' ||
   /^l_/.test(k) || /^s\d+_/.test(k) || /^b_/.test(k);
 

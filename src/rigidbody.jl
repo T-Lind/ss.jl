@@ -86,3 +86,32 @@ end
 
 "Body-frame angular momentum Iω."
 @inline ang_momentum(I::V3, w::V3) = (I[1]*w[1], I[2]*w[2], I[3]*w[3])
+
+"""
+    stack_inertia(bodies) -> (I_roll, I_transverse)
+
+Inertia [kg·m²] of a stack of coaxial uniform cylinders about the composite
+centre of mass. Each body is `(mass, radius, length, x_centre)`, with `x`
+measured along the shared axis in any common frame.
+
+    I_roll       = Σ ½·m·r²
+    I_transverse = Σ [ m·(3r² + L²)/12 + m·(x - x_cg)² ]
+
+The parallel-axis term is the whole reason this exists rather than a single
+cylinder: a capsule sitting on top of a kick stage contributes far more
+inertia by being two metres off the stack's centre of mass than it does by
+being a metre wide, and it is transverse inertia that sets what attitude
+control costs.
+"""
+function stack_inertia(bodies)
+    mt = sum(b[1] for b in bodies; init = 0.0)
+    mt > 0 || return (0.0, 0.0)
+    xc = sum(b[1] * b[4] for b in bodies) / mt
+    Ir = 0.0
+    It = 0.0
+    for (m, r, L, x) in bodies
+        Ir += 0.5 * m * r^2
+        It += m * (3 * r^2 + L^2) / 12 + m * (x - xc)^2
+    end
+    (Ir, It)
+end

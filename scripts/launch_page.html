@@ -1,9 +1,8 @@
 <!doctype html>
 <!-- Cinematic mission experience: a raw-WebGL scene flown directly from the
      simulator's logs, pad to splashdown. Served by scripts/panel.jl at
-     /launch; query-string parameters are forwarded to /api/run and
-     /api/geometry, so the panel's "launch view" chip replays exactly the
-     configured mission.
+     /launch; a run id fetches the exact stored trajectory, while a bare
+     configuration is never treated as permission to simulate.
 
      Everything is procedural and self-contained: vehicle mesh from
      rocket_mesh via the API, a full launch complex — hardstand, flame
@@ -1384,8 +1383,8 @@ function lathe(out, prof, nseg, colFn) {
 //   ?run=<id>   a flight already flown, fetched from the server's run store.
 //               The normal case, and the only one that guarantees you are
 //               watching the same flight mission control just showed you.
-//   ?pod_mass=… a configuration, which is flown here. Bare links and the
-//               selftest below.
+//   ?pod_mass=… a configuration without a trajectory. It is shown as pending
+//               and must be flown from mission control's Run button.
 //   nothing     nothing has been flown. Say so — see `showEmpty`.
 const RUN_ID = new URLSearchParams(location.search).get('run');
 const qs = (() => {
@@ -1547,6 +1546,37 @@ function buildData() {
             x: C.x.map(v => v*1e6), y: C.y.map(v => v*1e6), z: C.z.map(v => v*1e6),
             mx: C.mx.map(v => v*1e6), my: C.my.map(v => v*1e6),
             mz: C.mz.map(v => v*1e6), nrm: V.norm(C.n) };
+    // A landing run's `cis` log stops at LOI. The parking orbit and the descent
+    // ellipse that follow are in `run.moon.orbit`, Moon-centred inertial, and
+    // were never read here — so during the LUNAR ORBIT and DESCENT ORBIT phases
+    // `cisState` clamped to the last sample, its finite-difference velocity
+    // became exactly zero, and `orthoFrame` on a zero vector collapsed the
+    // whole stack onto a line. Append the orbit to the Earth-centred track
+    // (Moon position continued on the circular ephemeris the server flies) so
+    // those phases show the vehicle going around the Moon.
+    const O = run.moon && run.moon.orbit;
+    if (O && O.t && O.t.length > 2 && CIS.n > 2) {
+      const k = CIS.n;
+      const m0 = [CIS.mx[k-1], CIS.my[k-1], CIS.mz[k-1]];
+      const m1 = [CIS.mx[k-2], CIS.my[k-2], CIS.mz[k-2]];
+      const dtm = (CIS.t[k-1] - CIS.t[k-2]) || 1;
+      // omega = m x mdot / |m|^2, the Moon's angular velocity vector
+      const om = V.scale(V.cross(m0, V.scale(V.sub(m0, m1), 1/dtm)),
+                         1/V.dot(m0, m0));
+      const w = V.len(om), kh = w > 1e-12 ? V.scale(om, 1/w) : [0, 0, 1];
+      const tEndCis = CIS.t[k-1];
+      for (let i = 0; i < O.t.length; i++) {
+        if (O.t[i] <= tEndCis + 1e-6) continue;    // overlaps the cis log
+        const th = w * (O.t[i] - tEndCis);         // m sits in the orbit plane
+        const moon = V.add(V.scale(m0, Math.cos(th)),
+                           V.scale(V.cross(kh, m0), Math.sin(th)));
+        const pos = V.add(moon, [O.x[i]*1e3, O.y[i]*1e3, O.z[i]*1e3]);
+        CIS.t.push(O.t[i]);
+        CIS.x.push(pos[0]); CIS.y.push(pos[1]); CIS.z.push(pos[2]);
+        CIS.mx.push(moon[0]); CIS.my.push(moon[1]); CIS.mz.push(moon[2]);
+      }
+      CIS.n = CIS.t.length;
+    }
   }
 
   // entry profile: downrange integrated from h/v, positioned so splashdown
@@ -7343,8 +7373,15 @@ function segX(t, w) {
 }
 function drawSeek() {
   const ctx = seekCv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
   const w = seekCv.clientWidth, h = 18;
-  if (seekCv.width !== w) { seekCv.width = w; seekCv.height = h; }
+  // Backing store in device pixels, drawing in CSS pixels: without this the
+  // seek bar is upscaled from a 1x buffer and every phase label is soft on a
+  // HiDPI display, unlike the main canvas which already scales.
+  if (seekCv.width !== Math.round(w*dpr) || seekCv.height !== Math.round(h*dpr)) {
+    seekCv.width = Math.round(w*dpr); seekCv.height = Math.round(h*dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   const np = PH.length, sw = w/np;
   for (let i = 0; i < np; i++) {
@@ -9198,32 +9235,16 @@ function step(msg) {
 
 async function boot() {
   try {
-    if (RUN_ID) {
-      // A stored run is a lookup, so there is nothing to overlap it with —
-      // and the vehicle to draw is the one the run recorded, which is only
-      // known once it lands. Re-flying instead was the old behaviour, and it
-      // meant this view could show a subtly different flight from the one
-      // whose numbers you had just read.
-      run = await runs.get(RUN_ID);
-      await step('building the vehicle…');
-      geo = api.expect(
-        await api.post('/api/geometry',
-                       new URLSearchParams(run.params || {}).toString()),
-        'geometry');
-    } else {
-      // both in flight at once, but validated in order: transport-level `post`
-      // keeps the mission's error the one you see when both legs fail, which
-      // api.run/api.geometry could not promise — Promise.all rejects with
-      // whichever settled first, and "geometry failed" for an unflyable vehicle
-      // sends you to the builder to fix a stack that was never the problem
-      const [r, g] = await Promise.all([
-        api.post('/api/run', qs, { onProgress: p => {
-          if (p && p.detail) $('ov_sub').textContent = p.detail;
-        }}),
-        api.post('/api/geometry', qs)]);
-      run = api.expect(r, 'mission');
-      geo = api.expect(g, 'geometry');
-    }
+    if (!RUN_ID) throw new Error('no trajectory has been selected');
+    // A stored run is a lookup, so there is nothing to overlap it with — and
+    // the vehicle to draw is the one the run recorded, which is only known
+    // once it lands. A configuration URL is deliberately not a run request.
+    run = await runs.get(RUN_ID);
+    await step('building the vehicle…');
+    geo = api.expect(
+      await api.post('/api/geometry',
+                     new URLSearchParams(run.params || {}).toString()),
+      'geometry');
     VEHNAME = vehName(geo.name);
     $('ov_title').textContent = VEHNAME;
     document.title = VEHNAME + ' — mission';
@@ -9335,10 +9356,11 @@ async function boot() {
  * seconds of simulation nobody asked for and a lie about what you are
  * watching. Now it says what it needs and hands over the runs that exist.
  */
-async function showEmpty() {
+async function showEmpty(configured=false) {
   $('ov_title').textContent = 'NO TRAJECTORY';
-  $('ov_sub').textContent =
-    'the launch view flies a mission that has already been designed';
+  $('ov_sub').textContent = configured
+    ? 'configuration changed — run the mission before opening its launch view'
+    : 'the launch view plays a mission that has already been designed';
   const list = await runs.list();
   const body = $('ov_body');
   if (list.length) {
@@ -9373,8 +9395,10 @@ if (!RUN_ID && !qs) {
     if (list.length) location.replace('/launch?run=' + encodeURIComponent(list[0].id));
     else showEmpty();      // nothing has ever been flown
   });
-} else {
+} else if (RUN_ID) {
   boot().then(ok => { if (ok && SELFTEST_REQUESTED) window.__selftest(); });
+} else {
+  showEmpty(true);
 }
 requestAnimationFrame(frame);
 </script>

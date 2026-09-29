@@ -210,6 +210,12 @@ function moonshot(; pod_mass::Float64 = 350.0,
     # a supplied launch vehicle wins; its payload IS the pod
     lv === nothing && (lv = default_moon_rocket(payload = pod_mass))
     pod_mass = lv.payload_mass
+    # Resolved here rather than in the signature because `lv` may have just
+    # replaced pod_mass, and the fit has to see the mass actually being flown.
+    # It is needed before the entry handoff now: the cruise attitude budget
+    # sizes the stack's inertia from it.
+    pod_d = isfinite(pod_diameter) && pod_diameter > 0 ?
+            pod_diameter : 2 * pod_radius(pod_mass)
     des = translunar_design(lv; h_park = h_park, hp_moon = hp_moon,
                             hp_return = hp_return, inclination = inclination,
                             kick_angle = kick_angle, optimize_kick = optimize_kick,
@@ -270,18 +276,23 @@ function moonshot(; pod_mass::Float64 = 350.0,
             return MoonshotResult(lv, guid, asc, eph, cis_d, nothing, nothing, nothing, dstatus)
         end
         tcm_prop = cis_d.m * (exp(tcm_dv / (G0 * kick.isp_vac)) - 1)
-        rcs_budget = cruise_rcs_budget(default_kick_rcs(), 1000.0;
-                                       duration = cis_d.t - cis_d.t_tli)
+        # The cruise stack is the kick stage with the payload on its nose, and
+        # its transverse inertia is what attitude control is actually paid
+        # against — see `cruise_inertia`, which this used to bypass with a flat
+        # 1000 kg·m².
+        _, I_t = cruise_inertia(lv, cis_d.m, pod_d; payload_mass = pod_mass)
+        rcs_sys = sized_kick_rcs(I_t, stage_diameter(kick, core_diameter(lv)) / 2,
+                                 cis_d.m)
+        rcs_budget = cruise_rcs_budget(rcs_sys, I_t;
+                                       duration = cis_d.t - cis_d.t_tli,
+                                       t_tli = cis_d.t_tli,
+                                       t_events = [cis_d.t_tli + tcm_delay])
         cruise = CruiseReport(tli_mag_err, tli_point_err, tcm_dv,
                               cis_d.t_tli + tcm_delay, tcm_prop, rcs_budget)
         cis = cis_d
     end
 
     # --- 4. entry handoff: jettison the spent kick stage, fly the pod ------
-    # resolved here rather than in the signature because `lv` may have replaced
-    # pod_mass above, and the fit has to see the mass actually being flown
-    pod_d = isfinite(pod_diameter) && pod_diameter > 0 ?
-            pod_diameter : 2 * pod_radius(pod_mass)
     pod = default_reentry_pod(mass = pod_mass, diameter = pod_d)
     scn = Scenario(vehicle = pod, r0 = cis.r, v0 = cis.v,
                    t0 = cis.t, t_max = cis.t + 3.0e4, theta_g0 = theta_g0,

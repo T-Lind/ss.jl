@@ -198,7 +198,7 @@ export
     stage_thrust, stage_mdot, booster_mass, booster_thrust, booster_mdot,
     frontal_area, core_diameter, pad_thrust,
     stage_burn_time, stage_dv, liftoff_mass, stack_mass_above,
-    stage_volume, stage_diameter,
+    stage_volume, stage_diameter, barrel_length, stage_length, cruise_inertia,
     LV_CD_TABLE, LV_CD_BARE_DELTA, bare_payload_cd, stack_sref,
     # moon
     MU_MOON, R_MOON, A_MOON, N_MOON,
@@ -214,11 +214,12 @@ export
     launch_window, next_launch_window, site_geocentric_lat,
     # rigid body / attitude
     Quat, qmul, qconj, qnormalize, qrotate, qrotate_inv, quat_axis_angle,
-    quat_from_to, qdot, euler_wdot, rot_energy, ang_momentum,
+    quat_from_to, qdot, euler_wdot, rot_energy, ang_momentum, stack_inertia,
     # rcs
     RCSThruster, RCSystem, thruster_torque, torque_authority, rate_damp_command,
-    limit_cycle_prop, slew_prop, cruise_rcs_budget,
-    default_pod_rcs, default_kick_rcs, rcs_mdot,
+    limit_cycle_prop, slew_prop, rcs_budget, cruise_rcs_budget, orbit_rcs_budget,
+    gravity_gradient_torque, aero_torque, momentum_dump_prop,
+    default_pod_rcs, default_kick_rcs, sized_kick_rcs, rcs_mdot,
     # 6-DOF entry
     Entry6Result, Entry6Log, simulate_entry6,
     # earth orbit

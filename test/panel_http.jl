@@ -267,6 +267,13 @@ end
         @test occursin("<html", lowercase(bod))
         @test occursin("/static/charts.js", bod)
         @test occursin("/static/metrics.js", bod)
+        for id in ("c_asc_mach", "c_asc_gamma", "c_asc_mass", "c_asc_path",
+                   "c_coast_v", "c_energy", "c_lunar", "c_ent_qbar",
+                   "c_ent_alpha", "c_ent_heat", "c_ent_wall", "c_ent_range",
+                   "c_rcs_remaining", "c_rcs_rate", "c_desc_mass", "c_desc_nav")
+            @test occursin("id=\"$id\"", bod)
+        end
+        @test occursin("drag to pan", bod)
         st, hdrs, bod = http("GET", "/analysis?mode=landing&nstages=3"; port = port)
         @test st == 200
         # a near-miss must not be served the page — /analysisx is not a route
@@ -280,7 +287,19 @@ end
         @test st == 200
         @test occursin("/analysis", bod)
         @test !occursin("id=\"c_asc_h\"", bod)
+        # Only the main Run button and the stale-result banner may invoke the
+        # simulator. Presets, mode/orbit controls and keyboard shortcuts merely
+        # invalidate the result currently on screen.
+        @test length(collect(eachmatch(r"doRun\(\);", bod))) == 2
+        @test !occursin("kbd\" style=\"margin-left:6px\">R", bod)
         @test !occursin("id=\"sweepchart\"", bod)
+
+        # Configuration URLs are context, not permission to run. The launch
+        # view used to POST /api/run merely by opening a builder link.
+        st, hdrs, launch = http("GET", "/launch?mode=orbit&orbit=leo"; port = port)
+        @test st == 200
+        @test !occursin("api.post('/api/run'", launch)
+        @test occursin("showEmpty(true)", launch)
 
         # --- navigation must not depend on opening a window -----------------
         # v0.3.1 shipped with `target="_blank"` on the analysis and launch-view
@@ -424,8 +443,29 @@ end
         @test occursin("\"stage\":\"complete\"", prog)
         @test occursin("\"done\":true", prog)
 
+        # --- the staleness guard has to be told about new controls ----------
+        #
+        # The builder compares the controls it offers (its `NEEDS` list)
+        # against what the server says it understands (`features`) and warns
+        # when the running process is older than the page. That guard only
+        # works if the two lists are kept in step, and NOTHING checked that
+        # they were — so adding a control and forgetting the manifest raised
+        # a red banner on a server that was in fact perfectly current.
+        #
+        # Parsed out of the page rather than restated here: a copy of the list
+        # in this file would drift from the page exactly as the manifest did.
+        st, hdrs, cat = http("GET", "/api/catalogue"; port = port)
+        st, hdrs, page = http("GET", "/build"; port = port)
+        m = match(r"const NEEDS = \[(.*?)\];"s, page)
+        @test m !== nothing
+        needs = [String(x.captures[1]) for x in eachmatch(r"'([^']+)'", m.captures[1])]
+        @test length(needs) >= 7
+        for f in needs
+            @test occursin("\"$f\"", cat)
+        end
+
         # --- Earth-orbit missions -------------------------------------------
-        st, hdrs, bod = http("GET", "/api/catalogue"; port = port)
+        bod = cat
         @test occursin("\"orbits\"", bod)
         @test occursin("molniya", bod)
         st, hdrs, bod = http("POST", "/api/run";
@@ -472,12 +512,17 @@ end
         # with the wrong media type is refused by the browser outright, and
         # the console blames CORS, so the content type is asserted.
         for name in ("fmt.js", "api.js", "vehicle.js", "selftest.js",
-                     "charts.js", "groundtrack.js", "metrics.js")
+                     "charts.js", "groundtrack.js", "groundstation.js", "metrics.js")
             st, hdrs, bod = http("GET", "/static/$name"; port = port)
             @test st == 200
             @test hdrs["content-type"] == "text/javascript; charset=utf-8"
             @test occursin("export", bod)
         end
+        st, hdrs, bod = http("GET", "/static/ne_110m_admin_0_countries.geojson";
+                             port = port)
+        @test st == 200
+        @test hdrs["content-type"] == "application/geo+json; charset=utf-8"
+        @test occursin("FeatureCollection", bod)
 
         # `limit` is the only thing that colours a metric anywhere in the app,
         # and `drawLine` the only thing that draws a chart. Both were private
@@ -488,6 +533,10 @@ end
         @test occursin("prop_margin_kg", bod)
         st, hdrs, bod = http("GET", "/static/charts.js"; port = port)
         @test occursin("export function drawLine", bod)
+        for capability in ("pointerdown", "zoomView", "Export plotted data",
+                           "text/csv", "toBlob", "_view")
+            @test occursin(capability, bod)
+        end
 
         # The console language. A stylesheet served as the wrong media type is
         # dropped as silently as a module is, and the page still renders —
@@ -690,9 +739,60 @@ end
                              body = "mode=flyby&pod_mass=350")
         @test occursin("\"outcome\":\"nominal\"", bod)
         @test occursin("\"splashdown\"", bod)
+        @test occursin("\"rcs\":", bod)
+        @test num(bod, "rcs_used_kg") > 0
+        @test num(bod, "rcs_margin_kg") > 0
+        for field in ("alpha", "qrate", "qbar", "mach", "heat", "twall")
+            @test occursin("\"$field\":", bod)
+        end
         @test !occursin("\"t_days\":null", bod)
         @test isfinite(num(bod, "t_days")) && num(bod, "t_days") > 1.0
         @test 4.0 < num(bod, "peak_g") < 9.0
+
+        # --- the payload is a spacecraft plus its cargo -----------------------
+        #
+        # It was one number doing three jobs: what the launcher lifts, what
+        # re-enters, and what the capsule's size is fitted from. One number
+        # cannot be a spacecraft AND its cargo, which is why the reference
+        # vehicle sat at a "350 kg capsule" — lighter than anything anyone has
+        # ever flown a person in.
+        #
+        # A bare `pod_mass` still has to fly exactly as it did, because saved
+        # runs and hand-written URLs carry it.
+        legacy = http("POST", "/api/run"; port = port, timeout = 300.0,
+                      body = "mode=flyby&pod_mass=350")[3]
+        split_ = http("POST", "/api/run"; port = port, timeout = 300.0,
+                      body = "mode=flyby&payload_kind=bus&bus_mass=200&cargo_mass=150")[3]
+        @test isapprox(num(legacy, "liftoff_t"), num(split_, "liftoff_t"); rtol = 1e-9)
+
+        # cargo is really carried: drop it and the stack gets lighter
+        nocargo = http("POST", "/api/run"; port = port, timeout = 300.0,
+                       body = "mode=flyby&payload_kind=bus&bus_mass=200&cargo_mass=0")[3]
+        @test num(nocargo, "liftoff_t") < num(split_, "liftoff_t")
+        # ...and it re-enters INSIDE the spacecraft's envelope rather than
+        # widening it, so it raises the ballistic coefficient and the heating
+        @test num(nocargo, "peak_q_wcm2") < num(split_, "peak_q_wcm2")
+
+        # the geometry endpoint reports the composition, not just the lump
+        st, hdrs, bod = http("POST", "/api/geometry"; port = port,
+            body = "payload_kind=bus&bus_mass=200&cargo_mass=150")
+        @test st == 200
+        @test isapprox(num(bod, "spacecraft_kg"), 200.0; rtol = 1e-9)
+        @test isapprox(num(bod, "cargo_kg"), 150.0; rtol = 1e-9)
+        @test isapprox(num(bod, "mass_kg"), 350.0; rtol = 1e-9)
+        @test occursin("\"kind\":\"bus\"", bod)
+        # a bus has nobody in it whatever the crewed box says
+        st, hdrs, bod = http("POST", "/api/geometry"; port = port,
+            body = "payload_kind=bus&bus_mass=200&crewed=1")
+        @test occursin("\"crewed\":false", bod)
+
+        # --- the attitude budget answers to the vehicle -----------------------
+        # It used to be bit-identical for every stack: inertia was pinned at
+        # 1000 kg m^2 and the hardware at one fixed 12 kg tank, so the only
+        # input that reached it was how long the coast lasted.
+        heavy = http("POST", "/api/run"; port = port, timeout = 300.0,
+                     body = "mode=flyby&payload_kind=bus&bus_mass=200&cargo_mass=40")[3]
+        @test num(heavy, "rcs_used_kg") != num(split_, "rcs_used_kg")
 
         # --- a design that never converged is not a flyby ---------------------
         # The corrector emits "free-return design stalled" and "did not fully

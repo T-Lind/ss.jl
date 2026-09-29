@@ -258,9 +258,68 @@ end
 The capsule's diameter [m]: whatever the form states, or the mass fit when it
 states nothing. Zero and blank both mean "work it out", so an untouched form
 behaves exactly as it did before the field existed.
+
+Fitted from the SPACECRAFT's mass, not the total payload: a capsule's size is
+set by the vehicle, not by how much cargo is stowed in it. Loading cargo
+therefore raises the ballistic coefficient inside a fixed envelope, which is
+what loading cargo actually does.
 """
-pod_diameter(p, pod_mass) =
-    (d = getf(p, "pod_dia", 0.0); d > 0 ? d : 2 * pod_radius(pod_mass))
+pod_diameter(p, spacecraft_kg) =
+    (d = getf(p, "pod_dia", 0.0); d > 0 ? d : 2 * pod_radius(spacecraft_kg))
+
+# ------------------------------------------------------------- the payload --
+#
+# "Payload" was one number, `pod_mass`, doing three jobs: the mass the launch
+# vehicle lifts, the mass that re-enters, and the mass the capsule's size is
+# fitted from. That conflation is why the reference vehicle sat at 350 kg —
+# a figure that is a sensible free-return payload for this stack (it can throw
+# 395 kg onto a free return) and an absurd one for low orbit (it can lift
+# 1,951 kg there). One number cannot be both a spacecraft and its cargo.
+#
+# It is now two, and they compose:
+#
+#   payload = spacecraft + cargo
+#
+# The spacecraft is either a CAPSULE — a crew or cargo vehicle that comes home
+# behind a heat shield, at the real masses in the builder's preset list — or a
+# BUS: the probe core, the avionics and flight computers, power, comms and
+# structure that any uncrewed payload needs before it carries anything useful.
+# Cargo is the rest: the brick.
+
+"Is this payload an uncrewed bus rather than a capsule?"
+payload_is_bus(p) = gets(p, "payload_kind", "capsule") == "bus"
+
+"""
+Default dry mass [kg] of an uncrewed bus — probe core, flight computers,
+power, comms, harness and structure.
+
+200 kg is a small-but-real interplanetary-class bus: comparable to the dry
+spacecraft under a modest planetary instrument suite, and well above a
+cubesat's. It is a floor with a purpose — the previous model let "payload"
+fall to a few tens of kilograms with no vehicle around it, which is a mass
+that cannot point itself, talk home, or keep warm.
+"""
+const BUS_MASS_DEFAULT = 200.0
+
+"""
+Dry mass [kg] of the spacecraft itself: the capsule, or the bus's probe core.
+This is what `pod_diameter` fits an envelope to.
+"""
+spacecraft_mass(p) = max(payload_is_bus(p) ?
+                         getf(p, "bus_mass", BUS_MASS_DEFAULT) :
+                         getf(p, "pod_mass", 350.0), 0.0)
+
+"Additional mass [kg] carried alongside the spacecraft — cargo, the brick."
+cargo_mass(p) = max(getf(p, "cargo_mass", 0.0), 0.0)
+
+"""
+What the launch vehicle actually lifts [kg]: spacecraft plus cargo.
+
+Every mission mode takes its payload from here, so cargo is not decoration —
+it is carried up the whole ascent, it eats the kick stage's margin, and it
+re-enters with the spacecraft.
+"""
+payload_total(p) = spacecraft_mass(p) + cargo_mass(p)
 
 """
     stage_slug(vname) -> String
@@ -305,12 +364,14 @@ function lv_from_params(p)
     # the nose (so a blunt capsule sets the wave drag), and if the capsule is
     # wider than anything under it, it is what the flow sees.
     fair = getb(p, "fairing_on", true)
-    pod = getf(p, "pod_mass", 350.0)
+    # The stack lifts spacecraft AND cargo; the envelope is fitted to the
+    # spacecraft alone. See `payload_total`.
+    pod = payload_total(p)
     # A stated capsule diameter wins over the mass fit, here as well as in the
     # mesh — the number the flow sees and the number that is drawn have to be
     # the same number, or a bare Orion flies the drag of a capsule two metres
     # narrower than the one on the screen.
-    pod_d = pod_diameter(p, pod)
+    pod_d = pod_diameter(p, spacecraft_mass(p))
     sref = stack_sref((stage_diameter(s, dia) for s in stages), pod_d, fair)
     LaunchVehicle(
         # the page sends the name of whatever preset is loaded, so the livery
@@ -426,10 +487,13 @@ function scene_payload(asc, cis)
                                                      (L.mx[k], L.my[k], L.mz[k])))
         idx = flyby_idx(L, 1600)
         px = Float64[]; py = Float64[]; pz = Float64[]
+        vx = Float64[]; vy = Float64[]; vz = Float64[]; dm = Float64[]
         mx = Float64[]; my = Float64[]; mz = Float64[]
         tt = Float64[]; pp = Int[]; lat = Float64[]; lon = Float64[]
         for i in idx
             push!(px, L.rx[i] / 1e6); push!(py, L.ry[i] / 1e6); push!(pz, L.rz[i] / 1e6)
+            push!(vx, L.vx[i] / 1e3); push!(vy, L.vy[i] / 1e3); push!(vz, L.vz[i] / 1e3)
+            push!(dm, L.d_moon[i] / 1e6)
             push!(mx, L.mx[i] / 1e6); push!(my, L.my[i] / 1e6); push!(mz, L.mz[i] / 1e6)
             push!(tt, L.t[i]); push!(pp, L.phase[i])
             # Ground track in the same rotating-Earth convention as the
@@ -441,6 +505,7 @@ function scene_payload(asc, cis)
             push!(lat, rad2deg_(la)); push!(lon, rad2deg_(lo))
         end
         cisd = Dict("t" => tt, "x" => px, "y" => py, "z" => pz,
+                    "vx" => vx, "vy" => vy, "vz" => vz, "dm" => dm,
                     "mx" => mx, "my" => my, "mz" => mz, "ph" => pp,
                     "lat" => lat, "lon" => lon,
                     "n" => [nrm[1], nrm[2], nrm[3]])
@@ -466,7 +531,86 @@ function scene_payload(asc, cis)
 end
 
 """
-    descent_local(ls) -> Dict
+    rcs_payload(b) -> Dict
+
+Serialize an `rcs_budget` for the client.
+
+This used to compute the budget AND fabricate its history: every component
+was multiplied by the same 0→1 ramp, which drew four discrete slews — three
+quarters of a cislunar budget, and under a minute of firing each — as a smooth
+accumulation across six days. The physics now lives in `src/rcs.jl` and
+carries its own event times; this function only translates.
+"""
+rcs_payload(b) = Dict{String,Any}(
+    "t" => b.t,
+    "used" => b.used,
+    "remaining" => b.capacity .- b.used,
+    "limit_cycle" => b.limit_cycle,
+    "dump" => b.dump,
+    "hold" => b.hold,
+    "slews" => b.slews,
+    "settling" => b.settling,
+    "total" => b.total,
+    "margin" => b.margin,
+    "capacity" => b.capacity,
+    "n_slews" => b.n_slews,
+    "slew_s" => b.slew_time,
+    "disturbance_nm" => b.disturbance_torque,
+    "events" => [Dict{String,Any}("t" => e.t, "kg" => e.kg, "what" => e.what)
+                 for e in b.events],
+    "model" => "analytic attitude budget: continuous deadband hold (or " *
+               "disturbance-momentum dumping, whichever governs) plus discrete " *
+               "slews and ullage settling at their own epochs. Individual " *
+               "valve pulses are not resolved.",
+)
+
+"Axial length [m] of the coasting stack — kick stage plus the payload on it."
+cruise_body_length(lv, pod_d) =
+    stage_length(lv.stages[end], core_diameter(lv)) + pod_d
+
+"""
+The cislunar cruise budget for a flown mission: inertia from the real stack,
+and the mid-course correction (when there was one) as the ignition to settle
+propellant for.
+"""
+function cruise_budget(lv, cis, pod_m, pod_d; t_events = Float64[])
+    _, I_t = cruise_inertia(lv, cis.m, pod_d; payload_mass = pod_m)
+    sys = sized_kick_rcs(I_t, stage_diameter(lv.stages[end], core_diameter(lv)) / 2,
+                         cis.m)
+    cruise_rcs_budget(sys, I_t;
+                      duration = max(cis.t - cis.t_tli, 0.0),
+                      t_tli = cis.t_tli, t_events = t_events)
+end
+
+"""
+The Earth-orbit budget, which is a different problem from the cruise one.
+
+Out past the Moon nothing torques the stack and the tank pays only for
+deadband chatter. In low orbit gravity gradient and residual drag pump
+momentum in continuously, and dumping it is the entire budget — so this hands
+`orbit_rcs_budget` the altitude, speed and frontal area it needs to work out
+what the environment is actually doing, and lets the burn list say when the
+vehicle re-points and settles.
+"""
+function orbit_budget(lv, eo, asc, pod_m, pod_d)
+    I_r, I_t = cruise_inertia(lv, eo.m, pod_d; payload_mass = pod_m)
+    sys = sized_kick_rcs(I_t, stage_diameter(lv.stages[end], core_diameter(lv)) / 2,
+                         eo.m)
+    el = eo.elements
+    a = el.a > 0 ? el.a : (el.rp + el.ra) / 2
+    orbit_rcs_budget(sys, I_t, I_r;
+                     duration = max(eo.t - asc.t, 0.0),
+                     t0 = asc.t,
+                     t_burns = Float64[b.t_ign for b in eo.burns],
+                     alt = max(a - RE_MEAN, 0.0),
+                     v = sqrt(MU_EARTH / max(a, 1.0)),
+                     area = lv.sref,
+                     body_length = cruise_body_length(lv, pod_d),
+                     atmosphere = USSA76())
+end
+
+"""
+    descent_local(ls, idx = eachindex(ls.descent.log.t)) -> Dict
 
 The powered descent in a frame anchored at the touchdown point: `lx` metres of
 surface arc along the direction of travel (negative before touchdown, zero at
@@ -475,11 +619,12 @@ Moon-fixed basis at the site, so the viewer can rebuild the *same* terrain the
 descent was flown over — the surface is a pure function of direction, and this
 is the direction.
 
-Anchoring at touchdown rather than at ignition is what makes the view work:
-the interesting part of a descent is the last kilometre, and a frame pinned
-250 km upstream puts it at the far end of a float.
+`idx` selects the samples: these arrays are read against the *decimated*
+`descent.t` the payload also sends, so sampling them on the full log put the
+lander at the wrong place (and short of touchdown) once the descent exceeded
+the decimation cap.
 """
-function descent_local(ls)
+function descent_local(ls, idx = eachindex(ls.descent.log.t))
     S = SatelliteSim
     eph = ls.eph
     D = ls.descent.log
@@ -493,7 +638,7 @@ function descent_local(ls)
     ed = S.vunit(S.vcross(hf, utd))          # direction of travel
     ec = S.vcross(ed, utd)                   # crossrange, right-handed with up
     lx = Float64[]; ly = Float64[]; lz = Float64[]
-    for i in eachindex(D.t)
+    for i in idx
         r = (D.x[i], D.y[i], D.z[i])
         uf = S.vunit(moonfixed(r, ls.t_pdi + D.t[i], eph))
         b = asin(clamp(S.vdot(uf, ec), -1.0, 1.0))
@@ -578,6 +723,11 @@ function panel_landing(p)::Dict{String,Any}
                        "t" => ls.t_touchdown))
 
     prop_margin = cis.m - (ls.lv.stages[end].mdry + ls.lv.payload_mass)
+    # LOI and DOI are main-engine ignitions on the far side of the cruise, so
+    # they are what the coast slews toward and settles propellant for.
+    rcs = rcs_payload(cruise_budget(ls.lv, cis, ls.lv.payload_mass,
+                                    lander_from_params(p).diameter;
+                                    t_events = [ls.t_loi, ls.t_doi]))
     Dict{String,Any}(
         "ok" => true, "mode" => "landing",
         "metrics" => Dict(
@@ -590,6 +740,8 @@ function panel_landing(p)::Dict{String,Any}
             "tli_dv" => cis.dv_tli,
             "tli_burn_s" => cis.burn_duration,
             "prop_margin_kg" => prop_margin,
+            "rcs_used_kg" => rcs["used"][end],
+            "rcs_margin_kg" => rcs["remaining"][end],
             "lander_wet_t" => lander_mass(lander) / 1e3,
             "lander_dv" => lander_dv(lander),
             "perilune_km" => cis.perilune_alt / 1e3,
@@ -621,6 +773,7 @@ function panel_landing(p)::Dict{String,Any}
             "t_days" => ls.t_touchdown / 86400,
         ),
         "cis" => sc.cis, "asc3d" => sc.asc3d, "ascent" => sc.ascent,
+        "rcs" => rcs,
         # no entry leg on a landing mission; the client draws whatever is here
         "ent3d" => Dict("t" => Float64[], "x" => Float64[], "y" => Float64[],
                         "z" => Float64[]),
@@ -648,7 +801,7 @@ function panel_landing(p)::Dict{String,Any}
             "elev" => [D.elev[i] for i in didx],
             "navdh" => [D.nav_dh[i] for i in didx],
             "m" => [D.m[i] for i in didx]),
-        "site" => merge(descent_local(ls),
+        "site" => merge(descent_local(ls, didx),
                         Dict("terrain" => terrain_payload(terr),
                              "diameter" => ls.lander.diameter,
                              "t_pdi" => ls.t_pdi, "t_gate" => ls.t_pdi + d.t_gate,
@@ -685,8 +838,15 @@ function entry_payload!(out, metrics, events, ent)
     out["entry"] = Dict("t" => deci(EL.t[eidx] .- EL.t[1], 500),
                         "h" => deci(EL.h[eidx] ./ 1e3, 500),
                         "v" => deci(EL.vrel[eidx], 500),
+                        "mach" => deci(EL.mach[eidx], 500),
+                        "qbar" => deci(EL.qbar[eidx] ./ 1e3, 500),
                         "g" => deci(EL.gload[eidx], 500),
+                        "alpha" => rad2deg_.(deci(EL.alpha[eidx], 500)),
+                        "qrate" => rad2deg_.(deci(EL.qrate[eidx], 500)),
+                        "rho" => deci(EL.rho[eidx], 500),
                         "q" => deci((EL.qdot_conv[eidx] .+ EL.qdot_rad[eidx]) ./ 1e4, 500),
+                        "heat" => deci(EL.qload[eidx] ./ 1e6, 500),
+                        "twall" => deci(EL.twall[eidx], 500),
                         "lat" => rad2deg_.(deci(EL.lat[eidx], 500)),
                         "lon" => rad2deg_.(deci(EL.lon[eidx], 500)))
     out["sites"]["splash_lat"] = rad2deg_(ent.lat_splash)
@@ -706,7 +866,7 @@ function panel_orbit(p)::Dict{String,Any}
     eo = earthorbit(
         target = tkey,
         lv = lv_from_params(p),
-        pod_mass = getf(p, "pod_mass", 350.0),
+        pod_mass = payload_total(p),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
         perigee_alt = tkey === :custom ?
             clamp(getf(p, "orbit_perigee_km", 200.0), 100.0, 100000.0) * 1e3 : NaN,
@@ -754,6 +914,13 @@ function panel_orbit(p)::Dict{String,Any}
         metrics["park_apogee_km"] = (el.ra - RE_MEAN) / 1e3
         metrics["incl_deg"] = rad2deg_(el.i)
     end
+    rcs = haslog ? rcs_payload(orbit_budget(eo.lv, eo, asc, eo.lv.payload_mass,
+                                            pod_diameter(p, spacecraft_mass(p)))) :
+                   nothing
+    if rcs !== nothing
+        metrics["rcs_used_kg"] = rcs["used"][end]
+        metrics["rcs_margin_kg"] = rcs["remaining"][end]
+    end
     out = Dict{String,Any}(
         "ok" => true, "mode" => "orbit",
         "outcome" => eo.outcome in (:on_orbit, :splashdown) ? "nominal" :
@@ -782,7 +949,10 @@ function panel_orbit(p)::Dict{String,Any}
                 "dv" => b.dv) for b in eo.burns],
         ),
     )
-    haslog && (out["cis"] = sc.cis)
+    if haslog
+        out["cis"] = sc.cis
+        out["rcs"] = rcs
+    end
     ent !== nothing && entry_payload!(out, metrics, events, ent)
     out
 end
@@ -799,7 +969,7 @@ function panel_suborbital(p)::Dict{String,Any}
     sb = suborbital(
         profile = prof,
         lv = lv_from_params(p),
-        pod_mass = getf(p, "pod_mass", 350.0),
+        pod_mass = payload_total(p),
         apogee = clamp(getf(p, "sub_apogee_km", 100.0), 5.0, 3000.0) * 1e3,
         downrange = clamp(getf(p, "sub_range_km", 400.0), 10.0, 12000.0) * 1e3,
         loft = deg2rad_(clamp(getf(p, "sub_loft_deg", 40.0), 5.0, 85.0)),
@@ -882,11 +1052,11 @@ function panel_mission(p)::Dict{String,Any}
     mission_mode(p) === :orbit && return panel_orbit(p)
     mission_mode(p) === :suborbital && return panel_suborbital(p)
     ms = moonshot(
-        pod_mass = getf(p, "pod_mass", 350.0),
+        pod_mass = payload_total(p),
         # a stated capsule width is the width in the flow, the width on the
         # screen AND the width at entry — the same number in all three, which
         # is what the builder promises. Omitted, moonshot takes the mass fit.
-        pod_diameter = pod_diameter(p, getf(p, "pod_mass", 350.0)),
+        pod_diameter = pod_diameter(p, spacecraft_mass(p)),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
 
         hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3,
@@ -974,6 +1144,13 @@ function panel_mission(p)::Dict{String,Any}
 
     if cis !== nothing
         out["cis"] = sc.cis
+        # `moonshot` already built this budget when it flew a dispersed cruise
+        # (it needed it for the summary); rebuilding it there would risk the
+        # two disagreeing about the same flight.
+        rcs = rcs_payload(ms.cruise !== nothing ? ms.cruise.rcs :
+                          cruise_budget(ms.lv, cis, ms.lv.payload_mass,
+                                        pod_diameter(p, spacecraft_mass(p))))
+        out["rcs"] = rcs
         metrics["tli_dv"] = cis.dv_tli
         metrics["tli_burn_s"] = cis.burn_duration
         metrics["prop_margin_kg"] = cis.m - (ms.lv.stages[end].mdry + ms.lv.payload_mass)
@@ -982,7 +1159,8 @@ function panel_mission(p)::Dict{String,Any}
         metrics["vac_perigee_km"] = cis.vac_perigee_alt / 1e3
         metrics["tcm_dv"] = ms.cruise === nothing ? nothing : ms.cruise.tcm_dv
         metrics["tcm_prop_kg"] = ms.cruise === nothing ? nothing : ms.cruise.tcm_prop
-        metrics["rcs_margin_kg"] = ms.cruise === nothing ? nothing : ms.cruise.rcs.margin
+        metrics["rcs_used_kg"] = rcs["used"][end]
+        metrics["rcs_margin_kg"] = rcs["remaining"][end]
         # did the free-return design actually hit its targets? (a prop-starved
         # TLI still "flies", but the result is not the requested mission)
         hp_moon = getf(p, "hp_moon_km", 2000.0) * 1e3
@@ -1174,11 +1352,19 @@ function rocket_geometry(p)::Dict{String,Any}
         # is not necessarily the last one
         "length" => maximum(s.x1 for s in secs),
         "diameter" => d,
-        "payload" => Dict("kind" => lander === nothing ?
-                              (getb(p, "crewed", true) ? "capsule" : "bus") : "lander",
+        "payload" => Dict("kind" => lander !== nothing ? "lander" :
+                              payload_is_bus(p) ? "bus" : "capsule",
                           "mass_kg" => lv.payload_mass,
+                          # what the spacecraft weighs on its own, and what it
+                          # is carrying — the builder prints both, and the
+                          # capsule envelope is fitted to the former
+                          "spacecraft_kg" => lander === nothing ?
+                              spacecraft_mass(p) : lander_mass(lander),
+                          "cargo_kg" => lander === nothing ? cargo_mass(p) : 0.0,
+                          "crewed" => lander === nothing && !payload_is_bus(p) &&
+                                      getb(p, "crewed", true),
                           "diameter_m" => lander === nothing ?
-                              pod_diameter(p, lv.payload_mass) : lander.diameter),
+                              pod_diameter(p, spacecraft_mass(p)) : lander.diameter),
         "liftoff_mass_kg" => liftoff_mass(lv),
         "liftoff_twr" => pad_twr,
         "total_dv_mps" => sum(dv(k) for k in 1:nst) +
@@ -1230,8 +1416,8 @@ end
 
 "Numeric parameters that may be swept or solved for, for this stack height."
 sweepable(p) = vcat(
-    ["pod_mass", "h_park_km", "hp_moon_km", "hp_return_km", "incl_deg",
-     "diameter", "fairing", "kick_deg"],
+    ["pod_mass", "bus_mass", "cargo_mass", "h_park_km", "hp_moon_km",
+     "hp_return_km", "incl_deg", "diameter", "fairing", "kick_deg"],
     mission_mode(p) === :landing ?
         ["l_dry", "l_prop", "l_thrust_kn", "l_isp", "l_throttle_min",
          "h_moon_park_km", "h_pdi_km", "n_rev"] : String[],
@@ -1477,7 +1663,8 @@ catalogue_payload() = Dict{String,Any}(
     # the code that reads that field is not in the process. The pages check this
     # list against the controls they offer and say so.
     "features" => ["fairing_on", "crewed", "pod_dia", "l_diameter",
-                   "grazing", "flyby_wire"],
+                   "grazing", "flyby_wire",
+                   "payload_kind", "bus_mass", "cargo_mass"],
     "solve_metrics" => SOLVE_METRICS,
     "sweep_metrics" => SWEEP_METRICS,
     "landing_metrics" => LANDING_METRICS,
@@ -1552,10 +1739,11 @@ end
 """
     static_asset(path) -> (status, content_type, payload)
 
-Serve a shared ES module or stylesheet out of `scripts/static/`.
+Serve a shared ES module, stylesheet, or bundled map dataset out of
+`scripts/static/`.
 
 The requested name is matched against a strict whitelist rather than
-sanitised: `[A-Za-z0-9_-]+.(js|css)`, which cannot express a directory
+sanitised: `[A-Za-z0-9_-]+.(js|css|geojson)`, which cannot express a directory
 separator at all. Sanitising instead means enumerating every way a path can
 escape its root — `..`, `%2e%2e`, backslashes on Windows, drive letters,
 symlinks — and losing the moment you miss one. This process reads the user's
@@ -1566,7 +1754,7 @@ Read per request, like the pages, so editing an asset shows up on refresh.
 """
 function static_asset(path::AbstractString)
     name = first(split(path[length("/static/") + 1:end], '?'))
-    ok = occursin(r"^[A-Za-z0-9_-]+\.(js|css)$", name) &&
+    ok = occursin(r"^[A-Za-z0-9_-]+\.(js|css|geojson)$", name) &&
          isfile(joinpath(STATIC_DIR[], name))
     ok || return ("404 Not Found", "application/json",
                   json(Dict{String,Any}("ok" => false,
@@ -1575,7 +1763,8 @@ function static_asset(path::AbstractString)
     # browser outright, and the console error names CORS rather than the type.
     # A stylesheet served as the wrong type is dropped just as silently.
     ctype = endswith(name, ".css") ? "text/css; charset=utf-8" :
-                                     "text/javascript; charset=utf-8"
+            endswith(name, ".geojson") ? "application/geo+json; charset=utf-8" :
+                                         "text/javascript; charset=utf-8"
     return ("200 OK", ctype, read(joinpath(STATIC_DIR[], name), String))
 end
 

@@ -133,21 +133,42 @@
           <input type="checkbox" id="fairing_on" checked
                  style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label>
           <input id="fairing" value="150"></div>
-        <div><label for="pod_mass" title="the crew capsule IS the payload — this
-             mass is what re-enters">payload / capsule [kg]</label>
-          <input id="pod_mass" value="350"></div>
+        <div><label for="payload_kind" title="a CAPSULE is a spacecraft that comes
+             home behind a heat shield, at the masses real ones flew at. A BUS is
+             the uncrewed alternative: probe core, flight computers, power, comms
+             and structure — everything a payload needs before it carries
+             anything useful.">payload</label>
+          <select id="payload_kind">
+            <option value="capsule">capsule</option>
+            <option value="bus" selected>uncrewed bus</option>
+          </select></div>
+      </div>
+      <div class="row">
+        <div id="pod_mass_box"><label for="pod_mass" title="the capsule's own mass
+             — the vehicle, not what is stowed in it. Pick one below and this is
+             what that capsule actually weighed.">capsule [kg]</label>
+          <input id="pod_mass" value="900"></div>
+        <div id="bus_mass_box" hidden><label for="bus_mass" title="dry mass of the
+             probe core: flight computers, power, comms, harness and structure.
+             200 kg is a small but real interplanetary-class bus.">probe core [kg]</label>
+          <input id="bus_mass" value="200"></div>
+        <div><label for="cargo_mass" title="anything carried IN ADDITION to the
+             spacecraft. It rides the whole ascent, eats the kick stage's margin
+             and re-enters with the spacecraft — inside the same envelope, so it
+             raises the ballistic coefficient rather than the frontal area.">cargo
+             [kg]</label>
+          <input id="cargo_mass" value="150"></div>
       </div>
       <div class="row">
         <div><label for="pod_dia" title="the payload's body diameter. Blank or 0
-             works it out from the mass, which is a cube-root fit and misses the
-             big ones badly — Apollo by nearly a metre. Pick a capsule below and
-             this is set to what that capsule actually was.">payload &oslash; [m]
+             works it out from the SPACECRAFT's mass (a cube-root fit that misses
+             the big ones badly — Apollo by nearly a metre). Cargo does not widen
+             it: it is stowed inside. Pick a capsule below and this is set to what
+             that capsule actually was.">payload &oslash; [m]
           </label><input id="pod_dia" value="" placeholder="auto"></div>
-        <div><label for="crewed" title="off flies an uncrewed spacecraft bus
-             instead of a capsule: no cabin, no windows, and no interior view in
-             the launch page, because there is no interior. A robotic payload is
-             also the case a fairing exists for, so unticking this ticks the
-             fairing back on.">crew aboard
+        <div id="crewed_box"><label for="crewed" title="whether there are people
+             in the capsule. Off, there is no cabin and no interior view in the
+             launch page, because there is no interior.">crew aboard
           <input type="checkbox" id="crewed" checked
                  style="width:auto;margin:0 0 0 6px;vertical-align:-1px"></label>
           <div class="sub" id="crew_note" style="margin:6px 0 0">crew capsule</div>
@@ -155,6 +176,7 @@
       </div>
       <div id="podpresets" style="margin:2px 0 0"></div>
       <div class="sub" id="pod_note" style="margin:4px 0 0">&mdash;</div>
+      <div class="sub" id="load_note" style="margin:4px 0 0"></div>
       <div class="row">
         <div><label for="kick_deg" title="pitch-over kick [deg] — the one guidance
              number that does not scale with the vehicle">pitch-over kick [&deg;]</label>
@@ -504,13 +526,16 @@ function params() {
   u.set('vname', $('vname').value);
   u.set('nstages', NSTAGES);
   u.set('nboost', nBoost());
-  for (const id of ['diameter', 'fairing', 'pod_mass', 'pod_dia', 'kick_deg',
+  for (const id of ['diameter', 'fairing', 'pod_mass', 'bus_mass', 'cargo_mass',
+                    'pod_dia', 'kick_deg',
                     'l_dry', 'l_prop', 'l_diameter', 'l_thrust_kn', 'l_isp',
                     'l_throttle_min'])
     u.set(id, $(id).value);
+  u.set('payload_kind', $('payload_kind').value);
   u.set('opt_kick', $('opt_kick').checked ? '1' : '0');
   u.set('fairing_on', $('fairing_on').checked ? '1' : '0');
-  u.set('crewed', $('crewed').checked ? '1' : '0');
+  // a bus has nobody in it whatever the box says
+  u.set('crewed', (!isBus() && $('crewed').checked) ? '1' : '0');
   const fields = [];
   for (let k = 1; k <= NSTAGES; k++) fields.push(...STAGE_FIELDS.map(f => `s${k}_${f}`));
   if (nBoost()) fields.push(...BOOST_FIELDS.map(f => `b_${f}`));
@@ -581,9 +606,13 @@ async function doFetchGeo() {
 
 // ---------------------------------------------------------------- stats --
 function renderStats(j) {
-  const pod = +(j.payload || {}).mass_kg || +$('pod_mass').value || 0;
+  const pod = +(j.payload || {}).mass_kg || payloadKg();
   const twr = +j.liftoff_twr, dvt = +j.total_dv_mps;
   const pf = payloadFrac(pod, +j.liftoff_mass_kg);
+  // the load check needs the flown lift-off mass, which only the server knows
+  // (stages that size themselves do it there)
+  LIFTOFF_KG = +j.liftoff_mass_kg || 0;
+  loadNote();
   $('totals').innerHTML = [
     ['stack height', fmt(j.length) + ' m'],
     ['liftoff mass', fmt(j.liftoff_mass_kg/1000) + ' t'],
@@ -812,7 +841,11 @@ cv.addEventListener('wheel', e => {
 const VEHICLES = {
   'Sable (reference)': {
     nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
-    pod_mass: 350,
+    // 350 kg is not a capsule — the smallest thing anyone has flown people in
+    // is 900 kg — so it is stated as what it can only be: a probe core with a
+    // brick of cargo on it. Same 350 kg up the hill, same trajectory; it just
+    // now says what it is. This stack throws 395 kg onto a free return.
+    payload_kind: 'bus', bus_mass: 200, cargo_mass: 150,
   },
   // The strap-ons buy MARGIN, not payload. This carried 900 kg, and the kick
   // stage it inherits from the reference is sized for 350: strap-ons add
@@ -823,7 +856,7 @@ const VEHICLES = {
   // spare — which is what the extra boosters actually give you.
   'Sable + 4 strap-ons': {
     nstages: 3, nboost: 4, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
-    pod_mass: 350,
+    payload_kind: 'bus', bus_mass: 200, cargo_mass: 150,
     b_engine: 'manual', b_prop: 12000, b_dry: 900, b_thrust_kn: 380, b_isp: 285,
       b_engines: 2, b_propellant: 'kerolox', b_diameter: 1.53, b_throttle: 60,
   },
@@ -839,7 +872,7 @@ const VEHICLES = {
   // is the cargo Dragon, at its real width.
   'Falcon-class (Merlin)': {
     nstages: 2, nboost: 0, diameter: 3.7, fairing: 1900, kick_deg: 6, opt_kick: true,
-    pod_mass: 4200, pod_dia: 3.66,
+    payload_kind: 'capsule', pod_mass: 4200, cargo_mass: 0, pod_dia: 3.66,
     s1_engine: 'merlin_1d', s1_engines: 9, s1_prop: 411000, s1_dry_auto: true,
       s1_diameter: 3.7,
     s2_engine: 'merlin_1d_vac', s2_engines: 1, s2_prop: 108000, s2_dry_auto: true,
@@ -863,7 +896,7 @@ const VEHICLES = {
     // finds it now — its ladder used to start at 4 — but the number is stated
     // so the vehicle also flies with the search turned off.
     nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 1,
-    opt_kick: true, pod_mass: 45000,
+    opt_kick: true, payload_kind: 'capsule', pod_mass: 45000, cargo_mass: 0,
     s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000,
       s1_diameter: 10.1,
     s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000,
@@ -873,7 +906,7 @@ const VEHICLES = {
   },
   'Starship (expendable)': {
     nstages: 2, nboost: 0, diameter: 9.0, fairing_on: false, kick_deg: 5,
-    opt_kick: true, pod_mass: 50000,
+    opt_kick: true, payload_kind: 'capsule', pod_mass: 50000, cargo_mass: 0,
     s1_engine: 'raptor_2', s1_engines: 33, s1_prop: 3400000, s1_dry_auto: true,
       s1_diameter: 9.0,
     s2_engine: 'raptor_2', s2_engines: 6, s2_prop: 1200000, s2_dry_auto: true,
@@ -887,7 +920,7 @@ const VEHICLES = {
   // is untouched.
   'hydrolox upper': {
     nstages: 3, nboost: 0, diameter: 1.8, fairing: 150, kick_deg: 8, opt_kick: true,
-    pod_mass: 450,
+    payload_kind: 'bus', bus_mass: 200, cargo_mass: 250,
     s2_engine: 'rl10b2', s2_propellant: 'hydrolox', s2_engines: 1, s2_prop: 9500,
     s2_dry_auto: true,
     s3_prop: 1200, s3_dry: 170,
@@ -929,7 +962,8 @@ const PODS = [
 // reloads (it is saved under ssjl.vehicle). That is not cosmetic — pod_dia
 // sets the stack's reference area, so a 1.8 m Sable quietly flew the drag of a
 // five-metre capsule and stopped reaching the Moon at all.
-const VFIELDS = ['diameter', 'fairing', 'kick_deg', 'pod_mass', 'pod_dia'];
+const VFIELDS = ['diameter', 'fairing', 'kick_deg', 'pod_mass', 'bus_mass',
+                 'cargo_mass', 'pod_dia'];
 const VDEFAULTS = Object.fromEntries(VFIELDS.map(id => [id, $(id).value]));
 function applyPreset(name) {
   const o = VEHICLES[name];
@@ -943,6 +977,8 @@ function applyPreset(name) {
   // this reads "unless the preset says otherwise", not "unless it says yes"
   $('fairing_on').checked = o.fairing_on !== false;
   $('crewed').checked = o.crewed !== false;
+  $('payload_kind').value = o.payload_kind || 'capsule';
+  payloadUI();
   crewNote();
   podNote();
   // reset to the role defaults, then lay the preset's own keys over them —
@@ -971,9 +1007,40 @@ function initPresets() {
       $('pod_dia').value = el.dataset.d;      // the size it actually was
       podNote(); fetchGeo();
     };
-  for (const id of ['pod_mass', 'pod_dia', 'l_dry', 'l_prop', 'l_diameter'])
+  for (const id of ['pod_mass', 'bus_mass', 'cargo_mass', 'pod_dia',
+                    'l_dry', 'l_prop', 'l_diameter'])
     $(id).addEventListener('input', podNote);
+  $('payload_kind').addEventListener('change', () => {
+    // A bus is the case a shroud exists for. That rule used to hang off the
+    // crew tick-box, which is where "uncrewed" was expressed; it is expressed
+    // here now, and the box is hidden for a bus — so left there it would have
+    // become unreachable. Ticked rather than forced: untick it again and fly
+    // a bare bus if that is what you meant.
+    if (isBus()) $('fairing_on').checked = true;
+    payloadUI(); crewNote(); podNote(); fetchGeo();
+  });
+  payloadUI();
   podNote();
+}
+
+// --------------------------------------------------------- the payload --
+//
+// Payload is a spacecraft plus its cargo, not one lump. A capsule is a vehicle
+// that comes home; a bus is the probe core that any uncrewed payload needs
+// before it carries anything. The cargo is the brick either of them lifts.
+const isBus = () => $('payload_kind').value === 'bus';
+const spacecraftKg = () => Math.max(0, +$(isBus() ? 'bus_mass' : 'pod_mass').value || 0);
+const cargoKg = () => Math.max(0, +$('cargo_mass').value || 0);
+const payloadKg = () => spacecraftKg() + cargoKg();
+
+function payloadUI() {
+  const bus = isBus();
+  $('pod_mass_box').hidden = bus;
+  $('bus_mass_box').hidden = !bus;
+  // A bus has no crew, so the control that says whether it does is noise. The
+  // capsule presets stay visible either way — they are the only size reference
+  // the page has, and a bus is still a body with a diameter.
+  $('crewed_box').hidden = bus;
 }
 // Capsule radius from mass, the same r = 0.086*m^(1/3) the mesh is built on
 // (see pod_radius in mesh.jl), so the box says what the model will do before
@@ -993,24 +1060,70 @@ function podNote() {
     $('lander_note').textContent = `${(m/1000).toFixed(1)} t wet · ${(+$('l_prop').value || 0).toFixed(0)} kg descent propellant`;
     return;
   }
-  const m = +$('pod_mass').value || 0, d = +$('pod_dia').value || 0;
+  // The envelope is fitted to the SPACECRAFT, not to spacecraft + cargo: a
+  // capsule's size is set by the vehicle, and cargo is stowed inside it.
+  const sc = spacecraftKg(), cargo = cargoKg(), tot = payloadKg();
+  const d = +$('pod_dia').value || 0, dia = d > 0 ? d : 2*podR(sc);
   const near = PODS.reduce((a, b) =>
-    Math.abs(Math.log(b[1]/Math.max(m,1))) < Math.abs(Math.log(a[1]/Math.max(m,1))) ? b : a);
+    Math.abs(Math.log(b[1]/Math.max(sc,1))) < Math.abs(Math.log(a[1]/Math.max(sc,1))) ? b : a);
   // a chip is selected only when BOTH of its numbers are in the boxes: the
   // mass alone no longer says which capsule this is
   for (const el of $('podpresets').querySelectorAll('.chip'))
-    el.classList.toggle('sel', +el.dataset.m === m && Math.abs(+el.dataset.d - d) < 1e-9);
-  // and it is a CAPSULE or a BUS, which is not a cosmetic distinction: one of
-  // them re-enters and has people in it and the other does neither
-  const crewed = $('crewed').checked;
-  $('pod_note').innerHTML = m < 1 ? 'no payload' :
-    `${crewed ? 'capsule' : 'bus'} ${fmt(d > 0 ? d : 2*podR(m), 2)} m across` +
-    (d > 0 ? ' (stated)' : ' (from its mass; state one to override)') +
-    (crewed
-      ? ' &mdash; the payload IS the crew capsule here, and it is what re-enters. ' +
-        `Nearest flown by mass: ${near[0]} (${fmtMass(near[1])}, ${fmt(near[2], 2)} m).`
-      : ' &mdash; an uncrewed spacecraft bus. Nothing re-enters, and the flown ' +
-        'capsules below are only being used as a size reference.');
+    el.classList.toggle('sel', !isBus() && +el.dataset.m === sc &&
+                               Math.abs(+el.dataset.d - d) < 1e-9);
+  const bus = isBus();
+  $('pod_note').innerHTML = tot < 1 ? 'no payload' :
+    `${bus ? 'probe core' : 'capsule'} ${fmtMass(sc)}` +
+    (cargo > 0 ? ` + ${fmtMass(cargo)} cargo = <b>${fmtMass(tot)}</b> lifted` : '') +
+    ` &middot; ${fmt(dia, 2)} m across` +
+    (d > 0 ? ' (stated)' : ' (from the spacecraft mass; state one to override)') +
+    (bus
+      ? ' &mdash; probe core, flight computers, power and comms. No cabin, and ' +
+        'the flown capsules below are only a size reference.'
+      : ' &mdash; the capsule is the payload, and it is what re-enters. ' +
+        `Nearest flown by mass: ${near[0]} (${fmtMass(near[1])}, ${fmt(near[2], 2)} m).`) +
+    (cargo > 0 && !bus && cargo > 0.5*sc
+      ? ' <span class="warn">Cargo is over half the capsule\'s own mass — real ' +
+        'downmass runs well under that.</span>' : '');
+  loadNote();
+}
+
+// How much of what this stack could lift is actually being lifted.
+//
+// A payload fraction is the cleanest statement of that, because it needs no
+// second simulation: it is what the vehicle already reports. The bands are
+// what launchers of this class actually achieve — and they depend on the
+// DESTINATION, which is the whole reason one number could never be right for
+// both. This stack throws 1,951 kg to low orbit and 395 kg onto a free
+// return; 350 kg is a sensible lunar payload and a nearly empty LEO one.
+const LOAD_BANDS = {
+  orbit:      [0.015, 0.05,  'low orbit'],
+  suborbital: [0.015, 0.06,  'a suborbital lob'],
+  flyby:      [0.004, 0.015, 'a free return'],
+  landing:    [0.003, 0.012, 'a lunar landing'],
+};
+let LIFTOFF_KG = 0;
+function loadNote() {
+  const el = $('load_note');
+  if (!el) return;
+  const mode = (PASSTHRU.get && PASSTHRU.get('mode')) || 'flyby';
+  const band = LOAD_BANDS[mode] || LOAD_BANDS.flyby;
+  const tot = landingMode() ? (+$('l_dry').value || 0) + (+$('l_prop').value || 0)
+                            : payloadKg();
+  if (!(LIFTOFF_KG > 0) || !(tot > 0)) { el.textContent = ''; return; }
+  const f = tot / LIFTOFF_KG;
+  const [lo, hi, what] = band;
+  const pct = fmt(f*100, 2) + '%';
+  el.innerHTML = f < lo
+    ? `<span class="warn">light for this stack</span> — ${fmtMass(tot)} is ${pct} of ` +
+      `lift-off mass, under the ${fmt(lo*100,1)}–${fmt(hi*100,1)}% a launcher this ` +
+      `size typically sends to ${what}. It will fly; it is carrying air.`
+    : f > hi
+    ? `<span class="warn">heavy for this stack</span> — ${fmtMass(tot)} is ${pct} of ` +
+      `lift-off mass, over the ${fmt(lo*100,1)}–${fmt(hi*100,1)}% typical for ${what}. ` +
+      `Expect it to run the kick stage dry.`
+    : `<span class="good">well loaded</span> — ${fmtMass(tot)} is ${pct} of lift-off ` +
+      `mass, inside the ${fmt(lo*100,1)}–${fmt(hi*100,1)}% typical for ${what}.`;
 }
 
 // The one failure mode this repo's serving model creates: pages come off disk
@@ -1018,7 +1131,8 @@ function podNote() {
 // running across an edit serves a page whose controls it cannot read. Nothing
 // errors — the field is simply absent from the query the server understands,
 // and the control silently does nothing. Name it instead.
-const NEEDS = ['fairing_on', 'crewed', 'pod_dia', 'l_diameter'];
+const NEEDS = ['fairing_on', 'crewed', 'pod_dia', 'l_diameter',
+               'payload_kind', 'bus_mass', 'cargo_mass'];
 function staleCheck() {
   const have = (CATALOGUE && CATALOGUE.features) || [];
   const missing = NEEDS.filter(f => !have.includes(f));

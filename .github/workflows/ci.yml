@@ -86,3 +86,44 @@ jobs:
       # every figure predating terrain was flown against
       - name: fly it onto a smooth sphere
         run: SS_PLAIN=1 julia --project=. scripts/run_landing.jl
+
+  ui:
+    name: browser layer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # static module syntax and "every /static import exists" — exactly the
+      # rules build/build_app.jl enforces, moved in front of a PR instead of a
+      # tagged release
+      - name: static integrity
+        run: node scripts/check_static.mjs
+      # the pure helpers with no Julia equivalent: angle wrap, dateline split,
+      # chart extent
+      - name: UI helper tests
+        run: node --test test/ui_helpers.test.mjs
+
+  host:
+    name: rust host
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host
+      # the updater's release-tag parsing and version comparison — logic no
+      # Julia test reaches
+      - name: cargo test
+        run: cargo test --locked
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
