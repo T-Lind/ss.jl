@@ -6,7 +6,7 @@ import { vadd, vsub, vscale, vdot, vcross, vunit } from './vec3.js';
 import { moonfixed } from './moon.js';
 
 const u32 = x => x >>> 0;
-function _hash32(a, b, c, d) {
+export function _hash32(a, b, c, d) {
   let h = Math.imul(a >>> 0, 0x9E3779B1);
   h = Math.imul(h ^ (b >>> 0), 0x85EBCA77);
   h = Math.imul(h ^ (c >>> 0), 0xC2B2AE3D);
