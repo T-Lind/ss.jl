@@ -139,7 +139,7 @@
   <a href="/build" style="margin-left:10px">vehicle builder</a>
   <a href="/analysis" id="analysislink" style="margin-left:10px">analysis</a></div>
 <div id="keys" class="show">
-  <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>h</b> for all controls</div>
+  <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>v</b> eva · <b>h</b> for all controls</div>
 </div>
 <div id="help" class="hidden">
   <h2>Controls</h2>
@@ -156,6 +156,9 @@
     <tr><td><b>q</b> <b>e</b> · <b>z</b></td><td>roll your body · square yourself up again</td></tr>
     <tr><td><b>g</b></td><td>unbuckle, or strap back in — which also hands the keys over</td></tr>
     <tr><td>drag</td><td>look around — a head turn in the couch, your whole body out of it</td></tr>
+    <tr><td colspan="2" class="sec">EVA — the hatch cap, or V, on an unpowered coast</td></tr>
+    <tr><td><b>v</b></td><td>suit up, step outside, and back in — a 20 m tether holds you to the hatch</td></tr>
+    <tr><td><b>w a s d</b> <b>r</b> <b>f</b> · <b>q</b> <b>e</b></td><td>outside, the same six degrees of freedom in the helmet's own frame</td></tr>
     <tr><td colspan="2" class="sec">The console — hover any of it to see what it is</td></tr>
     <tr><td>caps</td><td>the coloured buttons are wired — cabin lights, display page, crew station, clock up and down, trajectory view, audio, null rates, level, and this list</td></tr>
     <tr><td>soft keys</td><td>on the trajectory display: zoom, pan, reset, and the coast orbit &mdash; where you end up with the engines cold</td></tr>
@@ -252,6 +255,15 @@ function mApply(m, v) {
   return [m[0]*v[0]+m[4]*v[1]+m[8]*v[2]+m[12],
           m[1]*v[0]+m[5]*v[1]+m[9]*v[2]+m[13],
           m[2]*v[0]+m[6]*v[1]+m[10]*v[2]+m[14]];
+}
+// The full homogeneous transform, w and all. Needed wherever a point is put
+// through a projection rather than a rigid placement — mApply drops the fourth
+// row, which is exactly the row that carries the perspective divide.
+function mApply4(m, v) {
+  return [m[0]*v[0]+m[4]*v[1]+m[8]*v[2]+m[12],
+          m[1]*v[0]+m[5]*v[1]+m[9]*v[2]+m[13],
+          m[2]*v[0]+m[6]*v[1]+m[10]*v[2]+m[14],
+          m[3]*v[0]+m[7]*v[1]+m[11]*v[2]+m[15]];
 }
 
 // --------------------------------------------------------------- gl setup --
@@ -1255,6 +1267,21 @@ void main(){
                         (sh*0.5 + core*0.5)*vF*0.9);
   }
 }`);
+
+// The EVA tether. It has no lighting because it does not need any — a rope is
+// modelled by a flat colour, and a flat colour needs no surface normal. The
+// vertices arrive already in clip space (drawTether lays the ribbon out in
+// pixels and does the perspective divide itself), so the shader is a pass-
+// through. Drawn as TRIANGLES and not as LINES: measured on the shipped
+// ANGLE/SwiftShader stack, a gl.LINES draw of this exact program rasterised
+// ZERO pixels while the same program's triangles drew, so the rope is a
+// camera-facing ribbon rather than a line primitive.
+const LINE = program(`
+attribute vec4 aP;
+void main(){ gl_Position = aP; }`, `
+precision mediump float;
+uniform vec4 uC;
+void main(){ gl_FragColor = uC; }`);
 
 // ------------------------------------------------------- procedural build --
 // mesh vertex: position, normal, baked color, livery uv, paint weight
@@ -3354,7 +3381,7 @@ function buildStatics() {
 function chuteStandoff(attach, lineLen, sc) { return attach + lineLen*sc; }
 
 const quadBuf = () => buffer(new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]));
-let skyBuf, partDyn;
+let skyBuf, partDyn, tethBuf;
 
 // ------------------------------------------- scaled background target --
 // The background passes are the whole frame budget — measured at 84 ms (planet)
@@ -3776,6 +3803,80 @@ function drawParticles(view, proj, fov, smoke, hot) {
   gl.disable(gl.BLEND);
   gl.depthMask(true);
   gl.disableVertexAttribArray(aM);
+}
+
+// The tether, from the hatch on the hull to the astronaut's harness. There are
+// two traps here and both are geometric, not GL.
+//
+// First, the rope must NOT end at the eye. The eye is the projection centre, so
+// a segment from the hatch to the eye projects to a single POINT — measured: the
+// rope was invisible at every attitude, however it was drawn. It clips to the
+// suit behind the helmet instead, a hand's width behind the camera plane, so
+// the visible part crosses the frame exactly as a real tether does seen from a
+// helmet cam.
+//
+// Second, the rope is a ribbon, not a GL line. Measured on the shipped
+// ANGLE/SwiftShader stack, a gl.LINES draw of this program rasterised zero
+// pixels while the same program's triangles drew. The ribbon is laid out in
+// PIXELS: project both ends with the real w, offset in screen space, hand the
+// shader four clip-space corners. That holds the width constant at any distance
+// and sidesteps the w = 0 of a vertex on the camera plane.
+//
+// Depth is left ON, so the rope disappears behind the hull when the astronaut
+// swings round the far side — which is what makes it read as attached to
+// something solid.
+function drawTether(sc, view, proj) {
+  if (!EVA.active || !sc.craftM) return;
+  const a = mApply(view, mApply(sc.craftM, EVA.anchor));   // hatch, view space
+  const b = mApply(view, mApply(sc.craftM, EVA.pv));       // helmet, view space
+  if (a[2] > -0.05 && b[2] > -0.05) return;         // both ends behind the eye
+  // harness: behind the helmet along the view axis (view space looks down -z)
+  const h = [b[0], b[1], b[2] + EVA_HARNESS];
+  // Clip the segment to just in front of the near plane, so both ribbon ends
+  // have w > 0. The harness end is normally behind it; the hatch end is in
+  // front whenever the hatch is on screen at all.
+  const NEAR = 0.36;
+  if (a[2] > -NEAR) return;                         // hatch at/behind the eye
+  let e = h;
+  if (h[2] > -NEAR) {
+    const t = (-NEAR - a[2])/(h[2] - a[2]);
+    if (!(t > 0 && t <= 1)) return;
+    e = V.add(a, V.scale(V.sub(h, a), t));
+  }
+  const cA = mApply4(proj, a), cE = mApply4(proj, e);
+  if (cA[3] <= 0.02 || cE[3] <= 0.02) return;
+  const W = cv.width || 1, H = cv.height || 1;
+  const sA = [(cA[0]/cA[3]*0.5 + 0.5)*W, (0.5 - cA[1]/cA[3]*0.5)*H];
+  const sE = [(cE[0]/cE[3]*0.5 + 0.5)*W, (0.5 - cE[1]/cE[3]*0.5)*H];
+  const dx = sE[0] - sA[0], dy = sE[1] - sA[1], sl = Math.hypot(dx, dy);
+  if (sl < 0.5) return;                             // end-on: the rope is a point
+  const px = -dy/sl, py = dx/sl, hw = 1.6;          // px half-width
+  const zA = cA[2]/cA[3], zE = cE[2]/cE[3];
+  const toClip = (sx, sy, wv, zv) =>
+    [(sx/W*2 - 1)*wv, (1 - sy/H*2)*wv, zv*wv, wv];
+  const A0 = toClip(sA[0] + px*hw, sA[1] + py*hw, cA[3], zA);
+  const A1 = toClip(sA[0] - px*hw, sA[1] - py*hw, cA[3], zA);
+  const E0 = toClip(sE[0] + px*hw, sE[1] + py*hw, cE[3], zE);
+  const E1 = toClip(sE[0] - px*hw, sE[1] - py*hw, cE[3], zE);
+  if (!tethBuf) tethBuf = gl.createBuffer();
+  gl.useProgram(LINE.p);
+  gl.bindBuffer(gl.ARRAY_BUFFER, tethBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    ...A0, ...A1, ...E1, ...A0, ...E1, ...E0]), gl.DYNAMIC_DRAW);
+  const aP = LINE.a.aP;
+  gl.enableVertexAttribArray(aP);
+  gl.vertexAttribPointer(aP, 4, gl.FLOAT, false, 0, 0);
+  // A tether is high-visibility hardware, and the cabin accent is the one
+  // colour on this page that reads against both a grey hull and black space —
+  // a pale line vanishes into the sunlit capsule it is tied to.
+  gl.uniform4fv(LINE.u.uC, [0.95, 0.76, 0.30, 0.95]);
+  gl.depthMask(false);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  gl.disable(gl.BLEND);
+  gl.depthMask(true);
+  gl.disableVertexAttribArray(aP);
 }
 
 // ------------------------------------------------------------- detachables --
@@ -4551,6 +4652,15 @@ function headLevel() { HEAD.q = [1,0,0,0]; headYaw = headPitch = 0; }
 // command a NEGATIVE one. Get it wrong and three of the four axes still feel
 // right, which is precisely what an inverted axis feels like.
 function lookDrag(dx, dy, Kin) {
+  // Outside, your whole body turns about the axes you can see, exactly as it
+  // does floating in the cabin — the helmet is just the cabin with no walls.
+  if (EVA.active) {
+    const base = evaPose();
+    if (!base) return false;
+    if (dx) headTurn(headFrame(base).up, -dx*LOOK_SENS);
+    if (dy) headTurn(headFrame(base).rt, -dy*LOOK_SENS);
+    return true;
+  }
   if (CAB.seat !== null) {
     headYaw = Math.min(HEAD_YAW_LIM,
                        Math.max(-HEAD_YAW_LIM, headYaw + dx*LOOK_SENS));
@@ -4911,6 +5021,204 @@ function cabSmooth(dt) {
   const k = dt > 0 ? 1 - Math.exp(-dt/CAB_SMOOTH) : 1;
   CAB.pv = V.add(CAB.pv, V.scale(V.sub(CAB.p, CAB.pv), k));
 }
+
+// -------------------------------------------------------------------- EVA --
+// A spacewalk. It is deliberately built out of the cabin's own parts: the same
+// keys, the same head-turn quaternion, the same eye filter, the same push-off
+// speed cap — because a crew member outside is doing exactly what they were
+// doing inside, with the wall taken away and a rope left in its place.
+//
+// Three states, because a suit is not a place:
+//   inside   — the ordinary cabin view
+//   suited   — suited up, hatch open, still on the cabin side of it
+//   outside  — through the hatch, on the tether, camera in the helmet
+// The hatch cap and the V key both cycle it. Only `outside` changes where the
+// camera is; the first press is the suit-up the checklist asks for.
+const EVA_TETHER = 20;      // m of tether from the hatch — 4 m cabin, 20 m rope
+// The helmet steps out far enough to clear the hull AND to frame the vehicle:
+// at half a metre the camera is inside the afterbody's own silhouette, and the
+// shot is a wall of ablator. Two and a half metres puts the capsule in the
+// lower third with the planet behind it, which is the postcard this exists for.
+const EVA_STANDOFF = 2.5;   // m the helmet sits off the hatch on egress
+const EVA_HARNESS = 0.4;    // m behind the helmet the tether clips to the suit
+const EVA_ACC = 1.2;        // m/s2, a slow push off the hull — you are not running
+const EVA_VMAX = 0.6;       // m/s, a careful translation outside
+const EVA_RROLL = 0.5;      // rad/s of body roll, a twist not a spin
+const EVA_ROLL_TAU = 0.30;  // s to wind that rate up and settle out of it
+const EVA_K = 12;           // tether spring, 1/s2 on the overshoot past the limit
+const EVA_C = 6;            // tether damping, 1/s on the outward rate
+const EVA_FOV = 1.05;       // a wide, screenshot-friendly lens
+const EVA_SMOOTH = 0.13;    // s of eye lag, the same feel as the cabin float
+const EVA = { state: 'inside', active: false, suited: false,
+              anchor: [0,0,0], out: [0,-1,0], base: null,
+              p: [0,0,0], pv: [0,0,0], v: [0,0,0], rw: 0,
+              len: 0, limit: EVA_TETHER, saved: null };
+// Why EVA is or is not offered, in the one place that decides it. The window is
+// the unpowered coast the cabin already runs on: a burn, the pad, entry and the
+// descent all own the crew's hands and the hatch stays shut. `why` is what the
+// HUD/toast says, so a refused press is never a control that did nothing.
+function evaGate(ph) {
+  if (!HASCAB) return { ok: false, why: 'no cabin on this vehicle' };
+  if (camMode !== 'cabin') return { ok: false, why: 'cabin view only' };
+  if (!coastActive(ph)) {
+    if (ph.w === 'entry') return { ok: false, why: 'entry' };
+    if (ph.w === 'moon')  return { ok: false, why: 'descent' };
+    if (ph.w === 'pad')   return { ok: false, why: simT < 0 ? 'on the pad' : 'powered flight' };
+    return { ok: false, why: 'powered flight' };
+  }
+  return { ok: true, why: '' };
+}
+// The frame the astronaut starts in: looking back at the hatch, the vehicle's
+// long axis across the frame — so egress is a step out of the door and a turn
+// of the head, not a teleport into a random attitude. From there the head is
+// free, and the vehicle can be framed against the planet.
+function evaBaseFrame() {
+  const out = EVA.out || [0,-1,0];
+  const fwd = V.norm(V.scale(out, -1));            // toward the vehicle
+  let rt = V.cross(fwd, [1,0,0]);                  // the vehicle's long axis is up
+  if (V.len(rt) < 1e-6) rt = [0,0,1];
+  rt = V.norm(rt);
+  return { fwd, rt, up: V.norm(V.cross(rt, fwd)) };
+}
+function evaPose() {
+  if (!EVA.active) return null;
+  const b = EVA.base || evaBaseFrame();
+  return { eye: EVA.pv, look: V.add(EVA.pv, b.fwd), up: b.up, fov: EVA_FOV };
+}
+// The astronaut's own axes in model space, exactly as cabDirs is for the float:
+// the same headFrame, the same quaternion, so look-drag and WASD mean the same
+// thing outside as in.
+function evaDirs() {
+  const p = evaPose();
+  return p ? headFrame(p) : null;
+}
+// The hatch is at roll pi (see the fit-out's roll map), mid-wall beside the crew
+// patch. The point is ON the pressure wall; the station is a hair inboard so a
+// ray from inside reaches it, and the astronaut steps out from the wall itself.
+function evaHatchPoint(K) {
+  const u = K.xa + 0.50*K.rp, rc = K.rcone(u);
+  return [K.xb + u, -rc, 0];
+}
+function evaHatchStation(Kin) {
+  const K = Kin || cabK();
+  if (!K) return null;
+  const u = K.xa + 0.50*K.rp, rc = K.rcone(u);
+  return { key: 'hatch', label: 'HATCH · EVA', r: Math.max(0.10*K.rp, 0.20),
+           p: [K.xb + u, -0.92*rc, 0] };
+}
+function evaSuit(ph) {
+  const g = evaGate(ph);
+  if (!g.ok) { cabToast('EVA UNAVAILABLE · ' + g.why.toUpperCase()); return false; }
+  EVA.state = 'suited'; EVA.suited = true;
+  sfxStrap();
+  cabToast('SUITED · V TO EGRESS');
+  return true;
+}
+function evaEgress(ph) {
+  const g = evaGate(ph);
+  if (!g.ok) { cabToast('EVA UNAVAILABLE · ' + g.why.toUpperCase()); return false; }
+  const K = cabK();
+  if (!K) return false;
+  // Remember the cabin EXACTLY, so re-entering is a return and not a reset —
+  // where you floated, which couch you left, and which way you were looking.
+  EVA.saved = { p: CAB.p.slice(), pv: CAB.pv.slice(), seat: CAB.seat,
+                q: HEAD.q.slice(), rw: CAB.rw, yaw: headYaw, pitch: headPitch };
+  CAB.seat = null;                       // you cannot egress strapped in
+  CAB.keys = {}; CAB.v = [0,0,0]; CAB.rw = 0;
+  CAB.touch = true; CAB.n = null; CAB.push = 0;
+  EVA.anchor = evaHatchPoint(K);
+  EVA.out = [0,-1,0];                    // outward normal at the hatch
+  EVA.base = evaBaseFrame();
+  EVA.p = V.add(EVA.anchor, V.scale(EVA.out, EVA_STANDOFF));
+  EVA.pv = EVA.p.slice(); EVA.v = [0,0,0]; EVA.rw = 0;
+  EVA.len = EVA_STANDOFF; EVA.limit = EVA_TETHER;
+  EVA.state = 'outside'; EVA.active = true; EVA.suited = true;
+  headLevel();                           // face the vehicle on the way out
+  sfxSwitch();
+  cabToast('EVA · TETHER ' + EVA_TETHER + ' m');
+  return true;
+}
+function evaReturn() {
+  if (EVA.state !== 'outside') {
+    EVA.state = 'inside'; EVA.suited = false; EVA.active = false;
+    return true;
+  }
+  const s = EVA.saved;
+  EVA.active = false; EVA.state = 'inside'; EVA.suited = false;
+  EVA.v = [0,0,0]; EVA.len = 0;
+  if (s) {
+    CAB.p = s.p.slice(); CAB.pv = s.pv.slice(); CAB.seat = s.seat;
+    HEAD.q = s.q.slice(); CAB.rw = s.rw;
+    headYaw = s.yaw; headPitch = s.pitch;
+  }
+  EVA.saved = null;
+  sfxSwitch();
+  cabToast('AIRLOCK · CREW INSIDE');
+  return true;
+}
+function evaToggle(ph) {
+  if (EVA.state === 'inside') return evaSuit(ph);
+  if (EVA.state === 'suited') return evaEgress(ph);
+  return evaReturn();
+}
+// The rope. A taut tether is a damped spring along its own line, so a shove past
+// the limit decelerates instead of slamming; the clamp under it is the hard
+// promise that the rope does not stretch, so the astronaut can never leave the
+// envelope however hard they push. `EVA.len`/`EVA.limit` are what the HUD reads.
+function evaTether(dt) {
+  const rel = V.sub(EVA.p, EVA.anchor);
+  let L = V.len(rel);
+  if (L < 1e-9) { EVA.len = 0; return; }
+  let dir = V.scale(rel, 1/L);
+  if (L > EVA_TETHER) {
+    const over = L - EVA_TETHER;
+    const vr = V.dot(EVA.v, dir);            // outward is positive
+    EVA.v = V.add(EVA.v, V.scale(dir, (-EVA_K*over - EVA_C*Math.max(0, vr))*dt));
+    L = V.len(V.sub(EVA.p, EVA.anchor));
+    if (L > EVA_TETHER) {
+      dir = V.norm(V.sub(EVA.p, EVA.anchor));
+      EVA.p = V.add(EVA.anchor, V.scale(dir, EVA_TETHER));
+      const vout = V.dot(EVA.v, dir);
+      if (vout > 0) EVA.v = V.sub(EVA.v, V.scale(dir, vout));
+    }
+  }
+  EVA.len = V.len(V.sub(EVA.p, EVA.anchor));
+}
+function evaSmooth(dt) {
+  const k = dt > 0 ? 1 - Math.exp(-dt/EVA_SMOOTH) : 1;
+  EVA.pv = V.add(EVA.pv, V.scale(V.sub(EVA.p, EVA.pv), k));
+}
+// The same six degrees of freedom as the cabin float, in the astronaut's own
+// frame, with the wall traded for the rope. There is no push-off rule out here:
+// in free fall a shove has nothing to leave from, so the keys are a slow
+// translation the whole time, bounded by the tether.
+function evaStep(dt) {
+  if (!EVA.active || !(dt > 0)) return;
+  const d = evaDirs();
+  if (!d) return;
+  const k = CAB.keys;                       // the same set the cabin float reads
+  const rl = (k.e ? 1 : 0) - (k.q ? 1 : 0);
+  EVA.rw += (rl*EVA_RROLL - EVA.rw)*(1 - Math.exp(-dt/EVA_ROLL_TAU));
+  if (Math.abs(EVA.rw) > 1e-5) headTurn(d.fwd, EVA.rw*dt);
+  const cmd = V.add(V.add(V.scale(d.fwd, (k.w ? 1 : 0) - (k.s ? 1 : 0)),
+                         V.scale(d.rt,  (k.d ? 1 : 0) - (k.a ? 1 : 0))),
+                   V.scale(d.up,  (k.r ? 1 : 0) - (k.f ? 1 : 0)));
+  const l = V.len(cmd);
+  if (l > 1e-6) EVA.v = V.add(EVA.v, V.scale(cmd, EVA_ACC*dt/l));
+  const sp = V.len(EVA.v);
+  if (sp > EVA_VMAX) EVA.v = V.scale(EVA.v, EVA_VMAX/sp);
+  EVA.p = V.add(EVA.p, V.scale(EVA.v, dt));
+  evaTether(dt);
+  evaSmooth(dt);
+}
+// The helmet camera: the astronaut's own eye, carried into the world by the
+// craft matrix exactly as the cabin eye is. Its mode is 'eva', not 'cabin', so
+// the renderer knows to draw the hull and not the inside of it.
+function evaCam(M) {
+  if (!M) return null;
+  const p = evaPose();
+  return p ? poseToWorld(p, M, 'eva') : null;
+}
 // ------------------------------------------------------- cabin controls --
 // The cabin lighting and the display page used to be two paddle switches out
 // on the console's flanks, with their own geometry and their own pick volumes.
@@ -5045,6 +5353,12 @@ function cabControls() {
                  p: [p[0] - 0.006*K.rp, p[1], p[2]] });
     }
   }
+  // The hatch. It is not a button cap — it is a door in the wall — but it is a
+  // thing you can point at and press, so it lives in the same pick list and
+  // announces itself the same way. Both buttons cycle the suit, because there
+  // is no forward and back on a hatch.
+  const hatch = evaHatchStation(K);
+  if (hatch) out.push(hatch);
   return out;
 }
 // Last frame's camera and craft transform, so a click can be turned into a ray
@@ -5082,7 +5396,10 @@ function raySphere(o, d, c, r) {
 function cabPick(cx, cy, seats) {
   const ray = cabRay(cx, cy);
   if (!ray) return null;
-  const targets = seats ? cabControls().concat(cabSeats()) : cabControls();
+  // Outside, the only thing there is to point at is the hatch you came out of.
+  const targets = EVA.active ? [evaHatchStation()].filter(Boolean)
+                             : seats ? cabControls().concat(cabSeats())
+                                     : cabControls();
   let best = null, bestT = Infinity;
   for (const c of targets) {
     const t = raySphere(ray.o, ray.d, c.p, c.r);
@@ -5155,6 +5472,9 @@ function cabActivate(hit, back) {
     cabToast('RATES NULLED');
   } else if (key === 'level') {
     headLevel(); CAB.rw = 0; cabToast('LEVELLED');
+  } else if (key === 'hatch') {
+    // suit up, egress, re-enter — the same cycle the V key runs
+    return evaToggle(phaseAt(simT));
   } else if (key === 'help') {
     helpShow = !helpShow; syncHelp();
   } else if (hit && hit.seat !== undefined) {
@@ -5198,6 +5518,9 @@ function cabinShake(cam, amp) {
 }
 function cabinCam(M, aim) {
   if (!M) return null;
+  // Outside, the cabin camera IS the helmet camera — every exterior rig that
+  // dispatches on mode 'cabin' gets the spacewalk for free.
+  if (EVA.active) return evaCam(M);
   const p = cabinPose(aim);
   if (!p) return null;
   if (aim === 'wide' && CAB.seat === null &&
@@ -5684,7 +6007,15 @@ function frame(now) {
   // Floating is relative to the cabin and therefore runs on wall time even
   // when the mission clock is compressed. Burns and entry still pin the crew
   // into the couch; an unpowered coast does not.
-  cabStep(dtReal, camMode === 'cabin' && coastActive(ph));
+  cabStep(dtReal, camMode === 'cabin' && !EVA.active && coastActive(ph));
+  // The spacewalk lives and dies with the coast: while the phase allows it the
+  // astronaut is on the rope, and the instant the window closes (a burn lights,
+  // entry starts, the descent begins) the crew is brought back through the
+  // hatch rather than left outside a vehicle that is about to move.
+  if (EVA.active) {
+    if (coastActive(ph) && HASCAB) evaStep(dtReal);
+    else evaReturn();
+  }
 
   const scene = buildScene(ph);
   scene.cam.fov = fovZoom(scene.cam.fov, zoomK);
@@ -6217,7 +6548,7 @@ function drawScene(sc) {
   const sun = sc.sun || SUN;
   const view = mLookAt(cam.eye, cam.look, cam.up);
   // everything a click needs to become a ray into the capsule
-  PICK = { cam, asp, craftM: sc.craftM, inCab };
+  PICK = { cam, asp, craftM: sc.craftM, inCab: inCab || cam.mode === 'eva' };
   // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
   // nearer clip plane than the outside views
   const proj = mPersp(cam.fov, asp,
@@ -6302,6 +6633,7 @@ function drawScene(sc) {
                 sc.world === 'entry' ? [0.60, 0.50, 0.45] :
                 sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined,
                 sc.world === 'entry' && sc.es ? heatOf(sc.es.q) : 0);
+  drawTether(sc, view, proj);
   cabinPanel(sc, view, proj, cv.clientWidth, cv.clientHeight);
 }
 // The drawn deck and the planet pass's own cloud shell are the same clouds at
@@ -7112,7 +7444,7 @@ function projectPt(view, proj, p, wCss, hCss) {
 // where the switch is, rather than in a corner.
 function cabinPanel(sc, view, proj, wCss, hCss) {
   const tip = $('cabtip');
-  const live = sc.cam.mode === 'cabin' && sc.craftM;
+  const live = (sc.cam.mode === 'cabin' || sc.cam.mode === 'eva') && sc.craftM;
   const hov = live && cabHover;
   const hp = hov && projectPt(view, proj, mApply(sc.craftM, hov.p), wCss, hCss);
   tip.classList.toggle('hidden', !hp);
@@ -7133,6 +7465,8 @@ function cabinPanel(sc, view, proj, wCss, hCss) {
       hov.key === 'audio'   ? `AUDIO · ${muted ? 'MUTED' : 'ON'}` :
       hov.key === 'nullr'   ? 'NULL RATES' :
       hov.key === 'level'   ? 'LEVEL THE CREW' :
+      hov.key === 'hatch'   ? `HATCH · ${EVA.state === 'inside' ? 'SUIT UP'
+                                : EVA.state === 'suited' ? 'EGRESS' : 'RE-ENTER'}` :
       hov.key === 'help'    ? `CHECKLIST · ${helpShow ? 'SHOWN' : 'PRESS H'}` :
       // a soft key already carries its own name; what it needs to add is the
       // state it is about to change
@@ -7347,6 +7681,14 @@ function drawHUD(sc, ph) {
       ? 'STRAPPED IN · WASD flies · G to unbuckle'
       : CAB.touch ? 'CONTACT · WASD RF to push'
                   : 'DRIFTING · ' + s.toFixed(2) + ' m/s']);
+  }
+  // EVA state, the tether it is riding, and the one key that ends it. Only
+  // shown once a suit is on, so the HUD stays as quiet as it was inside.
+  if (EVA.active) {
+    rows.push(['EVA', `OUTSIDE · TETHER ${EVA.len.toFixed(1)}/${EVA_TETHER} m`]);
+    rows.push(['SUIT', 'V re-enter · WASD RF · QE roll']);
+  } else if (EVA.state === 'suited') {
+    rows.push(['EVA', 'SUITED · V TO EGRESS']);
   }
   if (perfShow) {
     // FPS is the smoothed live rate; FRAME is the median the scaler last ruled
@@ -7593,10 +7935,16 @@ function initControls() {
     const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
     // the keyboard way in and out of a couch, for anyone who would rather not
     // hunt for it with the mouse
-    if (kk === 'g' && inside()) {
+    if (kk === 'g' && inside() && !EVA.active) {
       const K = cabK();
       if (CAB.seat !== null) cabStand();
       else if (K) cabSit(cabSeatHome(K));
+      e.preventDefault();
+    }
+    // V suits up, egresses and re-enters. Not in CAB_KEYS, so it never fights
+    // the translation keys; the hatch cap is the same control with a pointer.
+    if (kk === 'v' && inside()) {
+      evaToggle(phaseAt(simT));
       e.preventDefault();
     }
     if (CAB_KEYS[kk]) {
@@ -8906,6 +9254,127 @@ window.__selftest = function () {
   eq('a null t_days is not a mission duration',
      () => (fin(null) ? null : 0).toFixed(1), '0.0');
 
+  // --- EVA. Three things have to be true or the hatch is a lie: it opens only
+  // where it is safe to open, the rope is finite, and coming back leaves the
+  // cabin exactly as it was. Every row restores the globals it moved, because
+  // the tests below this one read the same state.
+  eq('EVA is refused under thrust', () => {
+    const s0 = simT, c0 = camMode, h0 = HASCAB, b0 = BURNW;
+    camMode = 'cabin'; HASCAB = true; simT = 60; BURNW = [[50, 80]];
+    const g = evaGate({ w: 'eci', n: 'BURN' });
+    simT = s0; camMode = c0; HASCAB = h0; BURNW = b0;
+    return g.ok;
+  }, false);
+  eq('and during entry', () => {
+    const c0 = camMode, h0 = HASCAB;
+    camMode = 'cabin'; HASCAB = true;
+    const g = evaGate({ w: 'entry', n: 'ENTRY' });
+    camMode = c0; HASCAB = h0;
+    return g.ok;
+  }, false);
+  eq('and on the pad before launch', () => {
+    const s0 = simT, c0 = camMode, h0 = HASCAB;
+    camMode = 'cabin'; HASCAB = true; simT = -5;
+    const g = evaGate({ w: 'pad', n: 'PRELAUNCH' });
+    simT = s0; camMode = c0; HASCAB = h0;
+    return g.ok;
+  }, false);
+  eq('but is offered on an unpowered coast', () => {
+    const s0 = simT, c0 = camMode, h0 = HASCAB, b0 = BURNW;
+    camMode = 'cabin'; HASCAB = true; simT = 100; BURNW = [];
+    const g = evaGate({ w: 'eci', n: 'ORBIT' });
+    simT = s0; camMode = c0; HASCAB = h0; BURNW = b0;
+    return g.ok;
+  }, true);
+  eq('and never offered without a cabin', () => {
+    const c0 = camMode, h0 = HASCAB, b0 = BURNW;
+    camMode = 'cabin'; HASCAB = false; BURNW = [];
+    const g = evaGate({ w: 'eci', n: 'ORBIT' });
+    camMode = c0; HASCAB = h0; BURNW = b0;
+    return g.ok;
+  }, false);
+  // The hatch is a real station in the same pick list the console switches
+  // live in, or the clickable way out is a control that does not exist.
+  eq('the hatch is a station in the cabin', () => {
+    const list = cabControls();
+    return list.some(c => c.key === 'hatch') &&
+           !!evaHatchStation() && evaHatchStation().p.length === 3;
+  }, true);
+
+  // The rope is the whole safety story: a shove past 20 m has to come back
+  // inside 20 m, and it must not do it by going NaN.
+  eq('the tether clamps range under a hard pull', () => {
+    const save = { state: EVA.state, active: EVA.active, anchor: EVA.anchor,
+                   out: EVA.out, base: EVA.base, p: EVA.p, pv: EVA.pv,
+                   v: EVA.v, rw: EVA.rw, len: EVA.len, saved: EVA.saved,
+                   seat: CAB.seat, keys: CAB.keys, q: HEAD.q };
+    EVA.state = 'outside'; EVA.active = true; EVA.saved = null;
+    EVA.anchor = [0,0,0]; EVA.out = [0,-1,0]; EVA.base = evaBaseFrame();
+    EVA.p = [0,-30,0]; EVA.pv = [0,-30,0]; EVA.v = [0,-40,0]; EVA.rw = 0;
+    CAB.seat = null; CAB.keys = {};
+    for (let i = 0; i < 900; i++) evaStep(1/60);
+    const L = V.len(V.sub(EVA.p, EVA.anchor));
+    const ok = isFinite(L) && L <= EVA_TETHER + 1e-6;
+    EVA.state = save.state; EVA.active = save.active; EVA.anchor = save.anchor;
+    EVA.out = save.out; EVA.base = save.base; EVA.p = save.p; EVA.pv = save.pv;
+    EVA.v = save.v; EVA.rw = save.rw; EVA.len = save.len; EVA.saved = save.saved;
+    CAB.seat = save.seat; CAB.keys = save.keys; HEAD.q = save.q;
+    return ok;
+  }, true);
+  // and a slack tether leaves you alone: inside the limit the rope does nothing
+  eq('a slack tether does not drag you home', () => {
+    const save = { active: EVA.active, anchor: EVA.anchor, out: EVA.out,
+                   base: EVA.base, p: EVA.p, pv: EVA.pv, v: EVA.v, rw: EVA.rw,
+                   seat: CAB.seat, keys: CAB.keys, q: HEAD.q };
+    EVA.active = true; EVA.anchor = [0,0,0]; EVA.out = [0,-1,0];
+    EVA.base = evaBaseFrame(); EVA.p = [0,-2,0]; EVA.pv = [0,-2,0];
+    EVA.v = [0,0,0]; EVA.rw = 0; CAB.seat = null; CAB.keys = {};
+    const before = EVA.p.slice();
+    for (let i = 0; i < 120; i++) evaStep(1/60);
+    const moved = V.len(V.sub(EVA.p, before));
+    EVA.active = save.active; EVA.anchor = save.anchor; EVA.out = save.out;
+    EVA.base = save.base; EVA.p = save.p; EVA.pv = save.pv; EVA.v = save.v;
+    EVA.rw = save.rw; CAB.seat = save.seat; CAB.keys = save.keys; HEAD.q = save.q;
+    return moved;
+  }, 0, 1e-12);
+
+  // The round trip. Suit up, step out, come home, and the cabin is where it was.
+  eq('suit up, egress and return round-trips the cabin', () => {
+    const g0 = { simT, camMode, HASCAB, BURNW };
+    const c0 = { p: CAB.p.slice(), pv: CAB.pv.slice(), seat: CAB.seat,
+                 q: HEAD.q.slice(), rw: CAB.rw, yaw: headYaw, pitch: headPitch };
+    camMode = 'cabin'; HASCAB = true; simT = 100; BURNW = [];
+    const ph = { w: 'eci', n: 'ORBIT' };
+    const suited = evaSuit(ph) && EVA.state === 'suited';
+    const out = evaEgress(ph) && EVA.active && EVA.state === 'outside';
+    const back = evaReturn() && !EVA.active && EVA.state === 'inside';
+    const restored = CAB.seat === c0.seat &&
+                     V.len(V.sub(CAB.p, c0.p)) === 0 &&
+                     V.len(V.sub(CAB.pv, c0.pv)) === 0 &&
+                     V.len(V.sub(HEAD.q, c0.q)) === 0;
+    simT = g0.simT; camMode = g0.camMode; HASCAB = g0.HASCAB; BURNW = g0.BURNW;
+    CAB.p = c0.p; CAB.pv = c0.pv; CAB.seat = c0.seat; HEAD.q = c0.q;
+    CAB.rw = c0.rw; headYaw = c0.yaw; headPitch = c0.pitch;
+    return suited && out && back && restored;
+  }, true);
+  // and the helmet camera is outside the hull, not in it
+  eq('the EVA camera is a standoff outside the hatch', () => {
+    const save = { active: EVA.active, anchor: EVA.anchor, out: EVA.out,
+                   base: EVA.base, p: EVA.p, pv: EVA.pv, seat: CAB.seat, q: HEAD.q };
+    const K = cabK();
+    if (!K) { EVA.active = save.active; return true; }
+    EVA.active = true; EVA.anchor = evaHatchPoint(K); EVA.out = [0,-1,0];
+    EVA.base = evaBaseFrame();
+    EVA.p = V.add(EVA.anchor, V.scale(EVA.out, EVA_STANDOFF));
+    EVA.pv = EVA.p.slice(); CAB.seat = null; HEAD.q = [1,0,0,0];
+    const p = evaPose();
+    const d = Math.hypot(p.eye[1], p.eye[2]) - K.rcone(p.eye[0] - K.xb);
+    EVA.active = save.active; EVA.anchor = save.anchor; EVA.out = save.out;
+    EVA.base = save.base; EVA.p = save.p; EVA.pv = save.pv;
+    CAB.seat = save.seat; HEAD.q = save.q;
+    return d > 0;
+  }, true);
+
   return report(out);
 };
 const SELFTEST_REQUESTED = requested();
@@ -8945,6 +9414,13 @@ window.__debug = {
              parts: parts.length, vehicle: VEHNAME };
   },
   get mission() { return run; },
+  // The spacewalk, as data. `len`/`limit` are the tether the HUD reads, and
+  // `state` is the three-step cycle the hatch and V share.
+  get eva() {
+    return { state: EVA.state, active: EVA.active, suited: EVA.suited,
+             len: EVA.len, limit: EVA.limit,
+             p: EVA.p.slice(), v: EVA.v.slice() };
+  },
   get geometry() { return geo; },
   get gpu() { return GPU_INFO; },
   gl,
