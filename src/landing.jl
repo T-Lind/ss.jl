@@ -419,6 +419,86 @@ function doi_burn(r_m::V3, v_m::V3, h_pdi::Float64)
     (dv, vscale(vunit(v_m), v_apo))
 end
 
+# -------------------------------------------------------- site targeting ---
+# Where a chosen landing site puts the parking orbit.
+#
+# The descent periapsis is the ANTIPODE of the DOI burn on the parking circle —
+# DOI drops the apoapsis where the vehicle is, so the ellipse reaches its low
+# point half a revolution later, on the opposite side of the Moon. To touch down
+# at a chosen selenographic point the parking orbit has to be tilted so that the
+# site's antipode lies ON the orbit at the DOI instant, and the vehicle has to be
+# there. The plane is the one through the arrival perilune (the LOI burn point,
+# which the orbit must contain) and the site's Moon-fixed direction at PDI; the
+# phasing is the wait that carries the vehicle from the perilune round to the
+# site's antipode at the circular rate — never more than one extra revolution.
+# Both depend on the PDI time, and the PDI time depends on the wait, so this is
+# a fixed point; it contracts hard (the site turns at a lunar day against a
+# two-hour orbit) and settles in a handful of passes.
+function target_parking(eph::CircularMoonEphemeris, t_loi::Float64, r_m::V3,
+                        v_m::V3, h_moon_park::Float64, h_pdi::Float64,
+                        u_t::V3, n_rev::Int = 0)
+    rp = R_MOON + h_moon_park
+    v_circ = sqrt(MU_MOON / rp)
+    rhat = vunit(r_m)
+    a_desc = 0.5 * (rp + R_MOON + h_pdi)
+    t_transfer = pi * sqrt(a_desc^3 / MU_MOON)
+    omega = sqrt(MU_MOON / rp^3)              # circular rate [rad/s]
+    T_park = 2pi / omega
+    t_pdi = t_loi + n_rev * T_park + t_transfer
+    v_park = v_m
+    t_doi = t_loi + n_rev * T_park
+    for _ in 1:60
+        Up = vunit(moonfixed_inv(u_t, t_pdi, eph))
+        cr = vcross(rhat, Up)
+        # perilune and the site on top of each other: any plane through them is
+        # fine, so keep the arrival plane and let the phase carry the vehicle
+        h = vnorm(cr) > 1e-9 ? vunit(cr) : vunit(vcross(rhat, (0.0, 0.0, 1.0)))
+        vp = vsub(v_m, vscale(h, vdot(v_m, h)))
+        if vnorm(vp) < 1e-12
+            vp = vcross(h, rhat)
+        end
+        what = vunit(vp)
+        v_park = vscale(what, v_circ)
+        # the vehicle at DOI must sit at the site's antipode
+        a = atan(-vdot(Up, what), -vdot(Up, rhat))
+        a < 0 && (a += 2pi)
+        t_doi = t_loi + n_rev * T_park + a / omega
+        t_pdi_new = t_doi + t_transfer
+        if abs(t_pdi_new - t_pdi) < 1e-4
+            t_pdi = t_pdi_new
+            break
+        end
+        t_pdi = t_pdi_new
+    end
+    (v_park = v_park, v_circ = v_circ, t_doi = t_doi, t_pdi = t_pdi,
+     wait = t_doi - t_loi, dv = vnorm(vsub(v_park, v_m)))
+end
+
+"Rotate a vector about a unit axis by `ang` (Rodrigues)."
+function rot_about(u::V3, axis::V3, ang::Float64)
+    a = vunit(axis); c = cos(ang); s = sin(ang)
+    vadd(vadd(vscale(u, c), vscale(vcross(a, u), s)),
+         vscale(a, vdot(a, u) * (1 - c)))
+end
+
+# The parking coast, DOI and the half-ellipse to the descent periapsis, with no
+# logging — what the site-aiming loop needs to know where a nominal descent
+# would come down, without paying for the viewer's orbit log.
+function descent_orbit(eph::CircularMoonEphemeris, t_loi::Float64, r_m::V3,
+                       v_park::V3, wait::Float64, h_pdi::Float64, field)
+    L = LunarOrbitLog()
+    r, v = r_m, v_park
+    r, v = coast_moon!(L, r, v, t_loi, wait; phase = 0, dt = 5.0,
+                       log_every = typemax(Int), field = field, eph = eph)
+    t_doi = t_loi + wait
+    dv_doi, v_doi = doi_burn(r, v, h_pdi)
+    a = 0.5 * (vnorm(r) + R_MOON + h_pdi)
+    tt = pi * sqrt(a^3 / MU_MOON)
+    r_pdi, v_pdi = coast_moon!(L, r, v_doi, t_doi, tt; phase = 1, dt = 2.0,
+                               log_every = typemax(Int), field = field, eph = eph)
+    (r_pdi = r_pdi, v_pdi = v_pdi, t_pdi = t_doi + tt, dv_doi = dv_doi)
+end
+
 """
     coast_moon!(L, r, v, t, dt_total; phase, dt, log_every) -> (r, v)
 
@@ -1192,6 +1272,8 @@ function moonlanding(; lander::Lander = default_lander(),
                      theta_g0::Float64 = 0.0,
                      site_lat::Float64 = deg2rad_(28.5),
                      site_lon::Float64 = deg2rad_(-80.6),
+                     target_lat::Float64 = NaN,
+                     target_lon::Float64 = NaN,
                      verbose::Bool = false)
     m_payload = lander_mass(lander) +
                 (orbiter === nothing ? 0.0 : orbiter_mass(orbiter))
@@ -1222,7 +1304,46 @@ function moonlanding(; lander::Lander = default_lander(),
     # --- insertion ---------------------------------------------------------
     t_loi = cis.t
     r_m, v_m = mci_state(cis.r, cis.v, t_loi, eph)
-    dv_loi, v_after = loi_burn(r_m, v_m)
+    T_park = 2pi * sqrt(vnorm(r_m)^3 / MU_MOON)
+    aiming = isfinite(target_lat) && isfinite(target_lon)
+    dv_loi0, v_after0 = loi_burn(r_m, v_m)
+
+    # A chosen site is reached by inserting into the parking orbit that passes
+    # over it — one combined LOI + plane-change burn, then a wait of at most an
+    # extra revolution before DOI. But the powered descent does not land where
+    # it is ignited: it brakes for six minutes and comes down several hundred
+    # kilometres downrange. So the PDI aim is walked UP-range of the site by the
+    # descent's own measured downrange, re-aiming against a nominal descent until
+    # the miss is gone. With no site the burn is the plain retrograde
+    # circularisation and the wait is the requested whole revolutions.
+    tgt = nothing
+    if aiming
+        u_site = (cos(target_lat) * cos(target_lon),
+                  cos(target_lat) * sin(target_lon), sin(target_lat))
+        u_aim = u_site
+        for _ in 1:5
+            T = target_parking(eph, t_loi, r_m, v_m, h_moon_park, h_pdi,
+                               u_aim, n_rev)
+            mi = _burn_mass(lander, lander_mass(lander), T.dv)
+            flyi = Lander(lander.name, lander.mdry, mi - lander.mdry,
+                          lander.thrust, lander.isp, lander.throttle_min,
+                          lander.diameter)
+            orb = descent_orbit(eph, t_loi, r_m, T.v_park, T.wait, h_pdi, field)
+            dry = powered_descent(flyi, orb.r_pdi, orb.v_pdi, mi;
+                                  h_gate = h_gate,
+                                  cfg = DescentConfig(eph = eph, t0 = orb.t_pdi))
+            tgt = T
+            dry.outcome == :touchdown || break
+            u_land = vunit(moonfixed(dry.r, orb.t_pdi + dry.t_touchdown, eph))
+            hf = vunit(vcross(moonfixed(orb.r_pdi, orb.t_pdi, eph),
+                              moonfixed(orb.v_pdi, orb.t_pdi, eph)))
+            err = atan(vdot(vcross(u_land, u_site), hf), vdot(u_land, u_site))
+            u_aim = rot_about(u_aim, hf, err)
+            abs(err) < 2e-5 && break
+        end
+    end
+    dv_loi = tgt === nothing ? dv_loi0 : tgt.dv
+    v_after = tgt === nothing ? v_after0 : tgt.v_park
     m = _burn_mass(lander, lander_mass(lander), dv_loi)
     m <= lander.mdry &&
         error("lunar-orbit insertion alone empties the lander " *
@@ -1240,11 +1361,11 @@ function moonlanding(; lander::Lander = default_lander(),
     # --- parking orbit, DOI, coast to the descent periapsis ----------------
     OL = LunarOrbitLog()
     r_park, v_park = r_m, v_after
-    T_park = 2pi * sqrt(vnorm(r_park)^3 / MU_MOON)
-    r_park, v_park = coast_moon!(OL, r_park, v_park, t_loi, n_rev * T_park;
+    wait = tgt === nothing ? n_rev * T_park : tgt.wait
+    r_park, v_park = coast_moon!(OL, r_park, v_park, t_loi, wait;
                                  phase = 0, dt = 5.0, log_every = 8,
                                  field = field, eph = eph)
-    t_doi = t_loi + n_rev * T_park
+    t_doi = t_loi + wait
     dv_doi, v_doi = doi_burn(r_park, v_park, h_pdi)
     m = _burn_mass(lander, m, dv_doi)
     a_desc = 0.5 * (vnorm(r_park) + R_MOON + h_pdi)

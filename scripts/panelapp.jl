@@ -683,6 +683,25 @@ const LAUNCH_SITES = Dict(
     "mahia" => (-39.3, 177.9))
 launch_site(p) = get(LAUNCH_SITES, gets(p, "site", "cape"), LAUNCH_SITES["cape"])
 
+# Lunar landing sites, matching the dropdown in panel_page.html: latitude and
+# longitude in degrees, the real coordinates of the sites the missions reached.
+# The coplanar Moon puts its equator in the transfer plane, so unlike the real
+# Moon it hands the arriving vehicle no free inclination — reaching a site costs
+# a real combined LOI/plane-change burn and a phasing wait. `auto` keeps the old
+# free-return site.
+const TARGET_SITES = Dict(
+    "auto" => ("Free return (auto)", NaN, NaN),
+    "tranquillity" => ("Mare Tranquillitatis · Apollo 11", 0.674, 23.473),
+    "procellarum" => ("Oceanus Procellarum · Apollo 12", -3.012, -23.422),
+    "framauro" => ("Fra Mauro · Apollo 14", -3.646, -17.472),
+    "hadley" => ("Hadley Rille · Apollo 15", 26.132, 3.634),
+    "descartes" => ("Descartes · Apollo 16", -8.973, 15.501),
+    "taurus" => ("Taurus–Littrow · Apollo 17", 20.191, 30.772),
+    "fecunditatis" => ("Mare Fecunditatis · Luna 16", 0.68, 56.30),
+    "procellarum9" => ("Oceanus Procellarum · Luna 9", 7.13, -64.37),
+    "aitken" => ("South Pole–Aitken · Chang’e 4", -45.5, 177.6))
+target_site(p) = get(TARGET_SITES, gets(p, "target", "auto"), TARGET_SITES["auto"])
+
 """
 Fly the lunar landing mission for the panel: the same launch and trans-lunar
 legs as the flyby, then insertion, the lunar-orbit coast and the powered
@@ -700,12 +719,16 @@ function panel_landing(p)::Dict{String,Any}
     # figure in this repo predating terrain was flown against.
     real_moon = !getb(p, "plain_moon", false)
     terr = real_moon ? LunarTerrain() : nothing
+    ts = target_site(p)
+    aiming = isfinite(ts[2]) && isfinite(ts[3])
     ls = moonlanding(
         lander = lander, lv = lv,
         terrain = terr,
         field = real_moon ? LunarGravity() : nothing,
         nav = real_moon ? DescentNav() : nothing,
         hazard = real_moon ? HazardScan() : nothing,
+        target_lat = aiming ? deg2rad_(ts[2]) : NaN,
+        target_lon = aiming ? deg2rad_(ts[3]) : NaN,
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
 
         h_moon_park = getf(p, "h_moon_park_km", 100.0) * 1e3,
@@ -791,6 +814,8 @@ function panel_landing(p)::Dict{String,Any}
             "hover_s" => d.hover_s,
             "land_lat" => rad2deg_(ls.lat_land),
             "land_lon" => rad2deg_(ls.lon_land),
+            "target_lat" => aiming ? ts[2] : NaN,
+            "target_lon" => aiming ? ts[3] : NaN,
             "ground_elev_m" => d.elev,
             "ground_slope_deg" => rad2deg_(d.slope),
             "site_score_deg" => isnan(d.site_score) ? 0.0 : rad2deg_(d.site_score),

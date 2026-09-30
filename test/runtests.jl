@@ -487,6 +487,30 @@ end
     @test 15.0 < dv2 < 30.0                       # a couple of dozen m/s, as flown
     @test_throws ArgumentError doi_burn(r0, (0.0, v_circ, 0.0), 150e3)
 
+    # --- site targeting ---------------------------------------------------
+    # The claim `target_parking` makes is geometric and checkable without the
+    # whole mission: fly the circular orbit it returns for the wait it returns
+    # and the vehicle must arrive at the ANTIPODE of the chosen point — which is
+    # where DOI has to happen for the half-ellipse to reach its periapsis over
+    # the site. Independent of the fixed point's own algebra.
+    eph = coplanar_moon((7.0e6, 0.0, 0.0), (0.0, 7.5e3, 0.0))
+    r_m = S.vscale((1.0, 0.0, 0.0), R_MOON + 100e3)
+    v_m = S.vscale((0.0, 1.0, 0.0), 1.6e3)
+    for (lat, lon) in ((0.674, 23.473), (-8.973, 15.501), (20.191, 30.772))
+        u_t = (cosd(lat) * cosd(lon), cosd(lat) * sind(lon), sind(lat))
+        T = S.target_parking(eph, 0.0, r_m, v_m, 100e3, 15e3, u_t, 1)
+        # coast the shallow circular orbit the targeting returned
+        rr, vv, tt = r_m, T.v_park, 0.0
+        n = 6000; h = T.wait / n
+        for _ in 1:n
+            rr, vv = S._moon_step(rr, vv, h; t = tt)
+            tt += h
+        end
+        Up = S.vunit(moonfixed_inv(u_t, T.t_pdi, eph))
+        # within a third of a degree of the antipode
+        @test S.vdot(S.vunit(rr), Up) < -0.99998
+    end
+
     # --- powered descent from a descent-orbit periapsis --------------------
     rpdi = R_MOON + 15e3
     a_d = 0.5 * (rpdi + R_MOON + 100e3)
