@@ -283,6 +283,8 @@ function earthorbit(; target::Symbol = :leo,
                     kick_angle::Float64 = deg2rad_(8.0),
                     optimize_kick::Bool = false,
                     theta_g0::Float64 = 0.0,
+                    site_lat::Float64 = deg2rad_(28.5),
+                    site_lon::Float64 = deg2rad_(-80.6),
                     strict::Bool = true,
                     verbose::Bool = false)
     haskey(ORBITS, target) || target === :custom ||
@@ -304,10 +306,10 @@ function earthorbit(; target::Symbol = :leo,
     # ascent into the parking orbit at the target plane (launch_azimuth clamps
     # an inclination below the site latitude to the site latitude — for GEO
     # that is exactly right: the remainder is the apogee plane change's job)
-    site_lat = deg2rad_(28.5)
     az = launch_azimuth(tgt.inclination, site_lat)
     guid0 = AscentGuidance(azimuth = az, h_target = h_park,
-                           kick_angle = kick_angle)
+                           kick_angle = kick_angle, site_lat = site_lat,
+                           site_lon = site_lon)
     guid, asc = tune_ascent(lv, guid0; optimize_kick = optimize_kick,
                             theta_g0 = theta_g0, verbose = verbose)
     # The spherical azimuth formula is several degrees off at steep
@@ -321,7 +323,8 @@ function earthorbit(; target::Symbol = :leo,
         if abs(miss) > deg2rad_(1.0)
             az2 = launch_azimuth(tgt.inclination + miss, site_lat)
             guid2 = AscentGuidance(azimuth = az2, h_target = h_park,
-                                   kick_angle = kick_angle)
+                                   kick_angle = kick_angle, site_lat = site_lat,
+                                   site_lon = site_lon)
             g2, a2 = tune_ascent(lv, guid2; optimize_kick = optimize_kick,
                                  theta_g0 = theta_g0, verbose = verbose)
             if a2.reached_orbit &&

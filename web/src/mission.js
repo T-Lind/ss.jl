@@ -18,9 +18,12 @@ export function translunar_design(lv, opts = {}) {
   const { h_park = 200.0e3, hp_moon = 2000.0e3, hp_return = 50.0e3,
           inclination = deg2rad_(28.5), kick_angle = deg2rad_(8.0),
           optimize_kick = false, cis_eta = 0.002, perigee_tol = 250.0,
-          tol_perigee_km = 2.0, theta_g0 = 0.0, strict = true, verbose = false } = opts;
-  const az = launch_azimuth(inclination, deg2rad_(28.5));
-  const guid0 = ascentGuidance({ azimuth: az, h_target: h_park, kick_angle });
+          tol_perigee_km = 2.0, theta_g0 = 0.0,
+          site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
+          strict = true, verbose = false } = opts;
+  const az = launch_azimuth(inclination, site_lat);
+  const guid0 = ascentGuidance({ azimuth: az, h_target: h_park, kick_angle,
+                                 site_lat, site_lon });
   const [guid, asc] = tune_ascent(lv, guid0, { optimize_kick, theta_g0, verbose });
   const partial = { guid, ascent: asc, eph: null, t_ign: NaN, dv: NaN, cis: null,
                     m_stack: NaN, kick: lv.stages[lv.stages.length - 1],
@@ -62,6 +65,7 @@ export function moonshot(opts = {}) {
           tli_mag_err = 0.0, tli_point_err = 0.0, tcm_delay = 86400.0,
           kick_angle = deg2rad_(8.0), optimize_kick = false, theta_g0 = 0.0,
           cis_eta = 0.002, perigee_tol = 250.0, strict = true,
+          site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
           pod_diameter = NaN, verbose = false } = opts;
   let lv = lvIn;
   if (lv === null) lv = default_moon_rocket({ payload: pod_mass0 });
@@ -70,7 +74,8 @@ export function moonshot(opts = {}) {
     ? pod_diameter : 2 * pod_radius(pod_mass);
 
   const des = translunar_design(lv, { h_park, hp_moon, hp_return, inclination,
-    kick_angle, optimize_kick, cis_eta, perigee_tol, theta_g0, strict, verbose });
+    kick_angle, optimize_kick, cis_eta, perigee_tol, theta_g0,
+    site_lat, site_lon, strict, verbose });
   const { guid, ascent: asc, eph } = des;
   const dstatus = des.design_status;
   const result = { lv, guid, ascent: asc, eph, cislunar: null, entry_scn: null,

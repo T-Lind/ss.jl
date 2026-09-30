@@ -787,7 +787,9 @@ export function moonlanding(opts = {}) {
           h_gate = 2000.0, terrain = null, field = null, nav: navIn = null,
           hazard = null, survey_error = 60.0, orbiter: orbiterIn = null,
           kick_angle = deg2rad_(8.0), optimize_kick = false, cis_eta = CIS_ETA,
-          perigee_tol = 5.0e3, verbose = false } = opts;
+          perigee_tol = 5.0e3, theta_g0 = 0.0,
+          site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
+          verbose = false } = opts;
   let nav = navIn;
   const m_payload = lander_mass(landerIn) +
     (orbiterIn === null ? 0.0 : orbiter_mass(orbiterIn));
@@ -802,12 +804,12 @@ export function moonlanding(opts = {}) {
   // The free return is an *abort* path here, not an entry corridor.
   const des = translunar_design(lv, { h_park, hp_moon: h_moon_park, hp_return,
     inclination, kick_angle, optimize_kick, cis_eta, perigee_tol,
-    tol_perigee_km: 30.0, verbose });
+    tol_perigee_km: 30.0, theta_g0, site_lat, site_lon, verbose });
   const asc = des.ascent, eph = des.eph;
 
   const cis = fly_to_perilune(asc.r, asc.v, asc.t, eph, {
     t_ign: des.t_ign, dv: des.dv, stage: des.kick, m_stack: des.m_stack,
-    prop_avail: asc.prop_left[asc.prop_left.length - 1], eta: cis_eta });
+    prop_avail: asc.prop_left[asc.prop_left.length - 1], eta: cis_eta, theta_g0 });
   if (cis.outcome !== 'perilune')
     throw new Error(`trans-lunar leg did not reach perilune (outcome: ${cis.outcome})`);
 

@@ -48,7 +48,8 @@ export function suborbital(opts = {}) {
   const { profile = 'hop', lv: lvIn = null, pod_mass: pod_mass0 = 350.0,
           apogee = 100.0e3, downrange = 250.0e3, loft = deg2rad_(40.0),
           azimuth = deg2rad_(90.0), kick_angle = deg2rad_(8.0),
-          theta_g0 = 0.0, iterations = 3, strict = true, verbose = false } = opts;
+          theta_g0 = 0.0, site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
+          iterations = 3, strict = true, verbose = false } = opts;
   if (!(profile === 'hop' || profile === 'downrange'))
     throw new Error(`unknown suborbital profile ${profile}; have hop, downrange`);
   if (!(apogee > 0)) throw new Error('apogee must be positive');
@@ -62,10 +63,11 @@ export function suborbital(opts = {}) {
   const base = profile === 'hop'
     ? ascentGuidance({ azimuth, kick_angle: 0.0, kick_duration: 0.0,
                        pitch_hold: 0.5 * Math.PI, cutoff: 'apogee',
-                       apogee_target: apogee,
+                       apogee_target: apogee, site_lat, site_lon,
                        fairing_alt: Math.min(60.0e3, 0.55 * apogee) })
     : ascentGuidance({ azimuth, kick_angle, pitch_hold: loft, cutoff: 'range',
-                       range_target: downrange, fairing_alt: 60.0e3 });
+                       range_target: downrange, site_lat, site_lon,
+                       fairing_alt: 60.0e3 });
 
   const goal = profile === 'hop' ? apogee : downrange;
   const got = f => profile === 'hop' ? f.apogee : f.range;

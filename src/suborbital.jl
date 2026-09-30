@@ -120,6 +120,8 @@ function suborbital(; profile::Symbol = :hop,
                     azimuth::Float64 = deg2rad_(90.0),
                     kick_angle::Float64 = deg2rad_(8.0),
                     theta_g0::Float64 = 0.0,
+                    site_lat::Float64 = deg2rad_(28.5),
+                    site_lon::Float64 = deg2rad_(-80.6),
                     iterations::Int = 3,
                     strict::Bool = true,
                     verbose::Bool = false)
@@ -138,11 +140,13 @@ function suborbital(; profile::Symbol = :hop,
     base = profile === :hop ?
         AscentGuidance(azimuth = azimuth, kick_angle = 0.0, kick_duration = 0.0,
                        pitch_hold = 0.5pi, cutoff = :apogee,
-                       apogee_target = apogee,
+                       apogee_target = apogee, site_lat = site_lat,
+                       site_lon = site_lon,
                        fairing_alt = min(60.0e3, 0.55 * apogee)) :
         AscentGuidance(azimuth = azimuth, kick_angle = kick_angle,
                        pitch_hold = loft, cutoff = :range,
-                       range_target = downrange,
+                       range_target = downrange, site_lat = site_lat,
+                       site_lon = site_lon,
                        fairing_alt = 60.0e3)
 
     # Secant correction on the COMMAND. The cutoff test is a vacuum arc through

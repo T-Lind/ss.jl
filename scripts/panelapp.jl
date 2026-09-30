@@ -666,6 +666,23 @@ terrain_payload(tr::Union{Nothing,LunarTerrain}) =
 ascent_events(asc) = Any[Dict("phase" => "ascent", "name" => string(e.name),
                               "t" => e.t) for e in asc.events]
 
+# Launch time of day. `theta_g0` is the Greenwich sidereal angle at liftoff,
+# so one hour on the clock is OMEGA_EARTH * 3600 rad of Earth rotation. Zero is
+# the epoch every mission was always flown at; 0-24 h walks the launch site
+# once around the globe, which is exactly what shifts the ground track.
+launch_theta(p) = SatelliteSim.OMEGA_EARTH * 3600.0 * getf(p, "launch_h", 0.0)
+
+# Launch sites, matching the dropdown in panel_page.html. Latitude caps what a
+# direct ascent can reach, so an equatorial target from a high-latitude site is
+# an honest miss rather than a silent re-aim.
+const LAUNCH_SITES = Dict(
+    "cape" => (28.5, -80.6), "vandenberg" => (34.6, -120.6),
+    "wallops" => (37.9, -75.5), "baikonur" => (45.9, 63.3),
+    "kourou" => (5.2, -52.8), "tanegashima" => (30.4, 131.0),
+    "sriharikota" => (13.7, 80.2), "wenchang" => (19.6, 110.9),
+    "mahia" => (-39.3, 177.9))
+launch_site(p) = get(LAUNCH_SITES, gets(p, "site", "cape"), LAUNCH_SITES["cape"])
+
 """
 Fly the lunar landing mission for the panel: the same launch and trans-lunar
 legs as the flyby, then insertion, the lunar-orbit coast and the powered
@@ -698,6 +715,9 @@ function panel_landing(p)::Dict{String,Any}
         hp_return = getf(p, "hp_return_km", 50.0) * 1e3,
         kick_angle = kick_rad(p),
         optimize_kick = opt_kick(p),
+        theta_g0 = launch_theta(p),
+        site_lat = deg2rad_(launch_site(p)[1]),
+        site_lon = deg2rad_(launch_site(p)[2]),
     )
     asc, cis, d = ls.ascent, ls.cislunar, ls.descent
     el = asc.elements
@@ -709,6 +729,16 @@ function panel_landing(p)::Dict{String,Any}
     oidx = deci_idx(length(O.t), 900)
     D = d.log
     didx = deci_idx(length(D.t), 700)
+
+    # Selenographic sub-points for the Moon ground track: latitude and longitude
+    # in the tidally-locked Moon-fixed frame, longitude 0 being the sub-Earth
+    # meridian. The orbit log carries absolute mission time; the powered
+    # descent is logged relative to PDI.
+    orbit_ll = [SatelliteSim.selenographic((O.x[i], O.y[i], O.z[i]), O.t[i], ls.eph)
+                for i in oidx]
+    desc_ll = [SatelliteSim.selenographic((D.x[i], D.y[i], D.z[i]),
+                                          ls.t_pdi + D.t[i], ls.eph)
+               for i in didx]
 
     events = ascent_events(asc)
     push!(events, Dict("phase" => "cislunar", "name" => "tli_ignition", "t" => cis.t_tli))
@@ -785,10 +815,14 @@ function panel_landing(p)::Dict{String,Any}
                             "x" => [O.x[i] / 1e3 for i in oidx],
                             "y" => [O.y[i] / 1e3 for i in oidx],
                             "z" => [O.z[i] / 1e3 for i in oidx],
-                            "ph" => [O.phase[i] for i in oidx]),
+                            "ph" => [O.phase[i] for i in oidx],
+                            "lat" => [rad2deg_(ll[1]) for ll in orbit_ll],
+                            "lon" => [rad2deg_(ll[2]) for ll in orbit_ll]),
             "descent" => Dict("x" => [D.x[i] / 1e3 for i in didx],
                               "y" => [D.y[i] / 1e3 for i in didx],
-                              "z" => [D.z[i] / 1e3 for i in didx])),
+                              "z" => [D.z[i] / 1e3 for i in didx],
+                              "lat" => [rad2deg_(ll[1]) for ll in desc_ll],
+                              "lon" => [rad2deg_(ll[2]) for ll in desc_ll])),
         "descent" => Dict(
             "t" => [D.t[i] for i in didx],
             "h" => [D.h[i] / 1e3 for i in didx],
@@ -879,6 +913,9 @@ function panel_orbit(p)::Dict{String,Any}
         hp_entry = getf(p, "hp_entry_km", 25.0) * 1e3,
         kick_angle = kick_rad(p),
         optimize_kick = opt_kick(p),
+        theta_g0 = launch_theta(p),
+        site_lat = deg2rad_(launch_site(p)[1]),
+        site_lon = deg2rad_(launch_site(p)[2]),
         strict = false,
     )
     asc, ent = eo.ascent, eo.entry
@@ -975,6 +1012,9 @@ function panel_suborbital(p)::Dict{String,Any}
         loft = deg2rad_(clamp(getf(p, "sub_loft_deg", 40.0), 5.0, 85.0)),
         azimuth = deg2rad_(clamp(getf(p, "sub_azimuth_deg", 90.0), 0.0, 360.0)),
         kick_angle = kick_rad(p),
+        theta_g0 = launch_theta(p),
+        site_lat = deg2rad_(launch_site(p)[1]),
+        site_lon = deg2rad_(launch_site(p)[2]),
         strict = false,
     )
     asc, ent = sb.ascent, sb.entry
@@ -1067,6 +1107,9 @@ function panel_mission(p)::Dict{String,Any}
         tli_point_err = deg2rad_(getf(p, "tli_point_err_deg", 0.0)),
         kick_angle = kick_rad(p),
         optimize_kick = opt_kick(p),
+        theta_g0 = launch_theta(p),
+        site_lat = deg2rad_(launch_site(p)[1]),
+        site_lon = deg2rad_(launch_site(p)[2]),
         strict = false,
     )
     asc, cis, ent = ms.ascent, ms.cislunar, ms.entry

@@ -2,7 +2,8 @@
 // routing and static-file serving are not needed in the browser: these
 // functions produce the same payload objects the pages used to receive as
 // JSON, and `panelRun` is the in-process replacement for POST /api/run.
-import { MU_EARTH, RE_MEAN, R_MOON, A_MOON, G0, P0_SEA, deg2rad_, rad2deg_ } from './constants.js';
+import { MU_EARTH, RE_MEAN, R_MOON, A_MOON, G0, P0_SEA, OMEGA_EARTH,
+         deg2rad_, rad2deg_ } from './constants.js';
 import { vsub, vcross, vdot, vnorm, vunit } from './vec3.js';
 import { ecef_from_geodetic, geodetic_from_ecef, earth_rotation_angle } from './frames.js';
 import { rot_z } from './vec3.js';
@@ -15,7 +16,7 @@ import { stage, stage_diameter, stage_length, stage_volume, stage_burn_time,
          core_diameter, launchVehicle, boosterSet, cruise_inertia } from './propulsion.js';
 import { ascentGuidance, tune_ascent } from './launch.js';
 import { moonshot, pod_radius } from './mission.js';
-import { lander, lander_mass, lander_dv, moonlanding } from './landing.js';
+import { lander, lander_mass, lander_dv, moonlanding, selenographic } from './landing.js';
 import { lunarTerrain } from './terrain.js';
 import { descentNav, hazardScan } from './landingnav.js';
 import { lunarGravity, moonfixed } from './moon.js';
@@ -368,6 +369,30 @@ const terrain_payload = tr => tr === null || tr === undefined
 const ascent_events = asc => asc.events.map(e =>
   ({ phase: 'ascent', name: String(e.name), t: e.t }));
 
+// Launch time of day. `theta_g0` is the Greenwich sidereal angle at liftoff,
+// so one hour on the clock is OMEGA_EARTH * 3600 rad of Earth rotation. Zero
+// is the epoch every mission was always flown at; 0-24 h walks the launch site
+// once around the globe, which is exactly what shifts the ground track.
+const launch_theta = p => OMEGA_EARTH * 3600.0 * getf(p, 'launch_h', 0.0);
+
+// Launch sites. Latitude is what a mission can reach directly: a prograde
+// orbit cannot have an inclination below the site latitude, so an equatorial
+// target from Baikonur is an honest miss rather than a silent re-aim. The
+// lunar missions pick the Moon plane to match the ascent, so they fly from
+// anywhere; only the ground track and the trans-lunar phasing change.
+export const LAUNCH_SITES = {
+  cape:        { name: 'Cape Canaveral', lat: 28.5,  lon: -80.6 },
+  vandenberg:  { name: 'Vandenberg',     lat: 34.6,  lon: -120.6 },
+  wallops:     { name: 'Wallops',        lat: 37.9,  lon: -75.5 },
+  baikonur:    { name: 'Baikonur',       lat: 45.9,  lon: 63.3 },
+  kourou:      { name: 'Kourou',         lat: 5.2,   lon: -52.8 },
+  tanegashima: { name: 'Tanegashima',    lat: 30.4,  lon: 131.0 },
+  sriharikota: { name: 'Sriharikota',    lat: 13.7,  lon: 80.2 },
+  wenchang:    { name: 'Wenchang',       lat: 19.6,  lon: 110.9 },
+  mahia:       { name: 'Mahia',          lat: -39.3, lon: 177.9 },
+};
+const launch_site = p => LAUNCH_SITES[gets(p, 'site', 'cape')] || LAUNCH_SITES.cape;
+
 // Fly the lunar landing mission for the panel.
 function panel_landing(p) {
   const lnd = lander_from_params(p);
@@ -387,6 +412,9 @@ function panel_landing(p) {
     hp_return: getf(p, 'hp_return_km', 50.0) * 1e3,
     kick_angle: kick_rad(p),
     optimize_kick: opt_kick(p),
+    theta_g0: launch_theta(p),
+    site_lat: deg2rad_(launch_site(p).lat),
+    site_lon: deg2rad_(launch_site(p).lon),
   });
   const asc = ls.ascent, cis = ls.cislunar, d = ls.descent;
   const el = asc.elements;
@@ -396,6 +424,15 @@ function panel_landing(p) {
   const oidx = deci_idx(O.t.length, 900);
   const D = d.log;
   const didx = deci_idx(D.t.length, 700);
+
+  // Selenographic sub-points for the Moon ground track: latitude and longitude
+  // in the tidally-locked Moon-fixed frame, longitude 0 being the sub-Earth
+  // meridian. The orbit log carries absolute mission time; the powered descent
+  // is logged relative to PDI.
+  const orbit_ll = oidx.map(i =>
+    selenographic([O.x[i] * 1e3, O.y[i] * 1e3, O.z[i] * 1e3], O.t[i], ls.eph).map(rad2deg_));
+  const desc_ll = didx.map(i =>
+    selenographic([D.x[i], D.y[i], D.z[i]], ls.t_pdi + D.t[i], ls.eph).map(rad2deg_));
 
   const events = ascent_events(asc);
   events.push({ phase: 'cislunar', name: 'tli_ignition', t: cis.t_tli });
@@ -462,10 +499,12 @@ function panel_landing(p) {
       r_km: R_MOON / 1e3,
       orbit: { t: sub(O.t, oidx), x: sub(O.x, oidx).map(x => x / 1e3),
                y: sub(O.y, oidx).map(x => x / 1e3), z: sub(O.z, oidx).map(x => x / 1e3),
-               ph: sub(O.phase, oidx) },
+               ph: sub(O.phase, oidx),
+               lat: orbit_ll.map(x => x[0]), lon: orbit_ll.map(x => x[1]) },
       descent: { x: sub(D.x, didx).map(x => x / 1e3),
                  y: sub(D.y, didx).map(x => x / 1e3),
-                 z: sub(D.z, didx).map(x => x / 1e3) },
+                 z: sub(D.z, didx).map(x => x / 1e3),
+                 lat: desc_ll.map(x => x[0]), lon: desc_ll.map(x => x[1]) },
     },
     descent: {
       t: sub(D.t, didx), h: sub(D.h, didx).map(x => x / 1e3),
@@ -545,6 +584,9 @@ function panel_orbit(p) {
     hp_entry: getf(p, 'hp_entry_km', 25.0) * 1e3,
     kick_angle: kick_rad(p),
     optimize_kick: opt_kick(p),
+    theta_g0: launch_theta(p),
+    site_lat: deg2rad_(launch_site(p).lat),
+    site_lon: deg2rad_(launch_site(p).lon),
     strict: false,
   });
   const asc = eo.ascent, ent = eo.entry;
@@ -620,6 +662,9 @@ function panel_suborbital(p) {
     loft: deg2rad_(Math.min(85.0, Math.max(5.0, getf(p, 'sub_loft_deg', 40.0)))),
     azimuth: deg2rad_(Math.min(360.0, Math.max(0.0, getf(p, 'sub_azimuth_deg', 90.0)))),
     kick_angle: kick_rad(p),
+    theta_g0: launch_theta(p),
+    site_lat: deg2rad_(launch_site(p).lat),
+    site_lon: deg2rad_(launch_site(p).lon),
     strict: false,
   });
   const asc = sb.ascent, ent = sb.entry;
@@ -687,6 +732,9 @@ export function panel_mission(p) {
     tli_point_err: deg2rad_(getf(p, 'tli_point_err_deg', 0.0)),
     kick_angle: kick_rad(p),
     optimize_kick: opt_kick(p),
+    theta_g0: launch_theta(p),
+    site_lat: deg2rad_(launch_site(p).lat),
+    site_lon: deg2rad_(launch_site(p).lon),
     strict: false,
   });
   const asc = ms.ascent, cis = ms.cislunar, ent = ms.entry;

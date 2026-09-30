@@ -175,3 +175,111 @@ export function drawMoonView(target, moon, opts = {}) {
   cv.__moonState = { rMoon, stepKm, altKm, scale };
   cv.title = 'Moon-centred orbit geometry: parking orbit, descent ellipse, touchdown';
 }
+
+// ---------------------------------------------------------- ground track -----
+// The sub-vehicle point in selenographic coordinates, longitude 0 being the
+// sub-Earth meridian: the near side sits in the middle of the map and the far
+// side wraps to the edges. This is the Moon's answer to the Earth ground track
+// — it says WHERE on the Moon the parking orbit, the descent ellipse and the
+// touchdown actually are, which the orbit-plane view above cannot.
+
+function llRuns(ph, lat, lon) {
+  const runs = [];
+  let cur = null;
+  for (let i = 0; i < lat.length; i++) {
+    const p = +((ph && ph[i]) || 0);
+    if (!cur || cur.ph !== p) { cur = { ph: p, lat: [], lon: [] }; runs.push(cur); }
+    cur.lat.push(lat[i]); cur.lon.push(lon[i]);
+  }
+  return runs.filter(r => r.lat.length > 1);
+}
+
+function strokeLL(ctx, xy, lat, lon, color, width, alpha) {
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.globalAlpha = alpha;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  let pen = false, pl = null;
+  for (let i = 0; i < lat.length; i++) {
+    const [x, y] = xy(lon[i], lat[i]);
+    if (!pen || (pl !== null && Math.abs(pl - lon[i]) > 180)) { ctx.moveTo(x, y); pen = true; }
+    else ctx.lineTo(x, y);
+    pl = lon[i];
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+export function drawMoonGroundTrack(target, moon, opts = {}) {
+  const cv = typeof target === 'string' ? document.getElementById(target) : target;
+  if (!cv || !moon || !moon.orbit || !moon.orbit.lat || moon.orbit.lat.length < 2) return;
+  const ctx = cv.getContext('2d'), dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const xy = (lo, la) => [(lo + 180) / 360 * w, (90 - la) / 180 * h];
+  const grd = ctx.createLinearGradient(0, 0, 0, h);
+  grd.addColorStop(0, '#0d2132'); grd.addColorStop(1, '#07131e');
+  ctx.fillStyle = grd; ctx.fillRect(0, 0, w, h);
+
+  ctx.strokeStyle = 'rgba(143,190,240,.10)'; ctx.lineWidth = 1;
+  for (let lo = -150; lo <= 150; lo += 30) {
+    const [x] = xy(lo, 0); ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+  }
+  for (let la = -60; la <= 60; la += 30) {
+    const [, y] = xy(0, la); ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(143,190,240,.22)';
+  {
+    const [, y0] = xy(0, 0);
+    ctx.beginPath(); ctx.moveTo(0, y0); ctx.lineTo(w, y0); ctx.stroke();
+    for (const lo of [0, 180, -180]) {
+      const [x] = xy(lo, 0);
+      ctx.beginPath(); ctx.moveTo(x, y0 - 4); ctx.lineTo(x, y0 + 4); ctx.stroke();
+    }
+  }
+
+  // The big near-side maria, approximate [lat, lon, r_lat, r_lon]: enough
+  // geography to say which face of the Moon the track is over.
+  const maria = [[33, -16, 9, 13], [28, 18, 7, 10], [17, 59, 9, 7],
+                 [-15, 34, 6, 7], [-24, -39, 5, 6], [-8, -52, 21, 10]];
+  ctx.fillStyle = 'rgba(96,106,118,.20)';
+  for (const [la, lo, rl, rn] of maria) {
+    const [x, y] = xy(lo, la);
+    ctx.beginPath(); ctx.ellipse(x, y, rn / 360 * w, rl / 180 * h, 0, 0, 2 * Math.PI); ctx.fill();
+  }
+
+  const O = moon.orbit;
+  for (const run of llRuns(O.ph, O.lat, O.lon))
+    strokeLL(ctx, xy, run.lat, run.lon, run.ph === 1 ? TRANSFER : PARK, 1.8,
+             run.ph === 1 ? 0.9 : 0.95);
+  const D = moon.descent;
+  if (D && D.lat && D.lat.length > 1)
+    strokeLL(ctx, xy, D.lat, D.lon, POWERED, 2.6, 1);
+
+  const site = opts.site ||
+    (D && D.lat ? { lat: D.lat[D.lat.length - 1], lon: D.lon[D.lon.length - 1] } : null);
+  if (site && Number.isFinite(+site.lat) && Number.isFinite(+site.lon)) {
+    const [x, y] = xy(+site.lon, +site.lat);
+    ctx.fillStyle = SITE; ctx.strokeStyle = '#07131e'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, y - 7); ctx.lineTo(x + 7, y); ctx.lineTo(x, y + 7); ctx.lineTo(x - 7, y);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    const lbl = opts.label || 'touchdown';
+    ctx.fillStyle = SITE; ctx.font = '11px ui-monospace,monospace';
+    ctx.fillText(lbl, Math.min(x + 10, w - ctx.measureText(lbl).width - 6),
+                 Math.max(y - 8, 26));
+  }
+
+  ctx.fillStyle = 'rgba(143,151,168,.65)'; ctx.font = '9px system-ui';
+  ctx.textAlign = 'right';
+  ctx.fillText('selenographic · 0° lon = sub-Earth meridian · near side centre',
+               w - 8, h - 7);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#8B97A8'; ctx.font = '10px ui-monospace,monospace';
+  ctx.fillText('Moon ground track', 12, 16);
+  cv.title = 'Selenographic ground track: parking orbit, descent ellipse and touchdown';
+}

@@ -83,6 +83,11 @@ function translunar_design(lv::LaunchVehicle;
                            # into — see `launch_window`. Both lunar missions
                            # share this leg, so both inherit the epoch.
                            theta_g0::Float64 = 0.0,
+                           # Launch site. Latitude caps what a direct ascent
+                           # can reach; the azimuth formula clamps a target
+                           # below the site latitude to the site itself.
+                           site_lat::Float64 = deg2rad_(28.5),
+                           site_lon::Float64 = deg2rad_(-80.6),
                            # strict = true throws on a failed leg (the
                            # behaviour every script and test was built on);
                            # strict = false returns the partial design with
@@ -90,9 +95,10 @@ function translunar_design(lv::LaunchVehicle;
                            # ascent that DID fly instead of an error string
                            strict::Bool = true,
                            verbose::Bool = false)
-    az = launch_azimuth(inclination, deg2rad_(28.5))
+    az = launch_azimuth(inclination, site_lat)
     guid0 = AscentGuidance(azimuth = az, h_target = h_park,
-                           kick_angle = kick_angle)
+                           kick_angle = kick_angle, site_lat = site_lat,
+                           site_lon = site_lon)
     guid, asc = tune_ascent(lv, guid0; optimize_kick = optimize_kick,
                             theta_g0 = theta_g0, verbose = verbose)
     partial = (guid = guid, ascent = asc, eph = nothing, t_ign = NaN,
@@ -205,6 +211,8 @@ function moonshot(; pod_mass::Float64 = 350.0,
                   # failure, and it was invisible because the number was right
                   # in the geometry and wrong only in the physics.
                   pod_diameter::Float64 = NaN,
+                  site_lat::Float64 = deg2rad_(28.5),
+                  site_lon::Float64 = deg2rad_(-80.6),
                   verbose::Bool = false)
     # --- 1-3. launch, ephemeris, free-return design ------------------------
     # a supplied launch vehicle wins; its payload IS the pod
@@ -220,7 +228,8 @@ function moonshot(; pod_mass::Float64 = 350.0,
                             hp_return = hp_return, inclination = inclination,
                             kick_angle = kick_angle, optimize_kick = optimize_kick,
                             cis_eta = cis_eta, perigee_tol = perigee_tol,
-                            theta_g0 = theta_g0, strict = strict,
+                            theta_g0 = theta_g0, site_lat = site_lat,
+                            site_lon = site_lon, strict = strict,
                             verbose = verbose)
     guid, asc, eph = des.guid, des.ascent, des.eph
     dstatus = des.design_status
