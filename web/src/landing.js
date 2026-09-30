@@ -273,6 +273,86 @@ export function doi_burn(r_m, v_m, h_pdi) {
   return [dv, vscale(vunit(v_m), v_apo)];
 }
 
+// -------------------------------------------------------- site targeting ---
+// Where a chosen landing site puts the parking orbit.
+//
+// The descent periapsis is the ANTIPODE of the DOI burn on the parking circle
+// — DOI drops the apoapsis where the vehicle is, so the ellipse reaches its low
+// point half a revolution later, on the opposite side of the Moon. To touch
+// down at a chosen selenographic point, then, the parking orbit has to be tilted
+// so that the site's antipode lies ON the orbit at the DOI instant, and the
+// vehicle has to be there.
+//
+// The plane is the one through the arrival perilune (the LOI burn point, which
+// the orbit must contain) and the site's Moon-fixed direction at PDI. The
+// phasing is the wait that carries the vehicle from the perilune round to the
+// site's antipode at the circular rate — never more than one extra revolution,
+// because the vehicle passes every point on the circle each revolution. Both
+// depend on the PDI time, and the PDI time depends on the wait, so this is a
+// fixed point; it contracts hard (the site turns at a lunar day against a two-
+// hour orbit) and settles in a handful of passes.
+//
+// Returns the circular velocity for the inclined orbit and the wait from LOI,
+// or null if the site is the arrival point itself and the plane is degenerate —
+// in which case the caller keeps the natural equatorial orbit.
+export function target_parking(eph, t_loi, r_m, v_m, h_moon_park, h_pdi,
+                               u_t, n_rev = 0) {
+  const rp = R_MOON + h_moon_park;
+  const v_circ = Math.sqrt(MU_MOON / rp);
+  const rhat = vunit(r_m);
+  const a_desc = 0.5 * (rp + R_MOON + h_pdi);
+  const t_transfer = Math.PI * Math.sqrt(a_desc ** 3 / MU_MOON);
+  const omega = Math.sqrt(MU_MOON / rp ** 3);          // circular rate
+  const T_park = 2 * Math.PI / omega;
+  let t_pdi = t_loi + n_rev * T_park + t_transfer;
+  let v_park = null, t_doi = t_loi + n_rev * T_park;
+  for (let it = 0; it < 60; it++) {
+    const Up = vunit(moonfixed_inv(u_t, t_pdi, eph));
+    let cr = vcross(rhat, Up);
+    // perilune and the site on top of each other: any plane through them is
+    // fine, so keep the arrival plane and let the phase carry the vehicle
+    const h = vnorm(cr) > 1e-9 ? vunit(cr) : vunit(vcross(rhat, [0, 0, 1]));
+    let vp = vsub(v_m, vscale(h, vdot(v_m, h)));
+    if (vnorm(vp) < 1e-12) vp = vcross(h, rhat);
+    const what = vunit(vp);
+    v_park = vscale(what, v_circ);
+    // the vehicle at DOI must sit at the site's antipode
+    let a = Math.atan2(-vdot(Up, what), -vdot(Up, rhat));
+    if (a < 0) a += 2 * Math.PI;
+    t_doi = t_loi + n_rev * T_park + a / omega;
+    const t_pdi_new = t_doi + t_transfer;
+    if (Math.abs(t_pdi_new - t_pdi) < 1e-4) { t_pdi = t_pdi_new; break; }
+    t_pdi = t_pdi_new;
+  }
+  return { v_park, v_circ, t_doi, t_pdi, wait: t_doi - t_loi,
+           dv: vnorm(vsub(v_park, v_m)) };
+}
+
+// Rotate a vector about a unit axis by `ang` (Rodrigues).
+function rot_about(u, axis, ang) {
+  const a = vunit(axis), c = Math.cos(ang), s = Math.sin(ang);
+  return vadd(vadd(vscale(u, c), vscale(vcross(a, u), s)),
+              vscale(a, vdot(a, u) * (1 - c)));
+}
+
+// The parking coast, DOI, and the half-ellipse to the descent periapsis, with
+// no logging — what the site-aiming loop needs to know where a nominal descent
+// would come down, without paying for the viewer's orbit log.
+function descent_orbit(eph, t_loi, r_m, v_park, wait, h_pdi, field) {
+  const L = lunarOrbitLog();
+  let r = r_m, v = v_park;
+  [r, v] = coast_moon(L, r, v, t_loi, wait,
+    { phase: 0, dt: 5.0, log_every: 1e9, field, eph });
+  const t_doi = t_loi + wait;
+  const [dv_doi, v_doi] = doi_burn(r, v, h_pdi);
+  const a = 0.5 * (vnorm(r) + R_MOON + h_pdi);
+  const tt = Math.PI * Math.sqrt(a ** 3 / MU_MOON);
+  const [r_pdi, v_pdi] = coast_moon(L, r, v_doi, t_doi, tt,
+    { phase: 1, dt: 2.0, log_every: 1e9, field, eph });
+  return { r_pdi, v_pdi, t_pdi: t_doi + tt, dv_doi };
+}
+
+
 // Ballistic Moon-centred coast of `dt_total` seconds, logging as it goes.
 export function coast_moon(L, r, v, t, dt_total, opts = {}) {
   const { phase = 0, dt = 5.0, log_every = 4, field = null, eph = null } = opts;
@@ -789,6 +869,7 @@ export function moonlanding(opts = {}) {
           kick_angle = deg2rad_(8.0), optimize_kick = false, cis_eta = CIS_ETA,
           perigee_tol = 5.0e3, theta_g0 = 0.0,
           site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
+          target_lat = NaN, target_lon = NaN,
           onProgress = null, verbose = false } = opts;
   let nav = navIn;
   const m_payload = lander_mass(landerIn) +
@@ -818,7 +899,47 @@ export function moonlanding(opts = {}) {
   // --- insertion ---------------------------------------------------------
   const t_loi = cis.t;
   const [r_m, v_m] = mci_state(cis.r, cis.v, t_loi, eph);
-  const [dv_loi, v_after] = loi_burn(r_m, v_m);
+  const T_park = 2 * Math.PI * Math.sqrt(vnorm(r_m) ** 3 / MU_MOON);
+  const aiming = Number.isFinite(target_lat) && Number.isFinite(target_lon);
+  const [dv_loi0, v_after0] = loi_burn(r_m, v_m);
+
+  // A chosen site is reached by inserting into the parking orbit that passes
+  // over it — one combined LOI + plane-change burn, then a wait of at most an
+  // extra revolution before DOI. But the powered descent does not land where it
+  // is ignited: it brakes for six minutes and comes down several hundred
+  // kilometres downrange. So the PDI aim is walked UP-range of the site by the
+  // descent's own measured downrange, re-aiming against a nominal descent until
+  // the miss is gone. With no site the burn is the plain retrograde
+  // circularisation and the wait is the requested whole revolutions.
+  let tgt = null, u_aim = null;
+  if (aiming) {
+    const u_site = [Math.cos(target_lat) * Math.cos(target_lon),
+                    Math.cos(target_lat) * Math.sin(target_lon),
+                    Math.sin(target_lat)];
+    u_aim = u_site.slice();
+    for (let it = 0; it < 5; it++) {
+      const T = target_parking(eph, t_loi, r_m, v_m, h_moon_park, h_pdi,
+                               u_aim, n_rev);
+      const mi = _burn_mass(landerIn, lander_mass(landerIn), T.dv);
+      const flyi = lander({ name: landerIn.name, mdry: landerIn.mdry,
+        mprop: mi - landerIn.mdry, thrust: landerIn.thrust, isp: landerIn.isp,
+        throttle_min: landerIn.throttle_min, diameter: landerIn.diameter });
+      const orb = descent_orbit(eph, t_loi, r_m, T.v_park, T.wait, h_pdi, field);
+      const dry = powered_descent(flyi, orb.r_pdi, orb.v_pdi, mi,
+        { h_gate, cfg: descentConfig({ eph, t0: orb.t_pdi }) });
+      tgt = T;
+      if (dry.outcome !== 'touchdown') break;
+      const u_land = vunit(moonfixed(dry.r, orb.t_pdi + dry.t_touchdown, eph));
+      const hf = vunit(vcross(moonfixed(orb.r_pdi, orb.t_pdi, eph),
+                              moonfixed(orb.v_pdi, orb.t_pdi, eph)));
+      const err = Math.atan2(vdot(vcross(u_land, u_site), hf),
+                             vdot(u_land, u_site));
+      u_aim = rot_about(u_aim, hf, err);
+      if (Math.abs(err) < 2e-5) break;
+    }
+  }
+  const dv_loi = tgt ? tgt.dv : dv_loi0;
+  const v_after = tgt ? tgt.v_park : v_after0;
   let m = _burn_mass(landerIn, lander_mass(landerIn), dv_loi);
   if (m <= landerIn.mdry)
     throw new Error(`lunar-orbit insertion alone empties the lander ` +
@@ -835,10 +956,10 @@ export function moonlanding(opts = {}) {
   // --- parking orbit, DOI, coast to the descent periapsis ----------------
   const OL = lunarOrbitLog();
   let r_park = r_m, v_park = v_after;
-  const T_park = 2 * Math.PI * Math.sqrt(vnorm(r_park) ** 3 / MU_MOON);
-  [r_park, v_park] = coast_moon(OL, r_park, v_park, t_loi, n_rev * T_park,
+  const wait = tgt ? tgt.wait : n_rev * T_park;
+  [r_park, v_park] = coast_moon(OL, r_park, v_park, t_loi, wait,
     { phase: 0, dt: 5.0, log_every: 8, field, eph });
-  const t_doi = t_loi + n_rev * T_park;
+  const t_doi = t_loi + wait;
   const [dv_doi, v_doi] = doi_burn(r_park, v_park, h_pdi);
   m = _burn_mass(landerIn, m, dv_doi);
   const a_desc = 0.5 * (vnorm(r_park) + R_MOON + h_pdi);

@@ -341,6 +341,25 @@
         <div><label for="n_rev">revs before DOI</label><input id="n_rev" value="1"></div>
       </div>
       <div class="row" style="margin-top:6px">
+        <div><label for="target" title="where on the Moon to touch down. The
+               coplanar Moon hands the arriving vehicle no free inclination, so
+               reaching a site costs a real combined LOI / plane-change burn and
+               a phasing wait — high-latitude sites near the arrival longitude
+               can exceed the lander's budget.">landing site</label>
+          <select id="target" style="width:100%">
+            <option value="auto">Free return (auto)</option>
+            <option value="tranquillity">Mare Tranquillitatis · Apollo 11</option>
+            <option value="procellarum">Oceanus Procellarum · Apollo 12</option>
+            <option value="framauro">Fra Mauro · Apollo 14</option>
+            <option value="hadley">Hadley Rille · Apollo 15</option>
+            <option value="descartes">Descartes · Apollo 16</option>
+            <option value="taurus">Taurus–Littrow · Apollo 17</option>
+            <option value="fecunditatis">Mare Fecunditatis · Luna 16</option>
+            <option value="procellarum9">Oceanus Procellarum · Luna 9</option>
+            <option value="aitken">South Pole–Aitken · Chang’e 4</option>
+          </select></div>
+      </div>
+      <div class="row" style="margin-top:6px">
         <!-- flex:1 to claim the row the way the other checkbox lines do, and
              white-space:normal to undo the global `label` rule: that rule's
              nowrap + overflow:hidden is right for a one-word field label above
@@ -550,7 +569,7 @@ const BASE_FIELDS =['pod_mass','payload_kind','bus_mass','cargo_mass',
 // the landing mission adds a lander and a descent plan; everything else — the
 // launcher, the ascent, the trans-lunar leg — is the same mission underneath
 const LANDING_FIELDS = ['l_dry','l_prop','l_thrust_kn','l_isp','l_throttle_min','l_diameter',
-  'h_moon_park_km','h_pdi_km','n_rev','plain_moon'];
+  'h_moon_park_km','h_pdi_km','n_rev','target','plain_moon'];
 const ORBIT_FIELDS = ['orbit','orbit_perigee_km','orbit_apogee_km','orbit_incl_deg',
   'n_orbits','deorbit','hp_entry_km'];
 // a suborbital flight has no orbit to describe, only a profile and its target
@@ -1091,6 +1110,8 @@ function renderAll() {
       ['sink rate', V(m.touchdown_v,2,'m/s'), limit('touchdown_v',m.touchdown_v)],
       ['lateral rate', V(m.touchdown_vh,2,'m/s'), limit('touchdown_vh',m.touchdown_vh)],
       ['landing site', fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°'],
+      ['site targeted', isFinite(m.target_lat)
+        ? fmt(m.target_lat,2)+'°, '+fmt(m.target_lon,2)+'°' : 'free return'],
       ['ground off sphere', (m.ground_elev_m>=0?'+':'')+V(m.ground_elev_m,0,'m')],
       ['slope', V(m.ground_slope_deg,1,'°')],
       ['nav altitude error', V(m.nav_alt_err_m,0,'m')],
@@ -1475,7 +1496,7 @@ MTEX_IMG.onload = () => {
     MTW = c.width; MTH = c.height;
   } catch (e) { MTEX = null; }
 };
-MTEX_IMG.src = new URL('./static/moon_map.jpg', import.meta.url).href;
+MTEX_IMG.src = new URL('../static/moon_map.jpg', import.meta.url).href;
 let MDISC = null, MDISC_KEY = '';
 function moonDisc(rM, RM, cy, sy, cp, sp) {
   const R = Math.max(8, Math.min(220, Math.round(rM)));

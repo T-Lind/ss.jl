@@ -393,17 +393,41 @@ export const LAUNCH_SITES = {
 };
 const launch_site = p => LAUNCH_SITES[gets(p, 'site', 'cape')] || LAUNCH_SITES.cape;
 
+// Lunar landing sites, by selenographic latitude and longitude in degrees —
+// the real coordinates of the sites the missions reached. The coplanar Moon
+// puts its equator in the transfer plane, so unlike the real Moon it hands the
+// arriving vehicle no free inclination: reaching a site costs a real combined
+// LOI/plane-change burn and a phasing wait, exactly as `target_parking` in
+// landing.js computes. `auto` keeps the old free-return site.
+export const TARGET_SITES = {
+  auto:          { name: 'Free return (auto)',            lat: NaN,   lon: NaN },
+  tranquillity:  { name: 'Mare Tranquillitatis · Apollo 11', lat: 0.674, lon: 23.473 },
+  procellarum:   { name: 'Oceanus Procellarum · Apollo 12',  lat: -3.012, lon: -23.422 },
+  framauro:      { name: 'Fra Mauro · Apollo 14',         lat: -3.646, lon: -17.472 },
+  hadley:        { name: 'Hadley Rille · Apollo 15',      lat: 26.132, lon: 3.634 },
+  descartes:     { name: 'Descartes · Apollo 16',         lat: -8.973, lon: 15.501 },
+  taurus:        { name: 'Taurus–Littrow · Apollo 17',    lat: 20.191, lon: 30.772 },
+  fecunditatis:  { name: 'Mare Fecunditatis · Luna 16',   lat: 0.68,  lon: 56.30 },
+  procellarum9:  { name: 'Oceanus Procellarum · Luna 9',  lat: 7.13,  lon: -64.37 },
+  aitken:        { name: 'South Pole–Aitken · Chang’e 4', lat: -45.5, lon: 177.6 },
+};
+const target_site = p => TARGET_SITES[gets(p, 'target', 'auto')] || TARGET_SITES.auto;
+
 // Fly the lunar landing mission for the panel.
 function panel_landing(p, onProgress) {
   const lnd = lander_from_params(p);
   const lv = landing_vehicle_from_params(p, lnd);
   const real_moon = !getb(p, 'plain_moon', false);
   const terr = real_moon ? lunarTerrain() : null;
+  const ts = target_site(p);
+  const aiming = Number.isFinite(ts.lat);
   const ls = moonlanding({
     lander: lnd, lv, terrain: terr,
     field: real_moon ? lunarGravity() : null,
     nav: real_moon ? descentNav() : null,
     hazard: real_moon ? hazardScan() : null,
+    target_lat: aiming ? deg2rad_(ts.lat) : NaN,
+    target_lon: aiming ? deg2rad_(ts.lon) : NaN,
     h_park: getf(p, 'h_park_km', 200.0) * 1e3,
     h_moon_park: getf(p, 'h_moon_park_km', 100.0) * 1e3,
     h_pdi: getf(p, 'h_pdi_km', 15.0) * 1e3,
@@ -481,6 +505,8 @@ function panel_landing(p, onProgress) {
       hover_s: d.hover_s,
       land_lat: rad2deg_(ls.lat_land),
       land_lon: rad2deg_(ls.lon_land),
+      target_lat: aiming ? ts.lat : NaN,
+      target_lon: aiming ? ts.lon : NaN,
       ground_elev_m: d.elev,
       ground_slope_deg: rad2deg_(d.slope),
       site_score_deg: Number.isNaN(d.site_score) ? 0.0 : rad2deg_(d.site_score),

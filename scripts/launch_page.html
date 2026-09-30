@@ -173,6 +173,11 @@
     <tr><td colspan="2" class="sec">EVA — the hatch cap, or V, on an unpowered coast</td></tr>
     <tr><td><b>v</b></td><td>suit up, step outside, and back in — a 20 m tether holds you to the hatch</td></tr>
     <tr><td><b>w a s d</b> <b>r</b> <b>f</b> · <b>q</b> <b>e</b></td><td>outside, the same six degrees of freedom in the helmet's own frame</td></tr>
+    <tr><td colspan="2" class="sec">On the surface — the hatch, or V, once you have landed</td></tr>
+    <tr><td><b>v</b></td><td>suit up and step out of the hatch onto the regolith, and back in</td></tr>
+    <tr><td><b>w a s d</b></td><td>walk — in the helmet's own frame</td></tr>
+    <tr><td><b>space</b></td><td>jump — a metre or two up, three seconds of hang at 1.62 m/s²</td></tr>
+    <tr><td>drag</td><td>look around — turn back to see the lander on its legs</td></tr>
     <tr><td colspan="2" class="sec">The console — hover any of it to see what it is</td></tr>
     <tr><td>caps</td><td>the coloured buttons are wired — cabin lights, display page, crew station, clock up and down, trajectory view, audio, null rates, level, and this list</td></tr>
     <tr><td>soft keys</td><td>on the trajectory display: zoom, pan, reset, and the coast orbit &mdash; where you end up with the engines cold</td></tr>
@@ -1662,7 +1667,7 @@ function buildData() {
                 : MS.t_pdi;
   }
   tEnd = isFinite(tSplash) ? tSplash + 12
-       : MS ? MS.t_td + 16
+       : MS ? MS.t_td + 16 + SURFACE_DUR
        : hasEnt ? ENT.t[ENT.n-1] + 10
        : hasCis ? CIS.t[CIS.n-1] : A.t[A.t.length-1] + 30;
 
@@ -1779,6 +1784,10 @@ function buildData() {
     }
   }
   if (MS) add('DESCENT', MS.t_td + 16, 'moon', { warp: descentWarp });
+  // Once the vehicle is down the clock keeps running so the crew can walk: a
+  // landed phase, still in the moon world and at real time, where the hatch is
+  // open and the surface EVA below is available.
+  if (MS) add('SURFACE', MS.t_td + 16 + SURFACE_DUR, 'moon', { warp: () => 1 });
   if (hasEnt) add('ENTRY', tEnd, 'entry', { warp: entryWarp });
   if (!PH.length) add('FLIGHT', tEnd, 'pad');
   // a paced phase compresses to roughly a fixed wall-clock length, so a
@@ -2245,11 +2254,13 @@ function buildLander() {
 function buildLMCabin() {
   const K = lmK(), rp = K.rp, P = K.panel, W = K.win;
   const rin = Math.max(rp*0.95, P.zW + 0.18, -P.yBot + 0.30);
-  const xa = K.xb + K.xa - 0.12, xt = K.xb + K.xtop;
+  const xa = K.xb + K.xa, xt = K.xb + K.xtop;
   const out = [];
   const WALL = [0.33, 0.34, 0.37], WALL2 = [0.21, 0.23, 0.26],
-        PANEL = [0.12, 0.13, 0.15],
-        COUCH = [0.20, 0.24, 0.30], DARK = [0.09, 0.10, 0.12];
+        FLOOR = [0.17, 0.18, 0.20], PANEL = [0.13, 0.14, 0.16],
+        FACE = [0.21, 0.22, 0.25], TRIM = [0.27, 0.28, 0.32],
+        COUCH = [0.28, 0.31, 0.38], SEAT = [0.34, 0.37, 0.44],
+        DARK = [0.08, 0.09, 0.11], METAL = [0.42, 0.43, 0.46];
   const tri = (a, b, c, col) => {
     const n = V.norm(V.cross(V.sub(b, a), V.sub(c, a)));
     for (const p of [a, b, c])
@@ -2257,47 +2268,79 @@ function buildLMCabin() {
   };
   const N = 28;
   const ring = (x, a) => [x, rin*Math.cos(a), rin*Math.sin(a)];
+  const yf = -0.48*rin, hfw = Math.sqrt(Math.max(rin*rin - yf*yf, 0.01));
+  // --- pressure shell. The lower band is painted the deck's colour, which is
+  // what reads as a floor without inventing a second surface to collide with.
   for (let k = 0; k < N; k++) {
     const a0 = k/N*2*Math.PI, a1 = (k + 1)/N*2*Math.PI;
+    const lo = Math.sin((a0 + a1)/2) < 0, c = lo ? FLOOR : WALL;
     for (const [x0, x1] of [[xa, xa + 0.5*(xt - xa)], [xa + 0.5*(xt - xa), xt]]) {
-      tri(ring(x0, a0), ring(x0, a1), ring(x1, a1), WALL);
-      tri(ring(x0, a0), ring(x1, a1), ring(x1, a0), WALL);
+      tri(ring(x0, a0), ring(x0, a1), ring(x1, a1), c);
+      tri(ring(x0, a0), ring(x1, a1), ring(x1, a0), c);
     }
   }
   for (let k = 0; k < N; k++)
     tri([xa, 0, 0], ring(xa, (k + 1)/N*2*Math.PI), ring(xa, k/N*2*Math.PI), WALL2);
-  // forward bulkhead, with two window apertures ABOVE the console
-  const ng = 16;
+  // --- forward bulkhead, with two window apertures ABOVE the console
+  const ng = 18;
   for (let i = 0; i < ng; i++) for (let j = 0; j < ng; j++) {
     const y0 = -rin + 2*rin*i/ng, y1 = -rin + 2*rin*(i + 1)/ng;
     const z0 = -rin + 2*rin*j/ng, z1 = -rin + 2*rin*(j + 1)/ng;
     const cy = (y0 + y1)/2, cz = (z0 + z1)/2;
     if (Math.hypot(cy, cz) > rin) continue;
     if (Math.abs(cy - W.y) < W.hy && Math.abs(Math.abs(cz) - W.z) < W.hz) continue;
-    tri([xt, y0, z0], [xt, y1, z0], [xt, y1, z1], WALL);
-    tri([xt, y0, z0], [xt, y1, z1], [xt, y0, z1], WALL);
+    tri([xt, y0, z0], [xt, y1, z0], [xt, y1, z1], cy < yf + 0.10 ? FLOOR : WALL);
+    tri([xt, y0, z0], [xt, y1, z1], [xt, y0, z1], cy < yf + 0.10 ? FLOOR : WALL);
   }
   for (const zc of [-W.z, W.z]) {
-    boxAt(out, [xt, W.y + W.hy, zc], [0.05, 0.05, W.hz*2], WALL2);
-    boxAt(out, [xt, W.y - W.hy, zc], [0.05, 0.05, W.hz*2], WALL2);
-    boxAt(out, [xt, W.y, zc - W.hz], [0.05, W.hy*2, 0.05], WALL2);
-    boxAt(out, [xt, W.y, zc + W.hz], [0.05, W.hy*2, 0.05], WALL2);
+    boxAt(out, [xt - 0.03, W.y + W.hy, zc], [0.05, 0.05, W.hz*2 + 0.06], TRIM);
+    boxAt(out, [xt - 0.03, W.y - W.hy, zc], [0.05, 0.05, W.hz*2 + 0.06], TRIM);
+    boxAt(out, [xt - 0.03, W.y, zc - W.hz], [0.05, W.hy*2 + 0.06, 0.05], TRIM);
+    boxAt(out, [xt - 0.03, W.y, zc + W.hz], [0.05, W.hy*2 + 0.06, 0.05], TRIM);
   }
-  // the console: a flat slab behind the screens (its face at P.x, the screens
-  // a hair in front), below eye level, with the caps proud of it
-  boxAt(out, [P.x + 0.05, P.yc, 0], [0.05, (P.yTop - P.yBot)/2, P.zW], PANEL);
+  boxAt(out, [xt - 0.03, W.y, 0], [0.05, W.hy*2 + 0.06, 0.06], WALL2);
+  // --- deck and the sill where it meets the forward bulkhead
+  boxAt(out, [(xa + xt)/2, yf - 0.03, 0], [xt - xa - 0.24, 0.06, 2*hfw - 0.10], FLOOR);
+  boxAt(out, [xt - 0.10, yf + 0.05, 0], [0.20, 0.16, 2*hfw - 0.16], TRIM);
+  // --- side equipment racks, low, running fore-aft
+  for (const s of [-1, 1]) {
+    boxAt(out, [xa + 0.45, yf + 0.42, s*(rin - 0.28)], [0.70, 0.84, 0.42], TRIM);
+    boxAt(out, [xa + 1.15, yf + 0.42, s*(rin - 0.28)], [0.55, 0.84, 0.42], DARK);
+  }
+  // --- the console: a framed backing panel on a sloped kick plate, with the
+  // switch shelf under the screens.
+  const pcx = P.x + 0.05, pcy = (P.yTop + P.yBot)/2, ph = P.yTop - P.yBot;
+  boxAt(out, [pcx, pcy, 0], [0.06, ph + 0.12, 2*P.zW + 0.10], FACE);
+  boxAt(out, [P.x - 0.01, P.yTop + 0.06, 0], [0.05, 0.05, 2*P.zW + 0.14], TRIM);
+  for (const s of [-1, 1])
+    boxAt(out, [pcx, pcy, s*(P.zW + 0.05)], [0.10, ph + 0.12, 0.06], PANEL);
+  boxAt(out, [P.x + 0.01, P.yBot - 0.15, 0], [0.10, 0.18, 2*P.zW + 0.08], PANEL);
+  beam(out, [P.x - 0.30, yf + 0.16, 0], [P.x - 0.02, P.yBot - 0.24, 0],
+       2*P.zW + 0.10, 0.05, PANEL);
   {
     const n = CAP_FN.length;
     CAP_FN.forEach((fn, i) => {
-      const z = P.zW*0.9*(2*(i/Math.max(n - 1, 1)) - 1);
-      boxAt(out, [P.x - 0.04, P.yBot + 0.08, z], [0.05, 0.05, 0.10],
+      const z = P.zW*0.94*(2*(i/Math.max(n - 1, 1)) - 1);
+      boxAt(out, [P.x - 0.04, P.yBot - 0.14, z], [0.06, 0.06, 0.10],
             fn.c === undefined ? [0.34, 0.36, 0.40] : fn.c);
     });
   }
+  // --- the crew stations: a pan, a back and a headrest at each couch
   const ln = cabSeatLn(K);
-  for (const zc of cabSeatZ(K))
-    boxAt(out, [K.xb + K.xa + 0.20*rp, -0.18*ln, zc],
-          [0.60*ln, 0.34*ln, 0.42*ln], COUCH);
+  for (const zc of cabSeatZ(K)) {
+    boxAt(out, [xa + 0.30*rp, yf + 0.34, zc], [0.62*ln, 0.12, 0.42*ln], COUCH);
+    boxAt(out, [xa + 0.06*rp, yf + 0.62, zc], [0.12, 0.58, 0.42*ln], SEAT);
+    boxAt(out, [xa + 0.06*rp, yf + 0.98, zc], [0.18, 0.18, 0.30*ln], SEAT);
+    for (const s of [-1, 1])
+      boxAt(out, [xa + 0.30*rp, yf + 0.44, zc + s*0.22*ln], [0.44, 0.06, 0.05], METAL);
+  }
+  // --- grab rails overhead and beside the console
+  for (const s of [-1, 1]) {
+    tube(out, [xa + 0.30, 0.86*rp, s*0.55*rp], [xt - 0.35, 0.86*rp, s*0.55*rp],
+         0.020, METAL, 6);
+    tube(out, [P.x - 0.12, P.yTop + 0.12, s*0.62*rp], [P.x - 0.12, yf + 0.30, s*0.62*rp],
+         0.018, METAL, 6);
+  }
   {
     const h = evaHatchStation(K);
     if (h) boxAt(out, [h.p[0], h.p[1], h.p[2]], [0.34, 0.42, 0.12], DARK);
@@ -2408,6 +2451,9 @@ const eciLanderPhase = ph => !!MS &&
   (ph.n === 'LUNAR ORBIT' || ph.n === 'DESCENT ORBIT');
 
 function cameraMoon(t, ms, M) {
+  // On foot: the helmet camera stands in the SITE frame, not the vehicle's, so
+  // it is answered before any of the vehicle's own rigs get a look in.
+  if (SURF.active) { const c = surfCam(); if (c) return c; }
   const mode = camMode === 'auto' ? autoPickMoon(t) : camMode;
   // The cabin: the same capsule-cabin machinery (pose, head-turn, float,
   // console) with cabK() returning the lander's stations for a landing run.
@@ -5075,19 +5121,19 @@ function cabSeatBay(K, i) {
 function lmCabinPose(aim, arg, K) {
   const P = K.panel, zs = cabSeatZ(K);
   if (aim === 'console')
-    return { eye: [K.xa + 0.20*K.rp, 0.26, 0], look: [P.x, P.yc, 0],
-             up: [0, 1, 0], fov: 1.25 };
+    return { eye: [K.xa + 0.22*K.rp, 0.30, 0], look: [P.x, P.yc, 0],
+             up: [0, 1, 0], fov: 1.30 };
   if (aim === 'seat') {
     const i = Math.min(Math.max(arg | 0, 0), zs.length - 1), zc = zs[i];
     const F = lmFrame(cabSeatBay(K, i));
-    return { eye: [K.xa + 0.20*K.rp, 0.28, zc], look: [P.x, P.yc, F.zc],
-             up: [0, 1, 0], fov: 1.12 };
+    return { eye: [K.xa + 0.20*K.rp, 0.30, zc], look: [P.x, P.yc, F.zc],
+             up: [0, 1, 0], fov: 1.20 };
   }
   // Unbuckled: a station INSIDE the clear volume (cabBox clamps x to
   // [xa+0.27rp, xcon-0.14rp]), not out at the panel where the console is.
   if (aim === 'float' || CAB.seat === null)
-    return { eye: [K.xa + 0.35*K.rp, 0.26, 0], look: [P.x, P.yc, 0],
-             up: [0, 1, 0], fov: 1.25 };
+    return { eye: [K.xa + 0.35*K.rp, 0.28, 0], look: [P.x, P.yc, 0],
+             up: [0, 1, 0], fov: 1.30 };
   // 'wide' and anything else means "wherever the crew is": in a couch, that is
   // the couch, exactly as the capsule resolves it.
   return lmCabinPose('seat', CAB.seat, K);
@@ -5095,7 +5141,10 @@ function lmCabinPose(aim, arg, K) {
 function cabinPose(aim, arg, Kin) {
   const K = Kin || cabK();
   if (!K) return null;
-  if (isLandingMission()) return lmCabinPose(aim, arg, K);
+  // The lander's table is the one with a flat console panel on it; a caller
+  // that hands in a capsule station (the self-test does, to pin the capsule's
+  // own geometry) still gets the capsule's poses even on a landing run.
+  if (K.panel !== undefined) return lmCabinPose(aim, arg, K);
   const rp = K.rp, Lc = K.Lc;
   const ln = cabSeatLn(K);                     // couch half-length
   // eye just above the headrest, set back from the wall so the viewport, the
@@ -5350,8 +5399,14 @@ const EVA = { state: 'inside', active: false, suited: false,
 // descent all own the crew's hands and the hatch stays shut. `why` is what the
 // HUD/toast says, so a refused press is never a control that did nothing.
 function evaGate(ph) {
-  if (!HASCAB) return { ok: false, why: 'no cabin on this vehicle' };
+  // The LM carries a cabin whether or not the launch vehicle's payload is
+  // flagged as one, exactly as its cockpit camera does.
+  if (!HASCAB && !isLandingMission())
+    return { ok: false, why: 'no cabin on this vehicle' };
   if (camMode !== 'cabin') return { ok: false, why: 'cabin view only' };
+  // On the Moon, once the vehicle is down, the hatch is open and the surface
+  // EVA takes over from the rope. Suiting up is the same first press either way.
+  if (landed(ph)) return { ok: true, why: '' };
   if (!coastActive(ph)) {
     if (ph.w === 'entry') return { ok: false, why: 'entry' };
     if (ph.w === 'moon')  return { ok: false, why: 'descent' };
@@ -5449,6 +5504,11 @@ function evaReturn() {
   return true;
 }
 function evaToggle(ph) {
+  // The surface hatch is a two-state door, not a three-state one: once the
+  // boots are on the ground another press goes back inside.
+  if (SURF.active) return surfReturn();
+  if (landed(ph))
+    return EVA.state === 'inside' ? evaSuit(ph) : surfEgress(ph);
   if (EVA.state === 'inside') return evaSuit(ph);
   if (EVA.state === 'suited') return evaEgress(ph);
   return evaReturn();
@@ -5511,6 +5571,132 @@ function evaCam(M) {
   const p = evaPose();
   return p ? poseToWorld(p, M, 'eva') : null;
 }
+// ------------------------------------------------- surface EVA (walking) --
+// Out of the hatch on the Moon is a different machine from the spacewalk. On
+// the rope there is no up and no ground; here there is 1.62 m/s2 of both. The
+// astronaut is a body in the SITE frame — world coordinates, not the vehicle's
+// — standing on the terrain the viewer draws, so a hop arcs and a slope is
+// something you walk up rather than through. The cabin is left exactly where
+// the crew left it, so stepping back through the hatch is a return and not a
+// reset, the same promise the spacewalk makes.
+const SURFACE_DUR = 300;     // s the landed timeline runs, hatch open
+const SURF_G = 1.62;         // m/s2, lunar surface gravity
+const SURF_EYE = 1.62;       // m, eye height above the regolith
+const SURF_WALK = 3.4;       // m/s, a brisk walk in a suit
+const SURF_ACC = 9.0;        // m/s2, how hard the feet can push off
+const SURF_JUMP = 2.5;       // m/s — about 1.9 m up and three seconds of hang
+const SURF_PITCH_MAX = 1.45; // rad, how far the helmet can look up and down
+const SURF_RANGE = 1500;     // m from the site before the patch runs out
+const SURF = { active: false, p: [0,0,0], v: [0,0,0], yaw: 0, pitch: 0,
+               onGround: true, keys: {}, saved: null };
+// The window the hatch is open: a landing mission, in the moon world, after the
+// contact light. Before arrival the lander is flying and the hatch stays shut.
+function landed(ph) {
+  return isLandingMission() && !!ph && ph.w === 'moon' && !!MS &&
+         simT >= MS.t_td + 0.5;
+}
+// Local vertical at a world point: the Moon-fixed radial through it, which near
+// the site is very nearly +y but is exact anywhere the patch reaches.
+function surfUp(p) { return V.norm([p[0], p[1] + RM, p[2]]); }
+function surfLook(dx, dy) {
+  SURF.yaw += dx*0.0035;
+  SURF.pitch = Math.min(SURF_PITCH_MAX,
+                        Math.max(-SURF_PITCH_MAX, SURF.pitch - dy*0.0035));
+}
+function surfCam() {
+  if (!SURF.active) return null;
+  const up = surfUp(SURF.p);
+  const eye = V.add(SURF.p, V.scale(up, SURF_EYE));
+  const cp = Math.cos(SURF.pitch), sp = Math.sin(SURF.pitch);
+  const f = [cp*Math.cos(SURF.yaw), sp, cp*Math.sin(SURF.yaw)];
+  return { eye, look: V.add(eye, f), up, fov: 1.15, mode: 'surface' };
+}
+function surfStep(dt) {
+  if (!SURF.active || !(dt > 0)) return;
+  const k = SURF.keys;
+  const up0 = surfUp(SURF.p);
+  const fwd = [Math.cos(SURF.yaw), 0, Math.sin(SURF.yaw)];
+  const rt  = [-Math.sin(SURF.yaw), 0, Math.cos(SURF.yaw)];
+  const cmd = V.add(V.scale(fwd, (k.w ? 1 : 0) - (k.s ? 1 : 0)),
+                    V.scale(rt,  (k.d ? 1 : 0) - (k.a ? 1 : 0)));
+  const l = V.len(cmd);
+  // The feet only push while they are on the ground: a shove in mid-hop coasts,
+  // exactly as the cabin's push-off does. Steering is toward the walking speed
+  // rather than a raw acceleration, so letting go of the key leaves you walking
+  // to a stop instead of at escape velocity.
+  if (l > 1e-6 && SURF.onGround) {
+    const wish = V.scale(cmd, SURF_WALK/l);
+    const vh = V.sub(SURF.v, V.scale(up0, V.dot(SURF.v, up0)));
+    SURF.v = V.add(SURF.v, V.scale(V.sub(wish, vh),
+                                   Math.min(1, SURF_ACC*dt/SURF_WALK)));
+  }
+  SURF.v = V.add(SURF.v, V.scale(up0, -SURF_G*dt));
+  SURF.p = V.add(SURF.p, V.scale(SURF.v, dt));
+  const gy = groundY(SURF.p[0], SURF.p[2]);
+  if (SURF.p[1] <= gy) {
+    SURF.p[1] = gy;
+    const up1 = surfUp(SURF.p);
+    const vn = V.dot(SURF.v, up1);
+    if (vn < 0) SURF.v = V.sub(SURF.v, V.scale(up1, vn));
+    SURF.onGround = true;
+  } else SURF.onGround = false;
+  // keep the walk inside the terrain patch that is actually drawn, so the crew
+  // can never step off the edge of the ground into the void behind it
+  const d = Math.hypot(SURF.p[0], SURF.p[2]);
+  if (d > SURF_RANGE) { SURF.p[0] *= SURF_RANGE/d; SURF.p[2] *= SURF_RANGE/d; }
+}
+function surfEgress(ph) {
+  if (!landed(ph)) { cabToast('EVA UNAVAILABLE · NOT ON THE SURFACE'); return false; }
+  if (camMode !== 'cabin') { cabToast('EVA UNAVAILABLE · CABIN VIEW ONLY'); return false; }
+  const K = cabK();
+  if (!K) return false;
+  // Where the ladder meets the ground, in the site frame: the lander's own
+  // matrix carries the model point into the world, and the ground is whatever
+  // the terrain is at that x,z — so the first step is out of the hatch and
+  // onto the surface rather than a teleport to a guessed altitude.
+  const ms = moonState(simT);
+  const M = mBasis(ms.bx, ms.by, ms.bz, ms.pos);
+  SURF.saved = { p: CAB.p.slice(), pv: CAB.pv.slice(), seat: CAB.seat,
+                 q: HEAD.q.slice(), rw: CAB.rw, yaw: headYaw, pitch: headPitch };
+  const R = MDIA/2;
+  const foot = mApply(M, [R*1.70, 0, -R*0.62]);
+  let hx = foot[0] - ms.pos[0], hz = foot[2] - ms.pos[2];
+  const hl = Math.hypot(hx, hz) || 1;
+  SURF.p = [foot[0] + hx/hl*1.5, 0, foot[2] + hz/hl*1.5];
+  SURF.p[1] = groundY(SURF.p[0], SURF.p[2]);
+  // Face straight out from the vehicle, so the hatch and the ladder are behind
+  // you and the surface is in front of you the moment the boots touch.
+  SURF.yaw = Math.atan2(hz, hx);
+  SURF.v = [0,0,0]; SURF.onGround = true; SURF.keys = {};
+  SURF.active = true;
+  EVA.state = 'inside'; EVA.suited = true;
+  CAB.seat = null;
+  headLevel();
+  sfxSwitch();
+  cabToast('EVA · ON THE SURFACE · WASD WALK · SPACE JUMP');
+  return true;
+}
+function surfReturn() {
+  const s = SURF.saved;
+  SURF.active = false; SURF.keys = {};
+  EVA.state = 'inside'; EVA.suited = false;
+  if (s) {
+    CAB.p = s.p.slice(); CAB.pv = s.pv.slice(); CAB.seat = s.seat;
+    HEAD.q = s.q.slice(); CAB.rw = s.rw;
+    headYaw = s.yaw; headPitch = s.pitch;
+  }
+  SURF.saved = null;
+  sfxSwitch();
+  cabToast('AIRLOCK · CREW INSIDE');
+  return true;
+}
+function surfJump() {
+  if (!SURF.active || !SURF.onGround) return false;
+  SURF.v = V.add(SURF.v, V.scale(surfUp(SURF.p), SURF_JUMP));
+  SURF.onGround = false;
+  sfxSwitch();
+  return true;
+}
 // ------------------------------------------------------- cabin controls --
 // The cabin lighting and the display page used to be two paddle switches out
 // on the console's flanks, with their own geometry and their own pick volumes.
@@ -5563,13 +5749,19 @@ function isLandingMission() { return !!(run && run.mode === 'landing'); }
 function lmK() {
   const rp = Math.max(0.7, 0.32*MDIA);
   const Lc = 2.0;
-  return { rp, Lc, xb0: 0.0, xa: 0.16, xcon: 1.05, xtop: Lc,
+  // The console is carried FORWARD, up against the forward bulkhead, so the
+  // crew reads it at the bottom of the same frame the windows sit at the top
+  // of — the way an LM's flight station actually works. A panel left back at
+  // mid-cabin put the windows out of the lens and the screens in the middle of
+  // it, which is the opposite of what the two are for.
+  const px = 1.55;
+  return { rp, Lc, xb0: 0.0, xa: 0.16, xcon: px, xtop: Lc,
            xfl: 0.10, xb: 0.0, ta: 0.0, xsh: 0.0, rcone: () => rp,
            // The LM console is a FLAT panel the upright crew faces, not the
            // capsule's overhead annulus: a panel below eye level, three bays
            // across it, windows above it in the forward bulkhead.
-           panel: { x: 1.05, yTop: -0.06, yBot: -0.70, zW: 0.95, yc: -0.38 },
-           win: { x: Lc, y: 0.45, z: 0.36, hy: 0.28, hz: 0.24 } };
+           panel: { x: px, yTop: 0.24, yBot: -0.34, zW: 0.60, yc: -0.05 },
+           win: { x: Lc, y: 0.46, z: 0.30, hy: 0.20, hz: 0.26 } };
 }
 function cabK() {
   if (isLandingMission()) return lmK();
@@ -6359,7 +6551,7 @@ function frame(now) {
   // into the couch; an unpowered coast does not.
   // The LM cabin opens for the whole lunar endgame, so floating is allowed
   // there even under thrust; a capsule still only lets go on an unpowered coast.
-  cabStep(dtReal, camMode === 'cabin' && !EVA.active &&
+  cabStep(dtReal, camMode === 'cabin' && !EVA.active && !SURF.active &&
     (coastActive(ph) || (isLandingMission() && (ph.w === 'moon' || eciLanderPhase(ph)))));
   // The spacewalk lives and dies with the coast: while the phase allows it the
   // astronaut is on the rope, and the instant the window closes (a burn lights,
@@ -6368,6 +6560,12 @@ function frame(now) {
   if (EVA.active) {
     if (coastActive(ph) && HASCAB) evaStep(dtReal);
     else evaReturn();
+  }
+  // On the surface there is no window to close: the walk runs on the wall clock
+  // for as long as the crew is outside and the mission is still on the ground.
+  if (SURF.active) {
+    if (isLandingMission() && landed(ph)) surfStep(dtReal);
+    else surfReturn();
   }
 
   const scene = buildScene(ph);
@@ -6867,16 +7065,17 @@ function drawWorldMeshes(sc, proj, inCab) {
                         [0,0,1], 0.05*dtj), proj, s.first, s.count);
       }
     }
-    if (landerHere && landerBuf)
-      drawWhole(inCab && lmCabBuf ? lmCabBuf : landerBuf,
-                inCab && lmCabBuf ? lmCabN : landerN, eciLanderMat(cs), proj);
+    if (landerHere && landerBuf) {
+      if (inCab && lmCabBuf) { bindMeshBuf(lmCabBuf); drawRangeInside(eciLanderMat(cs), proj, 0, lmCabN); }
+      else drawWhole(landerBuf, landerN, eciLanderMat(cs), proj);
+    }
   } else if (sc.world === 'moon') {
     // The ground, coarsest ring first: they nest, and the depth buffer would
     // sort them anyway, but drawing outward-in means the near ring overwrites
     // the far one's edge rather than fighting it.
     for (let k = moonRings.length - 1; k >= 0; k--)
       drawWhole(moonRings[k].buf, moonRings[k].n, mIdent(), proj);
-    if (inCab && lmCabBuf) drawWhole(lmCabBuf, lmCabN, sc.craftM, proj);
+    if (inCab && lmCabBuf) { bindMeshBuf(lmCabBuf); drawRangeInside(sc.craftM, proj, 0, lmCabN); }
     else if (landerBuf) drawWhole(landerBuf, landerN, sc.craftM, proj);
   } else {
     const es = sc.es;
@@ -7153,7 +7352,7 @@ function lmFrame(k) {
            at: (u, v) => [xs, P.yBot + (P.yTop - P.yBot)*(1 - v), z0 + (z1 - z0)*u] };
 }
 function scrFrame(K, k) {
-  if (isLandingMission()) return lmFrame(k);
+  if (K.panel !== undefined) return lmFrame(k);
   const rcin = K.rcone(K.xcon) - 0.05*K.rp;
   const b = SCR_BAYS[k];
   const a0 = b[0]*Math.PI/180 + 0.030, a1 = b[1]*Math.PI/180 - 0.030;
@@ -8076,7 +8275,7 @@ function drawHUD(sc, ph) {
                         : s > 90 ? (s/60).toFixed(0) + ' min'
                                  : s.toFixed(0) + ' s'}` : '')]);
   }
-  if (CAB.live) {
+  if (CAB.live && !SURF.active) {
     // Where the crew is and what they can do about it, which is three states
     // and not two: strapped in, on a surface, or in the air with nothing to
     // push off. The row says which, because which one you are in is the
@@ -8086,6 +8285,13 @@ function drawHUD(sc, ph) {
       ? 'STRAPPED IN · WASD flies · G to unbuckle'
       : CAB.touch ? 'CONTACT · WASD RF to push'
                   : 'DRIFTING · ' + s.toFixed(2) + ' m/s']);
+  }
+  // On foot on the Moon: the boots, the suit's own little physics, and the one
+  // key that takes you back through the hatch.
+  if (SURF.active) {
+    rows.push(['EVA', `ON FOOT · ${SURF.onGround ? 'BOOTS DOWN' : 'IN THE AIR'}`
+                      + ` · ${V.len(SURF.v).toFixed(1)} m/s`]);
+    rows.push(['SUIT', 'WASD walk · SPACE jump · V re-enter']);
   }
   // EVA state, the tether it is riding, and the one key that ends it. Only
   // shown once a suit is on, so the HUD stays as quiet as it was inside.
@@ -8261,7 +8467,8 @@ function initControls() {
   // The capsule's switches and fit-out only exist for a capsule cabin; the LM
   // cockpit is a camera, not an interactive interior, so it is not "inside"
   // for the picker.
-  const inside = () => camMode === 'cabin' && (HASCAB || isLandingMission());
+  const inside = () => !SURF.active && camMode === 'cabin' &&
+                       (HASCAB || isLandingMission());
   // A switch takes the click; anything else starts a head turn. Right click on
   // a switch steps it back, and only then is the context menu suppressed — a
   // right click anywhere else in the page still behaves like a right click.
@@ -8278,7 +8485,7 @@ function initControls() {
       if (hit) { cabActivate(hit, e.button === 2); e.preventDefault(); return; }
     }
     if (e.button !== 0) return;
-    if (camMode !== 'free' && !inside()) return;
+    if (camMode !== 'free' && !inside() && !SURF.active) return;
     cv.setPointerCapture(e.pointerId);
     cv._drag = [e.clientX, e.clientY];
   });
@@ -8290,7 +8497,11 @@ function initControls() {
     }
     if (!cv._drag) return;
     const dx = e.clientX - cv._drag[0], dy = e.clientY - cv._drag[1];
-    if (inside()) {
+    if (SURF.active) {
+      // On foot the drag is a head turn in the site frame: full yaw, clamped
+      // pitch, exactly as a helmet on a neck.
+      surfLook(dx, dy);
+    } else if (inside()) {
       // Turn your head on the couch rather than orbiting the capsule. Strapped
       // in that is a neck, with a neck's limits; loose it is your whole body,
       // turned about the axes you can currently SEE — which is what stops a
@@ -8309,7 +8520,13 @@ function initControls() {
     freeDist = Math.min(LEN*60, Math.max(6, (freeDist || LEN*3.6)*(e.deltaY > 0 ? 1.15 : 0.87)));
   }, { passive: false });
   window.addEventListener('keydown', e => {
-    if (e.key === ' ') { running = !running; e.preventDefault(); }
+    if (e.key === ' ') {
+      // On the surface the big bar is the jump the suit is for; everywhere else
+      // it is the pause it has always been.
+      if (SURF.active) surfJump();
+      else running = !running;
+      e.preventDefault();
+    }
     // hold to scrub: the clock starts on the FIRST press (e.repeat re-fires
     // keydown without a keyup, and restarting the clock there would hold the
     // rate at its slowest forever)
@@ -8351,11 +8568,15 @@ function initControls() {
     }
     // V suits up, egresses and re-enters. Not in CAB_KEYS, so it never fights
     // the translation keys; the hatch cap is the same control with a pointer.
-    if (kk === 'v' && inside()) {
+    if (kk === 'v' && (inside() || SURF.active)) {
       evaToggle(phaseAt(simT));
       e.preventDefault();
     }
-    if (CAB_KEYS[kk]) {
+    if (SURF.active && CAB_KEYS[kk]) {
+      // On foot the same WASD keys drive the body through the regolith.
+      SURF.keys[kk] = true;
+      e.preventDefault();
+    } else if (CAB_KEYS[kk]) {
       // Out of the couch the keys are the body's, whether or not the cabin is
       // live enough to move it — a key held through a warp must not be sitting
       // in the wheels' hand when real time comes back and the crew member is
@@ -8380,11 +8601,11 @@ function initControls() {
         (e.key === 'ArrowLeft' && scrubDir === -1)) scrubDir = 0;
     // clear BOTH: the mode may have been switched while a key was held
     const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
-    if (CAB_KEYS[kk]) { RCS.keys[kk] = false; CAB.keys[kk] = false; }
+    if (CAB_KEYS[kk]) { RCS.keys[kk] = false; CAB.keys[kk] = false; SURF.keys[kk] = false; }
   });
   // released keys can be missed entirely when the window loses focus mid-hold
   window.addEventListener('blur', () => {
-    scrubDir = 0; RCS.keys = {}; CAB.keys = {};
+    scrubDir = 0; RCS.keys = {}; CAB.keys = {}; SURF.keys = {};
   });
 }
 
@@ -9696,11 +9917,13 @@ window.__selftest = function () {
     simT = s0; camMode = c0; HASCAB = h0; BURNW = b0;
     return g.ok;
   }, true);
-  eq('and never offered without a cabin', () => {
-    const c0 = camMode, h0 = HASCAB, b0 = BURNW;
+  eq('and never offered without a cabin or a lander', () => {
+    const c0 = camMode, h0 = HASCAB, b0 = BURNW, r0 = run && run.mode;
     camMode = 'cabin'; HASCAB = false; BURNW = [];
+    if (run) run.mode = 'flyby';       // a capsule run: no lander to fall back on
     const g = evaGate({ w: 'eci', n: 'ORBIT' });
     camMode = c0; HASCAB = h0; BURNW = b0;
+    if (run) run.mode = r0;
     return g.ok;
   }, false);
   // The hatch is a real station in the same pick list the console switches
@@ -9830,6 +10053,14 @@ window.__debug = {
     return { state: EVA.state, active: EVA.active, suited: EVA.suited,
              len: EVA.len, limit: EVA.limit,
              p: EVA.p.slice(), v: EVA.v.slice() };
+  },
+  // The surface walk, as data: where the boots are, how fast, and whether they
+  // are on the ground — the three things a screenshot of the regolith cannot say.
+  get surf() {
+    return { active: SURF.active, onGround: SURF.onGround,
+             p: SURF.p.slice(), v: SURF.v.slice(),
+             yaw: SURF.yaw, pitch: SURF.pitch,
+             ground: SURF.active ? groundY(SURF.p[0], SURF.p[2]) : null };
   },
   get geometry() { return geo; },
   get gpu() { return GPU_INFO; },
