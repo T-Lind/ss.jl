@@ -1905,7 +1905,8 @@ function entState(t) {
 // terrain function needs to be evaluated anywhere in the scene.
 
 let MD = null, MS = null;              // descent track, site + terrain params
-let moonRings = [], landerBuf = null, landerN = 0, MDIA = 4.2;
+let moonRings = [], landerBuf = null, landerN = 0, lmCabBuf = null, lmCabN = 0,
+    MDIA = 4.2;
 
 function hash32(a, b, c, d) {
   let h = Math.imul(a | 0, 0x9E3779B1);
@@ -2220,6 +2221,60 @@ function buildLander() {
   return Y2 + 2.20;
 }
 
+// --- the LM cabin, seen from inside ---------------------------------------
+// The lander is one solid mesh with no interior. From the ascent-stage windows
+// the only thing between the crew and the surface would be the sealed hull
+// itself, so the interior is its own small mesh: a forward bulkhead with two
+// window apertures, a console beneath them, side pillars and an aft wall. It
+// is drawn INSTEAD of the hull when the camera is in the cabin, in the same
+// body frame, so it tilts with the vehicle. The eye sits just behind the
+// bulkhead and the apertures are real holes, so the world shows through them.
+function buildLMCabin() {
+  const out = [];
+  const R = MDIA/2, Y2 = 2.35;               // ascent-stage floor, same as buildLander
+  const WALL = [0.30, 0.32, 0.35], WALL2 = [0.21, 0.23, 0.26],
+        PANEL = [0.14, 0.15, 0.17], AMBER = [0.58, 0.44, 0.16],
+        SEAT = [0.19, 0.23, 0.29];
+  const tri = (a, b, c, col) => {
+    const n = V.norm(V.cross(V.sub(b, a), V.sub(c, a)));
+    for (const p of [a, b, c])
+      out.push(p[0], p[1], p[2], n[0], n[1], n[2], col[0], col[1], col[2], 0, 0, 0);
+  };
+  const xw = R*0.34, yLo = Y2 + 0.12, yHi = Y2 + 2.02;
+  const zHalf = Math.min(0.92, R*0.80);
+  const holes = [{ y: Y2 + 0.50, z: -0.34 }, { y: Y2 + 0.50, z: 0.34 }];
+  const hy = 0.34, hz = 0.24;
+  const ny = 12, nz = 12;
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nz; j++) {
+    const y0 = yLo + (yHi - yLo)*i/ny, y1 = yLo + (yHi - yLo)*(i + 1)/ny;
+    const z0 = -zHalf + 2*zHalf*j/nz, z1 = -zHalf + 2*zHalf*(j + 1)/nz;
+    const cy = (y0 + y1)/2, cz = (z0 + z1)/2;
+    let hole = false;
+    for (const h of holes)
+      if (Math.abs(cy - h.y) < hy && Math.abs(cz - h.z) < hz) { hole = true; break; }
+    if (hole) continue;
+    tri([xw, y0, z0], [xw, y1, z0], [xw, y1, z1], WALL);
+    tri([xw, y0, z0], [xw, y1, z1], [xw, y0, z1], WALL);
+  }
+  for (const h of holes) {                    // sills, so the apertures read as windows
+    boxAt(out, [xw, h.y - hy, h.z], [0.06, 0.05, hz*2], WALL2);
+    boxAt(out, [xw, h.y + hy, h.z], [0.06, 0.05, hz*2], WALL2);
+    boxAt(out, [xw, h.y, h.z - hz], [0.06, hy*2, 0.05], WALL2);
+    boxAt(out, [xw, h.y, h.z + hz], [0.06, hy*2, 0.05], WALL2);
+  }
+  boxAt(out, [R*0.10, Y2 + 1.05, -zHalf - 0.10], [0.48, 1.95, 0.14], WALL2);
+  boxAt(out, [R*0.10, Y2 + 1.05,  zHalf + 0.10], [0.48, 1.95, 0.14], WALL2);
+  boxAt(out, [R*0.10, Y2 + 2.05, 0], [0.48, 0.14, zHalf*2 + 0.36], WALL2);
+  boxAt(out, [-R*0.55, Y2 + 1.05, 0], [0.12, 1.95, zHalf*2 + 0.36], WALL2);
+  boxAt(out, [R*0.06, Y2 + 0.10, 0], [0.32, 0.14, Math.min(0.95, R)], PANEL);
+  boxAt(out, [R*0.10, Y2 + 0.16, -0.24], [0.10, 0.05, 0.20], AMBER);
+  boxAt(out, [R*0.10, Y2 + 0.16,  0.24], [0.10, 0.05, 0.20], AMBER);
+  boxAt(out, [-R*0.10, Y2 + 0.40, -0.34], [0.30, 0.36, 0.30], SEAT);
+  boxAt(out, [-R*0.10, Y2 + 0.40,  0.34], [0.30, 0.36, 0.30], SEAT);
+  lmCabBuf = buffer(new Float32Array(out));
+  lmCabN = out.length/VST;
+}
+
 // --- state in the site frame ------------------------------------------------
 function moonState(t) {
   const T = MD.t, tp = Math.max(T[0], t - MS.t_pdi);
@@ -2322,6 +2377,15 @@ const eciLanderPhase = ph => !!MS &&
 
 function cameraMoon(t, ms, M) {
   const mode = camMode === 'auto' ? autoPickMoon(t) : camMode;
+  // The LM cabin: the eye just behind the window bulkhead, looking forward and
+  // down at the site the way the crew does through the two forward windows.
+  if (mode === 'cabin') {
+    const R = MDIA/2, Y2 = 2.35;
+    const eye = V.add(ms.pos, V.add(V.scale(ms.bx, R*0.02),
+                                    V.scale(ms.by, Y2 + 1.05)));
+    const dir = V.norm(V.add(V.scale(ms.bx, 1.0), V.scale(ms.by, -0.95)));
+    return { eye, look: V.add(eye, dir), up: ms.by, fov: 0.95, mode };
+  }
   // Nothing may look up through the regolith. Free pitch can be driven below
   // the horizon and the low chase offset sits under the surface at touchdown,
   // and the ground is a one-sided sheet: from beneath it, the shot is the
@@ -4821,13 +4885,39 @@ function lookDrag(dx, dy, Kin) {
 // `cabin` is dropped from both when the payload has no cabin — an uncrewed bus
 // is a solid block and a camera inside it looks at the inside of a solid block.
 const CAMS_ALL = ['auto','wide','chase','onboard','cabin','free'];
-const CAMS_MOON_ALL = ['auto','wide','chase','onboard','ground','free'];
+const CAMS_MOON_ALL = ['auto','wide','chase','onboard','ground','cabin','free'];
 // Read as FUNCTIONS, not as constants: HASCAB is not known until the geometry
 // arrives, and a const evaluated at load would freeze the list before the
 // vehicle was ever seen.
 const camList = l => HASCAB ? l : l.filter(m => m !== 'cabin');
 const CAMS = () => camList(CAMS_ALL);
-const CAMS_MOON = () => camList(CAMS_MOON_ALL);
+// The lander is a crewed vehicle with its own cockpit, not the capsule's
+// cabin, so it is offered in the moon world whether or not the launch
+// vehicle's payload carries a `cabin` section.
+const CAMS_MOON = () => {
+  const l = camList(CAMS_MOON_ALL);
+  if (MS && !l.includes('cabin')) {
+    const i = l.indexOf('onboard');
+    l.splice(i < 0 ? 0 : i + 1, 0, 'cabin');
+  }
+  return l;
+};
+
+// The camera list follows the WORLD, not the mission. A landing mission has a
+// Moon somewhere in it, but its ascent is still flown over the pad — offering
+// `ground` up there (and hiding `cabin` on a crewed capsule) was the list
+// answering the wrong question. Updated when the world changes, not per frame.
+let curWorld = 'pad', chipWorld = null;
+const cameraModes = () => (curWorld === 'moon' ? CAMS_MOON() : CAMS());
+function refreshCams(world) {
+  if (world) curWorld = world;
+  const cl = cameraModes();
+  const sig = cl.join(',');
+  if (sig === chipWorld) return;
+  chipWorld = sig;
+  if (!cl.includes(camMode)) camMode = 'auto';
+  chipRow($('cams'), cl, camMode, m => camMode = m);
+}
 
 // ------------------------------------------------------ the clear volume --
 // The habitable volume, and the ONE definition of it. It is NOT the pressure
@@ -6174,6 +6264,7 @@ function frame(now) {
   }
 
   const scene = buildScene(ph);
+  refreshCams(scene.world);
   scene.cam.fov = fovZoom(scene.cam.fov, zoomK);
   // Plume and wake run on their own near-real-time clock. Stepping them with
   // the warped dt would spawn thousands of particles per frame and tear the
@@ -6673,7 +6764,8 @@ function drawWorldMeshes(sc, proj, inCab) {
     // the far one's edge rather than fighting it.
     for (let k = moonRings.length - 1; k >= 0; k--)
       drawWhole(moonRings[k].buf, moonRings[k].n, mIdent(), proj);
-    if (landerBuf) drawWhole(landerBuf, landerN, sc.craftM, proj);
+    if (inCab && lmCabBuf) drawWhole(lmCabBuf, lmCabN, sc.craftM, proj);
+    else if (landerBuf) drawWhole(landerBuf, landerN, sc.craftM, proj);
   } else {
     const es = sc.es;
     const podM = sc.craftM;
@@ -6702,7 +6794,7 @@ function drawWorldMeshes(sc, proj, inCab) {
   // The console's displays, last: they bring their own vertex buffer and their
   // own texture, and doing that inside the section loop would leave the next
   // section drawing the screens' geometry with the rocket's ranges.
-  if (inCab) { drawCabDecals(sc, proj); drawCabScreens(sc, proj); }
+  if (inCab && HASCAB) { drawCabDecals(sc, proj); drawCabScreens(sc, proj); }
 }
 
 function drawScene(sc) {
@@ -6714,7 +6806,8 @@ function drawScene(sc) {
   const sun = sc.sun || SUN;
   const view = mLookAt(cam.eye, cam.look, cam.up);
   // everything a click needs to become a ray into the capsule
-  PICK = { cam, asp, craftM: sc.craftM, inCab: inCab || cam.mode === 'eva' };
+  PICK = { cam, asp, craftM: sc.craftM,
+           inCab: (inCab && HASCAB) || cam.mode === 'eva' };
   // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
   // nearer clip plane than the outside views
   const proj = mPersp(cam.fov, asp,
@@ -8012,7 +8105,7 @@ function warpStep(dir) {
   return manualWarp === 0 ? 'AUTO' : warpLabel(manualWarp).toUpperCase();
 }
 function initControls() {
-  chipRow($('cams'), MS ? CAMS_MOON() : CAMS(), camMode, m => camMode = m);
+  refreshCams('pad');
   syncHelp();
   // the hint has done its job by the time the vehicle is off the pad
   setTimeout(() => $('keys').classList.remove('show'), 9000);
@@ -8035,7 +8128,10 @@ function initControls() {
   // the console's own time caps drive the same control, so the chip row has to
   // follow — two places showing different clock rates is worse than one
   speedSync = () => chipRow($('speed'), sp, warpLabel(manualWarp), setSpeed);
-  const inside = () => camMode === 'cabin';
+  // The capsule's switches and fit-out only exist for a capsule cabin; the LM
+  // cockpit is a camera, not an interactive interior, so it is not "inside"
+  // for the picker.
+  const inside = () => camMode === 'cabin' && HASCAB;
   // A switch takes the click; anything else starts a head turn. Right click on
   // a switch steps it back, and only then is the context menu suppressed — a
   // right click anywhere else in the page still behaves like a right click.
@@ -8093,7 +8189,7 @@ function initControls() {
       if (scrubDir !== d) { scrubDir = d; scrubT0 = performance.now(); }
     }
     const i = +e.key;
-    const cl = MS ? CAMS_MOON() : CAMS();
+    const cl = cameraModes();
     if (i >= 1 && i <= cl.length) {
       camMode = cl[i-1];
       chipRow($('cams'), cl, camMode, m => camMode = m);
@@ -8454,14 +8550,16 @@ window.__selftest = function () {
   // otherwise put an eye inside a solid bus, so it is the thing that goes.
   eq('the cabin camera is offered when there is a cabin', () => {
     const h = HASCAB; HASCAB = true;
-    const ok = CAMS().includes('cabin') && CAMS_MOON().length === 6;
+    const ok = CAMS().includes('cabin') && CAMS_MOON().includes('cabin');
     HASCAB = h;
     return ok;
   }, true);
-  eq('and withdrawn when there is not', () => {
+  eq('and withdrawn when there is neither a cabin nor a lander', () => {
     const h = HASCAB; HASCAB = false;
-    const ok = !CAMS().includes('cabin') && !CAMS_MOON().includes('cabin') &&
-               CAMS().length === 5;
+    // A landing run carries the lander, whose cockpit is its own interior, so
+    // the moon list keeps `cabin` there even without a capsule cabin.
+    const ok = !CAMS().includes('cabin') && CAMS().length === 5 &&
+               (!!MS || !CAMS_MOON().includes('cabin'));
     HASCAB = h;
     return ok;
   }, true);
@@ -9943,8 +10041,9 @@ async function boot() {
     buildLandTex();
     if (MS) {
       await step('building the ground…');
-      moonRings = buildMoonTerrain();
-      buildLander();
+  moonRings = buildMoonTerrain();
+  buildLander();
+  buildLMCabin();
       pickGroundCam();
     }
     buildToasts();
