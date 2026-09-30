@@ -40,7 +40,7 @@
   canvas#gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
   .hud { position: fixed; color: var(--ink); user-select: none; z-index: 2;
          text-shadow: 0 1px 3px rgba(0,0,0,.7); }
-  #clock { top: 18px; left: 50%; transform: translateX(-50%); text-align: center;
+  #clock { top: 58px; left: 50%; transform: translateX(-50%); text-align: center;
            font: 600 28px ui-monospace, Consolas, monospace; letter-spacing: 2px;
            color: var(--acc); }
   #clock.go { color: var(--go); }
@@ -59,7 +59,7 @@
            background: rgba(8,9,11,.34); backdrop-filter: blur(2px); }
   #backlink { background: rgba(8,9,11,.4); border-radius: 20px; padding: 4px 11px;
               backdrop-filter: blur(2px); }
-  #keys { position: fixed; right: 20px; top: 56px; z-index: 2; text-align: right;
+  #keys { position: fixed; right: 20px; top: 96px; z-index: 2; text-align: right;
           font: 11.5px system-ui; color: var(--dim); line-height: 1.7;
           background: rgba(8,9,11,.4); border-radius: 8px; padding: 6px 10px;
           backdrop-filter: blur(2px); opacity: 0; transition: opacity .3s;
@@ -67,7 +67,7 @@
   #keys.show { opacity: 1; }
   #keys b { color: var(--ink); font-weight: 600; }
   /* the full list, on H — the corner hint is one line and points here */
-  #help { position: fixed; right: 20px; top: 56px; z-index: 3; max-width: 460px;
+  #help { position: fixed; right: 20px; top: 96px; z-index: 3; max-width: 460px;
           font: 12px system-ui; color: var(--dim); line-height: 1.55;
           background: rgba(8,9,11,.82); border: 1px solid rgba(255,255,255,.13);
           border-radius: 10px; padding: 14px 16px; backdrop-filter: blur(6px); }
@@ -130,16 +130,28 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
+<!-- The same bar as the other three pages: the launch view is a full-bleed
+     instrument, but it is still one product, and the tiny top-right links read
+     as a different one. -->
+<nav class="appnav">
+  <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
+  <span class="appnav-links">
+    <a class="navlink" href="/">mission control</a>
+    <a class="navlink" href="/build">vehicle builder</a>
+    <a class="navlink" id="analysislink" href="/analysis">analysis</a>
+    <a class="navlink" href="#" aria-current="page">launch view</a>
+  </span>
+  <span class="appnav-end">
+    <span class="u-label" id="nav_note">launch</span>
+    <span class="u-label" data-appver></span>
+  </span>
+</nav>
 <div class="hud" id="clock">T–00:15<div id="phase">ASCENT</div></div>
 <div class="hud" id="stats"></div>
 <div class="hud" id="toast"></div>
 <!-- No nav bar here on purpose: this view is full-bleed and the chrome yields
      to it. It still needs to reach both other pages, though — a view you can
      only leave one way is what made three tabs feel scattered. -->
-<div class="hud" id="backlink"><a href="/">&#8617; mission control</a>
-  <a href="/build" style="margin-left:10px">vehicle builder</a>
-  <a href="/analysis" id="analysislink" style="margin-left:10px">analysis</a>
-  <span data-appver style="margin-left:10px;color:var(--dim)"></span></div>
 <div id="keys" class="show">
   <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>v</b> eva · <b>h</b> for all controls</div>
 </div>
@@ -2369,6 +2381,16 @@ function eciLanderMat(cs) {
   const f = eciLanderFrame(cs);
   return mBasis(f.bx, f.by, f.bz, cs.pos);
 }
+// The LM cockpit camera, in whatever body frame the caller has: the same eye
+// behind the window bulkhead, looking forward and down at the site. Shared by
+// the moon world and the lander's Earth-centred lunar phases so the handoff
+// does not change the seat.
+function lmCabinView(pos, bx, by) {
+  const R = MDIA/2, Y2 = 2.35;
+  const eye = V.add(pos, V.add(V.scale(bx, R*0.02), V.scale(by, Y2 + 1.05)));
+  const dir = V.norm(V.add(V.scale(bx, 1.0), V.scale(by, -0.95)));
+  return { eye, look: V.add(eye, dir), up: by, fov: 0.95, mode: 'cabin' };
+}
 // The eci phases that belong to the lander alone: the eci leg of a landing
 // mission's lunar endgame. The kick stage is gone by then, so the world draws
 // the lander and the camera uses its rig, exactly as the moon world will.
@@ -2379,13 +2401,7 @@ function cameraMoon(t, ms, M) {
   const mode = camMode === 'auto' ? autoPickMoon(t) : camMode;
   // The LM cabin: the eye just behind the window bulkhead, looking forward and
   // down at the site the way the crew does through the two forward windows.
-  if (mode === 'cabin') {
-    const R = MDIA/2, Y2 = 2.35;
-    const eye = V.add(ms.pos, V.add(V.scale(ms.bx, R*0.02),
-                                    V.scale(ms.by, Y2 + 1.05)));
-    const dir = V.norm(V.add(V.scale(ms.bx, 1.0), V.scale(ms.by, -0.95)));
-    return { eye, look: V.add(eye, dir), up: ms.by, fov: 0.95, mode };
-  }
+  if (mode === 'cabin') return lmCabinView(ms.pos, ms.bx, ms.by);
   // Nothing may look up through the regolith. Free pitch can be driven below
   // the horizon and the low chase offset sits under the surface at touchdown,
   // and the ground is a one-sided sheet: from beneath it, the shot is the
@@ -4907,10 +4923,21 @@ const CAMS_MOON = () => {
 // Moon somewhere in it, but its ascent is still flown over the pad — offering
 // `ground` up there (and hiding `cabin` on a crewed capsule) was the list
 // answering the wrong question. Updated when the world changes, not per frame.
-let curWorld = 'pad', chipWorld = null;
-const cameraModes = () => (curWorld === 'moon' ? CAMS_MOON() : CAMS());
-function refreshCams(world) {
+let curWorld = 'pad', chipWorld = null, curLander = false;
+const withLmCabin = l => {
+  if (!l.includes('cabin')) {
+    const i = l.indexOf('onboard');
+    l.splice(i < 0 ? 0 : i + 1, 0, 'cabin');
+  }
+  return l;
+};
+const cameraModes = () =>
+  curWorld === 'moon' ? CAMS_MOON()
+  : curWorld === 'eci' && curLander ? withLmCabin(CAMS())
+  : CAMS();
+function refreshCams(world, lander) {
   if (world) curWorld = world;
+  if (lander !== undefined) curLander = lander;
   const cl = cameraModes();
   const sig = cl.join(',');
   if (sig === chipWorld) return;
@@ -5948,6 +5975,10 @@ function cameraEci(t, cs, ph, M) {
     const c = cabinCam(M, 'wide');
     if (c) return cabinShake(c, cs.burning ? 0.5 : 0);
   }
+  if (mode === 'cabin' && eciLanderPhase(ph)) {
+    const f = eciLanderFrame(cs);
+    return lmCabinView(cs.pos, f.bx, f.by);
+  }
   if (mode === 'onboard') {
     const c = hullCam(M);
     if (c) return cabinShake(c, cs.burning ? 0.35 : 0);
@@ -6264,7 +6295,7 @@ function frame(now) {
   }
 
   const scene = buildScene(ph);
-  refreshCams(scene.world);
+  refreshCams(scene.world, eciLanderPhase(ph));
   scene.cam.fov = fovZoom(scene.cam.fov, zoomK);
   // Plume and wake run on their own near-real-time clock. Stepping them with
   // the warped dt would spawn thousands of particles per frame and tear the
@@ -6757,7 +6788,8 @@ function drawWorldMeshes(sc, proj, inCab) {
       }
     }
     if (landerHere && landerBuf)
-      drawWhole(landerBuf, landerN, eciLanderMat(cs), proj);
+      drawWhole(inCab && lmCabBuf ? lmCabBuf : landerBuf,
+                inCab && lmCabBuf ? lmCabN : landerN, eciLanderMat(cs), proj);
   } else if (sc.world === 'moon') {
     // The ground, coarsest ring first: they nest, and the depth buffer would
     // sort them anyway, but drawing outward-in means the near ring overwrites

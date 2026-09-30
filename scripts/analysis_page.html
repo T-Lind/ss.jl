@@ -675,11 +675,23 @@ function renderCharts() {
       {xu:'d',yu:'kg',y0:0,nopeak:true,labelAt:'start',marks});
     drawLine('c_rcs_remaining',[{xs:td,ys:R.remaining,color:'#199e70',unit:'kg'}],
       'attitude-control propellant reserve', {xu:'d',yu:'kg',y0:0,nopeak:true});
+    // The budget inserts a prevfloat(te)/te PAIR at every step so the
+    // cumulative curve jumps vertically. One ULP apart, the finite difference
+    // across the pair is ~1e18 kg/day — a discontinuity is not a rate. Merge
+    // each pair into the sample it lands on, so a step's mass is averaged over
+    // the real interval that follows it instead of divided by ~zero.
+    const ts=[],us=[];
+    for(let i=0;i<R.t.length;i++){
+      const last=ts.length-1;
+      if(last>=0 && R.t[i]-ts[last] < 1.0){ us[last]=R.used[i]; continue; }
+      ts.push(R.t[i]); us.push(R.used[i]);
+    }
     const rt=[],rr=[];
-    for(let i=1;i<R.t.length;i++){
-      const dt=R.t[i]-R.t[i-1];if(dt<=0)continue;
-      rt.push((R.t[i]+R.t[i-1])/2/86400);
-      rr.push((R.used[i]-R.used[i-1])/(dt/86400));
+    for(let i=1;i<ts.length;i++){
+      const dt=ts[i]-ts[i-1];
+      if(dt<=0)continue;
+      rt.push((ts[i]+ts[i-1])/2/86400);
+      rr.push((us[i]-us[i-1])/(dt/86400));
     }
     drawLine('c_rcs_rate',[{xs:rt,ys:rr,color:'#d95926',unit:'kg/day'}],
       'average RCS demand between budget events', {xu:'d',yu:'kg/day',y0:0});

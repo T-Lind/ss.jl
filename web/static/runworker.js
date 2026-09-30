@@ -17,11 +17,14 @@ self.onmessage = e => {
     let result;
     if (path === '/api/run') {
       const m = mode || params.mode || 'flyby';
-      progress(id, 'configuration', 'validating the vehicle and mission inputs…', 1, 4);
-      progress(id, 'simulation', SIM_DETAIL[m] || SIM_DETAIL.flyby, 2, 4);
-      result = panelRun(params, mode);
-      progress(id, 'diagnostics', 'building event, telemetry, and ground-track data…', 3, 4);
-      progress(id, 'complete', 'trajectory ready', 4, 4, true);
+      // Six coarse steps, and the mission builder reports the real boundaries
+      // between them as it reaches each leg, so the bar moves with the work
+      // instead of jumping to the middle and waiting there.
+      progress(id, 'configuration', 'validating the vehicle and mission inputs…', 1, 6);
+      progress(id, 'simulation', SIM_DETAIL[m] || SIM_DETAIL.flyby, 1, 6);
+      result = panelRun(params, mode, x => progress(id, x.stage, x.detail, x.current, x.total));
+      progress(id, 'diagnostics', 'building event, telemetry, and ground-track data…', 6, 6);
+      progress(id, 'complete', 'trajectory ready', 6, 6, true);
     } else if (path === '/api/geometry') {
       result = panelGeometry(params);
     } else if (path === '/api/sweep') {

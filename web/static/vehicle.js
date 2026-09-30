@@ -55,3 +55,27 @@ export function load() {
     return '';
   }
 }
+
+// A note that the vehicle was edited since the last time mission control looked.
+//
+// The storage event only fires in OTHER tabs, so editing in the builder and
+// then navigating back in the SAME tab applied the new stack silently and the
+// page showed "NO RUN YET" as though nothing had happened. The builder drops
+// this note on every accepted edit; mission control takes it on arrival (and
+// when the cross-tab event fires) and raises the stale banner.
+export const DIRTY_KEY = 'ssjl.vehicleDirty';
+
+export function markDirty(why) {
+  try { localStorage.setItem(DIRTY_KEY, why || 'the vehicle changed'); } catch (e) {}
+}
+
+/** Read and clear the note, returning the reason or null. */
+export function takeDirty() {
+  try {
+    const w = localStorage.getItem(DIRTY_KEY);
+    if (w) localStorage.removeItem(DIRTY_KEY);
+    return w;
+  } catch (e) {
+    return null;
+  }
+}
