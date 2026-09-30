@@ -122,11 +122,22 @@ function draw(s) {
 
   let consumed=0;
   for(const seg of s.segments){
-    ctx.strokeStyle=seg.color;ctx.lineWidth=2;ctx.beginPath();let pen=false;
+    // A cislunar coast wraps the Earth for days on end; drawing all of it at
+    // full weight buries the ascent, the parking orbit and the entry under
+    // seven dateline crossings. A `faint` segment is the far-from-Earth part
+    // of the same flight: still there for context, thin and translucent so it
+    // cannot compete with the legs that belong to the Earth map.
+    const faint=!!seg.faint;
+    ctx.save();
+    ctx.globalAlpha=faint?0.22:1;
+    ctx.strokeStyle=seg.color;ctx.lineWidth=faint?1:2;ctx.beginPath();let pen=false;
     seg.points.forEach((p,i)=>{const [x,y]=xy(p.lon,p.lat),prev=seg.points[i-1];
       if(!pen||prev&&Math.abs(prev.lon-p.lon)>180){ctx.moveTo(x,y);pen=true}else ctx.lineTo(x,y)});ctx.stroke();
-    const upto=clamp(s.cursor-consumed,0,seg.points.length-1);ctx.strokeStyle='#e9f2ff';ctx.lineWidth=2.5;ctx.beginPath();pen=false;
+    const upto=clamp(s.cursor-consumed,0,seg.points.length-1);
+    ctx.globalAlpha=faint?0.5:1;
+    ctx.strokeStyle=faint?seg.color:'#e9f2ff';ctx.lineWidth=faint?1.4:2.5;ctx.beginPath();pen=false;
     seg.points.slice(0,upto+1).forEach((p,i,a)=>{const [x,y]=xy(p.lon,p.lat),prev=a[i-1];if(!pen||prev&&Math.abs(prev.lon-p.lon)>180){ctx.moveTo(x,y);pen=true}else ctx.lineTo(x,y)});ctx.stroke();
+    ctx.restore();
     consumed+=seg.points.length;
   }
   if(s.station&&Number.isFinite(s.station.lat)&&Number.isFinite(s.station.lon)){

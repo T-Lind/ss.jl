@@ -82,6 +82,29 @@
   .track-tools button { padding:4px 12px; min-width:58px }
   .track-tools input { padding:0; accent-color:var(--amber) }
   .track-readout { color:var(--text-2); font:11px var(--mono); white-space:nowrap }
+  /* A second track view, for the Moon. Same shell as the Earth map so the page
+   * reads as one instrument, with the parking orbit, the descent ellipse and
+   * the touchdown on a body the Earth map cannot resolve. */
+  #moonview { display:block; width:100%; height:430px; }
+
+  /* --- section sub-navigation ------------------------------------------
+   * The page is long enough that the section you want is usually below the
+   * fold, so the visible sections get a sticky chip bar. Only sections that
+   * are actually shown for this run appear in it — a landing has a powered
+   * descent, a flyby does not — and the active chip tracks the scroll. */
+  .subnav { position: sticky; top: var(--appnav-h, 36px); z-index: 30;
+            display:flex; gap:var(--s1); align-items:center;
+            padding:6px 0; overflow-x:auto; scrollbar-width:none;
+            background:var(--ground); border-bottom:1px solid var(--line); }
+  .subnav::-webkit-scrollbar { display:none }
+  .subnav a { flex:0 0 auto; font:600 10.5px var(--mono); letter-spacing:.1em;
+              text-transform:uppercase; text-decoration:none; color:var(--text-2);
+              background:var(--surface); border:1px solid var(--line);
+              border-radius:20px; padding:4px 11px; white-space:nowrap;
+              cursor:pointer; }
+  .subnav a:hover { color:var(--text); border-color:var(--text-3) }
+  .subnav a.is-on { color:#12151A; background:var(--amber); border-color:var(--amber); }
+  .wrap > section[id^="sec_"] { scroll-margin-top: calc(var(--appnav-h, 36px) + 54px); }
   .station-shell { background:var(--surface); border:1px solid var(--line);
                    border-radius:var(--radius); overflow:hidden }
   #stationview { display:block; width:100%; height:430px; cursor:grab }
@@ -155,6 +178,11 @@
     <span class="act"><button id="rerun">Re-run</button></span>
   </div>
   <div class="diag-strip" id="diag_strip"></div>
+
+  <!-- The sections below stretch well past a screen on a cislunar run. This
+       bar is built from the sections that are actually visible AFTER render,
+       so it never offers a jump to a chart that is not on the page. -->
+  <nav class="subnav" id="subnav" aria-label="Analysis sections" hidden></nav>
 
   <!-- Arrived with nothing to analyse. Not an error, and not a reason to
        invent a mission: this page reads a trajectory and there is not one
@@ -267,6 +295,26 @@
     </div>
   </section>
 
+  <!-- The lunar half of a cislunar flight, which the Earth map cannot show:
+       a 100 km parking orbit, a descent ellipse with a 15 km perilune and the
+       touchdown all vanish into one pixel beside a 384,000 km transfer, so the
+       Moon gets its own frame. Only a run that carries a Moon leg has it. -->
+  <section id="sec_moon" class="hidden">
+    <div class="sec-h">
+      <h2>Moon track</h2>
+      <span class="hint" id="moon_note">top-down on the lunar orbit plane</span>
+    </div>
+    <div class="legend">
+      <span><i style="background:#3987e5"></i>parking orbit</span>
+      <span><i style="background:#c98500"></i>descent ellipse</span>
+      <span><i style="background:#d55181"></i>powered descent</span>
+      <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>landing site</span>
+    </div>
+    <div class="track-shell">
+      <canvas id="moonview"></canvas>
+    </div>
+  </section>
+
   <section id="sec_studies">
     <div class="sec-h">
       <h2>Studies</h2>
@@ -332,6 +380,7 @@ import * as api from '/static/api.js';
 import { drawLine, niceStep, fmtTick, fmtPeak } from '/static/charts.js';
 import { drawGroundTrack } from '/static/groundtrack.js';
 import { drawGroundStation } from '/static/groundstation.js';
+import { drawMoonView } from '/static/moonview.js';
 import { busy, fail, clearFailures, reportUncaught } from '/static/busy.js';
 import * as runs from '/static/runs.js';
 import { METRIC_LABEL, SFIELD_LABEL, PARAM_LABEL, SPARAM_LABEL, LPARAM_LABEL,
@@ -413,7 +462,8 @@ function showRun() {
   $('diag_strip').hidden = false;
   // sec_descent is included, but whether it is SEEN stays with renderCharts
   // and its `hidden` class — only a landing run has a powered descent.
-  for (const id of ['sec_descent', 'sec_profiles', 'sec_track', 'sec_station', 'sec_studies', 'sec_events'])
+  for (const id of ['sec_descent', 'sec_profiles', 'sec_track', 'sec_station',
+                    'sec_moon', 'sec_studies', 'sec_events'])
     $(id).hidden = false;
   $('runhdr').hidden = false;
 }
@@ -458,8 +508,10 @@ async function showEmpty() {
   const list = await runs.list();
   $('runhdr').hidden = true;
   $('diag_strip').hidden = true;
-  for (const id of ['sec_descent', 'sec_profiles', 'sec_track', 'sec_station', 'sec_studies', 'sec_events'])
+  for (const id of ['sec_descent', 'sec_profiles', 'sec_track', 'sec_station',
+                    'sec_moon', 'sec_studies', 'sec_events'])
     $(id).hidden = true;
+  buildSubnav();
   $('empty').hidden = false;
   const host = $('empty_runs');
   const hasConfig=[...Q.keys()].length>0;
@@ -686,16 +738,36 @@ function renderCharts() {
         : `, and no ignitions to settle propellant for.`) +
       ` Individual valve pulses are not resolved.`;
   }
-  const track=[];
-  if(A.lat&&A.lon)track.push({t:A.t,lat:A.lat,lon:A.lon,h:A.h,color:'#f0a500',label:'ascent'});
+  const track=[], stationTrack=[];
+  if(A.lat&&A.lon){
+    const asc={t:A.t,lat:A.lat,lon:A.lon,h:A.h,color:'#f0a500',label:'ascent'};
+    track.push(asc); stationTrack.push(asc);
+  }
   if(D&&D.lat&&D.lon){
     const h=D.x.map((x,i)=>(Math.hypot(x,D.y[i],D.z[i])-6.371)*1000);
-    track.push({t:D.t,lat:D.lat,lon:D.lon,h,color:'#3987e5',label:orbitm()?'orbit':'coast'});
+    const coast={t:D.t,lat:D.lat,lon:D.lon,h,color:'#3987e5',label:orbitm()?'orbit':'coast'};
+    // The ground station follows the whole flight, far coast included.
+    stationTrack.push(coast);
+    if(orbitm()||subm()){
+      // An Earth-orbit transfer (or a suborbital arc) never leaves the Earth
+      // map's business; splitting it would only break a leg that belongs here.
+      track.push(coast);
+    } else {
+      // A cislunar coast spends days far from Earth and wraps the map over and
+      // over on the way out and back. The Earth-relevant legs stay at full
+      // weight and the translunar stretch is kept only as faint context: the
+      // lunar geometry now has its own view, so the Earth map should show the
+      // Earth-relevant flight rather than seven dateline crossings.
+      for(const seg of splitRuns(coast,2000))
+        track.push({t:seg.t,lat:seg.lat,lon:seg.lon,h:seg.h,color:coast.color,
+                    faint:seg.far,label:seg.far?'translunar':'coast'});
+    }
   }
   if(hasEntry&&E.lat&&E.lon){
     const ei=(run.events||[]).find(e=>e.name==='entry_interface');
     const t0=ei?ei.t:(D&&D.t&&D.t.length?D.t[D.t.length-1]:A.t[A.t.length-1]);
-    track.push({t:E.t.map(t=>t+t0),lat:E.lat,lon:E.lon,h:E.h,color:'#d55181',label:'entry'});
+    const ent={t:E.t.map(t=>t+t0),lat:E.lat,lon:E.lon,h:E.h,color:'#d55181',label:'entry'};
+    track.push(ent); stationTrack.push(ent);
   }
   // Every flown ground-referenced leg is useful here: parking orbits on lunar
   // missions, the full Earth-orbit cases, and suborbital arcs alike.
@@ -705,9 +777,44 @@ function renderCharts() {
   if(showTrack){
     const station={lat:+(run.sites||{}).launch_lat||0,lon:+(run.sites||{}).launch_lon||0};
     drawGroundTrack('groundmap',track,station);
-    drawGroundStation('stationview',track,station);
+    drawGroundStation('stationview',stationTrack,station);
   }
   drawDescent();
+  renderMoon();
+  buildSubnav();
+}
+
+// Split a coast into contiguous runs either side of an altitude threshold, so
+// the Earth map can stroke the near-Earth legs and the translunar stretch at
+// different weights without drawing one line across the whole flight.
+function splitRuns(seg, altKm) {
+  const out=[]; let cur=null;
+  for(let i=0;i<seg.t.length;i++){
+    const far=+seg.h[i]>altKm;
+    if(!cur||cur.far!==far){
+      if(cur&&cur.t.length>1) out.push(cur);
+      cur={far,t:[],lat:[],lon:[],h:[]};
+    }
+    cur.t.push(seg.t[i]);cur.lat.push(seg.lat[i]);
+    cur.lon.push(seg.lon[i]);cur.h.push(seg.h[i]);
+  }
+  if(cur&&cur.t.length>1) out.push(cur);
+  return out;
+}
+
+// The lunar half of a cislunar flight: a landing carries `run.moon`, a flyby
+// does not, so the section simply does not exist for a mission with no Moon
+// leg. Everything drawn is Moon-centred, which is the only frame in which the
+// parking orbit and touchdown are visible at the same scale.
+function renderMoon() {
+  const m = run && run.moon;
+  const has = !!(m && m.orbit && m.orbit.x && m.orbit.x.length > 1);
+  $('sec_moon').classList.toggle('hidden', !has);
+  if (!has) return;
+  drawMoonView('moonview', m, { label: 'touchdown' });
+  const r = +m.r_km || 1737.4;
+  $('moon_note').textContent =
+    `top-down on the lunar orbit plane · Moon radius ${r.toFixed(0)} km`;
 }
 
 // Altitude against downrange, in the plane the descent actually flies. The
@@ -927,6 +1034,73 @@ function drawSolve(j) {
   ctx.fillText(x1.toPrecision(4), w - 46, h - 6);
 }
 
+// --------------------------------------------------------- section nav --
+
+// Short names for the sticky bar; the headings themselves are too long to fit
+// seven of them across a screen.
+const NAV_LABEL = {
+  sec_descent: 'Descent', sec_profiles: 'Profiles', sec_track: 'Ground track',
+  sec_station: 'Station', sec_moon: 'Moon', sec_studies: 'Studies',
+  sec_events: 'Events',
+};
+let SUBNAV = [];
+
+// What a scroll target has to clear: the app bar, the section bar when it is
+// showing, and a small breathing gap.
+function navOffset() {
+  const app = document.querySelector('.appnav');
+  const bar = $('subnav');
+  return (app ? app.offsetHeight : 36) + (bar.hidden ? 0 : bar.offsetHeight) + 8;
+}
+
+/** Build the bar from the sections that are VISIBLE for this run. Rebuilt on
+ *  every render, because a landing grows a powered-descent and a Moon-track
+ *  section that a flyby never has. */
+function buildSubnav() {
+  const bar = $('subnav');
+  const secs = [...document.querySelectorAll('.wrap > section[id^="sec_"]')]
+    .filter(s => getComputedStyle(s).display !== 'none');
+  SUBNAV = [];
+  bar.replaceChildren();
+  if (!run || !secs.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  for (const s of secs) {
+    const a = document.createElement('a');
+    a.href = '#' + s.id;
+    a.textContent = NAV_LABEL[s.id] ||
+      (s.querySelector('.sec-h h2')?.textContent.trim() || s.id);
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const y = s.getBoundingClientRect().top + window.scrollY - navOffset();
+      window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+      history.replaceState(null, '', '#' + s.id);
+    });
+    bar.appendChild(a);
+    SUBNAV.push({ el: a, sec: s });
+  }
+  markActive();
+}
+
+/** The active chip is the last section whose top has passed under the sticky
+ *  chrome, with the bottom of the page pinning the final one. */
+function markActive() {
+  if (!SUBNAV.length) return;
+  const off = navOffset() + 6;
+  let idx = 0;
+  for (let i = 0; i < SUBNAV.length; i++)
+    if (SUBNAV[i].sec.getBoundingClientRect().top - off <= 0) idx = i;
+  if (window.innerHeight + window.scrollY >=
+      document.documentElement.scrollHeight - 4) idx = SUBNAV.length - 1;
+  SUBNAV.forEach((x, i) => x.el.classList.toggle('is-on', i === idx));
+}
+
+// The sticky offset depends on the font the browser actually picked, so it is
+// measured rather than assumed.
+function measureNav() {
+  const app = document.querySelector('.appnav');
+  if (app) document.documentElement.style.setProperty('--appnav-h', app.offsetHeight + 'px');
+}
+
 // ---------------------------------------------------------------- wire up --
 // Re-run always flies, even when the page arrived by id: that is what the
 // button is for — the same configuration, simulated again.
@@ -934,11 +1108,13 @@ $('rerun').onclick = () => fly(true);
 $('sweepbtn').onclick = doSweep;
 $('sweep_metric').onchange = drawSweep;
 $('solvebtn').onclick = doSolve;
+window.addEventListener('scroll', () => requestAnimationFrame(markActive), { passive: true });
+measureNav();
 // charts are sized from their container, so a resized window has to redraw
 let rz = null;
 window.addEventListener('resize', () => {
   clearTimeout(rz);
-  rz = setTimeout(() => { if (run) renderCharts(); drawSweep(); }, 120);
+  rz = setTimeout(() => { measureNav(); if (run) renderCharts(); drawSweep(); }, 120);
 });
 
 // the page is useful the moment the run lands; the catalogue only feeds the
