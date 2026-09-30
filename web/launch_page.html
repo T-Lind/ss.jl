@@ -2243,12 +2243,12 @@ function buildLander() {
 // apertures the world shows through, a console the screens sit on, couches and
 // the switch caps.
 function buildLMCabin() {
-  const K = lmK(), rp = K.rp, Lc = K.Lc;
-  const rin = rp*0.95, rcin = rp*0.95;
+  const K = lmK(), rp = K.rp, P = K.panel, W = K.win;
+  const rin = Math.max(rp*0.95, P.zW + 0.18, -P.yBot + 0.30);
   const xa = K.xb + K.xa - 0.12, xt = K.xb + K.xtop;
   const out = [];
   const WALL = [0.33, 0.34, 0.37], WALL2 = [0.21, 0.23, 0.26],
-        PANEL = [0.12, 0.13, 0.15], CAPB = [0.34, 0.36, 0.40],
+        PANEL = [0.12, 0.13, 0.15],
         COUCH = [0.20, 0.24, 0.30], DARK = [0.09, 0.10, 0.12];
   const tri = (a, b, c, col) => {
     const n = V.norm(V.cross(V.sub(b, a), V.sub(c, a)));
@@ -2257,7 +2257,6 @@ function buildLMCabin() {
   };
   const N = 28;
   const ring = (x, a) => [x, rin*Math.cos(a), rin*Math.sin(a)];
-  // cylinder wall
   for (let k = 0; k < N; k++) {
     const a0 = k/N*2*Math.PI, a1 = (k + 1)/N*2*Math.PI;
     for (const [x0, x1] of [[xa, xa + 0.5*(xt - xa)], [xa + 0.5*(xt - xa), xt]]) {
@@ -2265,60 +2264,43 @@ function buildLMCabin() {
       tri(ring(x0, a0), ring(x1, a1), ring(x1, a0), WALL);
     }
   }
-  // aft cap
   for (let k = 0; k < N; k++)
     tri([xa, 0, 0], ring(xa, (k + 1)/N*2*Math.PI), ring(xa, k/N*2*Math.PI), WALL2);
-  // forward bulkhead, with two lower-front window apertures
-  const holes = [{ y: -0.55*rin, z: -0.34*rin }, { y: -0.55*rin, z: 0.34*rin }];
-  const hyW = 0.30*rin, hzW = 0.26*rin;
-  const ng = 14;
+  // forward bulkhead, with two window apertures ABOVE the console
+  const ng = 16;
   for (let i = 0; i < ng; i++) for (let j = 0; j < ng; j++) {
     const y0 = -rin + 2*rin*i/ng, y1 = -rin + 2*rin*(i + 1)/ng;
     const z0 = -rin + 2*rin*j/ng, z1 = -rin + 2*rin*(j + 1)/ng;
     const cy = (y0 + y1)/2, cz = (z0 + z1)/2;
     if (Math.hypot(cy, cz) > rin) continue;
-    let hole = false;
-    for (const h of holes)
-      if (Math.abs(cy - h.y) < hyW && Math.abs(cz - h.z) < hzW) { hole = true; break; }
-    if (hole) continue;
+    if (Math.abs(cy - W.y) < W.hy && Math.abs(Math.abs(cz) - W.z) < W.hz) continue;
     tri([xt, y0, z0], [xt, y1, z0], [xt, y1, z1], WALL);
     tri([xt, y0, z0], [xt, y1, z1], [xt, y0, z1], WALL);
   }
-  for (const h of holes) {                    // sills, so the apertures read as windows
-    boxAt(out, [xt, h.y - hyW, h.z], [0.05, 0.05, hzW*2], WALL2);
-    boxAt(out, [xt, h.y + hyW, h.z], [0.05, 0.05, hzW*2], WALL2);
-    boxAt(out, [xt, h.y, h.z - hzW], [0.05, hyW*2, 0.05], WALL2);
-    boxAt(out, [xt, h.y, h.z + hzW], [0.05, hyW*2, 0.05], WALL2);
+  for (const zc of [-W.z, W.z]) {
+    boxAt(out, [xt, W.y + W.hy, zc], [0.05, 0.05, W.hz*2], WALL2);
+    boxAt(out, [xt, W.y - W.hy, zc], [0.05, 0.05, W.hz*2], WALL2);
+    boxAt(out, [xt, W.y, zc - W.hz], [0.05, W.hy*2, 0.05], WALL2);
+    boxAt(out, [xt, W.y, zc + W.hz], [0.05, W.hy*2, 0.05], WALL2);
   }
-  // console backing panels behind each screen bay, and the switch caps the
-  // picker (cabControls) reads back out of the same grid
-  for (let k = 0; k < SCR_BAYS.length; k++) {
-    const F = scrFrame(K, k);
-    const q = [F.at(0, 0), F.at(1, 0), F.at(1, 1), F.at(0, 1)]
-      .map(p => [p[0] - 0.030*rp, p[1], p[2]]);
-    tri(q[0], q[1], q[2], PANEL); tri(q[0], q[2], q[3], PANEL);
-  }
+  // the console: a flat slab behind the screens (its face at P.x, the screens
+  // a hair in front), below eye level, with the caps proud of it
+  boxAt(out, [P.x + 0.05, P.yc, 0], [0.05, (P.yTop - P.yBot)/2, P.zW], PANEL);
   {
-    const rcin2 = cabRin(K, K.xcon);
-    for (const fn of CAP_FN) {
-      const bay = SCR_BAYS[(fn.cell >> 3)];
-      const a0 = bay[0]*Math.PI/180, a1 = bay[1]*Math.PI/180;
-      const col = (fn.cell >> 1) & 3, row = fn.cell & 1;
-      const ac = a0 + (a1 - a0)*(0.185 + 0.26*col);
-      const rr = (0.24 + 0.09*row + 0.031)*rcin2;
-      const p = [K.xb + K.xcon - 0.021*rp, rr*Math.cos(ac), rr*Math.sin(ac)];
-      boxAt(out, p, [0.03, 0.06, 0.06], fn.c === undefined ? CAPB : fn.c);
-    }
+    const n = CAP_FN.length;
+    CAP_FN.forEach((fn, i) => {
+      const z = P.zW*0.9*(2*(i/Math.max(n - 1, 1)) - 1);
+      boxAt(out, [P.x - 0.04, P.yBot + 0.08, z], [0.05, 0.05, 0.10],
+            fn.c === undefined ? [0.34, 0.36, 0.40] : fn.c);
+    });
   }
-  // couches
   const ln = cabSeatLn(K);
   for (const zc of cabSeatZ(K))
-    boxAt(out, [K.xb + K.xa + 0.18*rp, -0.20*ln, zc],
-          [0.62*ln, 0.30*ln, 0.42*ln], COUCH);
-  // hatch: a dark slab in the wall beside the crew
+    boxAt(out, [K.xb + K.xa + 0.20*rp, -0.18*ln, zc],
+          [0.60*ln, 0.34*ln, 0.42*ln], COUCH);
   {
     const h = evaHatchStation(K);
-    if (h) boxAt(out, [h.p[0], h.p[1], h.p[2]], [0.34, 0.42, 0.10], DARK);
+    if (h) boxAt(out, [h.p[0], h.p[1], h.p[2]], [0.34, 0.42, 0.12], DARK);
   }
   lmCabBuf = buffer(new Float32Array(out));
   lmCabN = out.length/VST;
@@ -5088,9 +5070,32 @@ function cabSeatBay(K, i) {
 // These mirror pod_mesh's layout (heat-shield sagitta, 32.5 deg afterbody,
 // deck and couch stations) so the eye lands in the cabin, not in a wall.
 // `arg` is the couch index for the seated station and is ignored otherwise.
+// The LM crew stations, in the same model frame as lmK: upright, looking
+// forward at the panel, with the windows above it.
+function lmCabinPose(aim, arg, K) {
+  const P = K.panel, zs = cabSeatZ(K);
+  if (aim === 'console')
+    return { eye: [K.xa + 0.20*K.rp, 0.26, 0], look: [P.x, P.yc, 0],
+             up: [0, 1, 0], fov: 1.25 };
+  if (aim === 'seat') {
+    const i = Math.min(Math.max(arg | 0, 0), zs.length - 1), zc = zs[i];
+    const F = lmFrame(cabSeatBay(K, i));
+    return { eye: [K.xa + 0.20*K.rp, 0.28, zc], look: [P.x, P.yc, F.zc],
+             up: [0, 1, 0], fov: 1.12 };
+  }
+  // Unbuckled: a station INSIDE the clear volume (cabBox clamps x to
+  // [xa+0.27rp, xcon-0.14rp]), not out at the panel where the console is.
+  if (aim === 'float' || CAB.seat === null)
+    return { eye: [K.xa + 0.35*K.rp, 0.26, 0], look: [P.x, P.yc, 0],
+             up: [0, 1, 0], fov: 1.25 };
+  // 'wide' and anything else means "wherever the crew is": in a couch, that is
+  // the couch, exactly as the capsule resolves it.
+  return lmCabinPose('seat', CAB.seat, K);
+}
 function cabinPose(aim, arg, Kin) {
   const K = Kin || cabK();
   if (!K) return null;
+  if (isLandingMission()) return lmCabinPose(aim, arg, K);
   const rp = K.rp, Lc = K.Lc;
   const ln = cabSeatLn(K);                     // couch half-length
   // eye just above the headrest, set back from the wall so the viewport, the
@@ -5556,10 +5561,15 @@ let cabPage = 0, cabTraj = 0, cabHover = null;
 // screens — then drives the LM with no capsule geometry involved.
 function isLandingMission() { return !!(run && run.mode === 'landing'); }
 function lmK() {
-  const rp = Math.max(0.55, 0.30*MDIA);
+  const rp = Math.max(0.7, 0.32*MDIA);
   const Lc = 2.0;
-  return { rp, Lc, xb0: 0.0, xa: 0.16, xcon: 1.18, xtop: Lc,
-           xfl: 0.10, xb: 0.0, ta: 0.0, xsh: 0.0, rcone: () => rp };
+  return { rp, Lc, xb0: 0.0, xa: 0.16, xcon: 1.05, xtop: Lc,
+           xfl: 0.10, xb: 0.0, ta: 0.0, xsh: 0.0, rcone: () => rp,
+           // The LM console is a FLAT panel the upright crew faces, not the
+           // capsule's overhead annulus: a panel below eye level, three bays
+           // across it, windows above it in the forward bulkhead.
+           panel: { x: 1.05, yTop: -0.06, yBot: -0.70, zW: 0.95, yc: -0.38 },
+           win: { x: Lc, y: 0.45, z: 0.36, hy: 0.28, hz: 0.24 } };
 }
 function cabK() {
   if (isLandingMission()) return lmK();
@@ -5621,6 +5631,27 @@ function cabStand(Kin) {
 function cabControls() {
   const K = cabK();
   if (!K) return [];
+  if (isLandingMission()) {
+    const P = K.panel, out = [];
+    // caps in a row along the bottom edge of the panel, below the screens
+    const n = CAP_FN.length;
+    CAP_FN.forEach((fn, i) => {
+      const z = P.zW*0.9*(2*(i/(Math.max(n - 1, 1))) - 1);
+      out.push({ key: fn.key, label: fn.label, r: 0.05,
+                 p: [P.x - 0.04, P.yBot + 0.08, z] });
+    });
+    if (CAB_PAGES[cabPage] === 'TRAJECTORY' && trajView() === 'ORBIT') {
+      const F = lmFrame(1);
+      for (const s of SOFT_KEYS) {
+        const p = F.at(s.u, s.v);
+        out.push({ key: s.key, label: s.tip, soft: true, r: softKeyR(K, F),
+                   p: [p[0] - 0.006*K.rp, p[1], p[2]] });
+      }
+    }
+    const hatch = evaHatchStation(K);
+    if (hatch) out.push(hatch);
+    return out;
+  }
   const out = [];
   // The wired button caps. Each station is read back out of the same grid
   // the mesh builds them on and the colour rule reads, so the cap you click is
@@ -7108,7 +7139,21 @@ function cabScreenInit() {
 // inner radius, its bottom corners inside the roll span (the sector is
 // narrowest there), its top corners inside the outer radius; then trimmed to
 // the canvas aspect so nothing is stretched.
+// The LM console bay frame: a flat panel, three bays across z, so the upright
+// crew reads the screens square-on. Same shape skrFrame returns (x, S, H, at,
+// up, rt) so the quad builder, the soft-key picker and the painter all keep
+// agreeing about where a bay is.
+function lmFrame(k) {
+  const P = lmK().panel;
+  const z0 = -P.zW + 2*P.zW*k/3, z1 = -P.zW + 2*P.zW*(k + 1)/3;
+  const S = (z1 - z0)/2, H = (P.yTop - P.yBot)/2;
+  const xs = P.x - 0.012;                    // a hair in front of the panel slab
+  return { x: xs, rc: (P.yTop + P.yBot)/2, S, H, up: [0, 1, 0], rt: [0, 0, 1],
+           zc: (z0 + z1)/2, yc: (P.yTop + P.yBot)/2, z0, z1,
+           at: (u, v) => [xs, P.yBot + (P.yTop - P.yBot)*(1 - v), z0 + (z1 - z0)*u] };
+}
 function scrFrame(K, k) {
+  if (isLandingMission()) return lmFrame(k);
   const rcin = K.rcone(K.xcon) - 0.05*K.rp;
   const b = SCR_BAYS[k];
   const a0 = b[0]*Math.PI/180 + 0.030, a1 = b[1]*Math.PI/180 - 0.030;
