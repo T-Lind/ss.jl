@@ -4,6 +4,7 @@
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const fmtTime = s => s >= 86400 ? `T+${(s/86400).toFixed(2)} d` :
                      s >= 3600 ? `T+${(s/3600).toFixed(2)} h` : `T+${s.toFixed(0)} s`;
+const PLAY_SECONDS = 24;   // one full pass of the track in the Play button
 
 let WORLD = [];
 const STATES = new Set();
@@ -35,9 +36,12 @@ function install(canvas) {
   state.slider = slider; state.play = play; state.readout = readout;
   slider.addEventListener('input', () => { state.cursor = +slider.value; draw(state); });
   play.addEventListener('click', () => {
+    // Play runs forward from wherever the cursor is, and pressing it at the end
+    // starts over rather than sitting there.
+    if (!state.playing && state.cursor >= state.points.length - 1) state.cursor = 0;
     state.playing = !state.playing;
     play.textContent = state.playing ? 'pause' : 'play';
-    if (state.playing) { state.last = performance.now(); tick(state, state.last); }
+    if (state.playing) { state.last = performance.now(); state.acc = 0; tick(state, state.last); }
     else cancelAnimationFrame(state.frame);
   });
   canvas.addEventListener('pointermove', e => {
@@ -59,10 +63,22 @@ function install(canvas) {
 
 function tick(s, now) {
   if (!s.playing) return;
-  if (now - s.last > 55) {
-    s.cursor = (s.cursor + 1) % Math.max(1, s.points.length);
-    s.slider.value = s.cursor; s.last = now; draw(s);
-  }
+  const n = s.points.length;
+  if (n > 1) {
+    // Time-based, and paced so the whole track plays in about PLAY_SECONDS no
+    // matter how many samples it holds: one point per 55 ms took minutes over a
+    // multi-day coast, and wrapping at the end restarted without warning.
+    const dt = Math.min(0.25, (now - s.last) / 1000);
+    s.last = now;
+    s.acc = (s.acc || 0) + dt * (n / PLAY_SECONDS);
+    const adv = Math.floor(s.acc);
+    if (adv > 0) {
+      s.acc -= adv;
+      s.cursor = Math.min(n - 1, s.cursor + adv);
+      s.slider.value = s.cursor; draw(s);
+      if (s.cursor >= n - 1) { s.playing = false; s.play.textContent = 'play'; return; }
+    }
+  } else { s.last = now; }
   s.frame = requestAnimationFrame(t => tick(s,t));
 }
 
@@ -132,6 +148,12 @@ export function drawGroundTrack(target, segments, station=null) {
   s.segments=(segments||[]).filter(x=>x.t&&x.lat&&x.lon).map(seg=>({
     ...seg, points:seg.t.map((t,i)=>({t:+t,lat:+seg.lat[i],lon:+seg.lon[i],h:+(seg.h||[])[i]||0,label:seg.label||'flight'}))
       .filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon))})).filter(x=>x.points.length>1);
-  s.points=s.segments.flatMap(x=>x.points);s.cursor=Math.max(0,s.points.length-1);
+  const sig=s.segments.map(x=>x.points.length+'@'+x.points[0].t).join('|');
+  s.points=s.segments.flatMap(x=>x.points);
+  // Start at the beginning so Play runs the flight forward, and hold the cursor
+  // across redraws of the SAME track: renderCharts runs on every resize, and
+  // resetting to the end there is what made Play jump back to the start.
+  if (s.sig !== sig) { s.cursor = 0; s.sig = sig; }
+  s.cursor = Math.min(Math.max(0, s.cursor), Math.max(0, s.points.length-1));
   s.slider.max=Math.max(0,s.points.length-1);s.slider.value=s.cursor;draw(s);
 }

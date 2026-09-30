@@ -269,6 +269,9 @@ export function drawLine(target, series, title, opts) {
       const primary=s.series[0],k=nearest(primary),X=s.px(primary.xs[k]);
       ctx.save();ctx.setTransform(window.devicePixelRatio||1,0,0,window.devicePixelRatio||1,0,0);
       ctx.strokeStyle='rgba(240,165,0,.55)';ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(X,s.T);ctx.lineTo(X,cv.clientHeight-s.B);ctx.stroke();ctx.setLineDash([]);
+      // A dot on every curve where the inspector crosses it, so the value the
+      // tooltip reports has a home on the plot.
+      for(const a of s.series){const j=nearest(a);circle(ctx,s.px(a.xs[j]),s.py(a.ys[j]),3,a.color||'#e4e9f0');}
       const lines=s.series.map(a=>{const j=nearest(a);return `${a.label||title}: ${fmtPeak(a.ys[j])}${a.unit?' '+a.unit:''}`});
       lines.unshift(`${s.opts.xu||'x'} ${fmtPeak(primary.xs[k])}`);
       ctx.font='11px system-ui';const tw=Math.max(...lines.map(z=>ctx.measureText(z).width))+16,th=lines.length*16+10;
