@@ -943,7 +943,7 @@ export function find_root(f, lo, hi, { target = 0.0, xtol = 0.0, ftol = 0.0, max
            lo: ulo, hi: uhi, history: hist };
 }
 
-export function run_sweep(p) {
+export function run_sweep(p, onProgress) {
   const param = p.sweep_param ?? 'pod_mass';
   if (!sweepable(p).includes(param))
     return { ok: false, error: `unknown sweep parameter: ${param}` };
@@ -951,19 +951,30 @@ export function run_sweep(p) {
   const hi = getf(p, 'sweep_max', 450.0);
   const nv = Math.min(41, Math.max(2, Math.trunc(getf(p, 'sweep_n', 9.0))));
   const vals = Array.from({ length: nv }, (_, i) => lo + (hi - lo) * i / (nv - 1));
-  const runs = vals.map(v => {
+  if (onProgress)
+    onProgress({ ok: true, stage: 'sweep', detail: `launching ${nv} mission evaluations…`,
+                 current: 0, total: nv });
+  const runs = vals.map((v, i) => {
     const q = { ...p, [param]: String(v) };
+    let out;
     try {
       const r = panel_mission(q);
-      return { ok: true, metrics: r.metrics };
+      out = { ok: true, metrics: r.metrics };
     } catch (err) {
-      return { ok: false, error: String(err) };
+      out = { ok: false, error: String(err) };
     }
+    if (onProgress)
+      onProgress({ ok: true, stage: 'sweep', detail: `completed mission ${i + 1} of ${nv}`,
+                   current: i + 1, total: nv });
+    return out;
   });
+  if (onProgress)
+    onProgress({ ok: true, stage: 'complete', detail: 'parameter sweep complete',
+                 current: nv, total: nv, done: true });
   return { ok: true, param, values: vals, runs };
 }
 
-export function run_solve(p) {
+export function run_solve(p, onProgress) {
   const param = p.solve_param ?? 'pod_mass';
   const metric = p.solve_metric ?? 'prop_margin_kg';
   if (!sweepable(p).includes(param))
@@ -979,11 +990,23 @@ export function run_solve(p) {
   const target = getf(p, 'solve_target', 0.0);
   const budget = Math.min(30, Math.max(4, Math.round(getf(p, 'solve_iters', 14.0))));
   const ftol = 1e-4 * Math.max(Math.abs(target), 1.0);
+  if (onProgress)
+    onProgress({ ok: true, stage: 'solve', detail: 'starting bracket search…',
+                 current: 0, total: budget });
+  let evals = 0;
   const res = find_root(x => {
+    evals += 1;
+    if (onProgress)
+      onProgress({ ok: true, stage: 'solve',
+                   detail: `evaluation ${evals} of up to ${budget} · ${param} = ${Number(x).toPrecision(5)}`,
+                   current: evals, total: budget });
     const q = { ...p, [param]: String(x) };
     const v = panel_mission(q).metrics[metric];
     return v === null || v === undefined ? NaN : Number(v);
   }, lo, hi, { target, max_iter: budget, ftol });
+  if (onProgress)
+    onProgress({ ok: true, stage: 'complete', detail: 'target search complete',
+                 current: res.iterations, total: budget, done: true });
   return {
     ok: true, param, metric, target, x: res.x, value: res.value,
     status: String(res.status), iterations: res.iterations,

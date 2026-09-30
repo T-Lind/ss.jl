@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ss.jl analysis</title>
 <link rel="stylesheet" href="./static/tokens.css">
+<script type="module" src="./static/version.js"></script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -168,6 +169,7 @@
     <a class="navlink" href="#" aria-current="page">analysis</a>
     <a class="navlink" id="nav_launch" href="launch_page.html">launch view</a>
   </span>
+  <span class="u-label" id="appver" data-appver></span>
   <span class="appnav-end u-label" id="nav_note">analysis</span>
 </nav>
 
@@ -196,28 +198,6 @@
     <p><a class="chip" href="./">Go to mission control &rarr;</a></p>
   </section>
 
-  <!-- Powered descent leads on a landing mission: it is the fifteen kilometres
-       the whole flight exists to fly, and burying it under six ascent and
-       entry charts said the opposite. -->
-  <section id="sec_descent" class="hidden">
-    <div class="sec-h">
-      <h2>Powered descent</h2>
-      <span class="hint" id="desc_note">—</span>
-    </div>
-    <div class="legend">
-      <span><i style="background:#c98500"></i>braking (full thrust)</span>
-      <span><i style="background:#d55181"></i>terminal (throttled)</span>
-      <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>high gate</span>
-    </div>
-    <div class="plots">
-      <div class="plot wide"><canvas id="c_desc_prof"></canvas></div>
-      <div class="plot"><canvas id="c_desc_v"></canvas></div>
-      <div class="plot"><canvas id="c_desc_thr"></canvas></div>
-      <div class="plot"><canvas id="c_desc_mass"></canvas></div>
-      <div class="plot"><canvas id="c_desc_att"></canvas></div>
-      <div class="plot wide"><canvas id="c_desc_nav"></canvas></div>
-    </div>
-  </section>
 
   <section id="sec_profiles">
     <div class="sec-h">
@@ -235,6 +215,22 @@
       <div class="plot"><canvas id="c_asc_mass"></canvas></div>
       <div class="plot"><canvas id="c_asc_thrust"></canvas></div>
       <div class="plot wide"><canvas id="c_asc_path"></canvas></div>
+      <!-- Powered descent is a flight profile, and on a landing it is the one
+           the whole mission exists to fly; it lives beside ascent rather than
+           as a top-level section of its own. -->
+      <div class="plot-break hidden" id="h_descent">Powered descent <small>braking, the high gate and the throttled terminal phase</small></div>
+      <div class="legend hidden" id="desc_legend" style="grid-column:1 / -1">
+        <span><i style="background:#c98500"></i>braking (full thrust)</span>
+        <span><i style="background:#d55181"></i>terminal (throttled)</span>
+        <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>high gate</span>
+        <span class="hint" id="desc_note" style="margin-left:auto">—</span>
+      </div>
+      <div class="plot wide hidden" id="w_desc_prof"><canvas id="c_desc_prof"></canvas></div>
+      <div class="plot hidden" id="w_desc_v"><canvas id="c_desc_v"></canvas></div>
+      <div class="plot hidden" id="w_desc_thr"><canvas id="c_desc_thr"></canvas></div>
+      <div class="plot hidden" id="w_desc_mass"><canvas id="c_desc_mass"></canvas></div>
+      <div class="plot hidden" id="w_desc_att"><canvas id="c_desc_att"></canvas></div>
+      <div class="plot wide hidden" id="w_desc_nav"><canvas id="c_desc_nav"></canvas></div>
       <div class="plot-break hidden" id="h_coast">Orbit / coast <small>geometry, relative motion and specific energy</small></div>
       <div class="plot" id="w_dist"><canvas id="c_dist"></canvas></div>
       <div class="plot" id="w_coast_v"><canvas id="c_coast_v"></canvas></div>
@@ -424,7 +420,7 @@ const nStages = () => Math.max(1, +Q.get('nstages') || 3);
 // instead — it edits a vehicle, and a run id means nothing to it.
 function syncLinks() {
   const rq = run && run.id ? '?run=' + encodeURIComponent(run.id) : '';
-  $('nav_home').href = '/' + rq;
+  $('nav_home').href = './' + rq;
   $('nav_launch').href = 'launch_page.html' + rq;
   $('nav_build').href = 'build_page.html?' + Q.toString();
 }
@@ -460,9 +456,9 @@ function adopt(j) {
 function showRun() {
   $('empty').hidden = true;
   $('diag_strip').hidden = false;
-  // sec_descent is included, but whether it is SEEN stays with renderCharts
-  // and its `hidden` class — only a landing run has a powered descent.
-  for (const id of ['sec_descent', 'sec_profiles', 'sec_track', 'sec_station',
+  // The powered-descent group lives inside sec_profiles; whether it is SEEN
+  // stays with drawDescent and its `hidden` class — only a landing has one.
+  for (const id of ['sec_profiles', 'sec_track', 'sec_station',
                     'sec_moon', 'sec_studies', 'sec_events'])
     $(id).hidden = false;
   $('runhdr').hidden = false;
@@ -508,7 +504,7 @@ async function showEmpty() {
   const list = await runs.list();
   $('runhdr').hidden = true;
   $('diag_strip').hidden = true;
-  for (const id of ['sec_descent', 'sec_profiles', 'sec_track', 'sec_station',
+  for (const id of ['sec_profiles', 'sec_track', 'sec_station',
                     'sec_moon', 'sec_studies', 'sec_events'])
     $(id).hidden = true;
   buildSubnav();
@@ -825,7 +821,9 @@ function renderMoon() {
 function drawDescent() {
   const d = run.descent, m = run.metrics;
   const has = !!(d && d.t && d.t.length);
-  $('sec_descent').classList.toggle('hidden', !has);
+  for (const id of ['h_descent', 'desc_legend', 'w_desc_prof', 'w_desc_v',
+                    'w_desc_thr', 'w_desc_mass', 'w_desc_att', 'w_desc_nav'])
+    $(id).classList.toggle('hidden', !has);
   if (!has) return;
   const gate = m.gate_s;
   const iGate = Math.max(1, d.t.findIndex(t => t >= gate));
@@ -1039,7 +1037,7 @@ function drawSolve(j) {
 // Short names for the sticky bar; the headings themselves are too long to fit
 // seven of them across a screen.
 const NAV_LABEL = {
-  sec_descent: 'Descent', sec_profiles: 'Profiles', sec_track: 'Ground track',
+  sec_profiles: 'Profiles', sec_track: 'Ground track',
   sec_station: 'Station', sec_moon: 'Moon', sec_studies: 'Studies',
   sec_events: 'Events',
 };

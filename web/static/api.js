@@ -81,12 +81,64 @@ const paramsFrom = body => {
   return p;
 };
 
+// A mission is seconds of synchronous simulation. Run on the main thread it
+// blocks everything, so the busy overlay never paints and the elapsed clock
+// never ticks: the page freezes, then completes, which is exactly the "the run
+// pop-up is gone" report. The worker keeps the main thread free, so the
+// overlay animates and the stage updates arrive while the flight is computed.
+let worker = null, jobSeq = 0;
+const pending = new Map();
+
+function ensureWorker() {
+  if (worker) return worker;
+  if (typeof Worker === 'undefined') return null;
+  try {
+    worker = new Worker(new URL('./runworker.js', import.meta.url), { type: 'module' });
+  } catch (e) { worker = null; return null; }
+  worker.onmessage = e => {
+    const { id, progress, result, error } = e.data || {};
+    const job = pending.get(id);
+    if (!job) return;
+    if (progress) { if (job.onProgress) job.onProgress(progress); return; }
+    pending.delete(id);
+    if (error !== undefined) job.reject(new Error(error));
+    else job.resolve(result);
+  };
+  worker.onerror = e => {
+    const err = new Error(e.message || 'the simulation worker stopped');
+    for (const [, job] of pending) job.reject(err);
+    pending.clear();
+    worker = null;
+  };
+  return worker;
+}
+
+function inWorker(path, p, onProgress) {
+  const w = ensureWorker();
+  if (!w) return null;
+  jobSeq += 1;
+  const id = 'w' + jobSeq;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject, onProgress });
+    w.postMessage({ id, path, params: p });
+  });
+}
+
 /** Run the matching payload builder and answer {ok, ...}. Throws only for a
  *  route that does not exist; a mission that cannot be flown comes back as
  *  {ok: false, error}, exactly as the server's safe_call did. */
 export async function post(path, body, options = {}) {
   const p = paramsFrom(body);
   const onProgress = options && options.onProgress;
+  const job = inWorker(path, p, onProgress);
+  if (job) {
+    let out;
+    try { out = await job; }
+    catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+    return path === '/api/run' && out && out.ok === true ? rememberRun(out, p) : out;
+  }
+  // No worker at all (an engine without module workers, or opened over
+  // file://): fall back to the old synchronous, in-process path.
   try {
     if (path === '/api/run') {
       const out = panelRun(p);
@@ -97,8 +149,8 @@ export async function post(path, body, options = {}) {
       return result;
     }
     if (path === '/api/geometry') return panelGeometry(p);
-    if (path === '/api/sweep') return panelSweep(p);
-    if (path === '/api/solve') return panelSolve(p);
+    if (path === '/api/sweep') return panelSweep(p, onProgress);
+    if (path === '/api/solve') return panelSolve(p, onProgress);
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   }
