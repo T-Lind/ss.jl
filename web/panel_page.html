@@ -1457,6 +1457,65 @@ function fitCamera() {
 // ------------------------------------------------------- Moon-centred view --
 // A 15 km descent is invisible next to a 384,000 km transfer, so the lunar
 // phase gets its own frame: Moon at the origin, everything in km.
+// The real lunar map, for the Moon-centred scene. The scene rotates the Moon
+// in 3D, so the disc is textured by inverse-orthographic projection: for each
+// pixel inside the limb, recover the world direction of the sphere point and
+// read the selenographic lat/lon out of the equirectangular image (0 deg lon =
+// sub-Earth meridian, which is also the "to Earth" arrow). Cached by view angle
+// so an idle scene costs nothing; capped at 220 px so a zoomed-in disc cannot
+// stall a frame.
+let MTEX = null, MTW = 0, MTH = 0;
+const MTEX_IMG = new Image();
+MTEX_IMG.onload = () => {
+  const c = document.createElement('canvas');
+  c.width = MTEX_IMG.naturalWidth; c.height = MTEX_IMG.naturalHeight;
+  const g = c.getContext('2d'); g.drawImage(MTEX_IMG, 0, 0);
+  try {
+    MTEX = g.getImageData(0, 0, c.width, c.height).data;
+    MTW = c.width; MTH = c.height;
+  } catch (e) { MTEX = null; }
+};
+MTEX_IMG.src = new URL('./static/moon_map.jpg', import.meta.url).href;
+let MDISC = null, MDISC_KEY = '';
+function moonDisc(rM, RM, cy, sy, cp, sp) {
+  const R = Math.max(8, Math.min(220, Math.round(rM)));
+  const key = [R, cy.toFixed(4), sy.toFixed(4), cp.toFixed(4), sp.toFixed(4)].join('|');
+  if (MDISC && MDISC_KEY === key) return MDISC;
+  const oc = document.createElement('canvas'); oc.width = 2*R; oc.height = 2*R;
+  const g = oc.getContext('2d'), out = g.createImageData(2*R, 2*R), d = out.data;
+  const eh = [cy, -sy, 0], ev = [sy*sp, cy*sp, cp], ed = [sy*cp, cy*cp, -sp];
+  const mp = [S.mx[S.n-1], S.my[S.n-1], S.mz[S.n-1]];
+  const ml = Math.hypot(mp[0], mp[1], mp[2]) || 1;
+  const xh = [-mp[0]/ml, -mp[1]/ml, -mp[2]/ml];
+  let zh = S.nrm ? [S.nrm[0], S.nrm[1], S.nrm[2]] : [0, 0, 1];
+  const zl = Math.hypot(zh[0], zh[1], zh[2]) || 1; zh = [zh[0]/zl, zh[1]/zl, zh[2]/zl];
+  const yh = [zh[1]*xh[2]-zh[2]*xh[1], zh[2]*xh[0]-zh[0]*xh[2], zh[0]*xh[1]-zh[1]*xh[0]];
+  const step = RM/R;
+  for (let j = 0; j < 2*R; j++) {
+    const W = ((j + 0.5) - R)*step;
+    for (let i = 0; i < 2*R; i++) {
+      const X = ((i + 0.5) - R)*step, r2 = X*X + W*W;
+      if (r2 > RM*RM) continue;
+      const D = -Math.sqrt(RM*RM - r2);
+      const px = X*eh[0]+W*ev[0]+D*ed[0], py = X*eh[1]+W*ev[1]+D*ed[1], pz = X*eh[2]+W*ev[2]+D*ed[2];
+      const ux = px/RM, uy = py/RM, uz = pz/RM;
+      const uzz = ux*zh[0]+uy*zh[1]+uz*zh[2];
+      const lat = Math.asin(Math.max(-1, Math.min(1, uzz)));
+      let lon = Math.atan2(ux*yh[0]+uy*yh[1]+uz*yh[2], ux*xh[0]+uy*xh[1]+uz*xh[2]);
+      let tx = Math.floor((lon*180/Math.PI + 180)/360*MTW);
+      let ty = Math.floor((90 - lat*180/Math.PI)/180*MTH);
+      tx = ((tx % MTW) + MTW) % MTW;
+      if (ty < 0) ty = 0; if (ty >= MTH) ty = MTH - 1;
+      const si = (ty*MTW + tx)*4, o = (j*2*R + i)*4;
+      const shade = 0.35 + 0.65*Math.sqrt(Math.max(0, 1 - r2/(RM*RM)));
+      d[o] = MTEX[si]*shade; d[o+1] = MTEX[si+1]*shade; d[o+2] = MTEX[si+2]*shade; d[o+3] = 255;
+    }
+  }
+  g.putImageData(out, 0, 0);
+  MDISC = oc; MDISC_KEY = key;
+  return oc;
+}
+
 function drawMoonScene(cv, ctx, w, h) {
   const M = run.moon;
   const O = M.orbit, D = M.descent;
@@ -1470,9 +1529,15 @@ function drawMoonScene(cv, ctx, w, h) {
   };
   // the Moon itself, shaded, with the Earth-facing side marked
   const pm = pj(0, 0, 0), rM = RM*f;
-  const g = ctx.createRadialGradient(pm[0]-rM*.35, pm[1]-rM*.35, rM*.15, pm[0], pm[1], rM);
-  g.addColorStop(0, '#9a9990'); g.addColorStop(1, '#3f3f3a');
-  circle(ctx, pm[0], pm[1], rM, g);
+  if (MTEX) {
+    ctx.drawImage(moonDisc(rM, RM, cy, sy, cp, sp), pm[0]-rM, pm[1]-rM, 2*rM, 2*rM);
+    ctx.strokeStyle = 'rgba(120,130,140,.45)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(pm[0], pm[1], rM, 0, 2*Math.PI); ctx.stroke();
+  } else {
+    const g = ctx.createRadialGradient(pm[0]-rM*.35, pm[1]-rM*.35, rM*.15, pm[0], pm[1], rM);
+    g.addColorStop(0, '#9a9990'); g.addColorStop(1, '#3f3f3a');
+    circle(ctx, pm[0], pm[1], rM, g);
+  }
   const seg = (xs, ys, zs, i0, i1, col, wid) => {
     ctx.strokeStyle = col; ctx.lineWidth = wid; ctx.lineJoin = 'round';
     ctx.beginPath();
@@ -2396,7 +2461,14 @@ fillCatalogues().then(() => {
   // `?run=<id>` is not an exception to that. It displays a flight that has
   // already happened, which is exactly what returning from another page means.
   const rid = new URLSearchParams(location.search).get('run');
-  loadHistory().then(() => rid ? restore(rid) : showIdle());
+  loadHistory().then(() => {
+    rid ? restore(rid) : showIdle();
+    // A vehicle edited in the builder and then visited in THIS tab leaves a
+    // note there. The storage event only fires in the OTHER tab, so without
+    // this the return trip silently applied the new stack and read as idle.
+    const why = vehicle.takeDirty();
+    if (why) markStale(why);
+  });
 });
 // live sync: the builder saves on every edit, and a storage event fires in
 // every OTHER tab on the same origin — so the geometry card follows the
@@ -2404,6 +2476,7 @@ fillCatalogues().then(() => {
 window.addEventListener('storage', e => {
   if (e.key !== VEHICLE_KEY || !e.newValue) return;
   applyVehicleConfig(e.newValue);
+  vehicle.takeDirty();          // the banner is the notification; drop the note
   fetchGeo();
   markStale('the vehicle changed in the builder');
 });

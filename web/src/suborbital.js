@@ -49,7 +49,7 @@ export function suborbital(opts = {}) {
           apogee = 100.0e3, downrange = 250.0e3, loft = deg2rad_(40.0),
           azimuth = deg2rad_(90.0), kick_angle = deg2rad_(8.0),
           theta_g0 = 0.0, site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
-          iterations = 3, strict = true, verbose = false } = opts;
+          onProgress = null, iterations = 3, strict = true, verbose = false } = opts;
   if (!(profile === 'hop' || profile === 'downrange'))
     throw new Error(`unknown suborbital profile ${profile}; have hop, downrange`);
   if (!(apogee > 0)) throw new Error('apogee must be positive');
@@ -93,6 +93,8 @@ export function suborbital(opts = {}) {
   }
 
   const g = best.g, f = best.f;
+  if (onProgress) onProgress({ ok: true, stage: 'ballistic arc',
+    detail: 'guidance solved and the arc propagated', current: 4, total: 6 });
   const outcome = !f.cut ? 'short' : Number.isNaN(f.range) ? 'timeout' : 'splashdown';
   if (outcome === 'short' && strict)
     throw new Error('the vehicle could not reach its suborbital target ' +

@@ -552,7 +552,12 @@ function params() {
 // panel (in any other tab) applies it on its storage event — so the mission
 // page's geometry view follows this page live. Which keys travel, and why
 // only those, is documented in /static/vehicle.js.
-function saveVehicle() { vehicle.save(params()); }
+function saveVehicle() {
+  vehicle.save(params());
+  // Tell mission control the stack moved, so returning to it does not read as
+  // "nothing happened". Cleared when the panel takes it.
+  vehicle.markDirty('the vehicle changed in the builder');
+}
 function refreshLinks() {
   $('backlink').href = '/?' + params();
   // The launch view and the analysis page READ a flown trajectory; neither

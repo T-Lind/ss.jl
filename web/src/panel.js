@@ -394,7 +394,7 @@ export const LAUNCH_SITES = {
 const launch_site = p => LAUNCH_SITES[gets(p, 'site', 'cape')] || LAUNCH_SITES.cape;
 
 // Fly the lunar landing mission for the panel.
-function panel_landing(p) {
+function panel_landing(p, onProgress) {
   const lnd = lander_from_params(p);
   const lv = landing_vehicle_from_params(p, lnd);
   const real_moon = !getb(p, 'plain_moon', false);
@@ -415,6 +415,7 @@ function panel_landing(p) {
     theta_g0: launch_theta(p),
     site_lat: deg2rad_(launch_site(p).lat),
     site_lon: deg2rad_(launch_site(p).lon),
+    onProgress,
   });
   const asc = ls.ascent, cis = ls.cislunar, d = ls.descent;
   const el = asc.elements;
@@ -565,7 +566,7 @@ function entry_payload(out, metrics, events, ent) {
 }
 
 // Fly an Earth-orbit mission for the panel.
-function panel_orbit(p) {
+function panel_orbit(p, onProgress) {
   let tkey = gets(p, 'orbit', 'leo');
   if (!(tkey in ORBITS) && tkey !== 'custom') tkey = 'leo';
   const eo = earthorbit({
@@ -587,6 +588,7 @@ function panel_orbit(p) {
     theta_g0: launch_theta(p),
     site_lat: deg2rad_(launch_site(p).lat),
     site_lon: deg2rad_(launch_site(p).lon),
+    onProgress,
     strict: false,
   });
   const asc = eo.ascent, ent = eo.entry;
@@ -651,7 +653,7 @@ function panel_orbit(p) {
 }
 
 // Fly a suborbital mission for the panel.
-function panel_suborbital(p) {
+function panel_suborbital(p, onProgress) {
   const prof = gets(p, 'sub_profile', 'hop') === 'downrange' ? 'downrange' : 'hop';
   const sb = suborbital({
     profile: prof,
@@ -665,6 +667,7 @@ function panel_suborbital(p) {
     theta_g0: launch_theta(p),
     site_lat: deg2rad_(launch_site(p).lat),
     site_lon: deg2rad_(launch_site(p).lon),
+    onProgress,
     strict: false,
   });
   const asc = sb.ascent, ent = sb.entry;
@@ -715,11 +718,11 @@ function panel_suborbital(p) {
 }
 
 // The mission the panel is configured for.
-export function panel_mission(p) {
+export function panel_mission(p, onProgress) {
   const mode = mission_mode(p);
-  if (mode === 'landing') return panel_landing(p);
-  if (mode === 'orbit') return panel_orbit(p);
-  if (mode === 'suborbital') return panel_suborbital(p);
+  if (mode === 'landing') return panel_landing(p, onProgress);
+  if (mode === 'orbit') return panel_orbit(p, onProgress);
+  if (mode === 'suborbital') return panel_suborbital(p, onProgress);
   const ms = moonshot({
     pod_mass: payload_total(p),
     pod_diameter: pod_diameter(p, spacecraft_mass(p)),
@@ -735,6 +738,7 @@ export function panel_mission(p) {
     theta_g0: launch_theta(p),
     site_lat: deg2rad_(launch_site(p).lat),
     site_lon: deg2rad_(launch_site(p).lon),
+    onProgress,
     strict: false,
   });
   const asc = ms.ascent, cis = ms.cislunar, ent = ms.entry;
@@ -1085,9 +1089,9 @@ export function catalogue_payload() {
 }
 
 // Clean entry points for the pages.
-export function panelRun(p, mode) {
+export function panelRun(p, mode, onProgress) {
   const q = mode === undefined ? p : { ...p, mode };
-  return panel_mission(q);
+  return panel_mission(q, onProgress);
 }
 export const run = panelRun;
 export function panelGeometry(p) { return rocket_geometry(p); }

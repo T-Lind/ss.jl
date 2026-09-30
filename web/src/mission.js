@@ -20,11 +20,13 @@ export function translunar_design(lv, opts = {}) {
           optimize_kick = false, cis_eta = 0.002, perigee_tol = 250.0,
           tol_perigee_km = 2.0, theta_g0 = 0.0,
           site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
-          strict = true, verbose = false } = opts;
+          onProgress = null, strict = true, verbose = false } = opts;
   const az = launch_azimuth(inclination, site_lat);
   const guid0 = ascentGuidance({ azimuth: az, h_target: h_park, kick_angle,
                                  site_lat, site_lon });
   const [guid, asc] = tune_ascent(lv, guid0, { optimize_kick, theta_g0, verbose });
+  if (onProgress) onProgress({ ok: true, stage: 'ascent',
+    detail: 'ascent to the parking orbit complete', current: 2, total: 6 });
   const partial = { guid, ascent: asc, eph: null, t_ign: NaN, dv: NaN, cis: null,
                     m_stack: NaN, kick: lv.stages[lv.stages.length - 1],
                     design_status: 'no_design' };
@@ -56,6 +58,8 @@ export function translunar_design(lv, opts = {}) {
     prop_avail: asc.prop_left[asc.prop_left.length - 1],
     hp_moon_target: hp_moon, hp_return_target: hp_return, tol_perigee_km, verbose,
   });
+  if (onProgress) onProgress({ ok: true, stage: 'trajectory',
+    detail: 'trans-lunar trajectory designed', current: 3, total: 6 });
   return { guid, ascent: asc, eph, t_ign, dv, cis, m_stack, kick, design_status: dstatus };
 }
 
@@ -66,7 +70,7 @@ export function moonshot(opts = {}) {
           kick_angle = deg2rad_(8.0), optimize_kick = false, theta_g0 = 0.0,
           cis_eta = 0.002, perigee_tol = 250.0, strict = true,
           site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
-          pod_diameter = NaN, verbose = false } = opts;
+          pod_diameter = NaN, onProgress = null, verbose = false } = opts;
   let lv = lvIn;
   if (lv === null) lv = default_moon_rocket({ payload: pod_mass0 });
   const pod_mass = lv.payload_mass;
@@ -75,7 +79,7 @@ export function moonshot(opts = {}) {
 
   const des = translunar_design(lv, { h_park, hp_moon, hp_return, inclination,
     kick_angle, optimize_kick, cis_eta, perigee_tol, theta_g0,
-    site_lat, site_lon, strict, verbose });
+    site_lat, site_lon, onProgress, strict, verbose });
   const { guid, ascent: asc, eph } = des;
   const dstatus = des.design_status;
   const result = { lv, guid, ascent: asc, eph, cislunar: null, entry_scn: null,
@@ -128,6 +132,8 @@ export function moonshot(opts = {}) {
   const pod = default_reentry_pod({ mass: pod_mass, diameter: pod_d });
   const scn = scenario({ vehicle: pod, r0: cis.r, v0: cis.v, t0: cis.t,
                          t_max: cis.t + 3.0e4, theta_g0, alpha0: deg2rad_(5.0) });
+  if (onProgress) onProgress({ ok: true, stage: 'entry',
+    detail: 'propagating atmospheric entry', current: 5, total: 6 });
   const entry = simulate(scn);
   return { lv, guid, ascent: asc, eph, cislunar: cis, entry_scn: scn, entry, cruise,
            design_status: dstatus };

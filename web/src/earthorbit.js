@@ -185,7 +185,7 @@ export function earthorbit(opts = {}) {
           inclination = NaN, n_orbits = 2.0, deorbit = false,
           hp_entry = 25.0e3, kick_angle = deg2rad_(8.0), optimize_kick = false,
           theta_g0 = 0.0, site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
-          strict = true, verbose = false } = opts;
+          onProgress = null, strict = true, verbose = false } = opts;
   if (!(target in ORBITS) && target !== 'custom')
     throw new Error(`unknown orbit target ${target}; have custom, ` +
                     `${Object.keys(ORBITS).sort().join(', ')}`);
@@ -224,6 +224,8 @@ export function earthorbit(opts = {}) {
       }
     }
   }
+  if (onProgress) onProgress({ ok: true, stage: 'ascent',
+    detail: 'ascent to the parking orbit complete', current: 2, total: 6 });
   const eph_seed = coplanar_moon([RE_MEAN + h_park, 0.0, 0.0], [0.0, 7.8e3, 0.0]);
   if (!(asc.reached_orbit &&
         asc.elements.rp > RE_MEAN + 0.5 * h_park &&
@@ -334,7 +336,9 @@ export function earthorbit(opts = {}) {
     dry = dry || dryd;
     if (!dryd) {
       const pod = default_reentry_pod({ mass: pod_mass });
-      entry_scn = scenario({ vehicle: pod, r0: r, v0: v, t0: t,
+      if (onProgress) onProgress({ ok: true, stage: 'entry',
+    detail: 'propagating atmospheric entry', current: 5, total: 6 });
+  entry_scn = scenario({ vehicle: pod, r0: r, v0: v, t0: t,
                              t_max: t + 3.0e4, theta_g0, alpha0: deg2rad_(5.0) });
       entry = simulate(entry_scn);
     }
