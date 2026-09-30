@@ -2234,55 +2234,92 @@ function buildLander() {
 }
 
 // --- the LM cabin, seen from inside ---------------------------------------
-// The lander is one solid mesh with no interior. From the ascent-stage windows
-// the only thing between the crew and the surface would be the sealed hull
-// itself, so the interior is its own small mesh: a forward bulkhead with two
-// window apertures, a console beneath them, side pillars and an aft wall. It
-// is drawn INSTEAD of the hull when the camera is in the cabin, in the same
-// body frame, so it tilts with the vehicle. The eye sits just behind the
-// bulkhead and the apertures are real holes, so the world shows through them.
+// A real interior, in the same frame the station table (lmK) describes: x is
+// the crew's fore-aft (they face +x), y up, z across. It is the LANDER's own
+// mesh, drawn instead of the hull when the camera is in the cabin. The capsule
+// cabin console, switch picking, free-float and lighting are all driven through
+// cabK(), which returns lmK() for a landing run — so this mesh only has to
+// present the surfaces: a cylinder wall, a forward bulkhead with two window
+// apertures the world shows through, a console the screens sit on, couches and
+// the switch caps.
 function buildLMCabin() {
+  const K = lmK(), rp = K.rp, Lc = K.Lc;
+  const rin = rp*0.95, rcin = rp*0.95;
+  const xa = K.xb + K.xa - 0.12, xt = K.xb + K.xtop;
   const out = [];
-  const R = MDIA/2, Y2 = 2.35;               // ascent-stage floor, same as buildLander
-  const WALL = [0.30, 0.32, 0.35], WALL2 = [0.21, 0.23, 0.26],
-        PANEL = [0.14, 0.15, 0.17], AMBER = [0.58, 0.44, 0.16],
-        SEAT = [0.19, 0.23, 0.29];
+  const WALL = [0.33, 0.34, 0.37], WALL2 = [0.21, 0.23, 0.26],
+        PANEL = [0.12, 0.13, 0.15], CAPB = [0.34, 0.36, 0.40],
+        COUCH = [0.20, 0.24, 0.30], DARK = [0.09, 0.10, 0.12];
   const tri = (a, b, c, col) => {
     const n = V.norm(V.cross(V.sub(b, a), V.sub(c, a)));
     for (const p of [a, b, c])
       out.push(p[0], p[1], p[2], n[0], n[1], n[2], col[0], col[1], col[2], 0, 0, 0);
   };
-  const xw = R*0.34, yLo = Y2 + 0.12, yHi = Y2 + 2.02;
-  const zHalf = Math.min(0.92, R*0.80);
-  const holes = [{ y: Y2 + 0.50, z: -0.34 }, { y: Y2 + 0.50, z: 0.34 }];
-  const hy = 0.34, hz = 0.24;
-  const ny = 12, nz = 12;
-  for (let i = 0; i < ny; i++) for (let j = 0; j < nz; j++) {
-    const y0 = yLo + (yHi - yLo)*i/ny, y1 = yLo + (yHi - yLo)*(i + 1)/ny;
-    const z0 = -zHalf + 2*zHalf*j/nz, z1 = -zHalf + 2*zHalf*(j + 1)/nz;
+  const N = 28;
+  const ring = (x, a) => [x, rin*Math.cos(a), rin*Math.sin(a)];
+  // cylinder wall
+  for (let k = 0; k < N; k++) {
+    const a0 = k/N*2*Math.PI, a1 = (k + 1)/N*2*Math.PI;
+    for (const [x0, x1] of [[xa, xa + 0.5*(xt - xa)], [xa + 0.5*(xt - xa), xt]]) {
+      tri(ring(x0, a0), ring(x0, a1), ring(x1, a1), WALL);
+      tri(ring(x0, a0), ring(x1, a1), ring(x1, a0), WALL);
+    }
+  }
+  // aft cap
+  for (let k = 0; k < N; k++)
+    tri([xa, 0, 0], ring(xa, (k + 1)/N*2*Math.PI), ring(xa, k/N*2*Math.PI), WALL2);
+  // forward bulkhead, with two lower-front window apertures
+  const holes = [{ y: -0.55*rin, z: -0.34*rin }, { y: -0.55*rin, z: 0.34*rin }];
+  const hyW = 0.30*rin, hzW = 0.26*rin;
+  const ng = 14;
+  for (let i = 0; i < ng; i++) for (let j = 0; j < ng; j++) {
+    const y0 = -rin + 2*rin*i/ng, y1 = -rin + 2*rin*(i + 1)/ng;
+    const z0 = -rin + 2*rin*j/ng, z1 = -rin + 2*rin*(j + 1)/ng;
     const cy = (y0 + y1)/2, cz = (z0 + z1)/2;
+    if (Math.hypot(cy, cz) > rin) continue;
     let hole = false;
     for (const h of holes)
-      if (Math.abs(cy - h.y) < hy && Math.abs(cz - h.z) < hz) { hole = true; break; }
+      if (Math.abs(cy - h.y) < hyW && Math.abs(cz - h.z) < hzW) { hole = true; break; }
     if (hole) continue;
-    tri([xw, y0, z0], [xw, y1, z0], [xw, y1, z1], WALL);
-    tri([xw, y0, z0], [xw, y1, z1], [xw, y0, z1], WALL);
+    tri([xt, y0, z0], [xt, y1, z0], [xt, y1, z1], WALL);
+    tri([xt, y0, z0], [xt, y1, z1], [xt, y0, z1], WALL);
   }
   for (const h of holes) {                    // sills, so the apertures read as windows
-    boxAt(out, [xw, h.y - hy, h.z], [0.06, 0.05, hz*2], WALL2);
-    boxAt(out, [xw, h.y + hy, h.z], [0.06, 0.05, hz*2], WALL2);
-    boxAt(out, [xw, h.y, h.z - hz], [0.06, hy*2, 0.05], WALL2);
-    boxAt(out, [xw, h.y, h.z + hz], [0.06, hy*2, 0.05], WALL2);
+    boxAt(out, [xt, h.y - hyW, h.z], [0.05, 0.05, hzW*2], WALL2);
+    boxAt(out, [xt, h.y + hyW, h.z], [0.05, 0.05, hzW*2], WALL2);
+    boxAt(out, [xt, h.y, h.z - hzW], [0.05, hyW*2, 0.05], WALL2);
+    boxAt(out, [xt, h.y, h.z + hzW], [0.05, hyW*2, 0.05], WALL2);
   }
-  boxAt(out, [R*0.10, Y2 + 1.05, -zHalf - 0.10], [0.48, 1.95, 0.14], WALL2);
-  boxAt(out, [R*0.10, Y2 + 1.05,  zHalf + 0.10], [0.48, 1.95, 0.14], WALL2);
-  boxAt(out, [R*0.10, Y2 + 2.05, 0], [0.48, 0.14, zHalf*2 + 0.36], WALL2);
-  boxAt(out, [-R*0.55, Y2 + 1.05, 0], [0.12, 1.95, zHalf*2 + 0.36], WALL2);
-  boxAt(out, [R*0.06, Y2 + 0.10, 0], [0.32, 0.14, Math.min(0.95, R)], PANEL);
-  boxAt(out, [R*0.10, Y2 + 0.16, -0.24], [0.10, 0.05, 0.20], AMBER);
-  boxAt(out, [R*0.10, Y2 + 0.16,  0.24], [0.10, 0.05, 0.20], AMBER);
-  boxAt(out, [-R*0.10, Y2 + 0.40, -0.34], [0.30, 0.36, 0.30], SEAT);
-  boxAt(out, [-R*0.10, Y2 + 0.40,  0.34], [0.30, 0.36, 0.30], SEAT);
+  // console backing panels behind each screen bay, and the switch caps the
+  // picker (cabControls) reads back out of the same grid
+  for (let k = 0; k < SCR_BAYS.length; k++) {
+    const F = scrFrame(K, k);
+    const q = [F.at(0, 0), F.at(1, 0), F.at(1, 1), F.at(0, 1)]
+      .map(p => [p[0] - 0.030*rp, p[1], p[2]]);
+    tri(q[0], q[1], q[2], PANEL); tri(q[0], q[2], q[3], PANEL);
+  }
+  {
+    const rcin2 = cabRin(K, K.xcon);
+    for (const fn of CAP_FN) {
+      const bay = SCR_BAYS[(fn.cell >> 3)];
+      const a0 = bay[0]*Math.PI/180, a1 = bay[1]*Math.PI/180;
+      const col = (fn.cell >> 1) & 3, row = fn.cell & 1;
+      const ac = a0 + (a1 - a0)*(0.185 + 0.26*col);
+      const rr = (0.24 + 0.09*row + 0.031)*rcin2;
+      const p = [K.xb + K.xcon - 0.021*rp, rr*Math.cos(ac), rr*Math.sin(ac)];
+      boxAt(out, p, [0.03, 0.06, 0.06], fn.c === undefined ? CAPB : fn.c);
+    }
+  }
+  // couches
+  const ln = cabSeatLn(K);
+  for (const zc of cabSeatZ(K))
+    boxAt(out, [K.xb + K.xa + 0.18*rp, -0.20*ln, zc],
+          [0.62*ln, 0.30*ln, 0.42*ln], COUCH);
+  // hatch: a dark slab in the wall beside the crew
+  {
+    const h = evaHatchStation(K);
+    if (h) boxAt(out, [h.p[0], h.p[1], h.p[2]], [0.34, 0.42, 0.10], DARK);
+  }
   lmCabBuf = buffer(new Float32Array(out));
   lmCabN = out.length/VST;
 }
@@ -2381,16 +2418,7 @@ function eciLanderMat(cs) {
   const f = eciLanderFrame(cs);
   return mBasis(f.bx, f.by, f.bz, cs.pos);
 }
-// The LM cockpit camera, in whatever body frame the caller has: the same eye
-// behind the window bulkhead, looking forward and down at the site. Shared by
-// the moon world and the lander's Earth-centred lunar phases so the handoff
-// does not change the seat.
-function lmCabinView(pos, bx, by) {
-  const R = MDIA/2, Y2 = 2.35;
-  const eye = V.add(pos, V.add(V.scale(bx, R*0.02), V.scale(by, Y2 + 1.05)));
-  const dir = V.norm(V.add(V.scale(bx, 1.0), V.scale(by, -0.95)));
-  return { eye, look: V.add(eye, dir), up: by, fov: 0.95, mode: 'cabin' };
-}
+
 // The eci phases that belong to the lander alone: the eci leg of a landing
 // mission's lunar endgame. The kick stage is gone by then, so the world draws
 // the lander and the camera uses its rig, exactly as the moon world will.
@@ -2399,9 +2427,12 @@ const eciLanderPhase = ph => !!MS &&
 
 function cameraMoon(t, ms, M) {
   const mode = camMode === 'auto' ? autoPickMoon(t) : camMode;
-  // The LM cabin: the eye just behind the window bulkhead, looking forward and
-  // down at the site the way the crew does through the two forward windows.
-  if (mode === 'cabin') return lmCabinView(ms.pos, ms.bx, ms.by);
+  // The cabin: the same capsule-cabin machinery (pose, head-turn, float,
+  // console) with cabK() returning the lander's stations for a landing run.
+  if (mode === 'cabin') {
+    const c = cabinCam(M, 'wide');
+    if (c) return cabinShake(c, 0);
+  }
   // Nothing may look up through the regolith. Free pitch can be driven below
   // the horizon and the low chase offset sits under the surface at touchdown,
   // and the ground is a one-sided sheet: from beneath it, the shot is the
@@ -5058,9 +5089,9 @@ function cabSeatBay(K, i) {
 // deck and couch stations) so the eye lands in the cabin, not in a wall.
 // `arg` is the couch index for the seated station and is ignored otherwise.
 function cabinPose(aim, arg, Kin) {
-  const pr = Kin ? null : podRange();
-  if (!Kin && !pr) return null;
-  const K = Kin || capStations(pr.x0), rp = K.rp, Lc = K.Lc;
+  const K = Kin || cabK();
+  if (!K) return null;
+  const rp = K.rp, Lc = K.Lc;
   const ln = cabSeatLn(K);                     // couch half-length
   // eye just above the headrest, set back from the wall so the viewport, the
   // console edge and the couch all fall inside a wide lens
@@ -5192,9 +5223,9 @@ function cabBox(K, pt) {
   return { p: [x, pt[1]*k, pt[2]*k], hit: true, n };
 }
 function cabClamp(pt) {
-  const pr = podRange();
-  if (!pr) return { p: pt, hit: false };
-  return cabBox(capStations(pr.x0), pt);
+  const K = cabK();
+  if (!K) return { p: pt, hit: false };
+  return cabBox(K, pt);
 }
 // `Kin` lets the self-test drive this without a loaded vehicle: the stations
 // are the only thing it needs from the geometry, and the rule it verifies —
@@ -5211,8 +5242,7 @@ function cabStep(dt, active, Kin) {
     return;
   }
   if (!(dt > 0)) return;
-  const pr = Kin ? null : podRange();
-  const K = Kin || (pr ? capStations(pr.x0) : null);
+  const K = Kin || cabK();
   if (!K) return;
   const d = cabDirs(K);
   if (!d) return;
@@ -5519,7 +5549,23 @@ let cabPage = 0, cabTraj = 0, cabHover = null;
 // is square on to your eye — so it is worth being able to get back to. Right
 // click a couch to strap in, right click it again to unbuckle. Right, because
 // left is already a head turn and a switch throw.
-function cabK() { const pr = podRange(); return pr ? capStations(pr.x0) : null; }
+// A landing run's crew station is the LANDER, not a capsule. Its cabin is a
+// cylinder about the crew's fore-aft axis (they face +x at the forward windows,
+// up +y, with the console ring at xcon), so it gets its own station table. Every
+// consumer of `cabK()` — the pose, the float box, the switch picker, the console
+// screens — then drives the LM with no capsule geometry involved.
+function isLandingMission() { return !!(run && run.mode === 'landing'); }
+function lmK() {
+  const rp = Math.max(0.55, 0.30*MDIA);
+  const Lc = 2.0;
+  return { rp, Lc, xb0: 0.0, xa: 0.16, xcon: 1.18, xtop: Lc,
+           xfl: 0.10, xb: 0.0, ta: 0.0, xsh: 0.0, rcone: () => rp };
+}
+function cabK() {
+  if (isLandingMission()) return lmK();
+  const pr = podRange();
+  return pr ? capStations(pr.x0) : null;
+}
 function cabSeatLabel(K, i) {
   return cabCrew(K) === 1 ? 'CREW COUCH' : `CREW COUCH ${i + 1}`;
 }
@@ -5573,9 +5619,8 @@ function cabStand(Kin) {
   return true;
 }
 function cabControls() {
-  const pr = podRange();
-  if (!pr) return [];
-  const K = capStations(pr.x0);
+  const K = cabK();
+  if (!K) return [];
   const out = [];
   // The wired button caps. Each station is read back out of the same grid
   // the mesh builds them on and the colour rule reads, so the cap you click is
@@ -5975,10 +6020,7 @@ function cameraEci(t, cs, ph, M) {
     const c = cabinCam(M, 'wide');
     if (c) return cabinShake(c, cs.burning ? 0.5 : 0);
   }
-  if (mode === 'cabin' && eciLanderPhase(ph)) {
-    const f = eciLanderFrame(cs);
-    return lmCabinView(cs.pos, f.bx, f.by);
-  }
+
   if (mode === 'onboard') {
     const c = hullCam(M);
     if (c) return cabinShake(c, cs.burning ? 0.35 : 0);
@@ -6284,7 +6326,10 @@ function frame(now) {
   // Floating is relative to the cabin and therefore runs on wall time even
   // when the mission clock is compressed. Burns and entry still pin the crew
   // into the couch; an unpowered coast does not.
-  cabStep(dtReal, camMode === 'cabin' && !EVA.active && coastActive(ph));
+  // The LM cabin opens for the whole lunar endgame, so floating is allowed
+  // there even under thrust; a capsule still only lets go on an unpowered coast.
+  cabStep(dtReal, camMode === 'cabin' && !EVA.active &&
+    (coastActive(ph) || (isLandingMission() && (ph.w === 'moon' || eciLanderPhase(ph)))));
   // The spacewalk lives and dies with the coast: while the phase allows it the
   // astronaut is on the rope, and the instant the window closes (a burn lights,
   // entry starts, the descent begins) the crew is brought back through the
@@ -6398,14 +6443,18 @@ function buildScene(ph) {
     // model x = 0 at the last stage's base, so the stack sits on the track
     const ls = secDraw.find(s => s.name === LASTST);
     const base = mBasis(cs.bx, cs.by, cs.bz, cs.pos);
-    const craftM = mAbout(mMul(base, mTrans([-(ls ? ls.x0 : 0), 0, 0])),
+    const stackM = mAbout(mMul(base, mTrans([-(ls ? ls.x0 : 0), 0, 0])),
                           rcsPivot(), rcsMat());
+    // Over the lunar endgame the LANDER is the crew's vehicle, so the cabin
+    // camera, the console screens and the picker all ride eciLanderMat; the
+    // stack sections (a drifting kick stage) still ride stackM.
+    const craftM = (MS && eciLanderPhase(ph)) ? eciLanderMat(cs) : stackM;
     const cam = cameraEci(simT, cs, ph, craftM);
     const noz = V.add(cs.pos, V.scale(cs.bx, -0.5));
     PUP = null;                        // inertial frame: no up, no buoyancy
     TRENCH = false;
     return {
-      world: 'eci', cs, cam, craftM, craftPos: cs.pos, sun: SUNE,
+      world: 'eci', cs, cam, craftM, stackM, craftPos: cs.pos, sun: SUNE,
       earthC: [0, 0, 0], moonC: cs.moon,
       eMat: [1,0,0, 0,1,0, 0,0,1], spin: OME*simT, near: 0,
       loud: cs.burning ? 0.5 : 0,
@@ -6757,7 +6806,7 @@ function drawWorldMeshes(sc, proj, inCab) {
     }
   } else if (sc.world === 'eci') {
     const cs = sc.cs;
-    const stackM = sc.craftM;
+    const stackM = sc.stackM || sc.craftM;
     // Once the kick stage has gone, a landing mission's vehicle is the lander
     // and nothing else — the same lander the moon world flies. Drawing the
     // stack's own 'lander' section here would swap the model's identity at the
@@ -6826,7 +6875,7 @@ function drawWorldMeshes(sc, proj, inCab) {
   // The console's displays, last: they bring their own vertex buffer and their
   // own texture, and doing that inside the section loop would leave the next
   // section drawing the screens' geometry with the rocket's ranges.
-  if (inCab && HASCAB) { drawCabDecals(sc, proj); drawCabScreens(sc, proj); }
+  if (inCab && (HASCAB || isLandingMission())) { drawCabDecals(sc, proj); drawCabScreens(sc, proj); }
 }
 
 function drawScene(sc) {
@@ -6839,7 +6888,7 @@ function drawScene(sc) {
   const view = mLookAt(cam.eye, cam.look, cam.up);
   // everything a click needs to become a ray into the capsule
   PICK = { cam, asp, craftM: sc.craftM,
-           inCab: (inCab && HASCAB) || cam.mode === 'eva' };
+           inCab: (inCab && (HASCAB || isLandingMission())) || cam.mode === 'eva' };
   // the console sits ~0.3 m from the crew's eye, so the cabin needs a much
   // nearer clip plane than the outside views
   const proj = mPersp(cam.fov, asp,
@@ -7097,9 +7146,8 @@ function softKeyR(K, F) {
   return 0.40*Math.min(0.5*F.S, 0.24*F.H);
 }
 function cabScreenBuild() {
-  const pr = podRange();
-  if (!pr) return;
-  const K = capStations(pr.x0);
+  const K = cabK();
+  if (!K) return;
   const out = [];
   // A FLAT panel per bay, not a curved one.
   //
@@ -7632,9 +7680,14 @@ function decOnWall(out, i, r0, r1, x0, x1, b0, b1, n) {
 }
 const D2R = Math.PI/180;
 function cabDecalBuild() {
-  const pr = podRange();
-  if (!pr) return;
-  const K = capStations(pr.x0), rp = K.rp, Lc = K.Lc;
+  // The placards are the capsule's locker-and-rail fit-out; the LM has none of
+  // those rails, so it draws no decals rather than capsule labels floating in a
+  // cylinder. Its console bay legends are the only ones it needs, and those are
+  // painted on the screens themselves.
+  if (isLandingMission()) return;
+  const K = cabK();
+  if (!K) return;
+  const rp = K.rp, Lc = K.Lc;
   const rin = x => K.rcone(x) - 0.05*rp;
   const out = [];
   const xb = K.xb;
@@ -8163,7 +8216,7 @@ function initControls() {
   // The capsule's switches and fit-out only exist for a capsule cabin; the LM
   // cockpit is a camera, not an interactive interior, so it is not "inside"
   // for the picker.
-  const inside = () => camMode === 'cabin' && HASCAB;
+  const inside = () => camMode === 'cabin' && (HASCAB || isLandingMission());
   // A switch takes the click; anything else starts a head turn. Right click on
   // a switch steps it back, and only then is the context menu suppressed — a
   // right click anywhere else in the page still behaves like a right click.
