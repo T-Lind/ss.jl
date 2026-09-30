@@ -1,14 +1,13 @@
 // Unit tests for the pure helpers in the browser layer.
 //
-// The simulation is tested exhaustively; the UI is not. These four functions
-// are the parts of it that are testable without a DOM, and they are where the
-// quiet math bugs live (a series axis, an angle wrap, a dateline crossing).
+// The simulation is tested exhaustively; the UI is not. These functions are
+// the parts of it that are testable without a DOM, and they are where the
+// quiet math bugs live (a series axis, a dateline crossing).
 //
 //   node --test test/ui_helpers.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chartExtent } from '../scripts/static/charts.js';
-import { wrap180 } from '../scripts/static/groundstation.js';
 import { mapPath } from '../scripts/static/groundtrack.js';
 
 // A canvas 2D context that records the path it is asked to build, so the
@@ -43,21 +42,6 @@ test('chartExtent does not overflow on a long series', () => {
 
 test('chartExtent on empty input is degenerate, not a throw', () => {
   assert.deepEqual(chartExtent({ series: [] }), [Infinity, -Infinity]);
-});
-
-test('wrap180 folds into (-180, 180]', () => {
-  assert.equal(wrap180(0), 0);
-  assert.equal(wrap180(90), 90);
-  assert.equal(wrap180(180), -180);
-  assert.equal(wrap180(181), -179);
-  assert.equal(wrap180(190), -170);
-  assert.equal(wrap180(-190), 170);
-  assert.equal(wrap180(360), 0);
-  assert.equal(wrap180(-360), 0);
-  for (const a of [-1000, -359, -1, 0, 1, 359, 1000]) {
-    const w = wrap180(a);
-    assert.ok(w > -180 && w <= 180, `${a} -> ${w}`);
-  }
 });
 
 test('mapPath draws a ring that does not cross the dateline', () => {

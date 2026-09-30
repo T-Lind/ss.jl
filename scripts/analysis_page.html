@@ -87,11 +87,6 @@
   .track-tools button { padding:4px 12px; min-width:58px }
   .track-tools input { padding:0; accent-color:var(--amber) }
   .track-readout { color:var(--text-2); font:11px var(--mono); white-space:nowrap }
-  /* A second track view, for the Moon. Same shell as the Earth map so the page
-   * reads as one instrument, with the parking orbit, the descent ellipse and
-   * the touchdown on a body the Earth map cannot resolve. */
-  #moonview { display:block; width:100%; height:430px; }
-
   /* --- section sub-navigation ------------------------------------------
    * The page is long enough that the section you want is usually below the
    * fold, so the visible sections get a sticky chip bar. Only sections that
@@ -110,19 +105,6 @@
   .subnav a:hover { color:var(--text); border-color:var(--text-3) }
   .subnav a.is-on { color:#12151A; background:var(--amber); border-color:var(--amber); }
   .wrap > section[id^="sec_"] { scroll-margin-top: calc(var(--appnav-h, 36px) + 54px); }
-  .station-shell { background:var(--surface); border:1px solid var(--line);
-                   border-radius:var(--radius); overflow:hidden }
-  #stationview { display:block; width:100%; height:430px; cursor:grab }
-  #stationview:active { cursor:grabbing }
-  .station-tools { display:grid; grid-template-columns:repeat(4,minmax(100px,1fr));
-                   gap:9px 12px; align-items:end; padding:10px 12px;
-                   border-top:1px solid var(--line); background:var(--raise) }
-  .station-tools .time { grid-column:1 / -1; display:grid;
-                         grid-template-columns:auto 1fr; gap:12px; align-items:center }
-  .station-tools input { padding:0; accent-color:var(--amber) }
-  .station-tools button.on { color:#12151a; background:var(--amber); border-color:var(--amber) }
-  .station-readout { grid-column:1 / -1; color:var(--text-2); font:11px var(--mono) }
-
   .studies { display: grid; gap: var(--s3);
              grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
              align-items: start; }
@@ -276,33 +258,14 @@
     </div>
   </section>
 
-  <section id="sec_station" class="hidden">
-    <div class="sec-h">
-      <h2>Ground observation station</h2>
-      <span class="hint">launch-site PTZ optics · drag to pan/tilt · wheel to zoom</span>
-    </div>
-    <div class="station-shell">
-      <canvas id="stationview"></canvas>
-      <div class="station-tools">
-        <button data-station-track class="on">tracking</button>
-        <div><label>pan / azimuth [°]</label><input data-station-pan type="range" min="0" max="360" step="0.1" value="90"></div>
-        <div><label>tilt / elevation [°]</label><input data-station-tilt type="range" min="0" max="90" step="0.1" value="15"></div>
-        <div><label>optical zoom</label><input data-station-zoom type="range" min="1" max="80" step="1" value="8"></div>
-        <div><label>cloud opacity [%]</label><input data-station-cloud type="range" min="0" max="100" step="1" value="20"></div>
-        <div class="time"><label>mission time</label><input data-station-time type="range" min="0" max="1" value="0" aria-label="ground station mission time"></div>
-        <div class="station-readout" data-station-readout>—</div>
-      </div>
-    </div>
-  </section>
-
-  <!-- The lunar half of a cislunar flight, which the Earth map cannot show:
-       a 100 km parking orbit, a descent ellipse with a 15 km perilune and the
-       touchdown all vanish into one pixel beside a 384,000 km transfer, so the
-       Moon gets its own frame. Only a run that carries a Moon leg has it. -->
+  <!-- The lunar half of a cislunar flight: the sub-vehicle point drawn on a
+       real lunar map, where the parking orbit, the descent ellipse and the
+       touchdown are visible against the surface they happen over. Only a run
+       that carries a Moon leg has it. -->
   <section id="sec_moon" class="hidden">
     <div class="sec-h">
-      <h2>Moon track</h2>
-      <span class="hint" id="moon_note">top-down on the lunar orbit plane</span>
+      <h2>Moon ground track</h2>
+      <span class="hint" id="moon_note">selenographic · 0° lon = sub-Earth meridian</span>
     </div>
     <div class="legend">
       <span><i style="background:#3987e5"></i>parking orbit</span>
@@ -311,12 +274,6 @@
       <span><i style="background:#8fbef0;height:8px;width:8px;border-radius:50%"></i>landing site</span>
     </div>
     <div class="track-shell">
-      <canvas id="moonview"></canvas>
-    </div>
-    <!-- The same flight as a sub-point track on the lunar surface: the
-         orbit-plane view above answers "what shape", this answers "where on
-         the Moon", which is the question a ground track exists to answer. -->
-    <div class="track-shell" style="margin-top:var(--s3)">
       <canvas id="moongroundmap"></canvas>
     </div>
   </section>
@@ -385,8 +342,7 @@ import { fin, fmt } from '/static/fmt.js';
 import * as api from '/static/api.js';
 import { drawLine, niceStep, fmtTick, fmtPeak } from '/static/charts.js';
 import { drawGroundTrack } from '/static/groundtrack.js';
-import { drawGroundStation } from '/static/groundstation.js';
-import { drawMoonView, drawMoonGroundTrack } from '/static/moonview.js';
+import { drawMoonGroundTrack } from '/static/moongroundtrack.js';
 import { busy, fail, clearFailures, reportUncaught } from '/static/busy.js';
 import * as runs from '/static/runs.js';
 import { METRIC_LABEL, SFIELD_LABEL, PARAM_LABEL, SPARAM_LABEL, LPARAM_LABEL,
@@ -468,7 +424,7 @@ function showRun() {
   $('diag_strip').hidden = false;
   // The powered-descent group lives inside sec_profiles; whether it is SEEN
   // stays with drawDescent and its `hidden` class — only a landing has one.
-  for (const id of ['sec_profiles', 'sec_track', 'sec_station',
+  for (const id of ['sec_profiles', 'sec_track',
                     'sec_moon', 'sec_studies', 'sec_events'])
     $(id).hidden = false;
   $('runhdr').hidden = false;
@@ -514,7 +470,7 @@ async function showEmpty() {
   const list = await runs.list();
   $('runhdr').hidden = true;
   $('diag_strip').hidden = true;
-  for (const id of ['sec_profiles', 'sec_track', 'sec_station',
+  for (const id of ['sec_profiles', 'sec_track',
                     'sec_moon', 'sec_studies', 'sec_events'])
     $(id).hidden = true;
   buildSubnav();
@@ -744,16 +700,14 @@ function renderCharts() {
         : `, and no ignitions to settle propellant for.`) +
       ` Individual valve pulses are not resolved.`;
   }
-  const track=[], stationTrack=[];
+  const track=[];
   if(A.lat&&A.lon){
     const asc={t:A.t,lat:A.lat,lon:A.lon,h:A.h,color:'#f0a500',label:'ascent'};
-    track.push(asc); stationTrack.push(asc);
+    track.push(asc);
   }
   if(D&&D.lat&&D.lon){
     const h=D.x.map((x,i)=>(Math.hypot(x,D.y[i],D.z[i])-6.371)*1000);
     const coast={t:D.t,lat:D.lat,lon:D.lon,h,color:'#3987e5',label:orbitm()?'orbit':'coast'};
-    // The ground station follows the whole flight, far coast included.
-    stationTrack.push(coast);
     if(orbitm()||subm()){
       // An Earth-orbit transfer (or a suborbital arc) never leaves the Earth
       // map's business; splitting it would only break a leg that belongs here.
@@ -773,17 +727,15 @@ function renderCharts() {
     const ei=(run.events||[]).find(e=>e.name==='entry_interface');
     const t0=ei?ei.t:(D&&D.t&&D.t.length?D.t[D.t.length-1]:A.t[A.t.length-1]);
     const ent={t:E.t.map(t=>t+t0),lat:E.lat,lon:E.lon,h:E.h,color:'#d55181',label:'entry'};
-    track.push(ent); stationTrack.push(ent);
+    track.push(ent);
   }
   // Every flown ground-referenced leg is useful here: parking orbits on lunar
   // missions, the full Earth-orbit cases, and suborbital arcs alike.
   const showTrack=track.some(s=>s.t.length>2);
   $('sec_track').classList.toggle('hidden',!showTrack);
-  $('sec_station').classList.toggle('hidden',!showTrack);
   if(showTrack){
     const station={lat:+(run.sites||{}).launch_lat||0,lon:+(run.sites||{}).launch_lon||0};
     drawGroundTrack('groundmap',track,station);
-    drawGroundStation('stationview',stationTrack,station);
   }
   drawDescent();
   renderMoon();
@@ -810,18 +762,14 @@ function splitRuns(seg, altKm) {
 
 // The lunar half of a cislunar flight: a landing carries `run.moon`, a flyby
 // does not, so the section simply does not exist for a mission with no Moon
-// leg. Everything drawn is Moon-centred, which is the only frame in which the
-// parking orbit and touchdown are visible at the same scale.
+// leg. The track is the sub-vehicle point on the lunar surface, drawn over a
+// real map, which is the only way a 15 km descent is visible at all.
 function renderMoon() {
   const m = run && run.moon;
   const has = !!(m && m.orbit && m.orbit.x && m.orbit.x.length > 1);
   $('sec_moon').classList.toggle('hidden', !has);
   if (!has) return;
-  drawMoonView('moonview', m, { label: 'touchdown' });
   drawMoonGroundTrack('moongroundmap', m, { label: 'touchdown' });
-  const r = +m.r_km || 1737.4;
-  $('moon_note').textContent =
-    `top-down on the lunar orbit plane · Moon radius ${r.toFixed(0)} km`;
 }
 
 // Altitude against downrange, in the plane the descent actually flies. The
@@ -1049,7 +997,7 @@ function drawSolve(j) {
 // seven of them across a screen.
 const NAV_LABEL = {
   sec_profiles: 'Profiles', sec_track: 'Ground track',
-  sec_station: 'Station', sec_moon: 'Moon', sec_studies: 'Studies',
+  sec_moon: 'Moon', sec_studies: 'Studies',
   sec_events: 'Events',
 };
 let SUBNAV = [];

@@ -149,7 +149,11 @@
      is reserved for plotted data — the ascent leg on the trajectory below is
      blue, and a selected control that matches a data series reads as a key. */
   .seg button.on { background: var(--amber); color: #12151A; font-weight: 600; }
-  .runbar { position: sticky; top: 8px; z-index: 5; }
+  /* Always in reach: the launcher form is longer than the window on a landing
+     mission, so the one button that starts a flight cannot live at the bottom
+     of a column you have to scroll to find. Sticky under the app bar. */
+  .runbar { position: sticky; top: 54px; z-index: 5;
+            box-shadow: 0 10px 24px rgba(0,0,0,.35); }
   .kbd { background: #0d0d0d; border: 1px solid rgba(255,255,255,.18);
          border-bottom-width: 2px; border-radius: 4px; padding: 0 4px;
          font: 11px ui-monospace, Consolas, monospace; color: #c3c2b7; }
@@ -207,6 +211,11 @@
   <!-- every control that describes the mission lives in here, which is what
        lets one listener notice that the run on screen is now out of date -->
   <div id="sideform">
+
+    <div class="card runbar">
+      <button id="run">Run mission</button>
+      <div class="status" id="status">idle</div>
+    </div>
 
     <div class="card">
       <h2>Mission</h2>
@@ -435,10 +444,6 @@
       </div>
     </div>
 
-    <div class="card runbar">
-      <button id="run">Run mission</button>
-      <div class="status" id="status">idle</div>
-    </div>
   </div>
 
   <div>
