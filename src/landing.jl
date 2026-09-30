@@ -1189,6 +1189,9 @@ function moonlanding(; lander::Lander = default_lander(),
                      # fails, so it is designed to kilometres rather than to
                      # the 250 m the flyby mission needs.
                      perigee_tol::Float64 = 5.0e3,
+                     theta_g0::Float64 = 0.0,
+                     site_lat::Float64 = deg2rad_(28.5),
+                     site_lon::Float64 = deg2rad_(-80.6),
                      verbose::Bool = false)
     m_payload = lander_mass(lander) +
                 (orbiter === nothing ? 0.0 : orbiter_mass(orbiter))
@@ -1204,12 +1207,15 @@ function moonlanding(; lander::Lander = default_lander(),
                             hp_return = hp_return, inclination = inclination,
                             kick_angle = kick_angle, optimize_kick = optimize_kick,
                             cis_eta = cis_eta, perigee_tol = perigee_tol,
+                            theta_g0 = theta_g0, site_lat = site_lat,
+                            site_lon = site_lon,
                             tol_perigee_km = 30.0, verbose = verbose)
     asc, eph = des.ascent, des.eph
 
     cis = fly_to_perilune(asc.r, asc.v, asc.t, eph; t_ign = des.t_ign,
                           dv = des.dv, stage = des.kick, m_stack = des.m_stack,
-                          prop_avail = asc.prop_left[end], eta = cis_eta)
+                          prop_avail = asc.prop_left[end], eta = cis_eta,
+                          theta_g0 = theta_g0)
     cis.outcome == :perilune ||
         error("trans-lunar leg did not reach perilune (outcome: $(cis.outcome))")
 

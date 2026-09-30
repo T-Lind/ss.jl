@@ -76,7 +76,11 @@
                text-transform:uppercase }
   .track-shell { background:var(--surface); border:1px solid var(--line);
                  border-radius:var(--radius); overflow:hidden }
-  #groundmap { display:block; width:100%; height:360px; cursor:crosshair }
+  /* Equirectangular is 2:1. A fixed 360 px height stretched the world to
+   * 4:1 at this column width — every continent flattened and every track
+   *  wrong by the same amount. Let the width choose the height. */
+  #groundmap, #moongroundmap { display:block; width:100%; height:auto;
+                               aspect-ratio:2 / 1; cursor:crosshair }
   .track-tools { display:grid; grid-template-columns:auto minmax(120px,1fr) auto;
                  align-items:center; gap:12px; padding:9px 12px;
                  border-top:1px solid var(--line); background:var(--raise) }
@@ -309,6 +313,12 @@
     <div class="track-shell">
       <canvas id="moonview"></canvas>
     </div>
+    <!-- The same flight as a sub-point track on the lunar surface: the
+         orbit-plane view above answers "what shape", this answers "where on
+         the Moon", which is the question a ground track exists to answer. -->
+    <div class="track-shell" style="margin-top:var(--s3)">
+      <canvas id="moongroundmap"></canvas>
+    </div>
   </section>
 
   <section id="sec_studies">
@@ -376,7 +386,7 @@ import * as api from '/static/api.js';
 import { drawLine, niceStep, fmtTick, fmtPeak } from '/static/charts.js';
 import { drawGroundTrack } from '/static/groundtrack.js';
 import { drawGroundStation } from '/static/groundstation.js';
-import { drawMoonView } from '/static/moonview.js';
+import { drawMoonView, drawMoonGroundTrack } from '/static/moonview.js';
 import { busy, fail, clearFailures, reportUncaught } from '/static/busy.js';
 import * as runs from '/static/runs.js';
 import { METRIC_LABEL, SFIELD_LABEL, PARAM_LABEL, SPARAM_LABEL, LPARAM_LABEL,
@@ -808,6 +818,7 @@ function renderMoon() {
   $('sec_moon').classList.toggle('hidden', !has);
   if (!has) return;
   drawMoonView('moonview', m, { label: 'touchdown' });
+  drawMoonGroundTrack('moongroundmap', m, { label: 'touchdown' });
   const r = +m.r_km || 1737.4;
   $('moon_note').textContent =
     `top-down on the lunar orbit plane · Moon radius ${r.toFixed(0)} km`;

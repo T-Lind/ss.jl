@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.5.0';
+export const APP_VERSION = '0.6.0';
 
 function stamp() {
   for (const el of document.querySelectorAll('[data-appver]'))

@@ -218,6 +218,27 @@
       </div>
       <div class="sub" id="modenote" style="margin:6px 0 0">a pod around the
         Moon and home — nothing is left behind and nothing has to stop</div>
+      <div class="row" style="margin-top:10px">
+        <div><label for="site" title="latitude decides what a direct ascent
+            can reach: a prograde orbit cannot be less inclined than the site,
+            so an equatorial target from Baikonur is an honest miss">launch
+            site</label>
+          <select id="site">
+            <option value="cape">Cape Canaveral</option>
+            <option value="vandenberg">Vandenberg</option>
+            <option value="wallops">Wallops</option>
+            <option value="baikonur">Baikonur</option>
+            <option value="kourou">Kourou</option>
+            <option value="tanegashima">Tanegashima</option>
+            <option value="sriharikota">Sriharikota</option>
+            <option value="wenchang">Wenchang</option>
+            <option value="mahia">Mahia</option>
+          </select></div>
+        <div><label for="launch_h" title="hours after the reference epoch;
+            0-24 walks the launch site once around the globe and shifts the
+            ascent and the ground track beneath it">launch time [h]</label>
+          <input id="launch_h" value="0" min="0" max="24" step="0.25"></div>
+      </div>
       <!-- Presets were their own card, which made choosing a mission a
            two-card decision: the mode here, the preset below it. They are one
            choice — "what am I flying" — so they are one card. -->
@@ -520,7 +541,7 @@ const $ = id => document.getElementById(id);
 const BASE_FIELDS =['pod_mass','payload_kind','bus_mass','cargo_mass',
   'pod_dia','crewed','h_park_km','incl_deg','hp_moon_km','hp_return_km',
   'fairing','fairing_on','diameter','nstages','nboost','opt_kick','kick_deg',
-  'tli_mag_err_pct','tli_point_err_deg'];
+  'tli_mag_err_pct','tli_point_err_deg','launch_h','site'];
 // the landing mission adds a lander and a descent plan; everything else — the
 // launcher, the ascent, the trans-lunar leg — is the same mission underneath
 const LANDING_FIELDS = ['l_dry','l_prop','l_thrust_kn','l_isp','l_throttle_min','l_diameter',
