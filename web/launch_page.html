@@ -25,6 +25,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sable — mission</title>
 <link rel="stylesheet" href="./static/tokens.css">
+<script type="module" src="./static/version.js"></script>
 <style>
   /* This page is where the console language came from, so its own names now
      point at the shared tokens rather than carrying a second set of values.
@@ -137,7 +138,8 @@
      only leave one way is what made three tabs feel scattered. -->
 <div class="hud" id="backlink"><a href="./">&#8617; mission control</a>
   <a href="build_page.html" style="margin-left:10px">vehicle builder</a>
-  <a href="analysis_page.html" id="analysislink" style="margin-left:10px">analysis</a></div>
+  <a href="analysis_page.html" id="analysislink" style="margin-left:10px">analysis</a>
+  <span data-appver style="margin-left:10px;color:var(--dim)"></span></div>
 <div id="keys" class="show">
   <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>v</b> eva · <b>h</b> for all controls</div>
 </div>
@@ -2320,10 +2322,19 @@ const eciLanderPhase = ph => !!MS &&
 
 function cameraMoon(t, ms, M) {
   const mode = camMode === 'auto' ? autoPickMoon(t) : camMode;
+  // Nothing may look up through the regolith. Free pitch can be driven below
+  // the horizon and the low chase offset sits under the surface at touchdown,
+  // and the ground is a one-sided sheet: from beneath it, the shot is the
+  // empty hull behind the terrain instead of the surface. Lifting the eye to
+  // the ground under it is enough, and is what a camera on a stand does.
+  const aboveGround = p => {
+    const g = groundY(p[0], p[2]) + 1.2;
+    return p[1] < g ? [p[0], g, p[2]] : p;
+  };
   const rig = landerRig(mode, ms.pos, ms.up, ms.fwd, ms.thrust, ms.h, ms.thr, M);
   if (rig) {
     if (rig.shake > 0) rig.eye = V.add(rig.eye, shakeVec(rig.shake));
-    return { eye: rig.eye, look: rig.look, up: rig.up, fov: rig.fov, mode };
+    return { eye: aboveGround(rig.eye), look: rig.look, up: rig.up, fov: rig.fov, mode };
   }
   const mid = V.add(ms.pos, V.scale(ms.up, 2.4));
   let eye, look = mid, up = ms.up, fov = 0.5;
@@ -2351,7 +2362,7 @@ function cameraMoon(t, ms, M) {
     fov = 0.5;
   }
   // ground and free never shake; the rig handles the modes that do
-  return { eye, look, up, fov, mode };
+  return { eye: aboveGround(eye), look, up, fov, mode };
 }
 
 // --- plume and dust ---------------------------------------------------------
@@ -7066,10 +7077,26 @@ function scrOrbit(g) {
   const x0 = 24, y0 = 56, w = SCR_W - 48, h = SCR_H - 136;
   g.strokeStyle = SCR_DIM; g.lineWidth = 1;
   g.strokeRect(x0, y0, w, h);
-  const n = V.norm(CIS.nrm);
+  // The plane is fitted from the trajectory itself. It used to be the normal
+  // of the Moon's ephemeris plane, which is right only by coincidence: a polar
+  // parking orbit is perpendicular to that plane, and projecting it there
+  // folded the circle into a line. Unit position vectors give every angular
+  // step equal weight, so the far lunar samples cannot swamp the near-Earth
+  // arc the way raw cross products would.
+  let acc = [0, 0, 0], prevU = null;
+  for (let i = 0; i < CIS.n; i++) {
+    const r = [CIS.x[i], CIS.y[i], CIS.z[i]], L = V.len(r);
+    if (!(L > 1)) { prevU = null; continue; }
+    const u = [r[0]/L, r[1]/L, r[2]/L];
+    if (prevU) acc = V.add(acc, V.cross(prevU, u));
+    prevU = u;
+  }
+  const n = V.len(acc) > 1e-7 ? V.norm(acc) : V.norm(CIS.nrm);
   // in-plane basis: the first point gives one axis, the normal gives the other
-  let e1 = [CIS.x[0], CIS.y[0], CIS.z[0]];
-  e1 = V.norm(V.sub(e1, V.scale(n, V.dot(e1, n))));
+  const r0 = [CIS.x[0], CIS.y[0], CIS.z[0]];
+  let e1 = V.sub(r0, V.scale(n, V.dot(r0, n)));
+  e1 = V.len(e1) > 1e-6 ? V.norm(e1)
+       : V.norm(V.cross(n, Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
   const e2 = V.cross(n, e1);
   const P = p => [V.dot(p, e1), V.dot(p, e2)];
   const step = Math.max(1, Math.floor(CIS.n/240));
