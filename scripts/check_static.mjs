@@ -1,57 +1,62 @@
 #!/usr/bin/env node
-// PR-time guard for the browser layer.
-//
-// Two failures the Julia suite cannot see and the release build only
-// discovers at tag time:
-//
-//   1. A page or module imports `/static/...` and the asset did not travel.
-//      `build/build_app.jl` checks this too, but only inside the Windows
-//      release job, so a typo merges and then fails when you cut a release.
-//   2. A static module does not parse. Browser ES modules are never loaded by
-//      any compiler or linter here; `node --check` parses them without running
-//      them.
-//
-// Both checks are intentionally the same rules build_app.jl enforces, so a
-// green run here predicts a green release build.
+// Check shipped Julia-panel and static-browser assets, including inline JS.
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { join, basename } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 
-const scriptsDir = fileURLToPath(new URL('.', import.meta.url)); // .../scripts/
-const staticDir = join(scriptsDir, 'static');
+const root = fileURLToPath(new URL('..', import.meta.url));
+const issues = [];
+let pages = 0, modules = 0, inline = 0;
+const STATIC = /['"]\/static\/([A-Za-z0-9_-]+\.(?:js|css|geojson))['"]/g;
+const IMPORT = /\b(?:from\s+|import\s*(?:\(\s*)?)['"]([^'"]+)['"]/g;
 
-// Same whitelist shape as panelapp.jl's `static_asset` and build_app.jl.
-const REF = /['"]\/static\/([A-Za-z0-9_-]+\.(?:js|css|geojson))['"]/g;
-
-const html = readdirSync(scriptsDir).filter(f => f.endsWith('.html'));
-const modules = readdirSync(staticDir).filter(f => f.endsWith('.js'));
-const sources = [
-  ...html.map(f => join(scriptsDir, f)),
-  ...modules.map(f => join(staticDir, f)),
-];
-
-const missing = new Set();
-for (const src of sources) {
-  const text = readFileSync(src, 'utf8');
-  for (const m of text.matchAll(REF))
-    if (!existsSync(join(staticDir, m[1])))
-      missing.add(`${basename(src)} imports /static/${m[1]}`);
-}
-
-const broken = [];
-for (const f of modules) {
-  try {
-    execFileSync(process.execPath, ['--check', join(staticDir, f)], { stdio: 'pipe' });
-  } catch (e) {
-    const first = String(e.stderr || e.message).trim().split('\n').find(Boolean);
-    broken.push(`${f}: ${first}`);
+function references(source, file, tree) {
+  const label = relative(root, file);
+  for (const m of source.matchAll(STATIC))
+    if (!existsSync(join(tree, 'static', m[1]))) issues.push(`${label}: missing /static/${m[1]}`);
+  for (const m of source.matchAll(IMPORT)) {
+    const ref = m[1].split(/[?#]/)[0];
+    if (!ref.startsWith('.') && !ref.startsWith('/')) continue;
+    const target = ref.startsWith('/') ? join(tree, ref) : join(dirname(file), ref);
+    if (!existsSync(target)) issues.push(`${label}: missing import ${ref}`);
   }
 }
 
-if (missing.size || broken.length) {
-  for (const m of missing) console.error(`missing asset: ${m}`);
-  for (const b of broken) console.error(`syntax error: ${b}`);
+function syntax(source, file, module = true) {
+  try {
+    execFileSync(process.execPath, [module ? '--input-type=module' : '--input-type=commonjs', '--check'],
+      { input: source, stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (err) {
+    issues.push(`${relative(root, file)}: ${String(err.stderr || err.message).trim()}`);
+  }
+}
+
+for (const name of ['scripts', 'web']) {
+  const tree = join(root, name);
+  const html = readdirSync(tree).filter(f => f.endsWith('.html'));
+  for (const page of html) {
+    const file = join(tree, page), source = readFileSync(file, 'utf8');
+    references(source, file, tree);
+    for (const match of source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
+      const attrs = match[1], body = match[2];
+      const type = /\btype\s*=\s*['"]([^'"]+)['"]/i.exec(attrs)?.[1];
+      if (!body.trim() || (type && !['module', 'text/javascript', 'application/javascript'].includes(type))) continue;
+      syntax(body, file, type === 'module'); inline++;
+    }
+  }
+  pages += html.length;
+  for (const folder of ['static', ...(name === 'web' ? ['src'] : [])]) {
+    const dir = join(tree, folder);
+    for (const entry of readdirSync(dir).filter(f => f.endsWith('.js'))) {
+      const file = join(dir, entry), source = readFileSync(file, 'utf8');
+      references(source, file, tree); syntax(source, file); modules++;
+    }
+  }
+}
+
+if (issues.length) {
+  for (const issue of issues) console.error(issue);
   process.exit(1);
 }
-console.log(`static check ok: ${html.length} pages, ${modules.length} modules`);
+console.log(`static check ok: ${pages} pages, ${modules} modules, ${inline} inline scripts`);

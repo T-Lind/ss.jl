@@ -99,6 +99,16 @@ end
 initial_state(s::Scenario) =
     [s.r0[1], s.r0[2], s.r0[3], s.v0[1], s.v0[2], s.v0[3], s.alpha0, 0.0, 0.0]
 
+function _validate_simulation(s::Scenario, log_dt_orbit, log_dt_entry)
+    all(isfinite, (s.r0..., s.v0..., s.t0, s.t_max, s.h_ei, s.alpha0, s.theta_g0)) &&
+        vnorm(s.r0) > 0 && s.t_max >= s.t0 ||
+        throw(ArgumentError("simulation needs finite state and times, with t_max >= t0"))
+    all(dt -> isfinite(dt) && dt > 0, (s.dt_orbit, s.dt_entry, s.dt_descent)) ||
+        throw(ArgumentError("integration steps must be finite and positive"))
+    all(dt -> dt > 0, (log_dt_orbit, log_dt_entry)) ||
+        throw(ArgumentError("logging intervals must be positive"))
+end
+
 # Pitch dynamics are meaningful only away from vertical flight and before
 # parachutes dominate the attitude.
 const COSGAMMA_MIN = 0.05

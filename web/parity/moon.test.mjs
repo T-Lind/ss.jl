@@ -1,11 +1,9 @@
+import { juliaGolden } from './julia_golden.mjs';
 // Parity for the Moon ephemeris, Moon-fixed frame and non-spherical gravity.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { MU_EARTH, RE_MEAN, deg2rad_ } from '../src/constants.js';
 import { coplanar_moon, moon_position, moon_velocity, lunar_gravity,
          lunarGravity, gravity_anomaly } from '../src/moon.js';
@@ -13,17 +11,7 @@ import { coplanar_moon, moon_position, moon_velocity, lunar_gravity,
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'web', 'parity', 'emit_moon.jl');
 
-function golden() {
-  const dir = mkdtempSync(join(tmpdir(), 'ssjl-moon-'));
-  try {
-    const out = join(dir, 'golden.json');
-    const r = spawnSync('julia', ['--project=' + root, script, out], { encoding: 'utf8' });
-    if (r.error || r.status !== 0) { if (r.stderr) process.stderr.write(r.stderr); return null; }
-    return JSON.parse(readFileSync(out, 'utf8'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+const golden = () => juliaGolden(script);
 
 function close(got, want, what, rtol = 1e-9, atol = 1e-6) {
   const tol = atol + rtol * Math.abs(want);

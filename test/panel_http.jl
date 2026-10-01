@@ -512,7 +512,7 @@ end
         # with the wrong media type is refused by the browser outright, and
         # the console blames CORS, so the content type is asserted.
         for name in ("fmt.js", "api.js", "vehicle.js", "selftest.js",
-                     "charts.js", "groundtrack.js", "groundstation.js", "metrics.js")
+                     "charts.js", "groundtrack.js", "moongroundtrack.js", "metrics.js")
             st, hdrs, bod = http("GET", "/static/$name"; port = port)
             @test st == 200
             @test hdrs["content-type"] == "text/javascript; charset=utf-8"

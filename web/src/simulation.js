@@ -44,6 +44,13 @@ function altitude(x, scn, t) {
 }
 
 export function simulate(scn, { log_dt_orbit = 5.0, log_dt_entry = 0.5 } = {}) {
+  if (![...scn.r0, ...scn.v0, scn.t0, scn.t_max, scn.h_ei, scn.alpha0, scn.theta_g0].every(Number.isFinite)
+      || Math.hypot(...scn.r0) === 0 || scn.t_max < scn.t0)
+    throw new RangeError('simulation needs finite state and times, with t_max >= t0');
+  if (![scn.dt_orbit, scn.dt_entry, scn.dt_descent].every(dt => Number.isFinite(dt) && dt > 0))
+    throw new RangeError('integration steps must be finite and positive');
+  if (![log_dt_orbit, log_dt_entry].every(dt => dt > 0))
+    throw new RangeError('logging intervals must be positive');
   const x = Float64Array.from(initial_state(scn));
   const xnew = new Float64Array(x.length);
   const w = rk4Work(x.length);
@@ -67,13 +74,18 @@ export function simulate(scn, { log_dt_orbit = 5.0, log_dt_entry = 0.5 } = {}) {
     return d;
   };
 
-  record(t);
+  const initial = record(t);
+  peak_g = initial.gload;
+  peak_qdot = initial.qdot_conv + initial.qdot_rad;
+  peak_qbar = ctx.entered ? initial.qbar : 0;
 
   while (t < scn.t_max) {
     const chutes_out = any_chute_deployed(ctx);
-    const dt = !ctx.entered ? scn.dt_orbit : (chutes_out ? scn.dt_descent : scn.dt_entry);
+    const dt = Math.min(!ctx.entered ? scn.dt_orbit : (chutes_out ? scn.dt_descent : scn.dt_entry), scn.t_max - t);
+    if (!(t + dt > t)) throw new RangeError('integration step cannot advance time at this epoch');
 
     rk4Step(xnew, x, t, dt, w, scn, ctx);
+    if (!xnew.every(Number.isFinite)) throw new Error(`non-finite reentry state at t=${t + dt}`);
     const hnew = altitude(xnew, scn, t + dt);
 
     if (!ctx.entered && hnew < scn.h_ei) {
@@ -129,6 +141,8 @@ export function simulate(scn, { log_dt_orbit = 5.0, log_dt_entry = 0.5 } = {}) {
       next_log += log_dt_orbit;
     }
   }
+
+  if (terminated === 'timeout' && L.t.at(-1) !== t) record(t);
 
   const miss = (!Number.isNaN(scn.target_lat) && terminated === 'splashdown')
     ? haversine(lat_sp, lon_sp, scn.target_lat, scn.target_lon) / 1000

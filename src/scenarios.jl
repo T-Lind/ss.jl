@@ -49,6 +49,7 @@ extension.
 function target_deorbit(el::DeorbitElements, veh::Vehicle;
                         max_iter::Int = 8, tol_deg::Float64 = 0.1, verbose::Bool = false,
                         kwargs...)
+    max_iter > 0 || throw(ArgumentError("max_iter must be positive"))
     raan, argp = el.raan, el.argp
     local res
     for it in 1:max_iter
@@ -66,6 +67,11 @@ function target_deorbit(el::DeorbitElements, veh::Vehicle;
             return (DeorbitElements(el.apoapsis_alt, el.periapsis_alt, el.inclination,
                                     raan, argp, el.nu0), res)
         end
+        # Return the elements actually flown, even if the budget runs out.
+        if it == max_iter
+            @warn "targeting did not converge to $(tol_deg) deg; using last flown iterate"
+            return (eli, res)
+        end
 
         # latitude via argument of latitude on the (ascending) final arc:
         # sin(lat) = sin(i) sin(u), so du = dlat / (sin i * cos u / cos lat) —
@@ -76,9 +82,6 @@ function target_deorbit(el::DeorbitElements, veh::Vehicle;
         argp += u_tgt - u_now
         raan += dlon
     end
-    @warn "targeting did not converge to $(tol_deg) deg; using last iterate"
-    (DeorbitElements(el.apoapsis_alt, el.periapsis_alt, el.inclination,
-                     raan, argp, el.nu0), res)
 end
 
 """

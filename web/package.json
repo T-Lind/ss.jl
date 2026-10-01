@@ -4,6 +4,7 @@
   "type": "module",
   "description": "SatelliteSim ported to browser ES modules. Parity-tested against the Julia source.",
   "scripts": {
-    "test": "node --test parity/atmosphere_gravity.test.mjs parity/reentry.test.mjs parity/ascent.test.mjs parity/moon.test.mjs parity/cislunar.test.mjs parity/moonshot.test.mjs parity/terrain.test.mjs parity/landingnav.test.mjs parity/landing.test.mjs parity/panel.test.mjs"
+    "test": "node --test parity/*.test.mjs",
+    "test:physics": "node --test ../test/numerical_helpers.test.mjs"
   }
 }

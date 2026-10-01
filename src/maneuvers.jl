@@ -43,6 +43,11 @@ function lambert(r1::V3, r2::V3, tof::Float64;
                  mu::Float64 = MU_EARTH, long_way::Bool = false,
                  tol::Float64 = 1e-9, max_iter::Int = 60)
     r1n = vnorm(r1); r2n = vnorm(r2)
+    all(isfinite, (r1..., r2..., tof, mu, tol)) && r1n > 0 && r2n > 0 &&
+        tof > 0 && mu > 0 && tol > 0 && max_iter > 0 ||
+        throw(ArgumentError("lambert requires finite nonzero positions and positive tof, mu, tol and max_iter"))
+    vnorm(vcross(vunit(r1), vunit(r2))) > 1e-14 ||
+        throw(ArgumentError("lambert: collinear positions leave the transfer plane undefined"))
     cosd = clamp(vdot(r1, r2) / (r1n * r2n), -1.0, 1.0)
     A = sqrt(r1n * r2n * (1 + cosd)) * (long_way ? -1.0 : 1.0)
     abs(A) < 1e-9 && error("lambert: 180° transfer is singular (plane undefined)")
@@ -59,19 +64,27 @@ function lambert(r1::V3, r2::V3, tof::Float64;
         x = sqrt(y / C)
         (x^3 * S + A * sqrt(y)) / sqrt(mu)
     end
-    # expand zlo until y > 0
-    while isnan(tfun(zlo))
-        zlo = 0.5 * (zlo + zhi)
-        zhi - zlo < 1e-12 && error("lambert: no feasible bracket")
+    # y < 0 is the zero-time edge, not a reason to discard the entire
+    # hyperbolic branch. Keep it as the lower bound and bisect toward it.
+    # Long-way transfers can need a more negative z for a short flight.
+    for _ in 1:60
+        tlo = tfun(zlo)
+        (!isfinite(tlo) || tlo <= tof) && break
+        zlo *= 2
     end
     tlo = tfun(zlo)
-    tlo <= tof || error("lambert: tof shorter than the minimum for this geometry")
-    for _ in 1:200
+    (!isfinite(tlo) || tlo <= tof) || error("lambert: no feasible time bracket")
+    done = false
+    for _ in 1:max_iter
         z = 0.5 * (zlo + zhi)
         tz = tfun(z)
         (isnan(tz) || tz < tof) ? (zlo = z) : (zhi = z)
-        abs(zhi - zlo) < tol && break
+        if abs(zhi - zlo) < tol
+            done = true
+            break
+        end
     end
+    done || error("lambert: iteration budget exhausted")
     z = 0.5 * (zlo + zhi)
     C, S = stumpff(z)
     y = yfun(z, C, S)

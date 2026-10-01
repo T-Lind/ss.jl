@@ -1,3 +1,5 @@
+import { find_root } from './solve.js';
+export { find_root } from './solve.js';
 // Port of the payload builders in scripts/panelapp.jl. The HTTP server,
 // routing and static-file serving are not needed in the browser: these
 // functions produce the same payload objects the pages used to receive as
@@ -947,78 +949,6 @@ export function sweepable(p) {
     out.push('nboost', 'b_prop', 'b_dry', 'b_isp', 'b_thrust_kn', 'b_engines',
              'b_throttle', 'b_diameter');
   return out;
-}
-
-// Illinois-modified regula falsi, ported from src/solve.jl.
-export function find_root(f, lo, hi, { target = 0.0, xtol = 0.0, ftol = 0.0, max_iter = 24 } = {}) {
-  let lo0 = Math.min(lo, hi), hi0 = Math.max(lo, hi);
-  lo = lo0; hi = hi0;
-  const hist = [];
-  const xt = xtol > 0 ? xtol : 1e-4 * Math.max(hi - lo, Number.EPSILON);
-  let n = 0;
-  const eval_ = x => {
-    n += 1;
-    let v;
-    try { v = Number(f(x)); } catch { v = NaN; }
-    hist.push([x, v]);
-    return v - target;
-  };
-  const usable = (x, toward) => {
-    let v = eval_(x);
-    let k = 0;
-    while (!Number.isFinite(v) && k < 8) {
-      x = x + 0.5 * (toward - x);
-      v = eval_(x);
-      k += 1;
-    }
-    return [x, v];
-  };
-  let flo, fhi;
-  [lo, flo] = usable(lo, hi);
-  if (!Number.isFinite(flo))
-    return { x: NaN, value: NaN, target, iterations: n, status: 'infeasible',
-             lo: lo0, hi: hi0, history: hist };
-  [hi, fhi] = usable(hi, lo);
-  if (!Number.isFinite(fhi))
-    return { x: lo, value: flo + target, target, iterations: n, status: 'infeasible',
-             lo, hi: hi0, history: hist };
-  const ulo = lo, uhi = hi;
-  if (Math.abs(flo) <= ftol)
-    return { x: lo, value: flo + target, target, iterations: n, status: 'converged',
-             lo: ulo, hi: uhi, history: hist };
-  if (Math.abs(fhi) <= ftol)
-    return { x: hi, value: fhi + target, target, iterations: n, status: 'converged',
-             lo: ulo, hi: uhi, history: hist };
-  if (flo * fhi > 0) {
-    const [x, v] = Math.abs(flo) <= Math.abs(fhi) ? [lo, flo] : [hi, fhi];
-    return { x, value: v + target, target, iterations: n, status: 'no_bracket',
-             lo: ulo, hi: uhi, history: hist };
-  }
-  let side = 0, x = lo, fx = flo;
-  while (n < max_iter && hi - lo > xt) {
-    x = lo - flo * (hi - lo) / (fhi - flo);
-    x = Math.min(hi - 0.01 * (hi - lo), Math.max(lo + 0.01 * (hi - lo), x));
-    fx = eval_(x);
-    if (!Number.isFinite(fx)) {
-      hi = x; fhi = Math.sign(flo) * Math.abs(fhi) * 0.5;
-      continue;
-    }
-    if (Math.abs(fx) <= ftol)
-      return { x, value: fx + target, target, iterations: n, status: 'converged',
-               lo: ulo, hi: uhi, history: hist };
-    if (fx * flo < 0) {
-      hi = x; fhi = fx;
-      if (side === -1) flo *= 0.5;
-      side = -1;
-    } else {
-      lo = x; flo = fx;
-      if (side === 1) fhi *= 0.5;
-      side = 1;
-    }
-  }
-  return { x, value: fx + target, target, iterations: n,
-           status: hi - lo <= xt ? 'converged' : 'no_bracket',
-           lo: ulo, hi: uhi, history: hist };
 }
 
 export function run_sweep(p, onProgress) {

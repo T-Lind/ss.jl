@@ -1,3 +1,4 @@
+import { juliaGolden } from './julia_golden.mjs';
 // Parity for the panel's payload layer: the browser builds the same objects
 // scripts/panelapp.jl serialised. Four missions (flyby, orbit, suborbital,
 // landing) and two vehicles' rocket_geometry are compared structurally.
@@ -9,11 +10,8 @@
 // floating-point operations, tight enough that a wrong constant shows.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { panelRun, panelGeometry } from '../src/panel.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -43,18 +41,7 @@ const GEOMETRY = {
   },
 };
 
-function golden() {
-  const dir = mkdtempSync(join(tmpdir(), 'ssjl-panel-'));
-  try {
-    const out = join(dir, 'golden.json');
-    const r = spawnSync('julia', ['--project=' + root, script, out],
-                        { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 1_200_000 });
-    if (r.error || r.status !== 0) { if (r.stderr) process.stderr.write(r.stderr); return null; }
-    return JSON.parse(readFileSync(out, 'utf8'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+const golden = () => juliaGolden(script);
 
 const RTOL = 1e-5;
 const ATOL = 1e-3;

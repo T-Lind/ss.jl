@@ -1,11 +1,9 @@
+import { juliaGolden } from './julia_golden.mjs';
 // Parity for the descent nav RNG, initial nav state, and hazard redesignation.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { MU_EARTH, RE_MEAN, R_MOON } from '../src/constants.js';
 import { vunit, vcross, vscale } from '../src/vec3.js';
 import { coplanar_moon } from '../src/moon.js';
@@ -16,17 +14,7 @@ import { descentNav, hazardScan, init_nav, _nrand, _ngauss,
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'web', 'parity', 'emit_landingnav.jl');
 
-function golden() {
-  const dir = mkdtempSync(join(tmpdir(), 'ssjl-lnav-'));
-  try {
-    const out = join(dir, 'golden.json');
-    const r = spawnSync('julia', ['--project=' + root, script, out], { encoding: 'utf8' });
-    if (r.error || r.status !== 0) { if (r.stderr) process.stderr.write(r.stderr); return null; }
-    return JSON.parse(readFileSync(out, 'utf8'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+const golden = () => juliaGolden(script);
 const close = (got, want, what, rtol = 1e-9, atol = 1e-6) => {
   const tol = atol + rtol * Math.abs(want);
   assert.ok(Math.abs(got - want) <= tol, `${what}: ${got} != ${want} (d=${got - want}, tol=${tol})`);

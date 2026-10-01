@@ -64,13 +64,17 @@ export function elements_from_state(r, v, mu = MU_EARTH) {
   const i = Math.acos(Math.min(1, Math.max(-1, h[2] / hn)));
   const nvec = vcross([0.0, 0.0, 1.0], h);
   const nn = vnorm(nvec);
-  const raan = nn > 1e-12 ? Math.atan2(nvec[1], nvec[0]) : 0.0;
-  const argp = (nn > 1e-12 && e > 1e-12)
+  const inclined = nn > 1e-12 * hn;
+  const wrap = angle => (angle + 2 * Math.PI) % (2 * Math.PI);
+  const orientation = h[2] < 0 ? -1 : 1;
+  const raan = inclined ? Math.atan2(nvec[1], nvec[0]) : 0.0;
+  const argp = (inclined && e > 1e-12)
     ? (() => { const w = Math.acos(Math.min(1, Math.max(-1, vdot(nvec, ev) / (nn * e)))); return ev[2] < 0 ? 2 * Math.PI - w : w; })()
-    : 0.0;
+    : e > 1e-12 ? wrap(Math.atan2(orientation * ev[1], ev[0])) : 0.0;
   const nu = e > 1e-12
     ? (() => { const f = Math.acos(Math.min(1, Math.max(-1, vdot(ev, r) / (e * rn)))); return vdot(r, v) < 0 ? 2 * Math.PI - f : f; })()
-    : 0.0;
+    : inclined ? wrap(Math.atan2(vdot(vcross(nvec, r), h) / hn, vdot(nvec, r)))
+      : wrap(Math.atan2(orientation * r[1], r[0]));
   const p = hn * hn / mu;
   const rp = p / (1 + e);
   const ra = e < 1 ? p / (1 - e) : Infinity;
