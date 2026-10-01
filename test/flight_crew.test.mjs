@@ -184,3 +184,28 @@ test('scene cameras and pickers ride the lander throughout launch and transfer',
   c.run.mode = 'orbit';
   assert.deepEqual(plain(c.buildScene({ w: 'eci' }).craftM), plain(sc.stackM));
 });
+
+
+test('lander console reports descent telemetry and actual crew state',()=>{
+  const c=flight();
+  Object.assign(c,{EVS:[],CAB:{live:false,seat:0},CAB_LIGHTS:[{n:'BRIGHT'}],cabLight:0});
+  c.RCS.rate=0;
+  for(const name of ['nextEv','fmtEta','cabRows'])runInContext(fn(name),c);
+  const sc={ms:{h:125,vh:2.5,vv:-1.4,thr:.27,m:4100,dr:32,elev:-17,navdh:4}};
+  const flightRows=plain(c.cabRows(sc,'FLIGHT'));
+  assert.ok(flightRows.some(([label,value])=>label==='SINK RATE'&&value==='1.4 m/s'));
+  assert.ok(flightRows.some(([label,value])=>label==='THROTTLE'&&value==='27%'));
+  assert.ok(flightRows.some(([label,value])=>label==='PROP LEFT'&&value==='600 kg'));
+  assert.ok(plain(c.cabRows(sc,'TRAJECTORY')).some(([label,value])=>label==='NAV ERROR'&&value==='4 m'));
+  assert.ok(plain(c.cabRows(sc,'SYSTEMS')).some(([label,value])=>label==='CREW'&&value==='STRAPPED IN'));
+  c.SURF.active=true;
+  assert.ok(plain(c.cabRows(sc,'SYSTEMS')).some(([label,value])=>label==='CREW'&&value==='EVA'));
+  for(const page of ['FLIGHT','TRAJECTORY','SYSTEMS'])
+    for(const [label,value] of c.cabRows(sc,page))assert.ok(label.length+value.length<=19,`${label}: ${value}`);
+  Object.assign(c,{TRAJ_VIEWS:['PROFILE','ORBIT'],cabTraj:1});
+  runInContext("curWorld='moon'",c);
+  runInContext(fn('trajView'),c);
+  assert.equal(c.trajView(),'DESCENT');
+  const julia=readFileSync(new URL('../scripts/launch_page.html',import.meta.url),'utf8');
+  for(const name of ['cabRows','cabScreenPaint','cabDecalBuild','decPaint','trajView'])assert.ok(julia.includes(fn(name)),`${name} frontend drift`);
+});

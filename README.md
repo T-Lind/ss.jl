@@ -1037,16 +1037,22 @@ attached 0–8 at a time, and any diameter edited with the model and every
 number updating live. A named engine owns its propellant: picking one
 locks the mixture select to it, and the server rejects a form that names
 both an engine and a different mixture — a Raptor does not burn kerolox.
-The builder opens on the panel's current form, and its **↩ mission
-control** and **🚀 launch view** links carry the configuration back out.
+The builder opens on the panel's current form. **↩ mission control** carries
+the edited configuration back; **🚀 launch view** and analysis open the latest
+recorded run.
 
-### Model inspector and modern lander
+### Spacecraft viewer and modern lander
 
-Open **model inspector** from the builder or launch view, or visit
+Open **spacecraft viewer** from the builder or launch view, or visit
 `http://localhost:8137/models`. The static browser version uses
-`web/models_page.html`. Inspect the lander exterior, cockpit, or a cutaway
-engine mount without calculating a mission. Drag or use arrow keys to rotate,
+`web/models_page.html`. Inspect the capsule or lander exterior and cockpit, and switch crew stations
+without calculating a mission. Builder and launch links carry the selected
+spacecraft and its diameter; preview edits do not change vehicle settings. Drag or use arrow keys to rotate,
 scroll or press + / − to zoom, reset the camera, and export a PNG.
+The lander console shares the capsule controls for crew stations, time warp,
+trajectory display, checklist, lighting, display pages, audio, rate null and
+attitude level. Lunar descent displays show altitude, sink and horizontal
+velocity, throttle, remaining propellant, terrain and navigation error.
 
 The lunar lander is a modern two-person concept: a chamfered pressure cabin,
 two upright crew restraints, three recessed flight displays, large forward

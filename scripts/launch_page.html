@@ -144,7 +144,7 @@
     <a class="navlink" href="/build">vehicle builder</a>
     <a class="navlink" id="analysislink" href="/analysis">analysis</a>
     <a class="navlink" href="#" aria-current="page">launch view</a>
-    <a class="navlink" href="/models">model inspector</a>
+    <a class="navlink" id="modelslink" href="/models">spacecraft viewer</a>
   </span>
   <span class="appnav-end">
     <span class="u-label" id="nav_note">launch</span>
@@ -7336,6 +7336,7 @@ function scrTape(g, x, y, w, h, val, span, unit) {
 // there is an ascent or a descent — so the switch falls back rather than
 // showing an empty box, and the title says which one you are looking at.
 function trajView() {
+  if (curWorld === 'moon' && isLandingMission()) return 'DESCENT';
   const v = TRAJ_VIEWS[cabTraj];
   return v === 'ORBIT' && !(hasCis && CIS && CIS.n > 8) ? 'PROFILE' : v;
 }
@@ -7551,17 +7552,17 @@ function scrProfile(g) {
   g.stroke();
 }
 function cabScreenPaint(sc) {
-  const st = sc.st, cs = sc.cs, es = sc.es;
+  const st = sc.st, cs = sc.cs, es = sc.es, ms = sc.ms;
   const km = m => !isFinite(m) ? '—' :
     Math.abs(m) < 1e4 ? m.toFixed(0) + ' m' : (m/1000).toFixed(1) + ' km';
-  const alt = st ? st.h : es ? es.h : cs ? cs.rE - RE : 0;
-  const spd = st ? st.v : es ? es.v : cs ? cs.speed : 0;
+  const alt = ms ? ms.h : st ? st.h : es ? es.h : cs ? cs.rE - RE : 0;
+  const spd = ms ? -ms.vv : st ? st.v : es ? es.v : cs ? cs.speed : 0;
 
   // left: the flight tape — altitude and speed as moving scales, which is what
   // a crew reads at a glance rather than a number they have to parse
   scrPane(0, 'FLIGHT', [], g => {
-    scrTape(g, 34, 96, 148, 208, alt/1000, 60, 'ALT km');
-    scrTape(g, 238, 96, 148, 208, spd, 2000, 'VEL m/s');
+    scrTape(g, 34, 96, 148, 208, ms && alt<1000 ? alt : alt/1000, ms ? (alt<1000?100:10) : 60, ms && alt<1000 ? 'ALT m' : 'ALT km');
+    scrTape(g, 238, 96, 148, 208, spd, ms ? Math.max(10,Math.abs(spd)*.6) : 2000, ms ? 'SINK m/s' : 'VEL m/s');
     g.fillStyle = SCR_HI; g.font = '600 22px ui-monospace, monospace';
     g.fillText(fmtClock(simT), 34, 344);
   });
@@ -7571,12 +7572,12 @@ function cabScreenPaint(sc) {
   // rather than five — five would be drawn straight through the graph
   const page = CAB_PAGES[cabPage];
   const rows = cabRows(sc, page);
-  const view = trajView();
+  const view = ms ? 'DESCENT' : trajView();
   // ORBIT takes the whole pane — a plot of a trajectory wants the area, and
   // its two numbers go inside its own frame. PROFILE keeps two rows above it.
   scrPane(1, page === 'TRAJECTORY' ? `TRAJECTORY · ${view}` : page,
-          page !== 'TRAJECTORY' ? rows : view === 'ORBIT' ? [] : rows.slice(0, 2),
-          page !== 'TRAJECTORY' ? null
+          page !== 'TRAJECTORY' || ms ? rows : view === 'ORBIT' ? [] : rows.slice(0, 2),
+          page !== 'TRAJECTORY' || ms ? null
             : view === 'ORBIT' ? scrOrbit : scrProfile);
 
   // right: systems, with a dot per line, because a status list is how a
@@ -7620,7 +7621,7 @@ function cabScreenPaint(sc) {
 // surfaces that carry them — the same decal path the screens use (paint weight
 // 1, sampled from uLiv with the placard texture bound), but built once and
 // never repainted, because a label does not change.
-const DEC_CW = 256, DEC_CH = 128, DEC_NX = 4, DEC_NY = 5;
+const DEC_CW = 256, DEC_CH = 128, DEC_NX = 4, DEC_NY = 7;
 let decCv = null, decTex = null, decBuf = null, decN = 0, decVerts = null;
 // atlas cells, by name
 const DEC = { caution: 0, stow1: 1, stow2: 2, stow3: 3, stow4: 4, stow5: 5,
@@ -7716,6 +7717,10 @@ function decPaint() {
     g.fillText(s, (DEC_CW - fit(s, 40, DEC_CW - 24))/2, DEC_CH/2 + 15);
     g.restore();
   });
+  ['SEAT', 'TIME +', 'TIME −', 'TRAJ', 'HELP', 'LIGHT', 'DISPLAY', 'AUDIO', 'NULL', 'LEVEL'].forEach((label,i) => {
+    cell(18+i, DARK); g.fillStyle=LBL;
+    g.fillText(label, (DEC_CW-fit(label,38,DEC_CW-20))/2, 78); g.restore();
+  });
 }
 function cabDecalInit() {
   if (decCv) return;
@@ -7783,11 +7788,19 @@ function decOnWall(out, i, r0, r1, x0, x1, b0, b1, n) {
 }
 const D2R = Math.PI/180;
 function cabDecalBuild() {
-  // The placards are the capsule's locker-and-rail fit-out; the LM has none of
-  // those rails, so it draws no decals rather than capsule labels floating in a
-  // cylinder. Its console bay legends are the only ones it needs, and those are
-  // painted on the screens themselves.
-  if (isLandingMission()) return;
+  if (isLandingMission()) {
+    const L=landerLayout(MDIA), out=[], n=CAP_FN.length;
+    for(let i=0;i<n;i++) {
+      const z=L.panel.zW*.9*(2*i/(n-1)-1), w=L.panel.zW*1.8/(n-1)*.86;
+      const [u0,u1,v0,v1]=decUV(18+i), x=L.panel.x-.078*L.s;
+      const q=[[[x,2.409*L.s,z-w/2],u0,v1],[[x,2.409*L.s,z+w/2],u1,v1],
+               [[x,2.446*L.s,z+w/2],u1,v0],[[x,2.446*L.s,z-w/2],u0,v0]];
+      for(const tri of [[0,1,2],[0,2,3]]) for(const j of tri)
+        out.push(...q[j][0],-1,0,0,1,1,1,q[j][1],q[j][2],1);
+    }
+    decVerts=new Float32Array(out); decBuf=buffer(decVerts); decN=out.length/VST;
+    return;
+  }
   const K = cabK();
   if (!K) return;
   const rp = K.rp, Lc = K.Lc;
@@ -7982,7 +7995,7 @@ function fmtEta(dt) {
   return (dt/86400).toFixed(2) + ' d';
 }
 function cabRows(sc, page) {
-  const st = sc.st, cs = sc.cs, es = sc.es;
+  const st = sc.st, cs = sc.cs, es = sc.es, ms = sc.ms;
   const km = m => !isFinite(m) ? '—' :
     Math.abs(m) < 1e4 ? m.toFixed(0) + ' m' : (m/1000).toFixed(1) + ' km';
   const deg = a => (a*180/Math.PI).toFixed(1) + '°';
@@ -8013,17 +8026,16 @@ function cabRows(sc, page) {
     // reached orbit — so it goes here instead of another word that says
     // NOMINAL. A display that reports a system it does not model is not a
     // display, it is a picture of one.
-    const mkg = st ? st.m : (run.metrics && run.metrics.prop_margin_kg !== undefined
-                             ? NaN : NaN);
+    const mkg = ms ? ms.m : st ? st.m : craftInertia(simT).M;
     return [['LIGHTS', CAB_LIGHTS[cabLight].n], ['ATT RATE', rate],
             ['CLOCK', warpEff > 1.5 ? '×' + Math.round(warpEff) : 'REAL'],
-            ['CREW', !CAB.live ? 'STOWED'
-                     : CAB.seat !== null ? 'STRAPPED IN' : 'FREE'],
-            ['STACK', isFinite(mkg) ? (mkg/1000).toFixed(1) + ' t' :
-                      LASTST ? 'KICK + POD' : 'POD'],
+            ['CREW', EVA.active || SURF.active ? 'EVA' : CAB.seat !== null ? 'STRAPPED IN' : 'FREE'],
+            [isLandingMission() ? 'VEH MASS' : 'STACK', isFinite(mkg) ? (mkg/1000).toFixed(1)+' t' : '—'],
             nextRow];
   }
   if (page === 'TRAJECTORY') {
+    if (ms) return [['TO SITE', km(ms.dr)], ['TERRAIN', km(ms.elev)],
+                    ['NAV ERROR', km(ms.navdh)], ['HORIZ VEL', ms.vh.toFixed(1)+' m/s'], nextRow];
     if (cs) {
       const ap = apsides(cs.pos, cs.vel);
       // the period is what turns two altitudes into an orbit you can plan in
@@ -8044,6 +8056,9 @@ function cabRows(sc, page) {
                        ? fmtEta(Math.max(0, tSplash - simT)) : '—'], nextRow];
     return [['STANDBY', '—']];
   }
+  if (ms) return [['ALTITUDE', km(ms.h)], ['SINK RATE', (-ms.vv).toFixed(1)+' m/s'],
+                  ['HORIZ VEL', ms.vh.toFixed(1)+' m/s'], ['THROTTLE', (100*ms.thr).toFixed(0)+'%'],
+                  ['PROP LEFT', Math.max(0,ms.m-Number(run.params?.l_dry || 3500)).toFixed(0)+' kg'], nextRow];
   if (st) return [['ALTITUDE', km(st.h)], ['VELOCITY', st.v.toFixed(0) + ' m/s'],
                   ['ACCEL', (st.m > 0 ? st.thr/st.m/9.81 : 0).toFixed(2) + ' g'],
                   ['DYN PRESS', st.q.toFixed(1) + ' kPa'], nextRow];
@@ -10275,6 +10290,7 @@ async function boot() {
       'geometry');
     VEHNAME = vehName(geo.name);
     MDIA = geo.payload?.diameter_m || 4.2;
+    $('modelslink').href=geo.payload?.kind==='bus' ? '/models' : '/models?craft='+(isLandingMission()?'lander':'capsule')+'&diameter='+MDIA;
     $('ov_title').textContent = VEHNAME;
     document.title = VEHNAME + ' — mission';
     await step('plotting the trajectory…');

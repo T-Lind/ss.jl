@@ -1,34 +1,34 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ss.jl · Model inspector</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ss.jl · Spacecraft viewer</title>
 <link rel="stylesheet" href="./static/tokens.css">
+<script type="module" src="./static/version.js"></script>
 <style>
-  *{box-sizing:border-box} body{margin:0;background:var(--ground,#101317);color:var(--text,#ddd);font:14px/1.5 system-ui,sans-serif}
-  main{max-width:1280px;margin:auto;padding:24px} a{color:#9acada} h1{font-size:23px;margin:14px 0 4px}
-  p{color:#9daab4;max-width:900px} .bar{display:flex;gap:16px;flex-wrap:wrap;align-items:end;margin:20px 0}
-  label{display:grid;gap:5px;font-size:12px;color:#aebac4} select,input,button{background:#202930;color:#e4edf3;border:1px solid #465764;border-radius:5px;padding:9px;font:inherit}
-  input{width:110px} button{cursor:pointer} button:focus-visible,a:focus-visible,canvas:focus-visible{outline:2px solid #82d7ea;outline-offset:3px}
-  canvas{width:100%;height:min(68vh,740px);min-height:340px;display:block;border:1px solid #34444f;border-radius:8px;touch-action:none}
-  #status{font:12px/1.5 monospace;color:#9dd1e1;margin:12px 0} #error{color:#ffab87}
-  .hint{font-size:12px} [hidden]{display:none!important}
-</style>
-</head>
-<body><main>
-<nav><a href="./">Mission control</a> · <a href="build_page.html">Vehicle builder</a></nav>
-<h1>Model inspector</h1>
-<p>Explore the modern two-person lunar lander and rocket engine mounts without running a mission. The lander is an original concept. The engine view cuts away the tank barrel to expose the thrust structure.</p>
+ *{box-sizing:border-box} body{margin:0;background:var(--ground);color:var(--text);font:14px/1.5 var(--sans)}
+ main{max-width:1280px;margin:auto;padding:24px} h1{font-size:23px;margin:14px 0 4px}
+ p{color:var(--text-2);max-width:900px} .bar{display:flex;gap:16px;flex-wrap:wrap;align-items:end;margin:20px 0}
+ label{display:grid;gap:5px;font-size:12px;color:var(--text-2)} select,input,button{background:var(--raise);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:9px;font:inherit}
+ input{width:110px} button{cursor:pointer} button:disabled{opacity:.5;cursor:default} button:focus-visible,a:focus-visible,canvas:focus-visible{outline:2px solid var(--amber);outline-offset:3px}
+ canvas{width:100%;height:min(65vh,740px);min-height:340px;display:block;border:1px solid var(--line);border-radius:8px;touch-action:none}
+ #status{font:12px/1.5 var(--mono);color:var(--text-2);margin:12px 0} #error{color:var(--failed)}
+ .hint{font-size:12px} [hidden]{display:none!important}
+</style></head><body>
+<nav class="appnav"><span class="appnav-brand">ss<span class="dot">.</span>jl</span><span class="appnav-links">
+<a class="navlink" href="./">mission control</a><a class="navlink" href="build_page.html">vehicle builder</a>
+<a class="navlink" href="analysis_page.html">analysis</a><a class="navlink" href="launch_page.html">launch view</a>
+<a class="navlink" href="#" aria-current="page">spacecraft viewer</a></span></nav>
+<main><h1>Spacecraft viewer</h1>
+<p>Inspect the capsule or lunar lander before flying. Compare the exterior with the crew's view, check the windows and hatch, and explore each crew station. No mission run is needed.</p>
 <div class="bar">
-  <label>View<select id="model"><option value="lander">Lander exterior</option><option value="cabin">Crew cockpit</option><option value="engines">Engine mount</option></select></label>
-  <label>Diameter (m)<input id="diameter" type="number" min="1" max="20" step="0.1" value="4.2"></label>
-  <label id="engine-field" hidden>Engines<select id="count"><option>1</option><option>5</option><option>6</option><option>9</option><option>13</option><option selected>33</option></select></label>
-  <button id="reset" type="button">Reset camera</button>
-  <button id="export" type="button">Save PNG</button>
+<label>Spacecraft<select id="craft"><option value="capsule">Capsule</option><option value="lander">Lunar lander</option></select></label>
+<label>View<select id="model"><option value="exterior">Exterior</option><option value="cabin">Cockpit</option></select></label>
+<label><span id="diameter_label">Body diameter (m)</span><input id="diameter" type="number" min="1.1" max="20" step="0.1" value="3.66"></label>
+<label id="station_field" hidden>Crew station<select id="station"></select></label>
+<button id="reset" type="button">Reset camera</button><button id="export" type="button">Save PNG</button>
 </div>
-<canvas id="view" tabindex="0" aria-label="Interactive model. Drag or use arrow keys to rotate. Plus and minus zoom. R resets the camera."></canvas>
+<canvas id="view" tabindex="0" aria-label="Interactive spacecraft. Drag or use arrow keys to rotate. Plus and minus zoom. R resets the camera."></canvas>
 <div id="error" role="alert"></div><div id="status" role="status"></div>
-<p class="hint">Drag to orbit or look around the cockpit. Scroll or use + / − to zoom. Arrow keys rotate; R resets. Cockpit displays are preview placeholders; flight telemetry appears in the launch viewer.</p>
-</main><script type="module" src="./static/model_inspector.js"></script></body>
-</html>
+<p class="hint">Drag to orbit the exterior or look around the cockpit. Scroll or use + / − to zoom. Arrow keys rotate; R resets. Preview dimensions are independent of your vehicle settings. Cockpit controls are operated in the launch view.</p>
+</main><script type="module" src="./static/model_inspector.js"></script></body></html>

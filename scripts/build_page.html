@@ -103,7 +103,7 @@
     <a class="navlink" href="/build" aria-current="page">vehicle builder</a>
     <a class="navlink" id="analysislink" href="/analysis">analysis</a>
     <a class="navlink" id="flylink" href="/launch">launch view</a>
-    <a class="navlink" href="/models">model inspector</a>
+    <a class="navlink" id="modelslink" href="/models">spacecraft viewer</a>
   </span>
   <!-- short on purpose: uppercase and letterspaced, this slot can carry about
        four words before it stops being a caption and starts being a headline
@@ -560,6 +560,8 @@ function saveVehicle() {
   vehicle.markDirty('the vehicle changed in the builder');
 }
 function refreshLinks() {
+  const landing=landingMode(), d=landing ? +$('l_diameter').value : (+$('pod_dia').value || 2*podR(spacecraftKg()));
+  $('modelslink').href=!landing && isBus() ? '/models' : '/models?craft='+(landing?'lander':'capsule')+'&diameter='+d;
   $('backlink').href = '/?' + params();
   // The launch view and the analysis page READ a flown trajectory; neither
   // takes a vehicle and starts one. Linking them with this form's
@@ -1050,13 +1052,15 @@ const cargoKg = () => Math.max(0, +$('cargo_mass').value || 0);
 const payloadKg = () => spacecraftKg() + cargoKg();
 
 function payloadUI() {
-  const bus = isBus();
-  $('pod_mass_box').hidden = bus;
-  $('bus_mass_box').hidden = !bus;
+  const bus = isBus(), landing=landingMode();
+  for(const id of ['payload_kind','cargo_mass','pod_dia']) $(id).parentElement.hidden=landing;
+  $('podpresets').hidden=landing;
+  $('pod_mass_box').hidden = bus || landing;
+  $('bus_mass_box').hidden = !bus || landing;
   // A bus has no crew, so the control that says whether it does is noise. The
-  // capsule presets stay visible either way — they are the only size reference
-  // the page has, and a bus is still a body with a diameter.
-  $('crewed_box').hidden = bus;
+  // capsule presets provide size references for buses too. Lunar missions
+  // use the lander card, so capsule settings stay hidden for those missions.
+  $('crewed_box').hidden = bus || landing;
 }
 // Capsule radius from mass, the same r = 0.086*m^(1/3) the mesh is built on
 // (see pod_radius in mesh.jl), so the box says what the model will do before
@@ -1266,7 +1270,7 @@ window.__selftest = function () {
   // mention. A capsule diameter stated for one vehicle must not follow you to
   // the next: it sets the stack's reference area, so carrying 5.02 m onto a
   // 1.8 m Sable silently flew the wrong drag.
-  const podDiaWas = $('pod_dia').value, presetWas = $('vname').value;
+  const formWas=Object.fromEntries(params()), stagesWas=NSTAGES;
   eq('a preset clears a pod diameter it does not state', () => {
     $('pod_dia').value = '5.02';
     applyPreset('Sable (reference)');
@@ -1280,8 +1284,10 @@ window.__selftest = function () {
     applyPreset('Sable (reference)');       // states pod_mass, not fairing_on
     return $('fairing').value;
   }, '150');
-  $('pod_dia').value = podDiaWas;
-  if (VEHICLES[presetWas]) applyPreset(presetWas);
+  NSTAGES=stagesWas;
+  $('nboost').value=formWas.nboost;
+  buildStages(formWas); buildBoost(formWas); setVals(formWas);
+  payloadUI(); crewNote(); podNote(); syncLocks(); fetchGeo();
 
   // This page's own copy of fmt had no null check, and the server sends a
   // NaN dimension as JSON null — so an unbuildable stack reported "0.0 m"
