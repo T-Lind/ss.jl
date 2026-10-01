@@ -1,3 +1,4 @@
+import { juliaGolden } from './julia_golden.mjs';
 // Parity for the panel's payload layer: the browser builds the same objects
 // scripts/panelapp.jl serialised. Four missions (flyby, orbit, suborbital,
 // landing) and two vehicles' rocket_geometry are compared structurally.
@@ -9,12 +10,10 @@
 // floating-point operations, tight enough that a wrong constant shows.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { panelRun, panelGeometry } from '../src/panel.js';
+import { engineCluster } from '../static/engine_layout.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'web', 'parity', 'emit_panel.jl');
@@ -34,6 +33,8 @@ const MISSIONS = {
 };
 
 const GEOMETRY = {
+  boosters: {nstages:'3',nboost:'2',diameter:'1.8',b_engines:'5',b_prop:'12000',b_diameter:'1.1'},
+  lander: MISSIONS.landing,
   sable: { nstages: '3', nboost: '0', diameter: '1.8' },
   falcon: {
     nstages: '3', nboost: '0', diameter: '3.7', payload_kind: 'bus', bus_mass: '200',
@@ -43,18 +44,7 @@ const GEOMETRY = {
   },
 };
 
-function golden() {
-  const dir = mkdtempSync(join(tmpdir(), 'ssjl-panel-'));
-  try {
-    const out = join(dir, 'golden.json');
-    const r = spawnSync('julia', ['--project=' + root, script, out],
-                        { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 1_200_000 });
-    if (r.error || r.status !== 0) { if (r.stderr) process.stderr.write(r.stderr); return null; }
-    return JSON.parse(readFileSync(out, 'utf8'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+const golden = () => juliaGolden(script);
 
 const RTOL = 1e-5;
 const ATOL = 1e-3;
@@ -107,4 +97,10 @@ test('panel rocket_geometry matches Julia', t => {
   if (!g) return t.skip('julia not available');
   for (const [name, params] of Object.entries(GEOMETRY))
     assertClose(panelGeometry(params), g.geometry[name], name);
+});
+
+test('every packed engine position and radius matches Julia', t => {
+  if (!g) return t.skip('julia not available');
+  for (const [n, pts] of Object.entries(g.engine_clusters))
+    assertClose(engineCluster(+n,3.6,.945),pts,`engine cluster ${n}`);
 });

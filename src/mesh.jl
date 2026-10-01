@@ -208,10 +208,43 @@ end
 Lay out `n` engine bells inside radius `rmax`, packed so they do not
 overlap: one on the axis, a plain ring, or a ring around a centre engine
 once there are five or more and the count is odd (the octaweb arrangement).
-Bells shrink as the count grows, which is what real clusters do.
+Large clusters use multiple rings; the 33-engine concept has 13 inner
+engines and 20 perimeter engines. Radius is limited by all pair distances.
 """
 function _cluster(n::Int, rmax::Float64, rb_max::Float64)
-    n <= 1 && return [(0.0, 0.0, rb_max)]
+    n <= 1 && return [(0.0, 0.0, min(rb_max, rmax))]
+    if n >= 13
+        points = Tuple{Float64,Float64}[]
+        function ring!(m, r, phase = 0.0)
+            for i in 0:(m - 1)
+                a = 2pi * i / m + phase
+                push!(points, (r * cos(a), r * sin(a)))
+            end
+        end
+        if n == 33
+            ring!(3, 0.18rmax)
+            ring!(10, 0.47rmax, pi / 10)
+            ring!(20, 0.83rmax, pi / 20)
+        else
+            push!(points, (0.0, 0.0))
+            nr = ceil(Int, (sqrt(1 + 4 * (n - 1) / 3) - 1) / 2)
+            left = n - 1
+            for j in 1:nr
+                m = j == nr ? left : min(6j, left)
+                ring!(m, rmax * j / (nr + 0.5), pi / m)
+                left -= m
+            end
+        end
+        rb = rb_max
+        for i in eachindex(points)
+            y, z = points[i]
+            rb = min(rb, rmax - hypot(y, z))
+            for j in 1:(i - 1)
+                rb = min(rb, 0.46hypot(y - points[j][1], z - points[j][2]))
+            end
+        end
+        return [(y, z, rb) for (y, z) in points]
+    end
     centre = isodd(n) && n >= 5
     m = centre ? n - 1 : n
     s = sin(pi / m)
@@ -1129,30 +1162,73 @@ section; the dedicated lunar scene may replace it with its more detailed
 animated lander after separation.
 """
 function _lander_payload_mesh(diameter::Float64; nseg::Int = 32)
-    d = diameter
+    # Closed engineering envelope of the modern viewer concept. The viewer
+    # adds thermal panels, window frames and cabin furnishings to this solid.
+    scale = diameter / 4.2
+    v(x, y, z) = (scale * y, -scale * x, scale * z) # y-up -> nose +x
     parts = TriMesh[]
-    # descent stage and ascent cabin
-    push!(parts, lathe_mesh([(0.0, 0.0), (0.0, 0.25d), (0.08d, 0.32d),
-                            (0.38d, 0.32d), (0.48d, 0.23d), (0.52d, 0.0)];
-                           nseg = nseg))
-    push!(parts, lathe_mesh([(0.42d, 0.0), (0.42d, 0.21d), (0.73d, 0.21d),
-                            (0.84d, 0.12d), (0.88d, 0.0)]; nseg = nseg))
-    push!(parts, _bell_mesh(0.0, 0.13d, 0.10d, 0.045d, 0.0, 0.0;
-                            nseg = max(16, nseg ÷ 2)))
-    # Four landing legs and broad footpads make the payload visually and
-    # physically wider than its pressure vessels—the diameter is the envelope.
-    for sg in (-1.0, 1.0)
-        y0, y1 = minmax(sg * 0.23d, sg * 0.48d)
-        push!(parts, box_mesh((0.10d, y0, -0.025d), (0.18d, y1, 0.025d)))
-        push!(parts, box_mesh((0.06d, sg * 0.48d - 0.06d, -0.08d),
-                              (0.11d, sg * 0.48d + 0.06d, 0.08d)))
-        z0, z1 = minmax(sg * 0.23d, sg * 0.48d)
-        push!(parts, box_mesh((0.10d, -0.025d, z0), (0.18d, 0.025d, z1)))
-        push!(parts, box_mesh((0.06d, -0.08d, sg * 0.48d - 0.06d),
-                              (0.11d, 0.08d, sg * 0.48d + 0.06d)))
+    function box(c, size)
+        lo = v(c[1] + size[1]/2, c[2] - size[2]/2, c[3] - size[3]/2)
+        hi = v(c[1] - size[1]/2, c[2] + size[2]/2, c[3] + size[3]/2)
+        push!(parts, box_mesh(lo, hi))
     end
-    parts, 0.88d
+    function rod(a, b, radius)
+        p, q = v(a...), v(b...)
+        ax = vunit(vsub(q, p))
+        side = vunit(vcross(ax, abs(ax[2]) > 0.9 ? (1.0,0.0,0.0) : (0.0,1.0,0.0)))
+        up = vcross(ax, side)
+        len = vnorm(vsub(q, p)); r = radius * scale
+        m = lathe_mesh([(0.0,0.0),(0.0,r),(len,r),(len,0.0)]; nseg = 10)
+        f(t) = vadd(p, vadd(vscale(ax,t[1]), vadd(vscale(side,t[2]),vscale(up,t[3]))))
+        push!(parts, TriMesh([(f(t[1]),f(t[2]),f(t[3])) for t in m.tris]))
+    end
+    push!(parts, lathe_mesh([(0.82scale,0.0),(0.82scale,1.28scale),
+        (1.62scale,1.34scale),(1.74scale,1.34scale),(1.74scale,0.0)]; nseg = 8))
+    push!(parts, _bell_mesh(0.34scale,0.64scale,0.43scale,0.16scale,0.0,0.0; nseg = 24))
+    yz = [(1.83,-0.91),(1.97,-1.05),(3.86,-1.05),(4.14,-0.77),
+          (4.14,0.77),(3.86,1.05),(1.97,1.05),(1.83,0.91)]
+    tris = NTuple{3,V3}[]
+    for i in 1:8
+        j = mod1(i + 1,8)
+        a, b, c, d = v(-0.98,yz[i]...),v(-0.98,yz[j]...),v(1.06,yz[j]...),v(1.06,yz[i]...)
+        append!(tris, [(a,b,c),(a,c,d), (v(-0.98,2.98,0.0),b,a),
+                       (v(1.06,2.98,0.0),d,c)])
+    end
+    push!(parts, ensure_outward(TriMesh(tris)))
+    box((-1.11,2.92,0.0),(0.26,1.65,1.50))
+    for z in (-0.53,0.53)
+        box((1.087,3.49,z),(0.045,0.725,0.805))
+    end
+    box((1.11,2.22,0.0),(0.06,0.72,0.63))
+    box((1.36,1.80,0.0),(0.56,0.07,0.66))
+    for k in 0:3
+        a = pi/4 + k*pi/2; cx, cz = cos(a),sin(a)
+        hip, ankle = (cx*1.13,1.52,cz*1.13),(cx*1.84,0.17,cz*1.84)
+        rod(hip,ankle,0.065)
+        rod(ankle,(ankle[1],0.105,ankle[3]),0.065)
+        knee = ntuple(i -> hip[i] + 0.47*(ankle[i]-hip[i]),3)
+        for sign in (-1,1)
+            aa = a + sign*0.33
+            rod((cos(aa)*0.91,0.88,sin(aa)*0.91),knee,0.034)
+        end
+        pad = lathe_mesh([(0.0,0.0),(0.0,0.26scale),(0.105scale,0.20scale),(0.105scale,0.0)]; nseg = 20)
+        push!(parts, _translate_mesh(pad,(0.0,-scale*ankle[1],scale*ankle[3])))
+    end
+    for z in (-0.27,0.27)
+        rod((1.33,1.80,z),(1.78,0.15,z),0.025)
+    end
+    for i in 0:8
+        f = i/8; rod((1.33+0.45f,1.80-1.65f,-0.27),(1.33+0.45f,1.80-1.65f,0.27),0.02)
+    end
+    for sign in (-1,1)
+        rod((-0.51,2.07,sign*1.22),(-0.51,3.38,sign*1.22),0.20)
+    end
+    push!(parts, lathe_mesh([(4.14scale,0.0),(4.14scale,0.33scale),
+        (4.37scale,0.33scale),(4.37scale,0.40scale),(4.42scale,0.40scale),(4.42scale,0.0)]; nseg = 24))
+    rod((-0.66,4.06,0.53),(-0.66,4.72,0.53),0.025)
+    parts, 4.72scale
 end
+
 """
     rocket_mesh(; diameter, diameters, prop_masses, densities, n_engines,
                   fairing_len, nseg) -> (mesh, sections)
@@ -1165,7 +1241,8 @@ interstage collars with a nested vacuum bell on every upper stage, cable
 raceways, RCS pods and a payload adapter cone on the kick stage, a crew
 capsule (see [`pod_mesh`](@ref)) on the adapter, and an ogive fairing
 enclosing both. Body +x is the nose axis; the tail plate sits at x = 0 with
-the first-stage bells extending to x ≈ -0.32·diameter.
+the first-stage bell throats recessed into that plate at x = 0.08·diameter.
+Their exit planes follow the packed bell radius, so high-count clusters stay attached.
 
 Each piece is a closed solid, so `sections` carries both the axial extent
 and the triangle range of every component in the merged soup:
@@ -1251,11 +1328,12 @@ function rocket_mesh(; diameter::Float64 = 1.8,
             ltap > 0 && push!(prof1, (xtop, rj))
             push!(prof1, (xtop, 0.0))
             push!(ms, lathe_mesh(prof1; nseg = nseg))
-            for (by, bz, bs) in _cluster(ne, 0.80r, 0.105D)
-                push!(ms, _bell_mesh(-0.32D, 4.0bs, bs, 0.48bs, by, bz; nseg = nb))
+            bells = _cluster(ne, 0.80r, 0.105D)
+            for (by, bz, bs) in bells
+                push!(ms, _bell_mesh(0.08D - 4.0bs, 4.0bs, bs, 0.48bs, by, bz; nseg = nb))
             end
             push!(ms, raceway(0.30D, x + len - 0.02D, r, D))
-            finish!(:stage1, -0.32D, xtop, ms)
+            finish!(:stage1, min(0.0, 0.08D - 4.0bells[1][3]), xtop, ms)
         else
             # Interstage collar: tucked inside whatever the stage below ends
             # at, then opened out to this stage's own radius.
@@ -1362,8 +1440,9 @@ function rocket_mesh(; diameter::Float64 = 1.8,
         end
         push!(bprof, (xn + 1.75rb, 0.0))
         one = TriMesh[lathe_mesh(bprof; nseg = max(16, nseg ÷ 2))]
-        for (by, bz, bs) in _cluster(b.n_engines, 0.78rb, 0.105db)
-            push!(one, _bell_mesh(-0.30db, 3.6bs, bs, 0.46bs, by, bz; nseg = nb))
+        bells = _cluster(b.n_engines, 0.78rb, 0.105db)
+        for (by, bz, bs) in bells
+            push!(one, _bell_mesh(0.08db - 3.6bs, 3.6bs, bs, 0.46bs, by, bz; nseg = nb))
         end
         R = r1 + rb                                  # flank of the core, touching
         set = TriMesh[]
@@ -1372,7 +1451,7 @@ function rocket_mesh(; diameter::Float64 = 1.8,
             sh = (0.0, R * cos(a), R * sin(a))
             append!(set, (_place_mesh(m; roll = a, shift = sh) for m in one))
         end
-        finish!(Symbol(:booster, bi), -0.30db, xn + 1.75rb, set)
+        finish!(Symbol(:booster, bi), min(0.0, 0.08db - 3.6bells[1][3]), xn + 1.75rb, set)
     end
     (merge_meshes(parts...), sections)
 end

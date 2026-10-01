@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ss.jl · Model inspector</title>
+<link rel="stylesheet" href="./static/tokens.css">
+<style>
+  *{box-sizing:border-box} body{margin:0;background:var(--ground,#101317);color:var(--text,#ddd);font:14px/1.5 system-ui,sans-serif}
+  main{max-width:1280px;margin:auto;padding:24px} a{color:#9acada} h1{font-size:23px;margin:14px 0 4px}
+  p{color:#9daab4;max-width:900px} .bar{display:flex;gap:16px;flex-wrap:wrap;align-items:end;margin:20px 0}
+  label{display:grid;gap:5px;font-size:12px;color:#aebac4} select,input,button{background:#202930;color:#e4edf3;border:1px solid #465764;border-radius:5px;padding:9px;font:inherit}
+  input{width:110px} button{cursor:pointer} button:focus-visible,a:focus-visible,canvas:focus-visible{outline:2px solid #82d7ea;outline-offset:3px}
+  canvas{width:100%;height:min(68vh,740px);min-height:340px;display:block;border:1px solid #34444f;border-radius:8px;touch-action:none}
+  #status{font:12px/1.5 monospace;color:#9dd1e1;margin:12px 0} #error{color:#ffab87}
+  .hint{font-size:12px} [hidden]{display:none!important}
+</style>
+</head>
+<body><main>
+<nav><a href="./">Mission control</a> · <a href="build_page.html">Vehicle builder</a></nav>
+<h1>Model inspector</h1>
+<p>Explore the modern two-person lunar lander and rocket engine mounts without running a mission. The lander is an original concept. The engine view cuts away the tank barrel to expose the thrust structure.</p>
+<div class="bar">
+  <label>View<select id="model"><option value="lander">Lander exterior</option><option value="cabin">Crew cockpit</option><option value="engines">Engine mount</option></select></label>
+  <label>Diameter (m)<input id="diameter" type="number" min="1" max="20" step="0.1" value="4.2"></label>
+  <label id="engine-field" hidden>Engines<select id="count"><option>1</option><option>5</option><option>6</option><option>9</option><option>13</option><option selected>33</option></select></label>
+  <button id="reset" type="button">Reset camera</button>
+  <button id="export" type="button">Save PNG</button>
+</div>
+<canvas id="view" tabindex="0" aria-label="Interactive model. Drag or use arrow keys to rotate. Plus and minus zoom. R resets the camera."></canvas>
+<div id="error" role="alert"></div><div id="status" role="status"></div>
+<p class="hint">Drag to orbit or look around the cockpit. Scroll or use + / − to zoom. Arrow keys rotate; R resets. Cockpit displays are preview placeholders; flight telemetry appears in the launch viewer.</p>
+</main><script type="module" src="./static/model_inspector.js"></script></body>
+</html>

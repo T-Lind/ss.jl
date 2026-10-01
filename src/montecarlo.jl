@@ -71,6 +71,7 @@ Threaded Monte Carlo around nominal scenario `scn`.
 """
 function run_montecarlo(scn::Scenario, disp::Dispersions = Dispersions();
                         n::Int = 300, seed::Int = 2026)
+    n >= 0 || throw(ArgumentError("sample count must be nonnegative"))
     out = Vector{MCSample}(undef, n)
     Threads.@threads for i in 1:n
         rng = Xoshiro(seed + i)
@@ -95,13 +96,25 @@ Splashdown dispersion statistics: mean point, miss stats, CEP50, and the
 """
 function mc_statistics(samples::Vector{MCSample})
     ok = [s for s in samples if s.terminated == :splashdown]
+    if isempty(ok)
+        return (n_ok = 0, n_fail = length(samples), mean_lat = NaN, mean_lon = NaN,
+                mean_miss_km = NaN, max_miss_km = NaN, cep50_km = NaN, r95_km = NaN,
+                sigma_major_km = NaN, sigma_minor_km = NaN, ellipse_angle_deg = NaN,
+                mean_peak_g = NaN, mean_heat_MJm2 = NaN)
+    end
     lat = [s.lat_deg for s in ok]; lon = [s.lon_deg for s in ok]
-    miss = [s.miss_km for s in ok]
-    mlat, mlon = mean(lat), mean(lon)
+    miss = [s.miss_km for s in ok if isfinite(s.miss_km)]
+    mlat = mean(lat)
+    # Longitude is circular: 179.9 E and 179.9 W are neighbours.
+    reference_lon = rad2deg_(atan(mean(sind.(lon)), mean(cosd.(lon))))
+    # Unwrap about that reference, then take the arithmetic centroid so the
+    # local offsets used by the covariance have zero mean.
+    mlon = rem(reference_lon + mean(rem.(lon .- reference_lon, 360.0, RoundNearest)),
+               360.0, RoundNearest)
     # local km per degree at the mean latitude
     kx = RE_MEAN * pi / 180 * cosd(mlat) / 1000   # per deg lon
     ky = RE_MEAN * pi / 180 / 1000                # per deg lat
-    dx = (lon .- mlon) .* kx
+    dx = rem.(lon .- mlon, 360.0, RoundNearest) .* kx
     dy = (lat .- mlat) .* ky
     cxx, cyy, cxy = mean(dx .^ 2), mean(dy .^ 2), mean(dx .* dy)
     tr = cxx + cyy; det_ = cxx * cyy - cxy^2
@@ -112,7 +125,8 @@ function mc_statistics(samples::Vector{MCSample})
     r = sqrt.(dx .^ 2 + dy .^ 2)
     (n_ok = length(ok), n_fail = length(samples) - length(ok),
      mean_lat = mlat, mean_lon = mlon,
-     mean_miss_km = mean(miss), max_miss_km = maximum(miss),
+     mean_miss_km = isempty(miss) ? NaN : mean(miss),
+     max_miss_km = isempty(miss) ? NaN : maximum(miss),
      cep50_km = median(r), r95_km = quantile(sort(r), 0.95),
      sigma_major_km = sqrt(max(0.0, l1)), sigma_minor_km = sqrt(max(0.0, l2)),
      ellipse_angle_deg = rad2deg_(theta),

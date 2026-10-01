@@ -1,32 +1,19 @@
+import { juliaGolden } from './julia_golden.mjs';
 // Parity: the browser port must reproduce the Julia core bit-for-bit to
 // floating-point tolerance. Julia generates the reference on the fly so the
 // two can never drift apart unnoticed. If Julia is not installed the parity
 // tests skip rather than fail — the port itself has no Julia dependency.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { atmosphere_state, USSA76 } from '../src/atmosphere.js';
 import { gravity_accel, j2Gravity } from '../src/gravity.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'web', 'parity', 'emit_parity.jl');
 
-function golden() {
-  const dir = mkdtempSync(join(tmpdir(), 'ssjl-parity-'));
-  try {
-    const out = join(dir, 'golden.json');
-    const r = spawnSync('julia', ['--project=' + root, script, out],
-                        { encoding: 'utf8' });
-    if (r.error || r.status !== 0) return null;
-    return JSON.parse(readFileSync(out, 'utf8'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+const golden = () => juliaGolden(script);
 
 function close(got, want, what, rtol = 1e-9) {
   if (!Number.isFinite(want)) { assert.ok(!Number.isFinite(got), `${what}: expected ${want}, got ${got}`); return; }

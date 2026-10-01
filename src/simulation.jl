@@ -64,6 +64,7 @@ Run a scenario to splashdown (geodetic altitude 0) or `scn.t_max`.
 Logging is decimated to roughly the requested cadences.
 """
 function simulate(scn::Scenario; log_dt_orbit::Float64 = 5.0, log_dt_entry::Float64 = 0.5)
+    _validate_simulation(scn, log_dt_orbit, log_dt_entry)
     x = initial_state(scn)
     xnew = similar(x)
     w = RK4Work(length(x))
@@ -91,13 +92,19 @@ function simulate(scn::Scenario; log_dt_orbit::Float64 = 5.0, log_dt_entry::Floa
         d
     end
 
-    record!(t)
+    initial = record!(t)
+    peak_g = initial.gload
+    peak_qdot = initial.qdot_conv + initial.qdot_rad
+    peak_qbar = ctx.entered ? initial.qbar : 0.0
 
     while t < scn.t_max
         chutes_out = any_chute_deployed(ctx)
         dt = !ctx.entered ? scn.dt_orbit : (chutes_out ? scn.dt_descent : scn.dt_entry)
+        dt = min(dt, scn.t_max - t)
+        t + dt > t || throw(ArgumentError("integration step cannot advance time at this epoch"))
 
         rk4_step!(xnew, x, t, dt, w, scn, ctx)
+        all(isfinite, xnew) || error("non-finite reentry state at t=$(t + dt)")
         hnew = _altitude(xnew, scn, t + dt)
 
         # --- entry interface crossing: bisect to the EI altitude ------------
@@ -165,6 +172,11 @@ function simulate(scn::Scenario; log_dt_orbit::Float64 = 5.0, log_dt_entry::Floa
             record!(t)
             next_log += log_dt_orbit
         end
+    end
+
+    # Even a metrics-only run retains its actual final state on timeout.
+    if terminated == :timeout && L.t[end] != t
+        record!(t)
     end
 
     miss = if !isnan(scn.target_lat) && terminated == :splashdown

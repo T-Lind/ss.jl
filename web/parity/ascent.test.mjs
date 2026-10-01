@@ -1,3 +1,4 @@
+import { juliaGolden } from './julia_golden.mjs';
 // Parity for the ascent.
 //
 // Unlike the reentry (dissipative, matched to 1e-8 over 3800 samples), a
@@ -8,31 +9,15 @@
 // asserted tightly.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { default_moon_rocket } from '../src/propulsion.js';
 import { ascentGuidance, tune_ascent, simulate_ascent } from '../src/launch.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'web', 'parity', 'emit_ascent.jl');
 
-function golden() {
-  const dir = mkdtempSync(join(tmpdir(), 'ssjl-ascent-'));
-  try {
-    const out = join(dir, 'golden.json');
-    const r = spawnSync('julia', ['--project=' + root, script, out], { encoding: 'utf8' });
-    if (r.error || r.status !== 0) {
-      if (r.stderr) process.stderr.write(r.stderr);
-      return null;
-    }
-    return JSON.parse(readFileSync(out, 'utf8'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+const golden = () => juliaGolden(script);
 
 function close(got, want, what, [rtol, atol]) {
   if (!Number.isFinite(want)) { assert.ok(!Number.isFinite(got), `${what}: ${got} != ${want}`); return; }

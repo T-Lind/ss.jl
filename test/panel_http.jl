@@ -311,7 +311,7 @@ end
         #
         # There is no browser here to prove that with, so the assertion is on
         # the thing that caused it: no in-app link opens a new window.
-        for page in ("/", "/build", "/analysis", "/launch")
+        for page in ("/", "/build", "/analysis", "/launch", "/models", "/models?view=cabin")
             st, hdrs, bod = http("GET", page; port = port)
             @test st == 200
             @test !occursin("target=\"_blank\"", bod)
@@ -512,7 +512,8 @@ end
         # with the wrong media type is refused by the browser outright, and
         # the console blames CORS, so the content type is asserted.
         for name in ("fmt.js", "api.js", "vehicle.js", "selftest.js",
-                     "charts.js", "groundtrack.js", "groundstation.js", "metrics.js")
+                     "charts.js", "groundtrack.js", "moongroundtrack.js", "metrics.js",
+                     "lander_model.js", "engine_layout.js", "engine_model.js")
             st, hdrs, bod = http("GET", "/static/$name"; port = port)
             @test st == 200
             @test hdrs["content-type"] == "text/javascript; charset=utf-8"

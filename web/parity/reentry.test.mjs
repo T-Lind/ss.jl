@@ -1,12 +1,10 @@
+import { juliaGolden } from './julia_golden.mjs';
 // End-to-end parity for the original LEO reentry mission: the JS port must
 // reproduce Julia's tuned deorbit elements, trajectory log, events and summary.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { default_reentry_pod } from '../src/vehicle.js';
 import { deorbitElements, target_deorbit, scenario_from_elements } from '../src/scenarios.js';
 import { simulate } from '../src/simulation.js';
@@ -14,21 +12,7 @@ import { simulate } from '../src/simulation.js';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'web', 'parity', 'emit_reentry.jl');
 
-function golden() {
-  const dir = mkdtempSync(join(tmpdir(), 'ssjl-reentry-'));
-  try {
-    const out = join(dir, 'golden.json');
-    const r = spawnSync('julia', ['--project=' + root, script, out],
-                        { encoding: 'utf8' });
-    if (r.error || r.status !== 0) {
-      if (r.stderr) process.stderr.write(r.stderr);
-      return null;
-    }
-    return JSON.parse(readFileSync(out, 'utf8'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+const golden = () => juliaGolden(script);
 
 // atol is one micron/metre-class: the splashdown bisection terminates on the
 // first step below 1e-5 m, so the final altitude sample is ULP-sensitive and

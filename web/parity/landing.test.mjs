@@ -1,3 +1,4 @@
+import { juliaGolden } from './julia_golden.mjs';
 // Parity for lunar arrival and powered descent: the LM-class burns, the
 // closed-loop descent from a descent-orbit periapsis, and the whole
 // pad-to-surface mission.
@@ -10,11 +11,8 @@
 // the braking shooter can land on either side of a loose residual.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { MU_MOON, R_MOON, deg2rad_ } from '../src/constants.js';
 import { vnorm } from '../src/vec3.js';
 import { default_lander, lander_mass, lander as L, powered_descent,
@@ -24,21 +22,7 @@ import { starship_expendable } from '../src/propulsion.js';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'web', 'parity', 'emit_landing.jl');
 
-function golden() {
-  const dir = mkdtempSync(join(tmpdir(), 'ssjl-landing-'));
-  try {
-    const out = join(dir, 'golden.json');
-    const r = spawnSync('julia', ['--project=' + root, script, out],
-                        { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 600000 });
-    if (r.error || r.status !== 0) {
-      if (r.stderr) process.stderr.write(r.stderr);
-      return null;
-    }
-    return JSON.parse(readFileSync(out, 'utf8'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+const golden = () => juliaGolden(script);
 
 function close(got, want, what, [rtol, atol]) {
   if (!Number.isFinite(want)) { assert.ok(!Number.isFinite(got), `${what}: ${got} != ${want}`); return; }

@@ -319,6 +319,8 @@
           <div><label for="solve_target">equals</label><input id="solve_target" value="3000"></div>
           <div><label for="solve_min">search from</label><input id="solve_min" value="1000"></div>
           <div><label for="solve_max">to</label><input id="solve_max" value="4000"></div>
+          <div><label for="solve_iters">max evaluations</label>
+            <input id="solve_iters" type="number" min="4" max="30" step="1" value="14"></div>
         </div>
         <div style="margin-top:10px"><button id="solvebtn">Solve</button></div>
         <div class="out" id="solve_out" style="margin-top:6px">—</div>
@@ -939,7 +941,7 @@ async function doSolve() {
   const done = busy('searching for the target…');
   try {
     const u = new URLSearchParams(Q);
-    for (const f of ['solve_param','solve_metric','solve_target','solve_min','solve_max'])
+    for (const f of ['solve_param','solve_metric','solve_target','solve_min','solve_max','solve_iters'])
       u.set(f, $(f).value);
     const j = await api.solve(u, { onProgress: done.progress });
     const pl = paramLabel(j.param), ml = metricLabel(j.metric);
@@ -958,8 +960,16 @@ async function doSolve() {
       ? `${ml} never reaches ${j.target} over that range; closest is ` +
         `${pl} = ${(+j.x).toPrecision(5)} at ${(+j.value).toPrecision(4)}.` +
         (shrank ? note : ' Try a wider range.')
-      : `no valid mission anywhere in that range — try bounds nearer the ` +
-        `current configuration.`;
+      : j.status === 'max_iter' && Number.isFinite(j.value)
+      ? `Search reached its budget of ${j.iterations} runs before converging. ` +
+        `Best evaluated ${pl} = ${(+j.x).toPrecision(5)}, ${ml} = ` +
+        `${(+j.value).toPrecision(4)}. Narrow the bounds or increase the budget.` + note
+      : Number.isFinite(j.value) && j.value !== null
+      ? `A mission failed inside the search range, so the target could not be ` +
+        `verified. Best evaluated ${pl} = ${(+j.x).toPrecision(5)}, ` +
+        `${ml} = ${(+j.value).toPrecision(4)}. Try a smaller feasible range.` + note
+      : `No valid mission was found in ${j.iterations} evaluations. ` +
+        `Try bounds nearer the current configuration.`;
     drawSolve(j);
   } catch (e) {
     $('solve_out').className = 'out err';
@@ -976,7 +986,7 @@ function drawSolve(j) {
   if (cv.width !== w*dpr) { cv.width = w*dpr; cv.height = h*dpr; }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const pts = ((j && j.history) || []).filter(p => isFinite(p.value));
+  const pts = ((j && j.history) || []).filter(p => Number.isFinite(p.value));
   if (pts.length < 2) return;
   const xs = pts.map(p => p.x), ys = pts.map(p => p.value).concat([j.target]);
   const x0 = Math.min(...xs), x1 = Math.max(...xs);

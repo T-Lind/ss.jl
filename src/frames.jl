@@ -75,6 +75,11 @@ end
 Osculating classical elements from an ECI Cartesian state. Returns
 `(a, e, i, raan, argp, nu, rp, ra, energy)` with `rp`/`ra` the periapsis and
 apoapsis radii (`ra = Inf` for `e >= 1`). Angles in radians.
+For circular orbits, `argp=0` and `nu` carries argument of latitude. For
+equatorial orbits, `raan=0` and `argp` carries longitude of periapsis; a
+circular equatorial orbit carries true longitude in `nu`. Retrograde
+equatorial angles follow the direction of motion. These conventions retain
+the Cartesian state when otherwise undefined angles are set to zero.
 """
 function elements_from_state(r::V3, v::V3; mu::Float64 = MU_EARTH)
     rn = vnorm(r); vn = vnorm(v)
@@ -88,18 +93,25 @@ function elements_from_state(r::V3, v::V3; mu::Float64 = MU_EARTH)
     i = acos(clamp(h[3] / hn, -1.0, 1.0))
     nvec = vcross((0.0, 0.0, 1.0), h)          # node vector
     nn = vnorm(nvec)
-    raan = nn > 1e-12 ? atan(nvec[2], nvec[1]) : 0.0
-    argp = if nn > 1e-12 && e > 1e-12
+    inclined = nn > 1e-12 * hn
+    raan = inclined ? atan(nvec[2], nvec[1]) : 0.0
+    argp = if inclined && e > 1e-12
         w = acos(clamp(vdot(nvec, ev) / (nn * e), -1.0, 1.0))
         ev[3] < 0 ? 2pi - w : w
+    elseif e > 1e-12
+        # Equatorial: RAAN is zero; preserve longitude of periapsis.
+        mod(atan(copysign(1.0, h[3]) * ev[2], ev[1]), 2pi)
     else
         0.0
     end
     nu = if e > 1e-12
         f = acos(clamp(vdot(ev, r) / (e * rn), -1.0, 1.0))
         vdot(r, v) < 0 ? 2pi - f : f
+    elseif inclined
+        # Circular: periapsis is undefined; nu carries argument of latitude.
+        mod(atan(vdot(vcross(nvec, r), h) / hn, vdot(nvec, r)), 2pi)
     else
-        0.0
+        mod(atan(copysign(1.0, h[3]) * r[2], r[1]), 2pi)
     end
     p = hn * hn / mu
     rp = p / (1 + e)

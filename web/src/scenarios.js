@@ -34,6 +34,8 @@ export function scenario_from_elements(el, veh,
 
 export function target_deorbit(el, veh,
     { max_iter = 8, tol_deg = 0.1, ...kwargs } = {}) {
+  if (!Number.isInteger(max_iter) || max_iter < 1)
+    throw new RangeError('max_iter must be a positive integer');
   let raan = el.raan, argp = el.argp, res;
   for (let it = 0; it < max_iter; it++) {
     const eli = deorbitElements({ ...el, raan, argp });
@@ -46,6 +48,7 @@ export function target_deorbit(el, veh,
     const dlon = rem2pi(scn.target_lon - res.lon_splash);
     if (Math.abs(dlat) < deg2rad_(tol_deg) && Math.abs(dlon) < deg2rad_(tol_deg))
       return [deorbitElements({ ...el, raan, argp }), res];
+    if (it === max_iter - 1) return [eli, res];
 
     const sini = Math.sin(el.inclination);
     const u_now = Math.asin(clamp1(Math.sin(res.lat_splash) / sini));

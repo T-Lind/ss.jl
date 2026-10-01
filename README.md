@@ -568,7 +568,7 @@ above or below target" case), drag coefficient, pitch stiffness, trim angle
 attitude, and parachute drag areas — with footprint statistics (CEP, R95,
 1σ covariance ellipse).
 
-## Nominal results (v0.1 reference mission)
+## Nominal results for the LEO reference mission
 
 350 kg, 1.5 m diameter pod (β ≈ 130 kg/m²), deorbit ellipse 400 × 25 km,
 i = 51.6°, targeted at 32.5°N 121.5°W:
@@ -576,30 +576,57 @@ i = 51.6°, targeted at 32.5°N 121.5°W:
 | Quantity | Value |
 |---|---|
 | Entry interface state | 7.60 km/s, γ = −1.46°, Mach 20 |
-| Downrange EI → splash | ~2 930 km |
-| Peak deceleration | 7.1 g |
-| Peak stagnation heating | 45 W/cm² at 63 km (T_wall ≈ 1750 K) |
-| Stagnation heat load | 77 MJ/m² |
+| Downrange EI → splash | ~4 392 km |
+| Peak deceleration | 4.29 g |
+| Peak stagnation heating | 28.7 W/cm² at 75.6 km (T_wall ≈ 1561 K) |
+| Stagnation heat load | 112.3 MJ/m² |
 | Drogue → main → splashdown | 9 km → 3 km → 4.5 m/s |
-| Nominal miss | 2.5 km |
-| MC footprint (300 samples) | 1σ ellipse 363 × 12 km along-track, CEP 228 km |
+| Nominal miss | 7.5 km |
+| MC footprint (300 samples, seed 2026) | 1σ ellipse 415 × 16 km, CEP 272 km, R95 833 km |
 
-The long thin footprint is the correct physics of a *shallow unguided
-ballistic* entry: downrange is very sensitive to density/CD/mass at
+These values use the current lifting capsule defaults. The long thin
+footprint is expected for a *shallow entry without target guidance*: downrange
+is very sensitive to density/CD/mass at
 γ_EI ≈ −1.5°. Steepen the entry (lower `periapsis_alt` in
 `DeorbitElements`) to trade footprint size against g-load and heating, or
 add a lift-modulation guidance law (see extension points) to shrink it by
 orders of magnitude.
 
-Plots: `output/plots/` — flight profile, aerothermal environment, pitch-DOF
-behavior, ground track, MC footprint and statistics.
+Plots: `output/plots/` — historical flight profile, aerothermal environment, pitch-DOF
+behavior, ground track, MC footprint and statistics snapshots. Regenerate their
+CSV inputs and plots together to compare with current defaults.
 
 ## Running
 
 Julia ≥ 1.9. The core has **zero external dependencies**.
 
+Run the reproducible checks and write a report without replacing trajectory CSVs:
+
 ```bash
-# tests (450 assertions: atmosphere vs USSA76 tables, vis-viva, J2, heating,
+julia --project=. -t 4 scripts/verify.jl --full --samples=300
+# output/verification.toml: values, acceptance limits, source revision,
+# runtime, mission-spec hash and random seed; nonzero exit on failure
+node scripts/check_static.mjs
+node --test test/*.test.mjs
+(cd web && SSJL_REQUIRE_JULIA=1 npm test)
+```
+
+`--output=PATH` selects another verification report path. Omit `--full` for
+entry, circumlunar, Earth-orbit, suborbital and Monte Carlo checks without the
+lunar landing and return. Julia is optional for local browser-only work;
+parity tests skip only when the executable is missing and strict mode is off.
+Broken reference runs fail. CI runs parity in strict mode and retains current
+reports and mission products as artifacts.
+
+See [the numerical audit and platform roadmap](docs/numerical-audit.md) for
+measured results, numerical fixes and follow-up proposals. Bundled CSVs, plots
+and the viewer under `output/` are historical snapshots; use a fresh report
+for current results. The original v0.2 numbers above describe that earlier
+capsule. The current mass-sized circumlunar pod returns in 6.587 days at
+5.68 g, 250 W/cm² peak heating and 271 MJ/m² heat load.
+
+```bash
+# tests (physics, numerical regressions and HTTP: atmosphere vs USSA76 tables, vis-viva, J2, heating,
 # orbit propagation, Tsiolkovsky, ephemeris, ascent-to-orbit, the full
 # circumlunar chain — including a first-pass-return regression check —
 # propellant/engine consistency and stage sizing, scalar targeting including
@@ -1012,6 +1039,36 @@ locks the mixture select to it, and the server rejects a form that names
 both an engine and a different mixture — a Raptor does not burn kerolox.
 The builder opens on the panel's current form, and its **↩ mission
 control** and **🚀 launch view** links carry the configuration back out.
+
+### Model inspector and modern lander
+
+Open **model inspector** from the builder or launch view, or visit
+`http://localhost:8137/models`. The static browser version uses
+`web/models_page.html`. Inspect the lander exterior, cockpit, or a cutaway
+engine mount without calculating a mission. Drag or use arrow keys to rotate,
+scroll or press + / − to zoom, reset the camera, and export a PNG.
+
+The lunar lander is a modern two-person concept: a chamfered pressure cabin,
+two upright crew restraints, three recessed flight displays, large forward
+windows, side equipment racks, and a centerline hatch/ladder. Its exterior,
+interior, camera poses, switch targets, hatch and exhaust share one dimension
+layout. `diameter` is the full deployed envelope, including footpads; at the
+4.2 m reference size the nozzle has 0.34 m ground clearance. The same detailed
+model appears in the builder, launch stack and lunar scene. Julia and browser
+engineering meshes use a closed solid envelope with matching proportions;
+render-only details and the cockpit are excluded from that envelope.
+
+Engine throats now enter the thrust structure rather than floating beneath the
+skirt. Large clusters use concentric rings; the 33-engine concept has 13 inner
+and 20 perimeter engines, following the arrangement described by
+[SpaceX](https://new.spacex.com/vehicles/starship). Bell size is limited by actual
+pairwise clearance, and core/booster exhaust originates at the corresponding
+nozzles. This remains a parametric visualization, not a manufacturing model.
+The launch complex adds maintenance stairs, cable trays and service skids.
+
+Previews: [exterior](docs/previews/modern-lander.png),
+[cockpit](docs/previews/modern-cabin.png),
+[engine mount](docs/previews/modern-engines.png).
 
 ### Mission experience
 

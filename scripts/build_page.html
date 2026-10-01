@@ -3,9 +3,8 @@
      file per request. The page is a pure client of two endpoints the panel
      already exposes: /api/catalogue (engines and mixtures) and /api/geometry
      (the authoritative vehicle: stats and the very mesh the mission flies).
-     It holds no vehicle model of its own — every number and every triangle
-     on screen came back from the server, so what you see here is what
-     /api/run will fly.
+     Vehicle dimensions and physical geometry come from the server. The lander
+     adds its shared detailed visual kit to that engineering envelope.
 
      The form speaks the panel's exact field encoding (nstages, nboost,
      diameter, fairing, pod_mass, s<k>_*, b_*), so the query string is
@@ -104,6 +103,7 @@
     <a class="navlink" href="/build" aria-current="page">vehicle builder</a>
     <a class="navlink" id="analysislink" href="/analysis">analysis</a>
     <a class="navlink" id="flylink" href="/launch">launch view</a>
+    <a class="navlink" href="/models">model inspector</a>
   </span>
   <!-- short on purpose: uppercase and letterspaced, this slot can carry about
        four words before it stops being a caption and starts being a headline
@@ -254,6 +254,7 @@
 </div>
 
 <script type="module">
+import {landerExterior} from '/static/lander_model.js';
 'use strict';
 import { fin, fmt, fmtMass } from '/static/fmt.js';
 import * as api from '/static/api.js';
@@ -745,6 +746,14 @@ function buildMesh(j) {
   if (!userZoomed) dist = vLen*2.1;
   for (const s of (j.sections || [])) {
     if (skip[s.name]) continue;
+    if(s.name==='lander') {
+      const data=landerExterior(+j.payload?.diameter_m||4.2);
+      const D=+j.stages?.at(-1)?.diameter_m||+j.diameter;
+      const xb=s.x0+.13*D+.02;
+      for(let i=0;i<data.length;i+=12)
+        out.push(xb+data[i+1],-data[i],data[i+2],data[i+4],-data[i+3],data[i+5],data[i+6],data[i+7],data[i+8]);
+      continue;
+    }
     const col = styleOf(s.name);
     for (let t = s.t0 - 1; t < s.t1; t++) {
       const T = j.tris[t];

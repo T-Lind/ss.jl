@@ -296,6 +296,7 @@ function simulate_entry6(scn::Scenario;
                          alpha0::Float64 = scn.alpha0,
                          log_dt_orbit::Float64 = 5.0,
                          log_dt_entry::Float64 = 0.5)
+    _validate_simulation(scn, log_dt_orbit, log_dt_entry)
     # initial attitude: symmetry axis offset from the relative wind by alpha0
     r0 = scn.r0; v0 = scn.v0
     omega_e = (0.0, 0.0, OMEGA_EARTH)
@@ -344,13 +345,19 @@ function simulate_entry6(scn::Scenario;
         push!(events, FlightEvent(name, tv, d.h, d.mach, d.vrel, d.lat, d.lon))
         d
     end
-    rec!(t)
+    initial = rec!(t)
+    peak_g = initial.gload
+    peak_qd = initial.qdot
+    peak_qb = ctx.entered ? initial.qbar : 0.0
 
     while t < scn.t_max
         chutes_out = any_chute_deployed(ctx)
         dt = !ctx.entered ? scn.dt_orbit : (chutes_out ? scn.dt_descent : scn.dt_entry)
+        dt = min(dt, scn.t_max - t)
+        t + dt > t || throw(ArgumentError("integration step cannot advance time at this epoch"))
 
         _rk4_e6!(xnew, x, t, dt, wk, scn, ctx, inertia, rcs, rate_db, rcs_mode)
+        all(isfinite, xnew) || error("non-finite 6-DOF state at t=$(t + dt)")
         hnew = alt(xnew, t + dt)
 
         if !ctx.entered && hnew < scn.h_ei
@@ -406,6 +413,10 @@ function simulate_entry6(scn::Scenario;
         elseif t >= next_log
             rec!(t); next_log += log_dt_orbit
         end
+    end
+
+    if terminated == :timeout && L.t[end] != t
+        rec!(t)
     end
 
     # stability envelope, post-hoc: max total AoA after peak deceleration

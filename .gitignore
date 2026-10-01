@@ -24,6 +24,7 @@ __pycache__/
 *.tmp
 .claude/
 output/rendezvous*.csv
+output/verification.toml
 
 # brainstorming companion
 .superpowers/

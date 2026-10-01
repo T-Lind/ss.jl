@@ -1966,4 +1966,6 @@ end
 
 # The panel is a script rather than part of the package, but it is the primary
 # way this simulator gets used, and its HTTP layer has its own failure modes.
+include("numerical_regressions.jl")
+include("visual_geometry.jl")
 include("panel_http.jl")
