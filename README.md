@@ -1058,6 +1058,19 @@ model appears in the builder, launch stack and lunar scene. Julia and browser
 engineering meshes use a closed solid envelope with matching proportions;
 render-only details and the cockpit are excluded from that envelope.
 
+Crewed Earth-orbit, suborbital and free-return missions retain the separate
+capsule and its original cockpit. Lunar landing missions carry one lander:
+the crew stays in its cockpit from launch through cruise and touchdown,
+without a capsule transfer or docking sequence. Select **cabin** to stay there.
+While strapped in on a coast at ×1 (or paused), WASD controls attitude and
+QE rolls the vehicle; the detached lander uses its own RCS authority.
+
+Click the cabin door, the **HATCH** control, or press **V** to suit up, then
+again to leave. In space, WASD/RF moves the suit and QE rolls it on a 20 m
+tether. After a successful touchdown, the hatch leads down the ladder to
+the Moon: WASD walks and Space jumps. Use HATCH or V to return to the cockpit.
+The hatch stays locked under propulsion and during entry or powered descent.
+
 Engine throats now enter the thrust structure rather than floating beneath the
 skirt. Large clusters use concentric rings; the 33-engine concept has 13 inner
 and 20 perimeter engines, following the arrangement described by
