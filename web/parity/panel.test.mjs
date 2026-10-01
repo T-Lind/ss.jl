@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { panelRun, panelGeometry } from '../src/panel.js';
+import { engineCluster } from '../static/engine_layout.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'web', 'parity', 'emit_panel.jl');
@@ -32,6 +33,8 @@ const MISSIONS = {
 };
 
 const GEOMETRY = {
+  boosters: {nstages:'3',nboost:'2',diameter:'1.8',b_engines:'5',b_prop:'12000',b_diameter:'1.1'},
+  lander: MISSIONS.landing,
   sable: { nstages: '3', nboost: '0', diameter: '1.8' },
   falcon: {
     nstages: '3', nboost: '0', diameter: '3.7', payload_kind: 'bus', bus_mass: '200',
@@ -94,4 +97,10 @@ test('panel rocket_geometry matches Julia', t => {
   if (!g) return t.skip('julia not available');
   for (const [name, params] of Object.entries(GEOMETRY))
     assertClose(panelGeometry(params), g.geometry[name], name);
+});
+
+test('every packed engine position and radius matches Julia', t => {
+  if (!g) return t.skip('julia not available');
+  for (const [n, pts] of Object.entries(g.engine_clusters))
+    assertClose(engineCluster(+n,3.6,.945),pts,`engine cluster ${n}`);
 });

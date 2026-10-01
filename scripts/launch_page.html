@@ -140,6 +140,7 @@
     <a class="navlink" href="/build">vehicle builder</a>
     <a class="navlink" id="analysislink" href="/analysis">analysis</a>
     <a class="navlink" href="#" aria-current="page">launch view</a>
+    <a class="navlink" href="/models">model inspector</a>
   </span>
   <span class="appnav-end">
     <span class="u-label" id="nav_note">launch</span>
@@ -200,6 +201,8 @@
 <script type="module">
 'use strict';
 import { fin } from '/static/fmt.js';
+import { landerLayout, landerExterior, landerInterior, landerDisplay, clampLanderEye } from '/static/lander_model.js';
+import { engineCluster, stageBells } from '/static/engine_layout.js';
 import * as api from '/static/api.js';
 import * as runs from '/static/runs.js';
 import { suite, report, requested } from '/static/selftest.js';
@@ -2145,208 +2148,15 @@ function buildMoonTerrain() {
   return rings;
 }
 
-// --- the lander: a descent stage that stays, an ascent stage that does not.
-// Built y-up with +x forward, which is how it is flown, and standing on y = 0:
-// the footpads define the ground plane, so the flight model's `pos` is the
-// contact point the descent was flown to. The builder returns the top of the
-// ascent stage, which is where the last stack section used to end.
+// The modern lander's exterior, interior and crew stations share one layout.
 function buildLander() {
-  const out = [];
-  const R = MDIA/2;
-  const FOIL = [0.66, 0.53, 0.20], FOIL2 = [0.50, 0.40, 0.15],
-        WHITE = [0.80, 0.80, 0.82], GREY = [0.56, 0.56, 0.59],
-        DARK = [0.13, 0.13, 0.15], STEEL = [0.42, 0.43, 0.46],
-        GLASS = [0.05, 0.08, 0.13];
-  const Y0 = 0.82, Y1 = 2.05;                 // descent-stage drum
-  const N = 8;
-  const tri = (a, b, c, col) => {
-    const n = V.norm(V.cross(V.sub(b, a), V.sub(c, a)));
-    for (const p of [a, b, c])
-      out.push(p[0],p[1],p[2], n[0],n[1],n[2], col[0],col[1],col[2], 0,0,0);
-  };
-  const face = (q, col) => { tri(q[0], q[1], q[2], col); tri(q[0], q[2], q[3], col); };
-  const oct = (y, r, k) => {
-    const a = k/N*2*Math.PI;
-    return [r*Math.cos(a), y, r*Math.sin(a)];
-  };
-  // --- descent stage: the octagonal foil body the legs bolt to, closed with a
-  // flat underside and a strengthened deck the ascent stage sits on.
-  for (let k = 0; k < N; k++) {
-    const r0 = R*0.86, r1 = R*0.93;
-    face([oct(Y0, r0, k), oct(Y1, r1, k), oct(Y1, r1, k+1), oct(Y0, r0, k+1)],
-         k % 2 ? FOIL : FOIL2);
-    tri([0, Y0, 0], oct(Y0, r0, k), oct(Y0, r0, k+1), FOIL2);      // underside
-    tri([0, Y1, 0], oct(Y1, r1, k+1), oct(Y1, r1, k), GREY);       // deck
-  }
-  tube(out, [0, Y1, 0], [0, Y1 + 0.10, 0], R*0.94, GREY, N);       // deck rim
-  // --- descent engine: a big centreline bell in a short skirt. The bell
-  // tapers downwards, so the nozzle exit is narrower than the combustion end.
-  tube(out, [0, Y0 - 0.02, 0], [0, Y0 + 0.30, 0], R*0.36, STEEL, 16, R*0.34, false);
-  tube(out, [0, Y0 + 0.06, 0], [0, 0.26, 0], R*0.30, DARK, 16, R*0.16);
-  // --- four splayed legs: a primary strut, an A-frame drag brace, and a
-  // conical footpad whose underside sits exactly on the ground plane y = 0.
-  for (let k = 0; k < 4; k++) {
-    const a = Math.PI/4 + k*Math.PI/2;
-    const cx = Math.cos(a), cz = Math.sin(a);
-    const hip = [cx*R*0.93, Y1 - 0.22, cz*R*0.93];
-    const ankle = [cx*R*1.60, 0.30, cz*R*1.60];
-    tube(out, hip, ankle, 0.085, STEEL, 7);
-    tube(out, [cx*R*0.30, Y0 + 0.34, cz*R*0.30], V.lerp(hip, ankle, 0.42),
-         0.055, STEEL, 6);
-    tube(out, ankle, [ankle[0], 0.15, ankle[2]], 0.075, STEEL, 6);
-    tube(out, [ankle[0], 0.15, ankle[2]], [ankle[0], 0.0, ankle[2]],
-         R*0.42, STEEL, 12, R*0.32);
-  }
-  // --- ladder from the forward hatch down the front leg
-  {
-    const top = [R*0.34, Y1 + 0.60, -R*0.10];
-    const bot = [R*1.24, 0.66, -R*0.62];
-    for (const s of [-0.17, 0.17])
-      tube(out, [top[0], top[1], top[2] + s], [bot[0], bot[1], bot[2] + s],
-           0.030, STEEL, 5);
-    for (let r = 0; r <= 6; r++) {
-      const p = V.lerp(top, bot, r/6);
-      tube(out, [p[0], p[1], p[2] - 0.17], [p[0], p[1], p[2] + 0.17],
-           0.022, STEEL, 5);
-    }
-  }
-  // --- ascent stage: the part that comes back. A grey adapter ring, the crew
-  // cabin, then a domed top with the tunnel and docking probe.
-  const Y2 = Y1 + 0.30;
-  tube(out, [0, Y1 + 0.10, 0], [0, Y2, 0], R*0.66, GREY, 12);
-  tube(out, [0, Y2, 0], [0, Y2 + 1.35, 0], R*0.60, WHITE, 12);
-  tube(out, [0, Y2 + 1.35, 0], [0, Y2 + 1.95, 0], R*0.60, WHITE, 12, R*0.30);
-  tube(out, [0, Y2 + 1.95, 0], [0, Y2 + 2.20, 0], 0.30, STEEL, 12);
-  // forward face: the two windows the crew looked out of on the way down, over
-  // the hatch they left through
-  boxAt(out, [R*0.58, Y2 + 1.02, -0.34], [0.12, 0.38, 0.46], GLASS);
-  boxAt(out, [R*0.58, Y2 + 1.02, 0.34], [0.12, 0.38, 0.46], GLASS);
-  boxAt(out, [R*0.60, Y2 + 0.40, 0], [0.10, 0.52, 0.66], GREY);
-  // RCS quads
-  for (let k = 0; k < 4; k++) {
-    const a = Math.PI/4 + k*Math.PI/2;
-    const p = [Math.cos(a)*R*0.70, Y2 + 1.15, Math.sin(a)*R*0.70];
-    boxAt(out, p, [0.34, 0.30, 0.34], DARK);
-  }
-  // --- antennas: a steerable high-gain dish on the descent-stage flank and a
-  // whip on the roof
-  {
-    const az = -R*0.98;
-    tube(out, [R*0.30, Y0 + 0.55, az], [R*0.30, Y0 + 1.00, az - R*0.34], 0.04, STEEL, 6);
-    tube(out, [R*0.30, Y0 + 1.00, az - R*0.34], [R*0.30, Y0 + 1.22, az - R*0.58],
-         0.36, WHITE, 14, 0.32);
-    tube(out, [0, Y2 + 2.20, 0], [0, Y2 + 3.10, R*0.10], 0.020, STEEL, 5);
-  }
-  landerBuf = buffer(new Float32Array(out));
-  landerN = out.length/VST;
-  return Y2 + 2.20;
+  const data = landerExterior(MDIA);
+  landerBuf = buffer(data); landerN = data.length/VST;
+  return landerLayout(MDIA).height;
 }
-
-// --- the LM cabin, seen from inside ---------------------------------------
-// A real interior, in the same frame the station table (lmK) describes: x is
-// the crew's fore-aft (they face +x), y up, z across. It is the LANDER's own
-// mesh, drawn instead of the hull when the camera is in the cabin. The capsule
-// cabin console, switch picking, free-float and lighting are all driven through
-// cabK(), which returns lmK() for a landing run — so this mesh only has to
-// present the surfaces: a cylinder wall, a forward bulkhead with two window
-// apertures the world shows through, a console the screens sit on, couches and
-// the switch caps.
 function buildLMCabin() {
-  const K = lmK(), rp = K.rp, P = K.panel, W = K.win;
-  const rin = Math.max(rp*0.95, P.zW + 0.18, -P.yBot + 0.30);
-  const xa = K.xb + K.xa, xt = K.xb + K.xtop;
-  const out = [];
-  const WALL = [0.33, 0.34, 0.37], WALL2 = [0.21, 0.23, 0.26],
-        FLOOR = [0.17, 0.18, 0.20], PANEL = [0.13, 0.14, 0.16],
-        FACE = [0.21, 0.22, 0.25], TRIM = [0.27, 0.28, 0.32],
-        COUCH = [0.28, 0.31, 0.38], SEAT = [0.34, 0.37, 0.44],
-        DARK = [0.08, 0.09, 0.11], METAL = [0.42, 0.43, 0.46];
-  const tri = (a, b, c, col) => {
-    const n = V.norm(V.cross(V.sub(b, a), V.sub(c, a)));
-    for (const p of [a, b, c])
-      out.push(p[0], p[1], p[2], n[0], n[1], n[2], col[0], col[1], col[2], 0, 0, 0);
-  };
-  const N = 28;
-  const ring = (x, a) => [x, rin*Math.cos(a), rin*Math.sin(a)];
-  const yf = -0.48*rin, hfw = Math.sqrt(Math.max(rin*rin - yf*yf, 0.01));
-  // --- pressure shell. The lower band is painted the deck's colour, which is
-  // what reads as a floor without inventing a second surface to collide with.
-  for (let k = 0; k < N; k++) {
-    const a0 = k/N*2*Math.PI, a1 = (k + 1)/N*2*Math.PI;
-    const lo = Math.sin((a0 + a1)/2) < 0, c = lo ? FLOOR : WALL;
-    for (const [x0, x1] of [[xa, xa + 0.5*(xt - xa)], [xa + 0.5*(xt - xa), xt]]) {
-      tri(ring(x0, a0), ring(x0, a1), ring(x1, a1), c);
-      tri(ring(x0, a0), ring(x1, a1), ring(x1, a0), c);
-    }
-  }
-  for (let k = 0; k < N; k++)
-    tri([xa, 0, 0], ring(xa, (k + 1)/N*2*Math.PI), ring(xa, k/N*2*Math.PI), WALL2);
-  // --- forward bulkhead, with two window apertures ABOVE the console
-  const ng = 18;
-  for (let i = 0; i < ng; i++) for (let j = 0; j < ng; j++) {
-    const y0 = -rin + 2*rin*i/ng, y1 = -rin + 2*rin*(i + 1)/ng;
-    const z0 = -rin + 2*rin*j/ng, z1 = -rin + 2*rin*(j + 1)/ng;
-    const cy = (y0 + y1)/2, cz = (z0 + z1)/2;
-    if (Math.hypot(cy, cz) > rin) continue;
-    if (Math.abs(cy - W.y) < W.hy && Math.abs(Math.abs(cz) - W.z) < W.hz) continue;
-    tri([xt, y0, z0], [xt, y1, z0], [xt, y1, z1], cy < yf + 0.10 ? FLOOR : WALL);
-    tri([xt, y0, z0], [xt, y1, z1], [xt, y0, z1], cy < yf + 0.10 ? FLOOR : WALL);
-  }
-  for (const zc of [-W.z, W.z]) {
-    boxAt(out, [xt - 0.03, W.y + W.hy, zc], [0.05, 0.05, W.hz*2 + 0.06], TRIM);
-    boxAt(out, [xt - 0.03, W.y - W.hy, zc], [0.05, 0.05, W.hz*2 + 0.06], TRIM);
-    boxAt(out, [xt - 0.03, W.y, zc - W.hz], [0.05, W.hy*2 + 0.06, 0.05], TRIM);
-    boxAt(out, [xt - 0.03, W.y, zc + W.hz], [0.05, W.hy*2 + 0.06, 0.05], TRIM);
-  }
-  boxAt(out, [xt - 0.03, W.y, 0], [0.05, W.hy*2 + 0.06, 0.06], WALL2);
-  // --- deck and the sill where it meets the forward bulkhead
-  boxAt(out, [(xa + xt)/2, yf - 0.03, 0], [xt - xa - 0.24, 0.06, 2*hfw - 0.10], FLOOR);
-  boxAt(out, [xt - 0.10, yf + 0.05, 0], [0.20, 0.16, 2*hfw - 0.16], TRIM);
-  // --- side equipment racks, low, running fore-aft
-  for (const s of [-1, 1]) {
-    boxAt(out, [xa + 0.45, yf + 0.42, s*(rin - 0.28)], [0.70, 0.84, 0.42], TRIM);
-    boxAt(out, [xa + 1.15, yf + 0.42, s*(rin - 0.28)], [0.55, 0.84, 0.42], DARK);
-  }
-  // --- the console: a framed backing panel on a sloped kick plate, with the
-  // switch shelf under the screens.
-  const pcx = P.x + 0.05, pcy = (P.yTop + P.yBot)/2, ph = P.yTop - P.yBot;
-  boxAt(out, [pcx, pcy, 0], [0.06, ph + 0.12, 2*P.zW + 0.10], FACE);
-  boxAt(out, [P.x - 0.01, P.yTop + 0.06, 0], [0.05, 0.05, 2*P.zW + 0.14], TRIM);
-  for (const s of [-1, 1])
-    boxAt(out, [pcx, pcy, s*(P.zW + 0.05)], [0.10, ph + 0.12, 0.06], PANEL);
-  boxAt(out, [P.x + 0.01, P.yBot - 0.15, 0], [0.10, 0.18, 2*P.zW + 0.08], PANEL);
-  beam(out, [P.x - 0.30, yf + 0.16, 0], [P.x - 0.02, P.yBot - 0.24, 0],
-       2*P.zW + 0.10, 0.05, PANEL);
-  {
-    const n = CAP_FN.length;
-    CAP_FN.forEach((fn, i) => {
-      const z = P.zW*0.94*(2*(i/Math.max(n - 1, 1)) - 1);
-      boxAt(out, [P.x - 0.04, P.yBot - 0.14, z], [0.06, 0.06, 0.10],
-            fn.c === undefined ? [0.34, 0.36, 0.40] : fn.c);
-    });
-  }
-  // --- the crew stations: a pan, a back and a headrest at each couch
-  const ln = cabSeatLn(K);
-  for (const zc of cabSeatZ(K)) {
-    boxAt(out, [xa + 0.30*rp, yf + 0.34, zc], [0.62*ln, 0.12, 0.42*ln], COUCH);
-    boxAt(out, [xa + 0.06*rp, yf + 0.62, zc], [0.12, 0.58, 0.42*ln], SEAT);
-    boxAt(out, [xa + 0.06*rp, yf + 0.98, zc], [0.18, 0.18, 0.30*ln], SEAT);
-    for (const s of [-1, 1])
-      boxAt(out, [xa + 0.30*rp, yf + 0.44, zc + s*0.22*ln], [0.44, 0.06, 0.05], METAL);
-  }
-  // --- grab rails overhead and beside the console
-  for (const s of [-1, 1]) {
-    tube(out, [xa + 0.30, 0.86*rp, s*0.55*rp], [xt - 0.35, 0.86*rp, s*0.55*rp],
-         0.020, METAL, 6);
-    tube(out, [P.x - 0.12, P.yTop + 0.12, s*0.62*rp], [P.x - 0.12, yf + 0.30, s*0.62*rp],
-         0.018, METAL, 6);
-  }
-  {
-    const h = evaHatchStation(K);
-    if (h) boxAt(out, [h.p[0], h.p[1], h.p[2]], [0.34, 0.42, 0.12], DARK);
-  }
-  lmCabBuf = buffer(new Float32Array(out));
-  lmCabN = out.length/VST;
+  const data = landerInterior(MDIA, CAP_FN);
+  lmCabBuf = buffer(data); lmCabN = data.length/VST;
 }
 
 // --- state in the site frame ------------------------------------------------
@@ -2393,7 +2203,8 @@ function autoPickMoon(t) {
 // the eci -> moon handoff move the origin and not the camera: both worlds
 // resolve `wide` and `chase` to the same offset from the same lander.
 function landerRig(mode, pos, up, fwd, thrust, h, thr, M) {
-  const mid = V.add(pos, V.scale(up, 2.4));
+  const L = landerLayout(MDIA);
+  const mid = V.add(pos, V.scale(up, 2.65*L.s));
   let eye, look = mid, fov = 0.5, shake = 0;
   const tn = thr*Math.min(1, 60/Math.max(h, 6));
   if (mode === 'chase' || mode === 'wide') {
@@ -2409,7 +2220,7 @@ function landerRig(mode, pos, up, fwd, thrust, h, thr, M) {
     fov = fitFov(V.len(V.sub(mid, eye)), 34*k);
   } else if (mode === 'onboard') {
     // out of the forward window, looking down the approach at the site
-    eye = V.add(V.add(pos, V.scale(up, 4.2)), V.scale(fwd, MDIA*0.55));
+    eye = V.add(V.add(pos, V.scale(up, L.win.y)), V.scale(fwd, L.front+.04*L.s));
     const ahead = Math.max(120, Math.min(9000, h*3.2));
     look = V.add(V.add(pos, V.scale(fwd, ahead)),
                  V.scale(up, -Math.max(h, 8)*0.92));
@@ -2444,6 +2255,15 @@ function eciLanderMat(cs) {
   return mBasis(f.bx, f.by, f.bz, cs.pos);
 }
 
+// While attached, the lander's thrust axis follows the stack's +x. Once
+// detached it follows the descent attitude; the interior stays in its own frame.
+function landerStackMat(stackM) {
+  const sec=geo.sections.find(s=>s.name==='lander');
+  if(!sec) return stackM;
+  const D=+geo.stages?.at(-1)?.diameter_m||DIA;
+  return mMul(stackM,mBasis([0,-1,0],[1,0,0],[0,0,1],[sec.x0+.13*D+.02,0,0]));
+}
+
 // The eci phases that belong to the lander alone: the eci leg of a landing
 // mission's lunar endgame. The kick stage is gone by then, so the world draws
 // the lander and the camera uses its rig, exactly as the moon world will.
@@ -2475,7 +2295,7 @@ function cameraMoon(t, ms, M) {
     if (rig.shake > 0) rig.eye = V.add(rig.eye, shakeVec(rig.shake));
     return { eye: aboveGround(rig.eye), look: rig.look, up: rig.up, fov: rig.fov, mode };
   }
-  const mid = V.add(ms.pos, V.scale(ms.up, 2.4));
+  const mid = V.add(ms.pos, V.scale(ms.up, 2.65*landerLayout(MDIA).s));
   let eye, look = mid, up = ms.up, fov = 0.5;
   if (mode === 'ground') {
     // A camera standing off to one side of the site, watching it come down.
@@ -2514,7 +2334,7 @@ function spawnDescent(dt, ms) {
   // contact stops the engine, and with no air to hold it up the dust it threw
   // is simply gone: every grain is on a ballistic arc and most of them left
   if (!(ms.thr > 0.01) || ms.h < 0.25) return;
-  const noz = V.add(ms.pos, V.scale(ms.thrust, -0.6));
+  const noz = V.add(ms.pos, V.scale(ms.thrust, landerLayout(MDIA).nozzle[1]));
   const ex = V.scale(ms.thrust, -1);
   const n = Math.min(26, Math.ceil(70*ms.thr*dt));
   for (let i = 0; i < n; i++) {
@@ -2611,43 +2431,16 @@ function measureRadii() {
 // radius] per engine in vehicle model coordinates. The +pi/m half-step on
 // the ring angle is load-bearing: the mesh offsets the ring by half a slot,
 // and without it every plume sits BETWEEN the bells instead of on them.
-function clusterPts(n, rmax, rbMax) {
-  if (n <= 1) return [[0, 0, rbMax]];
-  const centre = (n % 2 === 1) && n >= 5;
-  const m = centre ? n - 1 : n;
-  const s = Math.sin(Math.PI/m);
-  const rr = rmax/(1 + s);
-  let rb = Math.min(rbMax, 0.92*rr*s);
-  if (centre) rb = Math.min(rb, 0.5*rr);
-  const out = [];
-  if (centre) out.push([0, 0, rb]);
-  for (let i = 0; i < m; i++) {
-    const th = 2*Math.PI*i/m + Math.PI/m;
-    out.push([rr*Math.cos(th), rr*Math.sin(th), rb]);
-  }
-  return out;
-}
-// BELLS[k] for core stage k (0-based): the bell exit plane [model x] and the
-// cluster. Constants mirror rocket_mesh: stage 1 exits at its section x0
-// (-0.32 D); an upper stage's bells hang BELOW its section x0 by the scaled
-// bell length, which is why the old single-point plume started visibly too
-// high on every stage but the first.
+const clusterPts = engineCluster;
+// The mesh and plume use the same throat-mounted bell layout.
 let BELLS = [];
 function measureBells() {
-  BELLS = [];
   const stages = geo.sections.filter(s => /^stage\d+$/.test(s.name));
-  stages.forEach((s, k) => {
+  BELLS = stages.map((s,k) => {
     const st = (geo.stages || [])[k] || {};
-    const D = (+st.diameter_m) || DIA, r = D/2;
+    const D = (+st.diameter_m) || DIA;
     const ne = Math.max(1, Math.round(+st.engines || 1));
-    const last = k === stages.length - 1;
-    if (k === 0) {
-      BELLS.push({ sec: s.name, exitX: s.x0, pts: clusterPts(ne, 0.80*r, 0.105*D) });
-    } else {
-      const bex = last ? 0.085*D : 0.155*D, blen = last ? 0.22*D : 0.36*D;
-      const pts = clusterPts(ne, 0.80*r, bex);
-      BELLS.push({ sec: s.name, exitX: s.x0 + 0.04*D - blen*pts[0][2]/bex, pts });
-    }
+    return { sec: s.name, ...stageBells(ne,D,k,stages.length,k===0?0:s.x0) };
   });
 }
 // the burning core stage is the lowest one still attached
@@ -2992,7 +2785,11 @@ function buildRocket() {
     const cy = (t[1]+t[4]+t[7])/3, cz = (t[2]+t[5]+t[8])/3;
     const rad = Math.hypot(cy, cz);
     const sr = secR[sec.name] || DIA/2;
-    const c = rocketColor(sec, cx, rad, cy, cz, sr);
+    let c = rocketColor(sec, cx, rad, cy, cz, sr);
+    const bell=BELLS.find(b=>b.sec===sec.name);
+    const exit=bell?bell.exitX:/^booster/.test(sec.name)?sec.x0:null;
+    if(exit!==null&&Math.abs(cx-exit)<1e-6&&Math.abs(n[0])>.99)
+      c=[.035,.045,.060];
     // paint only the outer skin: raceways, bells and capsule internals keep
     // their baked material
     const pw = /^stage\d+$/.test(sec.name) ? (rad > 0.88*sr && rad < 1.02*sr ? 1 : 0)
@@ -3023,7 +2820,17 @@ function buildRocket() {
   };
   for (const s of geo.sections) {
     const v0 = verts.length/VST;
-    for (let k = s.t0-1; k < s.t1; k++) pushTri(geo.tris[k], s);
+    if (s.name === 'lander') {
+      const d = +geo.payload?.diameter_m || MDIA;
+      const data = landerExterior(d);
+      const topD = +geo.stages?.at(-1)?.diameter_m || DIA;
+      const xb = s.x0 + .13*topD + .02;
+      for (let i=0;i<data.length;i+=VST)
+        verts.push(xb+data[i+1],-data[i],data[i+2],data[i+4],-data[i+3],data[i+5],
+                   data[i+6],data[i+7],data[i+8],0,0,0);
+    } else {
+      for (let k = s.t0-1; k < s.t1; k++) pushTri(geo.tris[k], s);
+    }
     const n = verts.length/VST - v0;
     const rec = { name: s.name, first: v0, count: n,
                   x0: s.x0, x1: s.x1, cen: cenOf(v0, n) };
@@ -3336,6 +3143,24 @@ function buildTower(out, th) {
       boxAt(out, [sx*(HF-1), y+2.2, TWZ+HF+1.9], [1.4, 0.7, 0.5], M.lamp);
     }
   }
+  // Cable trays and a switchback maintenance stair on the far flank.
+  const stairX=HF+2.1, stairZ=TWZ+HF+1.5;
+  for (let y=y0;y<th-6;y+=6) {
+    boxAt(out,[stairX,y+.12,stairZ],[2.7,.22,3.8],M.grate);
+    railing(out,[[stairX+1.35,y+.24,stairZ-1.9],[stairX+1.35,y+.24,stairZ+1.9]],1.1,M.yellow);
+    const flip=Math.round((y-y0)/6)%2?1:-1;
+    for(let k=0;k<16;k++) {
+      const f=k/16;
+      boxAt(out,[stairX,y+.3+6*f,stairZ+flip*(1.6-3.2*f)],[1.65,.10,.24],M.steel);
+    }
+    for(const dx of [-.9,.9])
+      beam(out,[stairX+dx,y+1.35,stairZ+flip*1.6],[stairX+dx,y+7.35,stairZ-flip*1.6],.055,.055,M.yellow);
+  }
+  for(const x of [-HF-1.4,-HF-2.0]) {
+    boxAt(out,[x,(th+y0)/2,TWZ+HF+.3],[.44,th-y0,.28],M.dark);
+    for(let y=y0+1;y<th;y+=2)
+      boxAt(out,[x,y,TWZ+HF+.47],[.49,.08,.08],M.steel);
+  }
   // elevator shaft up the back face: framed, ribbed and louvred rather than a
   // blank slab, with the cab parked at the crew level and its machine room up top
   const ez0 = TWZ - HF - 3.4, ez1 = TWZ - HF, eh = th - 5;
@@ -3601,6 +3426,15 @@ function buildStatics() {
   const pad = [];
   buildHardstand(pad);
   buildMount(pad);
+  // Ground support: distribution skids, protected conduits and wheel stops.
+  const M=MAT, sx=PADX0+4.5, sz=PADZ0+5;
+  for(let k=0;k<3;k++) {
+    const z=sz+k*2.6;
+    boxAt(pad,[sx,DECK+.55,z],[1.5,1.1,1.6],M.dark);
+    boxAt(pad,[sx+.77,DECK+.63,z],[.05,.62,1.15],M.steel);
+    for(const dz of [-.45,.45]) tube(pad,[sx+1.4,DECK,z+dz],[sx+1.4,DECK+1.15,z+dz],.07,M.yellow,8);
+    tube(pad,[sx,DECK+.08,z],[sx,DECK+.08,TWZ],.085,M.pipe,8);
+  }
   const g0 = pad.length;
   buildGround(pad);
   // scale the outfield about the pad centre — positions only; normals are
@@ -5064,6 +4898,7 @@ const CAB_ROLL_EYE = 200, CAB_ROLL_HEAD = 282;
 // member is the same size in a 1.5 m capsule and a 6 m one, so above Apollo
 // size the count is COUNTED: how many fit across at a real shoulder pitch.
 function cabCrew(K) {
+  if (K.panel) return 2;
   const rp = K.rp;
   // The payload is already explicitly marked crewed (uncrewed payloads use a
   // different mesh). Preserve a floor for genuinely tiny recovery pods, but a
@@ -5080,6 +4915,7 @@ function cabCrew(K) {
   return Math.max(3, Math.min(6, Math.min(nwide, nface)));
 }
 function cabSeatZ(K) {
+  if (K.panel) return K.crew;
   const n = cabCrew(K), P = Math.min(0.44*K.rp, 0.86);
   if (n <= 0) return [];
   if (n === 1) return [0];
@@ -5118,25 +4954,12 @@ function cabSeatBay(K, i) {
 // `arg` is the couch index for the seated station and is ignored otherwise.
 // The LM crew stations, in the same model frame as lmK: upright, looking
 // forward at the panel, with the windows above it.
-function lmCabinPose(aim, arg, K) {
-  const P = K.panel, zs = cabSeatZ(K);
-  if (aim === 'console')
-    return { eye: [K.xa + 0.22*K.rp, 0.30, 0], look: [P.x, P.yc, 0],
-             up: [0, 1, 0], fov: 1.30 };
-  if (aim === 'seat') {
-    const i = Math.min(Math.max(arg | 0, 0), zs.length - 1), zc = zs[i];
-    const F = lmFrame(cabSeatBay(K, i));
-    return { eye: [K.xa + 0.20*K.rp, 0.30, zc], look: [P.x, P.yc, F.zc],
-             up: [0, 1, 0], fov: 1.20 };
-  }
-  // Unbuckled: a station INSIDE the clear volume (cabBox clamps x to
-  // [xa+0.27rp, xcon-0.14rp]), not out at the panel where the console is.
-  if (aim === 'float' || CAB.seat === null)
-    return { eye: [K.xa + 0.35*K.rp, 0.28, 0], look: [P.x, P.yc, 0],
-             up: [0, 1, 0], fov: 1.30 };
-  // 'wide' and anything else means "wherever the crew is": in a couch, that is
-  // the couch, exactly as the capsule resolves it.
-  return lmCabinPose('seat', CAB.seat, K);
+function lmCabinPose(aim,arg,K) {
+  const i=Math.min(Math.max(arg|0,0),1), z=aim==='seat'?K.crew[i]:0;
+  const eye=[K.eyeX,K.eyeY,z], look=[K.panel.x,K.panel.yc+.20*K.s,z];
+  if(aim==='float'||aim==='console'||aim==='seat')
+    return {eye,look,up:[0,1,0],fov:1.30};
+  return lmCabinPose(CAB.seat===null?'float':'seat',CAB.seat,K);
 }
 function cabinPose(aim, arg, Kin) {
   const K = Kin || cabK();
@@ -5264,6 +5087,7 @@ function cabDirs(Kin) {
 // Returns the clamped point, whether it was against a surface, and the INWARD
 // normal there — the direction the surface can push you. A wall cannot pull.
 function cabBox(K, pt) {
+  if (K.panel) return clampLanderEye(K, pt);
   const pad = Math.max(0.06, 0.09*K.rp);
   const x = Math.min(Math.max(pt[0], K.xb + cabXLo(K)), K.xb + cabXHi(K));
   const rmax = Math.max(0.03, cabRLim(K) - pad);
@@ -5422,7 +5246,7 @@ function evaGate(ph) {
 function evaBaseFrame() {
   const out = EVA.out || [0,-1,0];
   const fwd = V.norm(V.scale(out, -1));            // toward the vehicle
-  let rt = V.cross(fwd, [1,0,0]);                  // the vehicle's long axis is up
+  let rt = V.cross(fwd, isLandingMission() ? [0,1,0] : [1,0,0]);                  // the vehicle's long axis is up
   if (V.len(rt) < 1e-6) rt = [0,0,1];
   rt = V.norm(rt);
   return { fwd, rt, up: V.norm(V.cross(rt, fwd)) };
@@ -5443,12 +5267,15 @@ function evaDirs() {
 // patch. The point is ON the pressure wall; the station is a hair inboard so a
 // ray from inside reaches it, and the astronaut steps out from the wall itself.
 function evaHatchPoint(K) {
+  if (K.panel) return K.hatch;
   const u = K.xa + 0.50*K.rp, rc = K.rcone(u);
   return [K.xb + u, -rc, 0];
 }
 function evaHatchStation(Kin) {
   const K = Kin || cabK();
   if (!K) return null;
+  if (K.panel) return {key:'hatch',label:'AIRLOCK · EVA',r:.20*K.s,
+    p:[K.hatch[0]-.14*K.s,K.hatch[1],K.hatch[2]]};
   const u = K.xa + 0.50*K.rp, rc = K.rcone(u);
   return { key: 'hatch', label: 'HATCH · EVA', r: Math.max(0.10*K.rp, 0.20),
            p: [K.xb + u, -0.92*rc, 0] };
@@ -5474,7 +5301,7 @@ function evaEgress(ph) {
   CAB.keys = {}; CAB.v = [0,0,0]; CAB.rw = 0;
   CAB.touch = true; CAB.n = null; CAB.push = 0;
   EVA.anchor = evaHatchPoint(K);
-  EVA.out = [0,-1,0];                    // outward normal at the hatch
+  EVA.out = K.panel ? K.hatchNormal : [0,-1,0]; // outward normal at the hatch
   EVA.base = evaBaseFrame();
   EVA.p = V.add(EVA.anchor, V.scale(EVA.out, EVA_STANDOFF));
   EVA.pv = EVA.p.slice(); EVA.v = [0,0,0]; EVA.rw = 0;
@@ -5659,7 +5486,7 @@ function surfEgress(ph) {
   SURF.saved = { p: CAB.p.slice(), pv: CAB.pv.slice(), seat: CAB.seat,
                  q: HEAD.q.slice(), rw: CAB.rw, yaw: headYaw, pitch: headPitch };
   const R = MDIA/2;
-  const foot = mApply(M, [R*1.70, 0, -R*0.62]);
+  const foot = mApply(M, landerLayout(MDIA).ladderFoot);
   let hx = foot[0] - ms.pos[0], hz = foot[2] - ms.pos[2];
   const hl = Math.hypot(hx, hz) || 1;
   SURF.p = [foot[0] + hx/hl*1.5, 0, foot[2] + hz/hl*1.5];
@@ -5741,27 +5568,16 @@ let cabPage = 0, cabTraj = 0, cabHover = null;
 // click a couch to strap in, right click it again to unbuckle. Right, because
 // left is already a head turn and a switch throw.
 // A landing run's crew station is the LANDER, not a capsule. Its cabin is a
-// cylinder about the crew's fore-aft axis (they face +x at the forward windows,
-// up +y, with the console ring at xcon), so it gets its own station table. Every
+// chamfered pressure cabin (forward +x, up +y) with two upright crew stations,
+// so it gets its own station table and a rectangular clear volume. Every
 // consumer of `cabK()` — the pose, the float box, the switch picker, the console
 // screens — then drives the LM with no capsule geometry involved.
 function isLandingMission() { return !!(run && run.mode === 'landing'); }
 function lmK() {
-  const rp = Math.max(0.7, 0.32*MDIA);
-  const Lc = 2.0;
-  // The console is carried FORWARD, up against the forward bulkhead, so the
-  // crew reads it at the bottom of the same frame the windows sit at the top
-  // of — the way an LM's flight station actually works. A panel left back at
-  // mid-cabin put the windows out of the lens and the screens in the middle of
-  // it, which is the opposite of what the two are for.
-  const px = 1.55;
-  return { rp, Lc, xb0: 0.0, xa: 0.16, xcon: px, xtop: Lc,
-           xfl: 0.10, xb: 0.0, ta: 0.0, xsh: 0.0, rcone: () => rp,
-           // The LM console is a FLAT panel the upright crew faces, not the
-           // capsule's overhead annulus: a panel below eye level, three bays
-           // across it, windows above it in the forward bulkhead.
-           panel: { x: px, yTop: 0.24, yBot: -0.34, zW: 0.60, yc: -0.05 },
-           win: { x: Lc, y: 0.46, z: 0.30, hy: 0.20, hz: 0.26 } };
+  const L = landerLayout(MDIA);
+  return { ...L, rp: L.halfWidth, Lc: L.front-L.rear, xb0: 0,
+           xa: L.rear, xcon: L.panel.x, xtop: L.front, xfl: L.floor,
+           xb: 0, ta: 0, xsh: 0, rcone: () => L.halfWidth };
 }
 function cabK() {
   if (isLandingMission()) return lmK();
@@ -5769,11 +5585,14 @@ function cabK() {
   return pr ? capStations(pr.x0) : null;
 }
 function cabSeatLabel(K, i) {
+  if (K.panel) return i ? 'PILOT STATION' : 'COMMANDER STATION';
   return cabCrew(K) === 1 ? 'CREW COUCH' : `CREW COUCH ${i + 1}`;
 }
 function cabSeats(Kin) {
   const K = Kin || cabK();
   if (!K) return [];
+  if (K.panel) return K.crew.map((z,i) => ({key: 'seat'+i, seat:i, r:.22*K.s,
+    label:cabSeatLabel(K,i), p:[K.eyeX-.26*K.s,K.eyeY-.47*K.s,z]}));
   const ln = cabSeatLn(K);
   // a volume over the couch, centred between the headrest and the leg rest, so
   // the whole seat is clickable rather than one point of it
@@ -5829,8 +5648,8 @@ function cabControls() {
     const n = CAP_FN.length;
     CAP_FN.forEach((fn, i) => {
       const z = P.zW*0.9*(2*(i/(Math.max(n - 1, 1))) - 1);
-      out.push({ key: fn.key, label: fn.label, r: 0.05,
-                 p: [P.x - 0.04, P.yBot + 0.08, z] });
+      out.push({ key: fn.key, label: fn.label, r: 0.05*K.s,
+                 p: [P.x - .09*K.s, 2.48*K.s, z] });
     });
     if (CAB_PAGES[cabPage] === 'TRAJECTORY' && trajView() === 'ORBIT') {
       const F = lmFrame(1);
@@ -6558,7 +6377,7 @@ function frame(now) {
   // entry starts, the descent begins) the crew is brought back through the
   // hatch rather than left outside a vehicle that is about to move.
   if (EVA.active) {
-    if (coastActive(ph) && HASCAB) evaStep(dtReal);
+    if (coastActive(ph) && (HASCAB || isLandingMission())) evaStep(dtReal);
     else evaReturn();
   }
   // On the surface there is no window to close: the walk runs on the wall clock
@@ -6621,8 +6440,7 @@ function buildScene(ph) {
     // Model (y,z) map to (byv, bzp) — the exact basis craftM is built on.
     const kb = burningStage();
     const coreBells = kb < 0 ? [] : BELLS[kb].pts.map(([y, z, bs]) => ({
-      p: V.add(V.add(st.pos, V.scale(st.dir, BELLS[kb].exitX)),
-               V.add(V.scale(byv, y), V.scale(bzp, z))),
+      p: mApply(craftM,[BELLS[kb].exitX,y,z]),
       bs
     }));
     // Strap-ons burn beside the core, so they get their own plumes, placed in
@@ -6646,8 +6464,13 @@ function buildScene(ph) {
       const R = (SECR.stage1 || DIA/2) + (+BSET.diameter_m / 2);
       for (let j = 0; j < BSET.count; j++) {
         const th = 2*Math.PI*j/BSET.count;
-        bnoz.push(V.add(noz, V.add(V.scale(byv, R*Math.cos(th)),
-                                   V.scale(bzp, R*Math.sin(th)))));
+        const D=+BSET.diameter_m;
+        const pts=clusterPts(Math.max(1,+BSET.engines||1),.39*D,.105*D);
+        for(const [y,z,bs] of pts) {
+          const yy=R*Math.cos(th)+y*Math.cos(th)-z*Math.sin(th);
+          const zz=R*Math.sin(th)+y*Math.sin(th)+z*Math.cos(th);
+          bnoz.push({p:mApply(craftM,[.08*D-3.6*bs,yy,zz]),bs});
+        }
       }
     });
     // True local up. At the pad this is [0,1,0] to within the width of the
@@ -6677,7 +6500,8 @@ function buildScene(ph) {
     // Over the lunar endgame the LANDER is the crew's vehicle, so the cabin
     // camera, the console screens and the picker all ride eciLanderMat; the
     // stack sections (a drifting kick stage) still ride stackM.
-    const craftM = (MS && eciLanderPhase(ph)) ? eciLanderMat(cs) : stackM;
+    const craftM = (MS && eciLanderPhase(ph)) ?
+      (simT >= tLanderDrop ? eciLanderMat(cs) : landerStackMat(stackM)) : stackM;
     const cam = cameraEci(simT, cs, ph, craftM);
     const noz = V.add(cs.pos, V.scale(cs.bx, -0.5));
     PUP = null;                        // inertial frame: no up, no buoyancy
@@ -6696,7 +6520,7 @@ function buildScene(ph) {
     const ms = moonState(simT);
     const craftM = mBasis(ms.bx, ms.by, ms.bz, ms.pos);
     const cam = cameraMoon(simT, ms, craftM);
-    const noz = V.add(ms.pos, V.scale(ms.thrust, -0.6));
+    const noz = V.add(ms.pos, V.scale(ms.thrust, landerLayout(MDIA).nozzle[1]));
     PUP = null;                  // vacuum: nothing rises, nothing settles
     TRENCH = false;
     // the Earth hangs in one place in this sky, because the Moon keeps one
@@ -6804,15 +6628,17 @@ function spawnAscent(dt, st, rocketVel, noz, bnoz, coreBells) {
     spawn(V.add(noz, jit(0.5)), V.add(rocketVel, V.scale(st.dir, -60)),
           rnd(2.2, 0.9), DIA*1.1*E, DIA*3.0, 1);
   }
-  // one plume per lit strap-on, shorter and narrower than the core's
-  for (const bn of (bnoz || [])) {
-    emitStream(Math.max(1, Math.round(nf*0.45)), dt, rocketVel, () => ({
-      p: V.add(bn, jit(0.22*DIA)),
-      v: V.add(V.add(rocketVel,
-               V.scale(st.dir, -(80+rnd(38))*Math.min(E, 2.2) - 0.12*st.v)),
-               jit(3.5 + 1.2*E)),
-      life: rnd(0.34, 0.15),
-      size: DIA*(0.34+rnd(0.20))*E, grow: DIA*1.5*E, kind: 0 }));
+  // Rotate through booster nozzles without multiplying the particle budget
+  // by the engine count, just as the core's emitter does.
+  if (bnoz && bnoz.length) {
+    const nr=Math.max(1,Math.round(nf*.9)), br=spawnAscent._br|0;
+    emitStream(nr,dt,rocketVel,i=>{
+      const bn=bnoz[rrIdx(br+i,bnoz.length)];
+      return {p:V.add(bn.p,jit(.65*bn.bs)),
+        v:V.add(V.add(rocketVel,V.scale(st.dir,-(80+rnd(38))*Math.min(E,2.2)-.12*st.v)),jit(3.5+1.2*E)),
+        life:rnd(.34,.15),size:bn.bs*(1.5+rnd(.8))*E,grow:bn.bs*5*E,kind:0};
+    });
+    spawnAscent._br=br+nr;
   }
   if (st.mach > 0.92 && st.mach < 1.08 && st.q > 12) spawnVapor(st, rocketVel);
 }
@@ -7049,7 +6875,7 @@ function drawWorldMeshes(sc, proj, inCab) {
     // stage is jettisoned ahead of entry interface (or at DOI for a landing)
     for (const s of secDraw) {
       if (s.name === 'pod' || s.name === 'lander' || s.name === 'cabin' || s.name === 'glass') {
-        if (!landerHere && !skip(s))
+        if (!landerHere && !skip(s) && !(inCab && s.name==='lander'))
           drawSec(s, stackM, proj);
         continue;
       }
@@ -7065,8 +6891,8 @@ function drawWorldMeshes(sc, proj, inCab) {
                         [0,0,1], 0.05*dtj), proj, s.first, s.count);
       }
     }
-    if (landerHere && landerBuf) {
-      if (inCab && lmCabBuf) { bindMeshBuf(lmCabBuf); drawRangeInside(eciLanderMat(cs), proj, 0, lmCabN); }
+    if ((landerHere || (inCab && isLandingMission())) && landerBuf) {
+      if (inCab && lmCabBuf) { bindMeshBuf(lmCabBuf); drawRangeInside(sc.craftM, proj, 0, lmCabN); }
       else drawWhole(landerBuf, landerN, eciLanderMat(cs), proj);
     }
   } else if (sc.world === 'moon') {
@@ -7342,15 +7168,7 @@ function cabScreenInit() {
 // crew reads the screens square-on. Same shape skrFrame returns (x, S, H, at,
 // up, rt) so the quad builder, the soft-key picker and the painter all keep
 // agreeing about where a bay is.
-function lmFrame(k) {
-  const P = lmK().panel;
-  const z0 = -P.zW + 2*P.zW*k/3, z1 = -P.zW + 2*P.zW*(k + 1)/3;
-  const S = (z1 - z0)/2, H = (P.yTop - P.yBot)/2;
-  const xs = P.x - 0.012;                    // a hair in front of the panel slab
-  return { x: xs, rc: (P.yTop + P.yBot)/2, S, H, up: [0, 1, 0], rt: [0, 0, 1],
-           zc: (z0 + z1)/2, yc: (P.yTop + P.yBot)/2, z0, z1,
-           at: (u, v) => [xs, P.yBot + (P.yTop - P.yBot)*(1 - v), z0 + (z1 - z0)*u] };
-}
+function lmFrame(k) { return landerDisplay(landerLayout(MDIA),k,SCR_W/SCR_H); }
 function scrFrame(K, k) {
   if (K.panel !== undefined) return lmFrame(k);
   const rcin = K.rcone(K.xcon) - 0.05*K.rp;
@@ -9161,6 +8979,22 @@ window.__selftest = function () {
   eq('entry does too', () => bgClassFor('entry'), 'air');
   eq('coast and flyby share the space scale', () => bgClassFor('eci'), 'space');
   eq('the landing as well', () => bgClassFor('moon'), 'space');
+  // The modern lander uses two upright stations in the actual hull frame.
+  const LK=lmK();
+  eq('lander has exactly two crew stations',()=>cabCrew(LK),2);
+  eq('lander crew eyes are inside the fitted cabin',()=>{
+    for(let i=0;i<2;i++) if(cabBox(LK,lmCabinPose('seat',i,LK).eye).hit) return false;
+    return true;
+  },true);
+  eq('lander hatch picking agrees with the visible hatch',()=>{
+    const h=evaHatchStation(LK),p=evaHatchPoint(LK);
+    return V.len(V.sub(h.p,p));
+  },.14*LK.s,1e-8);
+  eq('lander screens preserve their canvas aspect',()=>lmFrame(1).S/lmFrame(1).H,SCR_W/SCR_H,1e-8);
+  eq('33 engines occupy three rings',()=>new Set(clusterPts(33,3.6,.945).map(p=>Math.hypot(p[0],p[1]).toFixed(6))).size,3);
+  eq('first-stage bell throats enter the mounting plate',()=>{
+    const B=stageBells(33,9,0,2);return B.exitX+B.length;
+  },.72,1e-8);
   // --- the engine cluster port. These pin the JS layout to src/mesh.jl's
   // _cluster: the half-slot ring offset and the centre-engine rule are the
   // two details that would silently misalign every plume if they drifted.
@@ -9996,16 +9830,18 @@ window.__selftest = function () {
                    base: EVA.base, p: EVA.p, pv: EVA.pv, seat: CAB.seat, q: HEAD.q };
     const K = cabK();
     if (!K) { EVA.active = save.active; return true; }
-    EVA.active = true; EVA.anchor = evaHatchPoint(K); EVA.out = [0,-1,0];
+    EVA.active = true; EVA.anchor = evaHatchPoint(K); EVA.out = K.panel ? K.hatchNormal : [0,-1,0];
     EVA.base = evaBaseFrame();
     EVA.p = V.add(EVA.anchor, V.scale(EVA.out, EVA_STANDOFF));
     EVA.pv = EVA.p.slice(); CAB.seat = null; HEAD.q = [1,0,0,0];
     const p = evaPose();
-    const d = Math.hypot(p.eye[1], p.eye[2]) - K.rcone(p.eye[0] - K.xb);
+    const d = K.panel ? V.dot(V.sub(p.eye,K.hatch),K.hatchNormal)
+      : Math.hypot(p.eye[1],p.eye[2])-K.rcone(p.eye[0]-K.xb);
+    const upright = !K.panel || V.dot(p.up,[0,1,0]) > .99;
     EVA.active = save.active; EVA.anchor = save.anchor; EVA.out = save.out;
     EVA.base = save.base; EVA.p = save.p; EVA.pv = save.pv;
     CAB.seat = save.seat; HEAD.q = save.q;
-    return d > 0;
+    return d > 0 && upright;
   }, true);
 
   return report(out);

@@ -25,6 +25,8 @@ const CASES = Dict{String,String}(
 # Geometry for two vehicles: the reference crew capsule, and a Falcon-class
 # stack carrying an uncrewed bus.
 const GEOM = Dict{String,String}(
+    "boosters" => "nstages=3&nboost=2&diameter=1.8&b_engines=5&b_prop=12000&b_diameter=1.1",
+    "lander" => STARSHIP,
     "sable"  => "nstages=3&nboost=0&diameter=1.8",
     "falcon" => "nstages=3&nboost=0&diameter=3.7&payload_kind=bus&bus_mass=200" *
                 "&s1_engine=merlin_1d&s1_engines=9&s1_prop=411000&s1_dry_auto=1" *
@@ -35,7 +37,10 @@ const GEOM = Dict{String,String}(
 
 missions = Dict{String,Any}(k => P.panel_mission(form(v)) for (k, v) in CASES)
 geometry = Dict{String,Any}(k => P.rocket_geometry(form(v)) for (k, v) in GEOM)
+engine_clusters = Dict(string(n) => P.SatelliteSim._cluster(n,3.6,0.945)
+                       for n in (1,6,9,13,20,27,33))
 
 open(ARGS[1], "w") do io
-    print(io, P.json(Dict{String,Any}("missions" => missions, "geometry" => geometry)))
+    print(io, P.json(Dict{String,Any}("missions" => missions, "geometry" => geometry,
+                                    "engine_clusters" => engine_clusters)))
 end

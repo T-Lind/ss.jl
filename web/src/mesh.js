@@ -1,6 +1,7 @@
 // Port of src/mesh.jl: the procedural launch-vehicle geometry. Meshes are
 // triangle soups — `tris` is a list of `[v1, v2, v3]` faces, each vertex an
 // `[x, y, z]` array — with the same winding and ordering as the Julia.
+import { engineCluster, stageBells } from '../static/engine_layout.js';
 import { deg2rad_ } from './constants.js';
 import { vadd, vsub, vcross, vdot, vnorm, vunit } from './vec3.js';
 import { PROPELLANTS, bulk_density } from './engines.js';
@@ -78,21 +79,7 @@ function _bell_mesh(xexit, len, rex, rt, y, z, { nseg = 24 } = {}) {
 }
 
 // Lay out n engine bells inside radius rmax, packed so they do not overlap.
-function _cluster(n, rmax, rb_max) {
-  if (n <= 1) return [[0.0, 0.0, rb_max]];
-  const centre = (n % 2 === 1) && n >= 5;
-  const m = centre ? n - 1 : n;
-  const s = Math.sin(Math.PI / m);
-  const rr = rmax / (1 + s);
-  let rb = Math.min(rb_max, 0.92 * rr * s);
-  if (centre) rb = Math.min(rb, 0.5 * rr);
-  const out = [];
-  for (let i = 1; i <= m; i++)
-    out.push([rr * Math.cos(2 * Math.PI * (i - 1) / m + Math.PI / m),
-              rr * Math.sin(2 * Math.PI * (i - 1) / m + Math.PI / m), rb]);
-  if (centre) out.unshift([0.0, 0.0, rb]);
-  return out;
-}
+const _cluster = engineCluster;
 
 // Inclusive linspace, matching Julia's `range(a, b; length=n)`.
 function lin(a, b, n) {
@@ -600,29 +587,45 @@ function probe_mesh({ radius = 0.75, nseg = 24 } = {}) {
 }
 
 // Compact two-stage lunar lander for the launch-stack payload bay.
-function _lander_payload_mesh(diameter, { nseg = 32 } = {}) {
-  const d = diameter;
-  const parts = [];
-  parts.push(lathe_mesh([[0.0, 0.0], [0.0, 0.25 * d], [0.08 * d, 0.32 * d],
-                         [0.38 * d, 0.32 * d], [0.48 * d, 0.23 * d], [0.52 * d, 0.0]],
-                        { nseg }));
-  parts.push(lathe_mesh([[0.42 * d, 0.0], [0.42 * d, 0.21 * d], [0.73 * d, 0.21 * d],
-                         [0.84 * d, 0.12 * d], [0.88 * d, 0.0]], { nseg }));
-  parts.push(_bell_mesh(0.0, 0.13 * d, 0.10 * d, 0.045 * d, 0.0, 0.0,
-                        { nseg: Math.max(16, Math.floor(nseg / 2)) }));
-  for (const sg of [-1.0, 1.0]) {
-    const y0 = Math.min(sg * 0.23 * d, sg * 0.48 * d);
-    const y1 = Math.max(sg * 0.23 * d, sg * 0.48 * d);
-    parts.push(box_mesh([0.10 * d, y0, -0.025 * d], [0.18 * d, y1, 0.025 * d]));
-    parts.push(box_mesh([0.06 * d, sg * 0.48 * d - 0.06 * d, -0.08 * d],
-                        [0.11 * d, sg * 0.48 * d + 0.06 * d, 0.08 * d]));
-    const z0 = Math.min(sg * 0.23 * d, sg * 0.48 * d);
-    const z1 = Math.max(sg * 0.23 * d, sg * 0.48 * d);
-    parts.push(box_mesh([0.10 * d, -0.025 * d, z0], [0.18 * d, 0.025 * d, z1]));
-    parts.push(box_mesh([0.06 * d, -0.08 * d, sg * 0.48 * d - 0.06 * d],
-                        [0.11 * d, 0.08 * d, sg * 0.48 * d + 0.06 * d]));
+function _lander_payload_mesh(diameter, {nseg=32}={}) {
+  const s=diameter/4.2, v=(x,y,z)=>[s*y,-s*x,s*z],parts=[];
+  const box=(c,size)=>parts.push(box_mesh(v(c[0]+size[0]/2,c[1]-size[1]/2,c[2]-size[2]/2),
+    v(c[0]-size[0]/2,c[1]+size[1]/2,c[2]+size[2]/2)));
+  const rod=(a,b,radius)=>{
+    const p=v(...a),q=v(...b),ax=vunit(vsub(q,p));
+    const side=vunit(vcross(ax,Math.abs(ax[1])>.9?[1,0,0]:[0,1,0])),up=vcross(ax,side);
+    const len=vnorm(vsub(q,p)),r=radius*s;
+    const m=lathe_mesh([[0,0],[0,r],[len,r],[len,0]],{nseg:10});
+    const f=t=>vadd(p,vadd(ax.map(x=>x*t[0]),vadd(side.map(x=>x*t[1]),up.map(x=>x*t[2]))));
+    parts.push(triMesh(m.tris.map(t=>t.map(f))));
+  };
+  parts.push(lathe_mesh([[.82*s,0],[.82*s,1.28*s],[1.62*s,1.34*s],[1.74*s,1.34*s],[1.74*s,0]],{nseg:8}));
+  parts.push(_bell_mesh(.34*s,.64*s,.43*s,.16*s,0,0,{nseg:24}));
+  const yz=[[1.83,-.91],[1.97,-1.05],[3.86,-1.05],[4.14,-.77],[4.14,.77],[3.86,1.05],[1.97,1.05],[1.83,.91]],tris=[];
+  for(let i=0;i<8;i++) {
+    const j=(i+1)%8,a=v(-.98,...yz[i]),b=v(-.98,...yz[j]),c=v(1.06,...yz[j]),d=v(1.06,...yz[i]);
+    tris.push([a,b,c],[a,c,d],[v(-.98,2.98,0),b,a],[v(1.06,2.98,0),d,c]);
   }
-  return [parts, 0.88 * d];
+  parts.push(ensure_outward(triMesh(tris)));
+  box([-1.11,2.92,0],[.26,1.65,1.5]);
+  for(const z of [-.53,.53]) box([1.087,3.49,z],[.045,.725,.805]);
+  box([1.11,2.22,0],[.06,.72,.63]); box([1.36,1.80,0],[.56,.07,.66]);
+  for(let k=0;k<4;k++) {
+    const a=Math.PI/4+k*Math.PI/2,c=Math.cos(a),z=Math.sin(a);
+    const hip=[c*1.13,1.52,z*1.13],ankle=[c*1.84,.17,z*1.84],knee=hip.map((v,i)=>v+.47*(ankle[i]-v));
+    rod(hip,ankle,.065); rod(ankle,[ankle[0],.105,ankle[2]],.065);
+    for(const sign of [-1,1]) {
+      const aa=a+sign*.33; rod([Math.cos(aa)*.91,.88,Math.sin(aa)*.91],knee,.034);
+    }
+    const pad=lathe_mesh([[0,0],[0,.26*s],[.105*s,.20*s],[.105*s,0]],{nseg:20});
+    parts.push(_translate_mesh(pad,[0,-s*ankle[0],s*ankle[2]]));
+  }
+  for(const z of [-.27,.27]) rod([1.33,1.80,z],[1.78,.15,z],.025);
+  for(let i=0;i<=8;i++) { const f=i/8; rod([1.33+.45*f,1.80-1.65*f,-.27],[1.33+.45*f,1.80-1.65*f,.27],.02); }
+  for(const sign of [-1,1]) rod([-.51,2.07,sign*1.22],[-.51,3.38,sign*1.22],.20);
+  parts.push(lathe_mesh([[4.14*s,0],[4.14*s,.33*s],[4.37*s,.33*s],[4.37*s,.40*s],[4.42*s,.40*s],[4.42*s,0]],{nseg:24}));
+  rod([-.66,4.06,.53],[-.66,4.72,.53],.025);
+  return [parts,4.72*s];
 }
 
 // Procedural launch-vehicle geometry with real detailing.
@@ -704,10 +707,11 @@ export function rocket_mesh(a, b = {}) {
       if (ltap > 0) prof1.push([xtop, rj]);
       prof1.push([xtop, 0.0]);
       ms.push(lathe_mesh(prof1, { nseg }));
-      for (const [by, bz, bs] of _cluster(ne, 0.80 * r, 0.105 * D))
-        ms.push(_bell_mesh(-0.32 * D, 4.0 * bs, bs, 0.48 * bs, by, bz, { nseg: nb }));
+      const bells = stageBells(ne,D,0,K);
+      for (const [by,bz,bs] of bells.pts)
+        ms.push(_bell_mesh(bells.exitX,bells.length,bs,bells.throatRadius,by,bz,{nseg:nb}));
       ms.push(raceway(0.30 * D, x + len - 0.02 * D, r, D));
-      finish('stage1', -0.32 * D, xtop, ms);
+      finish('stage1', Math.min(0,bells.exitX), xtop, ms);
     } else {
       const rbase = Math.min(0.945 * r, 0.98 * rtop_prev);
       const profk = [[x, 0.0], [x, rbase], [x + 0.10 * D, rbase],
@@ -790,8 +794,9 @@ export function rocket_mesh(a, b = {}) {
       bprof.push([xn + f * 1.75 * rb, rb * (1 - f * f) ** 0.55]);
     bprof.push([xn + 1.75 * rb, 0.0]);
     const one = [lathe_mesh(bprof, { nseg: Math.max(16, Math.floor(nseg / 2)) })];
-    for (const [by, bz, bs] of _cluster(bset.n_engines, 0.78 * rb, 0.105 * db))
-      one.push(_bell_mesh(-0.30 * db, 3.6 * bs, bs, 0.46 * bs, by, bz, { nseg: nb }));
+    const bells = _cluster(bset.n_engines,0.78*rb,0.105*db);
+    for (const [by,bz,bs] of bells)
+      one.push(_bell_mesh(.08*db-3.6*bs,3.6*bs,bs,.46*bs,by,bz,{nseg:nb}));
     const R = r1 + rb;
     const set = [];
     for (let j = 0; j < bset.count; j++) {
@@ -799,7 +804,7 @@ export function rocket_mesh(a, b = {}) {
       const sh = [0.0, R * Math.cos(ang), R * Math.sin(ang)];
       for (const m of one) set.push(_place_mesh(m, { roll: ang, shift: sh }));
     }
-    finish('booster' + bi, -0.30 * db, xn + 1.75 * rb, set);
+    finish('booster' + (bi+1), Math.min(0,.08*db-3.6*bells[0][2]), xn + 1.75 * rb, set);
   }
   return [merge_meshes(...parts), sections];
 }

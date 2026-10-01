@@ -1040,6 +1040,36 @@ both an engine and a different mixture — a Raptor does not burn kerolox.
 The builder opens on the panel's current form, and its **↩ mission
 control** and **🚀 launch view** links carry the configuration back out.
 
+### Model inspector and modern lander
+
+Open **model inspector** from the builder or launch view, or visit
+`http://localhost:8137/models`. The static browser version uses
+`web/models_page.html`. Inspect the lander exterior, cockpit, or a cutaway
+engine mount without calculating a mission. Drag or use arrow keys to rotate,
+scroll or press + / − to zoom, reset the camera, and export a PNG.
+
+The lunar lander is a modern two-person concept: a chamfered pressure cabin,
+two upright crew restraints, three recessed flight displays, large forward
+windows, side equipment racks, and a centerline hatch/ladder. Its exterior,
+interior, camera poses, switch targets, hatch and exhaust share one dimension
+layout. `diameter` is the full deployed envelope, including footpads; at the
+4.2 m reference size the nozzle has 0.34 m ground clearance. The same detailed
+model appears in the builder, launch stack and lunar scene. Julia and browser
+engineering meshes use a closed solid envelope with matching proportions;
+render-only details and the cockpit are excluded from that envelope.
+
+Engine throats now enter the thrust structure rather than floating beneath the
+skirt. Large clusters use concentric rings; the 33-engine concept has 13 inner
+and 20 perimeter engines, following the arrangement described by
+[SpaceX](https://new.spacex.com/vehicles/starship). Bell size is limited by actual
+pairwise clearance, and core/booster exhaust originates at the corresponding
+nozzles. This remains a parametric visualization, not a manufacturing model.
+The launch complex adds maintenance stairs, cable trays and service skids.
+
+Previews: [exterior](docs/previews/modern-lander.png),
+[cockpit](docs/previews/modern-cabin.png),
+[engine mount](docs/previews/modern-engines.png).
+
 ### Mission experience
 
 The **🚀 launch view** chip (or `http://localhost:8137/launch`) opens a

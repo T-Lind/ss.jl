@@ -25,6 +25,7 @@ const ROUTES = {
   '/panel': '/panel_page.html',
   '/launch': '/launch_page.html',
   '/build': '/build_page.html',
+  '/models': '/models_page.html',
   '/analysis': '/analysis_page.html',
   '/home': '/index.html',
 };
