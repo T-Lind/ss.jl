@@ -1075,7 +1075,22 @@ Click the cabin door, the **HATCH** control, or press **V** to suit up, then
 again to leave. In space, WASD/RF moves the suit and QE rolls it on a 20 m
 tether. After a successful touchdown, the hatch leads down the ladder to
 the Moon: WASD walks and Space jumps. Use HATCH or V to return to the cockpit.
+In a safely landed, unbuckled
+lander cabin, WASD moves continuously on the deck and R/F changes eye height;
+Q/E rolls the view, X stops movement, Z recentres it and G buckles back in.
+The timeline reports impacts, tipping and aborted descents explicitly: zero
+altitude alone is not a safe touchdown or permission to open the hatch.
 The hatch stays locked under propulsion and during entry or powered descent.
+
+Launch-time lighting shares the simulation's reference epoch: `launch_h = 0`
+is Greenwich noon at the vernal equinox, rather than a calendar date or the
+computer's clock. Earth rotation and idealised annual solar motion determine
+the Sun in the launch-site, inertial and lunar frames. Changing launch time
+moves sunrise, sunset, shadows and the day/night sky together; the HUD reports
+solar elevation. This is geometric lighting with a smooth twilight transition,
+not a dated ephemeris or an atmospheric-refraction sunrise calculation.
+Mission control uses the same sunlight, a correctly oriented lunar map and
+labelled north/south rotation axes on Earth and the Moon.
 
 Engine throats now enter the thrust structure rather than floating beneath the
 skirt. Large clusters use concentric rings; the 33-engine concept has 13 inner

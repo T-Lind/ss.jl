@@ -206,6 +206,8 @@
 <script type="module">
 'use strict';
 import { fin } from '/static/fmt.js';
+import { sunEci, sunAtSite, launchHours, earthAngle, daylight, sunVisibility, lunarSun, lunarEarthMatrix } from '/static/celestial.js';
+import { successfulTouchdown, lunarEndLabel, lunarHatchReason } from '/static/flight_state.js';
 import { landerLayout, landerExterior, landerInterior, landerDisplay, clampLanderEye } from '/static/lander_model.js';
 import { engineCluster, stageBells } from '/static/engine_layout.js';
 import * as api from '/static/api.js';
@@ -959,7 +961,11 @@ vec3 skyCol(vec3 d, vec3 up, float dens){
   float e = dot(d, up) + dip;
   vec3 zen = vec3(0.09,0.30,0.70), hor = vec3(0.62,0.78,0.95);
   vec3 day = mix(hor, zen, clamp(pow(max(e, 0.0), 0.42), 0.0, 1.0));
-  vec3 col = day * clamp(dens*1.25, 0.0, 1.0);
+  float sunH=dot(up,uSun);
+  float daylight=smoothstep(-0.12,0.12,sunH);
+  vec3 col = day * clamp(dens*1.25, 0.0, 1.0)*daylight;
+  float dusk=exp(-pow(sunH/0.10,2.0));
+  col+=vec3(.65,.23,.08)*dens*dusk*pow(max(dot(d,uSun),0.0),8.0);
   // atmosphere shell glow hugging the limb.
   // closest approach of the RAY, not of the infinite line: at b <= 0 the nearest
   // point is the camera itself, so the shell term is continuous through the local
@@ -981,14 +987,14 @@ vec3 skyCol(vec3 d, vec3 up, float dens){
     // over, and smoothstep is flat there, so the two meet with matching value
     // AND slope — no step, no kink, and the zenith goes back to black.
     col += (vec3(0.30,0.52,0.92)*g1 + vec3(0.9,0.5,0.3)*exp(-max(dmin,0.0)/16000.0)*0.35)
-           * (1.0 - dens) * 1.05 * (1.0 - smoothstep(0.0, dip, max(dot(d, up), 0.0)));
+           * (1.0 - dens) * 1.05 * daylight * (1.0 - smoothstep(0.0, dip, max(dot(d, up), 0.0)));
   }
   float s = max(dot(d, uSun), 0.0);
   col += vec3(1.0,0.97,0.9) * pow(s, 1500.0) * 5.0;
-  col += vec3(1.0,0.9,0.72) * pow(s, 9.0) * 0.34 * max(dens, 0.10);
+  col += vec3(1.0,0.9,0.72) * pow(s, 9.0) * 0.34 * max(dens, 0.10)*daylight;
   // stars: fade in as the sky goes out (~8 km up), full dark above ~35 km,
   // and never survive being looked at through the sun's glare
-  float night = smoothstep(0.42, 0.02, dens);
+  float night = max(smoothstep(0.42, 0.02, dens),1.0-daylight);
   if (night > 0.002) {
     float mw;
     // extinction rises toward the horizon while there is still air to look
@@ -1114,7 +1120,7 @@ void main(){
 precision highp float;
 varying vec3 vVP, vN, vC; varying vec2 vUV; varying float vPw;
 uniform vec3 uSunV, uFogCol, uEngV, uEngC;
-uniform float uFogDen, uEngI, uAmb;
+uniform float uFogDen, uEngI, uAmb, uSolar;
 uniform sampler2D uLiv;
 uniform float uHeat;          // 0..1 stagnation heating, off outside entry
 uniform vec3 uHeatV;          // flow direction, VIEW space, pointing upstream
@@ -1137,10 +1143,10 @@ void main(){
   }
   float dif = max(dot(n, uSunV), 0.0);
   float sky = 0.5 + 0.5*n.y;
-  vec3 lit = base * (0.82*dif + uAmb*(0.72 + 0.28*sky))
+  vec3 lit = base * (0.82*dif*uSolar + uAmb*(0.72 + 0.28*sky))
            + vec3(0.5,0.6,0.8)*0.10*sky*uAmb*2.0;
   vec3 h = normalize(uSunV - normalize(vVP));
-  lit += vec3(0.9)*pow(max(dot(n, h), 0.0), 42.0)*0.22;
+  lit += vec3(0.9)*pow(max(dot(n, h), 0.0), 42.0)*0.22*uSolar;
   if (uEngI > 0.0) {
     vec3 dd = uEngV - vVP; float r2 = dot(dd, dd);
     lit += base * uEngC * uEngI * 90.0/(r2 + 18.0)
@@ -1679,16 +1685,6 @@ function buildData() {
        : hasEnt ? ENT.t[ENT.n-1] + 10
        : hasCis ? CIS.t[CIS.n-1] : A.t[A.t.length-1] + 30;
 
-  // ECI sun: moonward (plus a plane-normal tilt). The free return swings
-  // around the far side, so a moonward sun lights the hemisphere the pod
-  // actually flies past — and the Earth face it sees looking back home.
-  if (hasCis) {
-    const ts = isFinite(tPeri) ? tPeri : CIS.t[CIS.n >> 1];
-    const mdp = V.norm([samp(CIS.t, CIS.mx, ts), samp(CIS.t, CIS.my, ts),
-                        samp(CIS.t, CIS.mz, ts)]);
-    SUNE = V.norm(V.add(mdp, V.scale(CIS.nrm, 0.38)));
-  }
-
   // --- which body drops when ----------------------------------------------
   // The k-th separation drops stage k. Whatever stage is still flying at SECO
   // hands over to the kick stage, which goes at the entry handoff.
@@ -1791,11 +1787,11 @@ function buildData() {
       add(ACH.tli ? 'OFF-NOMINAL COAST' : 'ORBIT', cisEnd, 'eci', { pace: 26 });
     }
   }
-  if (MS) add('DESCENT', MS.t_td + 16, 'moon', { warp: descentWarp });
+  if (MS) add('DESCENT', MS.t_td + 0.5, 'moon', { warp: descentWarp });
   // Once the vehicle is down the clock keeps running so the crew can walk: a
   // landed phase, still in the moon world and at real time, where the hatch is
   // open and the surface EVA below is available.
-  if (MS) add('SURFACE', MS.t_td + 16 + SURFACE_DUR, 'moon', { warp: () => 1 });
+  if (MS) add(lunarEndLabel(run), MS.t_td + 16 + SURFACE_DUR, 'moon', { warp: () => 1 });
   if (hasEnt) add('ENTRY', tEnd, 'entry', { warp: entryWarp });
   if (!PH.length) add('FLIGHT', tEnd, 'pad');
   // a paced phase compresses to roughly a fixed wall-clock length, so a
@@ -1902,6 +1898,14 @@ function cisState(t) {
   return { pos: p, vel, speed: V.len(vel), moon, bx, by, bz,
            rE: V.len(p), rM: V.len(V.sub(p, moon)),
            burning: BURNW.some(w => t >= w[0] && t <= w[1]) };
+}
+// Continue the same circular ephemeris beyond the last orbit sample.
+function moonPositionAt(t) {
+  const end=CIS.t[CIS.n-1], tc=Math.min(t,end);
+  const p=[samp(CIS.t,CIS.mx,tc),samp(CIS.t,CIS.my,tc),samp(CIS.t,CIS.mz,tc)];
+  const angle=2*Math.PI*Math.max(0,t-end)/(27.321661*86400), n=CIS.nrm;
+  return V.add(V.add(V.scale(p,Math.cos(angle)),V.scale(V.cross(n,p),Math.sin(angle))),
+               V.scale(n,V.dot(n,p)*(1-Math.cos(angle))));
 }
 // entry state in splash-anchored world
 function entState(t) {
@@ -2167,7 +2171,7 @@ function buildLMCabin() {
 // --- state in the site frame ------------------------------------------------
 function moonState(t) {
   const T = MD.t, tp = Math.max(T[0], t - MS.t_pdi);
-  const settled = t >= MS.t_td && run.metrics?.outcome === 'touchdown';
+  const settled = t >= MS.t_td && successfulTouchdown(run);
   const x = samp(T, MS.lx, tp), y = samp(T, MS.ly, tp), z = samp(T, MS.lz, tp);
   const a = x/RM, b = z/RM, R = RM + y;
   const pos = [R*Math.sin(a)*Math.cos(b), R*Math.cos(a)*Math.cos(b) - RM, R*Math.sin(b)];
@@ -2379,14 +2383,7 @@ function spawnDescent(dt, ms) {
 }
 
 // ------------------------------------------------------------- geometries --
-// The sim doesn't model the sun, so its direction is an aesthetic choice —
-// per world, since pad/entry coordinates are anchor-local (y = up) while
-// cruise coordinates are ECI. SUNE is set from the ephemeris at boot.
-const SUN = V.norm([0.50, 0.58, 0.42]);
-// Apollo landed with the sun behind the vehicle and well up: no glare down the
-// approach, and every rock still throwing a shadow long enough to judge it by.
-const MOONSUN = V.norm([-0.82, 0.53, 0.21]);
-let SUNE = V.norm([0.5, 0.5, 0.5]);
+// All worlds transform the same mission-time Sun from celestial.js.
 let rocketBuf, secDraw = [], halfDraw = [], LEN = 30, DIA = 1.8;
 let towerBuf, towerN, armBuf, armDraw = [], padBuf, padN, cloudBuf;
 let drogueBuf, drogueN, mainBuf, mainN, landTex;
@@ -5136,7 +5133,7 @@ function cabClamp(pt) {
 // are the only thing it needs from the geometry, and the rule it verifies —
 // that you can only push off something — has nothing to do with which rocket
 // is underneath the capsule.
-function cabStep(dt, active, Kin) {
+function cabStep(dt, active, Kin, grounded=false) {
   CAB.live = active;
   // Strapped in is strapped in: the harness holds you, so nothing you press
   // moves or turns your body until you unbuckle.
@@ -5149,6 +5146,7 @@ function cabStep(dt, active, Kin) {
   if (!(dt > 0)) return;
   const K = Kin || cabK();
   if (!K) return;
+  if (grounded && K.panel) { cabGroundStep(dt,K); return; }
   const d = cabDirs(K);
   if (!d) return;
   const k = CAB.keys;
@@ -5200,6 +5198,25 @@ function cabStep(dt, active, Kin) {
     if (!CAB.touch) sfxThump(V.len(CAB.v)/CAB_VMAX);
     CAB.v = [0,0,0]; CAB.touch = true; CAB.n = c.n; CAB.push = 0;
   }
+  cabSmooth(dt);
+}
+// Boots on a deck provide continuous traction; do not require another
+// zero-g handrail contact for each movement after landing. Keys and head look
+// are shared with the capsule. R/F adjusts eye height within the clear cabin.
+function cabGroundStep(dt,K) {
+  const d=cabDirs(K), base=cabinPose('float',0,K);
+  if(!d || !base)return;
+  const flat=v=>V.norm([v[0],0,v[2]]), f=flat(d.fwd);
+  const forward=V.len(f)>1e-6?f:[1,0,0], right=[-forward[2],0,forward[0]], k=CAB.keys;
+  let cmd=V.add(V.scale(forward,(k.w?1:0)-(k.s?1:0)),V.scale(right,(k.d?1:0)-(k.a?1:0)));
+  if(V.len(cmd)>1)cmd=V.norm(cmd);
+  CAB.v=V.scale(cmd,.65*K.s);
+  CAB.v[1]=.45*K.s*((k.r?1:0)-(k.f?1:0));
+  const c=cabBox(K,V.add(base.eye,V.add(CAB.p,V.scale(CAB.v,dt))));
+  CAB.p=V.sub(c.p,base.eye); CAB.touch=true; CAB.n=c.n; CAB.push=0;
+  const roll=(k.e?1:0)-(k.q?1:0);
+  CAB.rw+=(roll*CAB_RROLL-CAB.rw)*(1-Math.exp(-dt/CAB_ROLL_TAU));
+  if(Math.abs(CAB.rw)>1e-5)headTurn(d.fwd,CAB.rw*dt);
   cabSmooth(dt);
 }
 // The rule is a push, a coast and a wall — correct, and abrupt: a shove starts
@@ -5260,7 +5277,7 @@ function evaGate(ph) {
   if (landed(ph)) return { ok: true, why: '' };
   if (!coastActive(ph)) {
     if (ph.w === 'entry') return { ok: false, why: 'entry' };
-    if (ph.w === 'moon')  return { ok: false, why: 'descent' };
+    if (ph.w === 'moon') return { ok: false, why: MS && simT >= MS.t_td ? lunarHatchReason(run) : 'descent' };
     if (ph.w === 'pad')   return { ok: false, why: simT < 0 ? 'on the pad' : 'powered flight' };
     return { ok: false, why: 'powered flight' };
   }
@@ -5450,7 +5467,7 @@ const SURF = { active: false, p: [0,0,0], v: [0,0,0], yaw: 0, pitch: 0,
 // contact light. Before arrival the lander is flying and the hatch stays shut.
 function landed(ph) {
   return isLandingMission() && !!ph && ph.w === 'moon' && !!MS &&
-         run.metrics?.outcome === 'touchdown' &&
+         successfulTouchdown(run) &&
          simT >= MS.t_td + 0.5;
 }
 // Local vertical at a world point: the Moon-fixed radial through it, which near
@@ -5671,7 +5688,7 @@ function cabStand(Kin) {
   CAB.keys = {}; RCS.keys = {};
   CAB.touch = true; CAB.n = null; CAB.push = 0;   // a hand still on the couch
   sfxSwitch();                                    // the harness letting go
-  cabToast('UNBUCKLED · ZERO G');
+  cabToast(landed(phaseAt(simT)) ? 'UNBUCKLED · WASD WALK · RF UP/DOWN' : 'UNBUCKLED · ZERO G');
   return true;
 }
 function cabControls() {
@@ -6405,7 +6422,7 @@ function frame(now) {
   // into the couch; an unpowered coast does not.
   // Cabin translation is available on coast or after touchdown.
   cabStep(dtReal, camMode === 'cabin' && !EVA.active && !SURF.active &&
-    (coastActive(ph) || landed(ph)));
+    (coastActive(ph) || landed(ph)), undefined, landed(ph));
   // The spacewalk lives and dies with the coast: while the phase allows it the
   // astronaut is on the rope, and the instant the window closes (a burn lights,
   // entry starts, the descent begins) the crew is brought back through the
@@ -6516,9 +6533,10 @@ function buildScene(ph) {
     TRENCH = st.h < 260;
     return {
       world: 'pad', st, cam, craftM: cabinM, stackM: craftM, craftPos: st.pos,
+      sun: sunAtSite(simT,launchHours(run),run.sites.launch_lat,run.sites.launch_lon),
       earthC: [0, -RE, 0], moonC: null,
       eMat: anchorMat(run.sites.launch_lat, run.sites.launch_lon),
-      spin: OME*Math.max(simT, 0), near: 1,
+      spin: 0, near: 1,
       loud: Math.min(1, st.thr/9.5e5)*Math.exp(-st.h/12000),
       engI: st.thr > 0 ? Math.min(1, st.thr/9.5e5)*(0.8 + 0.4*Math.random()) : 0,
       engW: noz, engC: [1.0, 0.55, 0.22],
@@ -6542,9 +6560,9 @@ function buildScene(ph) {
     PUP = null;                        // inertial frame: no up, no buoyancy
     TRENCH = false;
     return {
-      world: 'eci', cs, cam, craftM, stackM, craftPos: cs.pos, sun: SUNE,
+      world: 'eci', cs, cam, craftM, stackM, craftPos: cs.pos, sun: sunEci(simT,launchHours(run)),
       earthC: [0, 0, 0], moonC: cs.moon,
-      eMat: [1,0,0, 0,1,0, 0,0,1], spin: OME*simT, near: 0,
+      eMat: [1,0,0, 0,1,0, 0,0,1], spin: earthAngle(simT,launchHours(run)), near: 0,
       loud: cs.burning ? 0.5 : 0,
       engI: cs.burning ? 0.9 + 0.4*Math.random() : 0,
       engW: noz, engC: [1.0, 0.55, 0.22],
@@ -6560,16 +6578,16 @@ function buildScene(ph) {
     TRENCH = false;
     // the Earth hangs in one place in this sky, because the Moon keeps one
     // face to it — the only sky in the solar system where that is true
-    const eDir = MS.earth;
+    const eDir = MS.earth, moon=moonPositionAt(simT), hours=launchHours(run);
     return {
-      world: 'moon', ms, cam, craftM, craftPos: ms.pos, sun: MOONSUN,
+      world: 'moon', ms, cam, craftM, craftPos: ms.pos, sun: lunarSun(simT,hours,moon,CIS.nrm,MS),
       // depth range follows the altitude: at 15 km the nearest thing worth
       // drawing is 30 m away, and spending the depth buffer on the first
       // 35 cm instead loses the horizon to z-fighting
       nearZ: Math.max(0.4, Math.min(400, ms.h/900)),
       earthC: V.add([0, -RM, 0], V.scale(V.norm([eDir[0], eDir[1], eDir[2]]),
                                          MS.earth_d)),
-      moonC: null, eMat: [1,0,0, 0,1,0, 0,0,1], spin: 0, near: 0,
+      moonC: null, eMat: lunarEarthMatrix(moon,CIS.nrm,MS), spin: earthAngle(simT,hours), near: 0,
       loud: 0.35*ms.thr,
       engI: ms.thr > 0.01 ? ms.thr*(0.7 + 0.4*Math.random()) : 0,
       engW: noz, engC: [0.85, 0.72, 0.45],
@@ -6597,6 +6615,7 @@ function buildScene(ph) {
   TRENCH = false;
   return {
     world: 'entry', es, cam, craftM, craftPos: es.pos,
+    sun: sunAtSite(simT,launchHours(run),run.sites.splash_lat,run.sites.splash_lon),
     earthC: [0, -RE, 0], moonC: null,
     eMat: anchorMat(run.sites.splash_lat, run.sites.splash_lon),
     spin: 0, near: 0,
@@ -6980,7 +6999,7 @@ function drawScene(sc) {
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   const cam = sc.cam, asp = w/h;
   const inCab = cam.mode === 'cabin';
-  const sun = sc.sun || SUN;
+  const sun = sc.sun || sunEci(simT,launchHours(run));
   const view = mLookAt(cam.eye, cam.look, cam.up);
   // everything a click needs to become a ray into the capsule
   PICK = { cam, asp, craftM: sc.craftM,
@@ -6993,7 +7012,8 @@ function drawScene(sc) {
   // no air on the Moon, so no haze, no scattered fill, and a black sky at
   // noon — the single most recognisable thing about the place
   const dens = sc.world === 'moon' ? 0 : Math.exp(-camAlt/9000);
-  const fogCol = [0.62*dens + 0.02, 0.75*dens + 0.04, 0.92*dens + 0.08];
+  const light=daylight(sun,V.norm(V.sub(cam.eye,sc.earthC)));
+  const fogCol = [0.62*dens*light + 0.02, 0.75*dens*light + 0.04, 0.92*dens*light + 0.08];
   const fogDen = (sc.world === 'eci' || sc.world === 'moon') ? 0 : 5e-5*dens + 2e-7;
   const deck = deckWeight(sc.world, cam.eye, sc.earthC);
   // The two fullscreen noise passes go into a smaller buffer and get magnified
@@ -7018,14 +7038,18 @@ function drawScene(sc) {
   // a cabin has its own lighting: raise the fill so interior surfaces facing
   // away from the sun still read (the plasma/engine point light still applies)
   const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 :
-              sc.world === 'moon' ? 0.22 : 0.30 + 0.16*dens;
+              sc.world === 'moon' ? 0.04 + .18*daylight(sun) : .035 + (.265 + .16*dens)*light;
   // Both mesh passes want identical program state, and MESH's uniforms are
   // per-program so in principle one setup would carry — but the passes are
   // separated by two other programs and a framebuffer switch, so state that is
   // set once and relied on later is exactly the kind of thing that rots. It
   // costs a handful of uniform calls.
+  const origin=sc.craftPos || cam.eye;
+  const solar=sc.world==='moon' ? sunVisibility(sun,origin,[0,-RM,0],RM) :
+    sunVisibility(sun,origin,sc.earthC,RE)*(sc.moonC?sunVisibility(sun,origin,sc.moonC,RM):1);
   const setupMeshes = () => {
     beginMeshes(view, V.norm(rotSun), fogDen, fogCol, amb, sc.engI, engV, sc.engC);
+    gl.uniform1f(MESH.u.uSolar,solar);
     setMeshHeat(sc, view);
   };
 
@@ -7135,7 +7159,7 @@ function drawClouds(sc, view, proj, fogCol, fogDen, deck) {
   gl.uniformMatrix3fv(CLOUD.u.uEMat, false, sc.eMat);
   gl.uniform1f(CLOUD.u.uSpin, sc.spin);
   gl.uniformMatrix3fv(CLOUD.u.uCRot, false, CSEED);
-  gl.uniform3fv(CLOUD.u.uSun, sc.sun || SUN);
+  gl.uniform3fv(CLOUD.u.uSun, sc.sun || sunEci(simT,launchHours(run)));
   gl.uniform3fv(CLOUD.u.uFogCol, fogCol);
   gl.uniform1f(CLOUD.u.uFogDen, fogDen);
   gl.bindBuffer(gl.ARRAY_BUFFER, cloudBuf);
@@ -8139,6 +8163,10 @@ function drawHUD(sc, ph) {
             ['HEATING', es.q.toFixed(0) + ' W/cm²'],
             ['CAMERA', sc.cam.mode.toUpperCase()]];
   }
+  if(sc.world==='pad' || sc.world==='entry' || sc.world==='moon') {
+    const up=V.norm(V.sub(sc.cam.eye,sc.world==='moon'?[0,-RM,0]:sc.earthC)), elevation=Math.asin(Math.max(-1,Math.min(1,V.dot(sc.sun,up))))*180/Math.PI;
+    rows.push(['SUN',elevation.toFixed(1)+'° · '+(elevation>0?'DAY':elevation>-6?'TWILIGHT':'NIGHT')]);
+  }
   // The wheels only answer while the stack coasts at real time, so the row
   // shows up exactly when the keys will do something — and reads out the rate,
   // because the rate is what the vehicle's mass decides.
@@ -8169,7 +8197,8 @@ function drawHUD(sc, ph) {
     // whole mechanic.
     const s = V.len(CAB.v);
     rows.push(['CREW', CAB.seat !== null
-      ? 'STRAPPED IN · WASD flies · G to unbuckle'
+      ? landed(ph) ? 'STRAPPED IN · G to unbuckle' : 'STRAPPED IN · WASD flies · G to unbuckle'
+      : landed(ph) ? 'ON DECK · WASD walk · RF up/down'
       : CAB.touch ? 'CONTACT · WASD RF to push'
                   : 'DRIFTING · ' + s.toFixed(2) + ' m/s']);
   }
