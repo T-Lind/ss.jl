@@ -1776,7 +1776,7 @@ A `204 No Content` gets neither `Content-Type` nor `Content-Length`: RFC 9112
 describe.
 """
 function write_response(sock, status::AbstractString, ctype::AbstractString,
-                        body::AbstractString; head::Bool = false)
+                        body::Union{AbstractString,AbstractVector{UInt8}}; head::Bool = false)
     no_content = startswith(status, "204")
     write(sock, no_content ?
         "HTTP/1.1 $status\r\nConnection: close\r\n\r\n" :
@@ -1808,11 +1808,11 @@ end
 """
     static_asset(path) -> (status, content_type, payload)
 
-Serve a shared ES module, stylesheet, or bundled map dataset out of
+Serve a shared ES module, stylesheet, or bundled map/image asset out of
 `scripts/static/`.
 
 The requested name is matched against a strict whitelist rather than
-sanitised: `[A-Za-z0-9_-]+.(js|css|geojson)`, which cannot express a directory
+sanitised: `[A-Za-z0-9_-]+.(js|css|geojson|jpg)`, which cannot express a directory
 separator at all. Sanitising instead means enumerating every way a path can
 escape its root — `..`, `%2e%2e`, backslashes on Windows, drive letters,
 symlinks — and losing the moment you miss one. This process reads the user's
@@ -1823,7 +1823,7 @@ Read per request, like the pages, so editing an asset shows up on refresh.
 """
 function static_asset(path::AbstractString)
     name = first(split(path[length("/static/") + 1:end], '?'))
-    ok = occursin(r"^[A-Za-z0-9_-]+\.(js|css|geojson)$", name) &&
+    ok = occursin(r"^[A-Za-z0-9_-]+\.(js|css|geojson|jpg)$", name) &&
          isfile(joinpath(STATIC_DIR[], name))
     ok || return ("404 Not Found", "application/json",
                   json(Dict{String,Any}("ok" => false,
@@ -1831,6 +1831,9 @@ function static_asset(path::AbstractString)
     # a module served as anything but a JS media type is refused by the
     # browser outright, and the console error names CORS rather than the type.
     # A stylesheet served as the wrong type is dropped just as silently.
+    if endswith(name, ".jpg")
+        return ("200 OK", "image/jpeg", read(joinpath(STATIC_DIR[], name)))
+    end
     ctype = endswith(name, ".css") ? "text/css; charset=utf-8" :
             endswith(name, ".geojson") ? "application/geo+json; charset=utf-8" :
                                          "text/javascript; charset=utf-8"

@@ -243,7 +243,7 @@
             <option value="wenchang">Wenchang</option>
             <option value="mahia">Mahia</option>
           </select></div>
-        <div><label for="launch_h" title="hours after the reference epoch;
+        <div><label for="launch_h" title="hours after Greenwich noon at the equinox (idealised lighting epoch);
             0-24 walks the launch site once around the globe and shifts the
             ascent and the ground track beneath it">launch time [h]</label>
           <input id="launch_h" value="0" min="0" max="24" step="0.25"></div>
@@ -547,6 +547,8 @@
 
 <script type="module">
 'use strict';
+import { earthAngle, launchHours, sunEci, moonOrientation, moonTexel, MOON_MAP_URL } from '/static/celestial.js';
+import { successfulTouchdown, lunarEndLabel } from '/static/flight_state.js';
 import { fin, fmt, fmtKm } from '/static/fmt.js';
 import * as api from '/static/api.js';
 import * as vehicle from '/static/vehicle.js';
@@ -1323,7 +1325,7 @@ let globeCv = null, globeCtx = null;
 // 30,000 km frame: at a 200 km frame the Earth is 80,000 px across, and a
 // full-disc buffer for it is a 6.4-gigapixel allocation. Clipped to the
 // viewport the cost is bounded by the canvas however far you zoom in.
-function drawGlobe(ctx, cx, cy, R, G, w, h) {
+function drawGlobe(ctx, cx, cy, R, G, w, h, light) {
   const x0 = Math.max(0, Math.floor(cx - R)), x1 = Math.min(w, Math.ceil(cx + R));
   const y0 = Math.max(0, Math.floor(cy - R)), y1 = Math.min(h, Math.ceil(cy + R));
   const Dw = x1 - x0, Dh = y1 - y0;
@@ -1349,7 +1351,7 @@ function drawGlobe(ctx, cx, cy, R, G, w, h) {
       const lat = Math.asin(Math.max(-1, Math.min(1, ez)));
       const lon = Math.atan2(ey, ex);
       const land = isLand(lat, lon);
-      const sh = 0.45 + 0.55*nz;              // limb shading
+      const sh = .2+.8*Math.max(0,ux*light[0]+uy*light[1]+uz*light[2]);              // limb shading
       let r, g, b;
       if (land) { r = 92*sh; g = 128*sh; b = 84*sh; }
       else      { r = 34*sh; g = 74*sh;  b = 112*sh; }
@@ -1397,6 +1399,21 @@ function precompute() {
   }
   for (let i = 0; i < E.t.length; i++) if (E.t[i] > tec) {
     t.push(E.t[i]); x.push(E.x[i]); y.push(E.y[i]); z.push(E.z[i]); ph.push(5);
+  }
+  // Include the lunar endgame in the clock and moving craft marker, rather
+  // than ending playback at LOI while painting a future descent underneath it.
+  if(C && run.moon) {
+    const normal=norm3(C.n), last=C.t.length-1;
+    const lunar=(xs,ys,zs,ts,phase)=>{
+      for(let i=0;i<xs.length;i++) {
+        const time=ts[i];if(!(time>t[t.length-1]))continue;
+        const m=rotAxis([C.mx[last],C.my[last],C.mz[last]],normal,N_MOON*(time-C.t[last]));
+        t.push(time);x.push(m[0]+xs[i]/1000);y.push(m[1]+ys[i]/1000);z.push(m[2]+zs[i]/1000);ph.push(phase);
+      }
+    };
+    const O=run.moon.orbit,D=run.moon.descent;
+    lunar(O.x,O.y,O.z,O.t,3);
+    lunar(D.x,D.y,D.z,run.descent.t.map(dt=>run.site.t_pdi+dt),5);
   }
   const N = t.length, n = C ? norm3(C.n) : [0, 0, 1];
   // Moon at every combined sample (circular ephemeris: rotate the nearest
@@ -1482,7 +1499,7 @@ function fitCamera() {
 // in 3D, so the disc is textured by inverse-orthographic projection: for each
 // pixel inside the limb, recover the world direction of the sphere point and
 // read the selenographic lat/lon out of the equirectangular image (0 deg lon =
-// sub-Earth meridian, which is also the "to Earth" arrow). Cached by view angle
+// sub-Earth meridian, which is also the "to Earth" arrow). Cached by orientation and sunlight
 // so an idle scene costs nothing; capped at 220 px so a zoomed-in disc cannot
 // stall a frame.
 let MTEX = null, MTW = 0, MTH = 0;
@@ -1498,43 +1515,42 @@ MTEX_IMG.onload = () => {
 };
 MTEX_IMG.src = new URL('./static/moon_map.jpg', import.meta.url).href;
 let MDISC = null, MDISC_KEY = '';
-function moonDisc(rM, RM, cy, sy, cp, sp) {
+function moonDisc(rM, G, light) {
   const R = Math.max(8, Math.min(220, Math.round(rM)));
-  const key = [R, cy.toFixed(4), sy.toFixed(4), cp.toFixed(4), sp.toFixed(4)].join('|');
+  const key = [R, ...G.flat(), ...light].map(x=>x.toFixed(4)).join('|');
   if (MDISC && MDISC_KEY === key) return MDISC;
   const oc = document.createElement('canvas'); oc.width = 2*R; oc.height = 2*R;
   const g = oc.getContext('2d'), out = g.createImageData(2*R, 2*R), d = out.data;
-  const eh = [cy, -sy, 0], ev = [sy*sp, cy*sp, cp], ed = [sy*cp, cy*cp, -sp];
-  const mp = [S.mx[S.n-1], S.my[S.n-1], S.mz[S.n-1]];
-  const ml = Math.hypot(mp[0], mp[1], mp[2]) || 1;
-  const xh = [-mp[0]/ml, -mp[1]/ml, -mp[2]/ml];
-  let zh = S.nrm ? [S.nrm[0], S.nrm[1], S.nrm[2]] : [0, 0, 1];
-  const zl = Math.hypot(zh[0], zh[1], zh[2]) || 1; zh = [zh[0]/zl, zh[1]/zl, zh[2]/zl];
-  const yh = [zh[1]*xh[2]-zh[2]*xh[1], zh[2]*xh[0]-zh[0]*xh[2], zh[0]*xh[1]-zh[1]*xh[0]];
-  const step = RM/R;
-  for (let j = 0; j < 2*R; j++) {
-    const W = ((j + 0.5) - R)*step;
-    for (let i = 0; i < 2*R; i++) {
-      const X = ((i + 0.5) - R)*step, r2 = X*X + W*W;
-      if (r2 > RM*RM) continue;
-      const D = -Math.sqrt(RM*RM - r2);
-      const px = X*eh[0]+W*ev[0]+D*ed[0], py = X*eh[1]+W*ev[1]+D*ed[1], pz = X*eh[2]+W*ev[2]+D*ed[2];
-      const ux = px/RM, uy = py/RM, uz = pz/RM;
-      const uzz = ux*zh[0]+uy*zh[1]+uz*zh[2];
-      const lat = Math.asin(Math.max(-1, Math.min(1, uzz)));
-      let lon = Math.atan2(ux*yh[0]+uy*yh[1]+uz*yh[2], ux*xh[0]+uy*xh[1]+uz*xh[2]);
-      let tx = Math.floor((lon*180/Math.PI + 180)/360*MTW);
-      let ty = Math.floor((90 - lat*180/Math.PI)/180*MTH);
-      tx = ((tx % MTW) + MTW) % MTW;
-      if (ty < 0) ty = 0; if (ty >= MTH) ty = MTH - 1;
-      const si = (ty*MTW + tx)*4, o = (j*2*R + i)*4;
-      const shade = 0.35 + 0.65*Math.sqrt(Math.max(0, 1 - r2/(RM*RM)));
-      d[o] = MTEX[si]*shade; d[o+1] = MTEX[si+1]*shade; d[o+2] = MTEX[si+2]*shade; d[o+3] = 255;
-    }
+  for (let j = 0; j < 2*R; j++) for (let i = 0; i < 2*R; i++) {
+    const x=(i+.5-R)/R, y=-(j+.5-R)/R, rr=x*x+y*y;
+    if(rr>1)continue;
+    const v=[x,y,-Math.sqrt(1-rr)];
+    const fixed=[0,1,2].map(k=>G[0][k]*v[0]+G[1][k]*v[1]+G[2][k]*v[2]);
+    const [tx,ty]=moonTexel(fixed,MTW,MTH), si=(ty*MTW+tx)*4, o=(j*2*R+i)*4;
+    // Some ambient light keeps the terrain readable on the night hemisphere.
+    const shade=.22+.78*Math.max(0,dot3(v,light));
+    d[o]=MTEX[si]*shade;d[o+1]=MTEX[si+1]*shade;d[o+2]=MTEX[si+2]*shade;d[o+3]=255;
   }
-  g.putImageData(out, 0, 0);
-  MDISC = oc; MDISC_KEY = key;
-  return oc;
+  g.putImageData(out,0,0); MDISC=oc;MDISC_KEY=key;return oc;
+}
+function drawPoleAxis(ctx, pj, centre, north, radius, name, color, w, h) {
+  const c=pj(centre), tips=[1,-1].map(sign=>pj(centre.map((v,i)=>v+sign*1.3*radius*north[i])));
+  const extent=Math.max(...[0,1,2].map(k=>{const q=pj(centre.map((v,i)=>v+(i===k?radius:0)));return Math.hypot(q[0]-c[0],q[1]-c[1]);}));
+  if(c[0]+extent<0||c[0]-extent>w||c[1]+extent<0||c[1]-extent>h)return;
+  if(Math.hypot(tips[0][0]-c[0],tips[0][1]-c[1])<7) {
+    // Looking along the axis: separate the pole labels so both remain legible.
+    tips[0]=[c[0],c[1]-20];tips[1]=[c[0],c[1]+20];
+  }
+  ctx.save();ctx.strokeStyle=color;ctx.lineWidth=1;ctx.setLineDash([4,3]);
+  ctx.beginPath();ctx.moveTo(...tips[0].slice(0,2));ctx.lineTo(...tips[1].slice(0,2));ctx.stroke();
+  ctx.setLineDash([]);ctx.font='11px system-ui';ctx.fillStyle=color;
+  for(let i=0;i<2;i++) {
+    const label=name+' '+(i?'South':'North')+' Pole';
+    const x=Math.max(5,Math.min(w-ctx.measureText(label).width-5,tips[i][0]+6));
+    const y=Math.max(14,Math.min(h-25,tips[i][1]+(i?12:-6)));
+    ctx.lineWidth=3;ctx.strokeStyle='#111318';ctx.strokeText(label,x,y);ctx.fillText(label,x,y);
+  }
+  ctx.restore();
 }
 
 function drawMoonScene(cv, ctx, w, h) {
@@ -1551,7 +1567,7 @@ function drawMoonScene(cv, ctx, w, h) {
   // the Moon itself, shaded, with the Earth-facing side marked
   const pm = pj(0, 0, 0), rM = RM*f;
   if (MTEX) {
-    ctx.drawImage(moonDisc(rM, RM, cy, sy, cp, sp), pm[0]-rM, pm[1]-rM, 2*rM, 2*rM);
+    ctx.drawImage(moonDisc(rM, matmul(camMatrix(), moonOrientation([S.mx[S.n-1],S.my[S.n-1],S.mz[S.n-1]],S.nrm)), matvec(camMatrix(),sunEci(run.site?.t_td ?? S.t[S.n-1],launchHours(run)))), pm[0]-rM, pm[1]-rM, 2*rM, 2*rM);
     ctx.strokeStyle = 'rgba(120,130,140,.45)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(pm[0], pm[1], rM, 0, 2*Math.PI); ctx.stroke();
   } else {
@@ -1572,6 +1588,7 @@ function drawMoonScene(cv, ctx, w, h) {
     }
     ctx.stroke();
   };
+  drawPoleAxis(ctx,p=>pj(...p),[0,0,0],S.nrm,RM,'Moon','#ccc9be',w,h);
   // parking orbit then the descent ellipse, in the colours the legend uses
   let iSplit = O.ph.findIndex(p => p === 1);
   if (iSplit < 0) iSplit = O.x.length;
@@ -1597,7 +1614,7 @@ function drawMoonScene(cv, ctx, w, h) {
     if (!occulted) {
       circle(ctx, q[0], q[1], 3.4, '#fff');
       ctx.fillStyle = INK2; ctx.font = '11px system-ui';
-      ctx.fillText('touchdown', q[0] + 8, q[1] + 3);
+      ctx.fillText(successfulTouchdown(run)?'touchdown':lunarEndLabel(run).toLowerCase(), q[0] + 8, q[1] + 3);
     }
   }
   // scale bar, because at this zoom nothing else says how big the frame is
@@ -1609,7 +1626,7 @@ function drawMoonScene(cv, ctx, w, h) {
   const m = run.metrics;
   $('readout').textContent =
     `Moon frame · ${fmt(m.perilune_km,0)} km orbit → ${fmt(m.downrange_km,0)} km ` +
-    `descent · touchdown ${fmt(m.land_lat,1)}°, ${fmt(m.land_lon,1)}°`;
+    `descent · ${lunarEndLabel(run).toLowerCase()} ${fmt(m.land_lat,1)}°, ${fmt(m.land_lon,1)}°`;
 }
 
 function drawScene() {
@@ -1627,11 +1644,11 @@ function drawScene() {
 
   const Rc = camMatrix();
   // globe orientation, ECEF -> scene
-  const th = OMEGA_E * tNow, c = Math.cos(th), s = Math.sin(th);
-  let A = [[c, -s, 0], [s, c, 0], [0, 0, 1]];
+  const th = earthAngle(tNow,launchHours(run)), c = Math.cos(th), s = Math.sin(th);
+  let A = [[c, -s, 0], [s, c, 0], [0, 0, 1]], frameRot=[[1,0,0],[0,1,0],[0,0,1]];
   if (rotFrame) {
     const e1 = norm3([S.mx[i0], S.my[i0], S.mz[i0]]), e2 = cross3(S.nrm, e1);
-    A = matmul([e1, e2, S.nrm], A);
+    frameRot=[e1,e2,S.nrm]; A = matmul(frameRot, A);
   }
 
   // lunar orbit ring (in the true mission plane)
@@ -1647,6 +1664,14 @@ function drawScene() {
   }
   ctx.stroke();
 
+  const moonPosition=[S.mx[i0],S.my[i0],S.mz[i0]];
+  const pm=project(cv,Pm(i0)),rM=Math.max(2.5,RM_MM*pm[2]);
+  const drawMoon=()=>{
+    if(MTEX)ctx.drawImage(moonDisc(rM,matmul(Rc,matmul(frameRot,moonOrientation(moonPosition,S.nrm))),
+      matvec(Rc,matvec(frameRot,sunEci(tNow,launchHours(run))))),pm[0]-rM,pm[1]-rM,2*rM,2*rM);
+    else circle(ctx,pm[0],pm[1],rM,'#77776f');
+  };
+
   // trajectory in two depth passes so the globe occludes the far side but
   // never hides near-side lines (parking orbit, TLI, entry)
   ctx.lineCap = 'round';
@@ -1654,6 +1679,7 @@ function drawScene() {
     let prev = null;
     for (let i = 0; i < N; i++) {
       const pr = project(cv, P(i));
+      if(!behind && pr[3]>pm[3] && Math.hypot(pr[0]-pm[0],pr[1]-pm[1])<rM) {prev=null;continue;}
       if (prev && ((pr[3] + prev[3]) > 0) === behind) {
         ctx.globalAlpha = i <= ti ? 1 : 0.35;
         ctx.strokeStyle = COL[S.ph[i]] || INK2;
@@ -1666,11 +1692,11 @@ function drawScene() {
   };
   drawSegs(true);                             // far side of the Earth
 
-  // Earth
   const pe = project(cv, [0, 0, 0]);
   const rE = Math.max(3, RE_MM*pe[2]);
+  if(pm[3]>=pe[3])drawMoon();
   if (rE >= 7) {
-    drawGlobe(ctx, pe[0], pe[1], rE, matmul(Rc, A), w, h);
+    drawGlobe(ctx, pe[0], pe[1], rE, matmul(Rc, A), w, h, matvec(Rc,matvec(frameRot,sunEci(tNow,launchHours(run)))));
   } else {
     const g = ctx.createRadialGradient(pe[0]-rE*.3, pe[1]-rE*.3, rE*.2, pe[0], pe[1], rE);
     g.addColorStop(0, '#4a7fa8'); g.addColorStop(1, '#193349');
@@ -1698,39 +1724,11 @@ function drawScene() {
     site(run.sites.splash_lat, run.sites.splash_lon, '#f2c14e', 'splash');
   }
 
-  // Moon
-  const pm = project(cv, Pm(i0));
-  const rM = Math.max(2.5, RM_MM*pm[2]*3);
-  const g2 = ctx.createRadialGradient(pm[0]-rM*.3, pm[1]-rM*.3, rM*.2, pm[0], pm[1], rM);
-  g2.addColorStop(0, '#8d8d86'); g2.addColorStop(1, '#4a4a45');
-  circle(ctx, pm[0], pm[1], rM, g2);
+  if(pm[3]<pe[3])drawMoon();
+  if(rE>=9)drawPoleAxis(ctx,p=>project(cv,p),[0,0,0],matvec(frameRot,[0,0,1]),RE_MM,'Earth','#8fbef0',w,h);
+  if(rM>=7)drawPoleAxis(ctx,p=>project(cv,p),Pm(i0),matvec(frameRot,S.nrm),RM_MM,'Moon','#ccc9be',w,h);
 
   drawSegs(false);                            // near side, over the globe
-
-  // Landing missions carry a lunar phase that lives in a Moon-centred frame.
-  // Put it back where it belongs: each sample is offset by the Moon's own
-  // position at that moment, so zooming in on the Moon shows the parking
-  // orbit and the descent arc in the same scene as the transfer.
-  if (run.moon && rM > 6) {
-    const M = run.moon;
-    const mm = t => {                    // Moon position at mission time t
-      let j = S.n - 1;
-      while (j > 0 && S.t[j] > t) j--;
-      return rotAxis([S.mx[j], S.my[j], S.mz[j]], S.nrm, N_MOON*(t - S.t[j]));
-    };
-    const lun = (X, Y, Z, ts, col, wid) => {
-      ctx.strokeStyle = col; ctx.lineWidth = wid;
-      ctx.beginPath();
-      for (let i = 0; i < X.length; i++) {
-        const c = mm(ts ? ts[i] : S.t[S.n-1]);
-        const q = project(cv, [c[0] + X[i]/1000, c[1] + Y[i]/1000, c[2] + Z[i]/1000]);
-        i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
-      }
-      ctx.stroke();
-    };
-    lun(M.orbit.x, M.orbit.y, M.orbit.z, M.orbit.t, '#c98500', 1.4);
-    lun(M.descent.x, M.descent.y, M.descent.z, null, '#d55181', 2.0);
-  }
 
   // pod (hollow + dim when behind the globe)
   const pd = project(cv, P(i0));

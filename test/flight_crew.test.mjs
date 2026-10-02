@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
-import { landerLayout } from '../web/static/lander_model.js';
+import { landerLayout, clampLanderEye } from '../web/static/lander_model.js';
+import * as celestial from '../web/static/celestial.js';
+import * as flightState from '../web/static/flight_state.js';
 import { panelGeometry } from '../web/src/panel.js';
 
 // Run the shipped viewer's flight logic with small telemetry fixtures. No GPU
@@ -16,7 +18,7 @@ function fn(name) {
   return source.slice(start, source.slice(start, oneLine).endsWith('}') ? oneLine : end + 2);
 }
 function flight() {
-  const c = createContext({ landerLayout, Math, Number,
+  const c = createContext({ ...celestial, ...flightState, landerLayout, Math, Number,
     run: { mode: 'landing', params: {}, metrics: { outcome: 'touchdown' } },
     HASCAB: false, camMode: 'cabin', simT: 100, warpEff: 1,
     BURNW: [], tLOI: 300, tDOI: 400, tPDI: 500, tLanderDrop: 400,
@@ -152,7 +154,7 @@ test('touchdown stops propulsion and terminal velocity readouts before moonwalks
 
 test('Julia and static viewers keep the same flight implementation', () => {
   const julia = readFileSync(new URL('../scripts/launch_page.html', import.meta.url), 'utf8');
-  for (const name of ['buildScene', 'drawWorldMeshes', 'craftInertia', 'evaGate', 'landerAttitudeMat']) {
+  for (const name of ['buildScene', 'drawWorldMeshes', 'craftInertia', 'evaGate', 'landerAttitudeMat', 'cabGroundStep', 'moonPositionAt']) {
     const body = fn(name);
     assert.ok(julia.includes(body), `${name} differs between frontends`);
   }
@@ -208,4 +210,24 @@ test('lander console reports descent telemetry and actual crew state',()=>{
   assert.equal(c.trajView(),'DESCENT');
   const julia=readFileSync(new URL('../scripts/launch_page.html',import.meta.url),'utf8');
   for(const name of ['cabRows','cabScreenPaint','cabDecalBuild','decPaint','trajView'])assert.ok(julia.includes(fn(name)),`${name} frontend drift`);
+});
+
+
+test('unbuckled grounded crew can move repeatedly, stop, and stay inside the cabin',()=>{
+  const c=flight(), K=landerLayout(4.2);
+  Object.assign(c,{clampLanderEye,K,CAB_RROLL:.9,CAB_ROLL_TAU:.2,CAB_SMOOTH:.13,
+    CAB:{seat:null,p:[0,0,0],pv:[0,0,0],v:[0,0,0],rw:0,keys:{w:true},touch:false},
+    cabDirs:()=>({fwd:[1,0,0],rt:[0,0,1],up:[0,1,0]})});
+  for(const name of ['lmCabinPose','cabinPose','cabBox','cabSmooth','cabGroundStep','cabStep'])runInContext(fn(name),c);
+  for(let i=0;i<20;i++)c.cabStep(.02,true,K,true);
+  assert.ok(c.CAB.p[0]>.2);
+  c.CAB.keys={s:true};for(let i=0;i<20;i++)c.cabStep(.02,true,K,true);
+  assert.ok(Math.abs(c.CAB.p[0])<1e-9); // no new wall contact needed to reverse
+  c.CAB.keys={};c.cabStep(.02,true,K,true);
+  assert.equal(Math.hypot(...c.CAB.v),0);
+  c.CAB.keys={d:true,r:true};for(let i=0;i<300;i++)c.cabStep(.02,true,K,true);
+  const base=c.cabinPose('float',0,K).eye, eye=base.map((v,i)=>v+c.CAB.p[i]);
+  eye.forEach((v,i)=>assert.ok(v>=K.clear.min[i]&&v<=K.clear.max[i]));
+  const before=plain(c.CAB.p);c.CAB.seat=0;c.cabStep(.1,true,K,true);
+  assert.deepEqual(plain(c.CAB.p),before); // the harness still owns a seated crew member
 });

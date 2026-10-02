@@ -513,7 +513,8 @@ end
         # the console blames CORS, so the content type is asserted.
         for name in ("fmt.js", "api.js", "vehicle.js", "selftest.js",
                      "charts.js", "groundtrack.js", "moongroundtrack.js", "metrics.js",
-                     "lander_model.js", "engine_layout.js", "engine_model.js")
+                     "lander_model.js", "engine_layout.js", "engine_model.js",
+                     "celestial.js", "flight_state.js")
             st, hdrs, bod = http("GET", "/static/$name"; port = port)
             @test st == 200
             @test hdrs["content-type"] == "text/javascript; charset=utf-8"
@@ -524,6 +525,20 @@ end
         @test st == 200
         @test hdrs["content-type"] == "application/geo+json; charset=utf-8"
         @test occursin("FeatureCollection", bod)
+
+        # The lunar map must survive the desktop server as bytes, including
+        # bytes that are not UTF-8. HEAD advertises the same size without a body.
+        image = read(joinpath(PanelApp.STATIC_DIR[], "moon_map.jpg"))
+        st, hdrs, bod = http("GET", "/static/moon_map.jpg?v=2"; port = port)
+        @test st == 200
+        @test hdrs["content-type"] == "image/jpeg"
+        @test parse(Int, hdrs["content-length"]) == length(image)
+        @test collect(codeunits(bod)) == image
+        st, hdrs, bod = http("HEAD", "/static/moon_map.jpg"; port = port)
+        @test st == 200
+        @test hdrs["content-type"] == "image/jpeg"
+        @test parse(Int, hdrs["content-length"]) == length(image)
+        @test isempty(bod)
 
         # `limit` is the only thing that colours a metric anywhere in the app,
         # and `drawLine` the only thing that draws a chart. Both were private
@@ -573,7 +588,8 @@ end
         # reason to hand out arbitrary files.
         for bad in ("../panelapp.jl", "..%2Fpanelapp.jl", "..\\panelapp.jl",
                     "sub/dir.js", "fmt.js.bak", "nope.js", "C:/Windows/win.ini",
-                    "../Project.toml", "tokens.css.bak", "tokens.scss")
+                    "../Project.toml", "tokens.css.bak", "tokens.scss",
+                    "../static/moon_map.jpg", "moon_map.jpg.bak", "sub/moon_map.jpg")
             st, hdrs, bod = http("GET", "/static/$bad"; port = port)
             @test st == 404
             @test occursin("\"ok\":false", bod)
