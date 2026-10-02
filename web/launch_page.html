@@ -34,6 +34,10 @@
      definition, in ./static/tokens.css; change it there and every page moves. */
   :root { --ink: var(--text); --dim: var(--text-2);
           --acc: var(--amber); --go: var(--nominal); }
+  #hatch_action { position:fixed; right:20px; bottom:88px; z-index:20;
+    padding:10px 14px; border:1px solid var(--acc); border-radius:5px;
+    background:#141c26; color:var(--acc); font:12px monospace; cursor:pointer; }
+  #hatch_action:disabled { color:var(--dim); border-color:var(--dim); cursor:default; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; background: #000; overflow: hidden;
                font-family: system-ui, sans-serif; }
@@ -140,7 +144,7 @@
     <a class="navlink" href="build_page.html">vehicle builder</a>
     <a class="navlink" id="analysislink" href="analysis_page.html">analysis</a>
     <a class="navlink" href="#" aria-current="page">launch view</a>
-    <a class="navlink" href="models_page.html">model inspector</a>
+    <a class="navlink" id="modelslink" href="models_page.html">spacecraft viewer</a>
   </span>
   <span class="appnav-end">
     <span class="u-label" id="nav_note">launch</span>
@@ -150,6 +154,7 @@
 <div class="hud" id="clock">T–00:15<div id="phase">ASCENT</div></div>
 <div class="hud" id="stats"></div>
 <div class="hud" id="toast"></div>
+<button id="hatch_action" class="hidden" type="button">HATCH · SUIT UP</button>
 <!-- No nav bar here on purpose: this view is full-bleed and the chrome yields
      to it. It still needs to reach both other pages, though — a view you can
      only leave one way is what made three tabs feel scattered. -->
@@ -164,7 +169,7 @@
     <tr><td><b>1</b>–<b>6</b></td><td>cameras · <b>[</b> <b>]</b> zoom, <b>\</b> reset</td></tr>
     <tr><td><b>m</b> · <b>p</b> · <b>h</b></td><td>mute · frame time · this list</td></tr>
     <tr><td colspan="2" class="sec">Flying the vehicle — strapped in, coasting, at &times;1</td></tr>
-    <tr><td><b>w a s d</b></td><td>pitch and yaw on the reaction wheels</td></tr>
+    <tr><td><b>w a s d</b></td><td>pitch and yaw · lander RCS / capsule attitude control</td></tr>
     <tr><td><b>q</b> <b>e</b> · <b>x</b></td><td>roll · kill rotation</td></tr>
     <tr><td colspan="2" class="sec">Out of the couch — the same keys, now your body</td></tr>
     <tr><td><b>w a s d</b> <b>r</b> <b>f</b></td><td>move — fore/aft, left/right, up/down</td></tr>
@@ -2162,6 +2167,7 @@ function buildLMCabin() {
 // --- state in the site frame ------------------------------------------------
 function moonState(t) {
   const T = MD.t, tp = Math.max(T[0], t - MS.t_pdi);
+  const settled = t >= MS.t_td && run.metrics?.outcome === 'touchdown';
   const x = samp(T, MS.lx, tp), y = samp(T, MS.ly, tp), z = samp(T, MS.lz, tp);
   const a = x/RM, b = z/RM, R = RM + y;
   const pos = [R*Math.sin(a)*Math.cos(b), R*Math.cos(a)*Math.cos(b) - RM, R*Math.sin(b)];
@@ -2178,9 +2184,9 @@ function moonState(t) {
   const fm = V.len(fp) > 1e-6 ? V.norm(fp) :
              V.norm(V.sub(up, V.scale(thrust, V.dot(up, thrust))));
   return { pos, up, fwd, thrust, bx: fm, by: thrust, bz: V.cross(fm, thrust),
-           h: samp(T, MD.h, tp)*1000, v: samp(T, MD.v, tp),
-           vh: samp(T, MD.vh, tp), vv: samp(T, MD.vv, tp),
-           thr: samp(T, MD.thr, tp)/100, m: samp(T, MD.m, tp),
+           h: settled ? 0 : samp(T, MD.h, tp)*1000, v: settled ? 0 : samp(T, MD.v, tp),
+           vh: settled ? 0 : samp(T, MD.vh, tp), vv: settled ? 0 : samp(T, MD.vv, tp),
+           thr: t >= MS.t_td ? 0 : samp(T, MD.thr, tp)/100, m: samp(T, MD.m, tp),
            elev: samp(T, MD.elev, tp), navdh: samp(T, MD.navdh, tp),
            x, y, z, dr: -x };
 }
@@ -2252,7 +2258,15 @@ function eciLanderFrame(cs) {
 }
 function eciLanderMat(cs) {
   const f = eciLanderFrame(cs);
-  return mBasis(f.bx, f.by, f.bz, cs.pos);
+  return landerAttitudeMat(mBasis(f.bx, f.by, f.bz, cs.pos));
+}
+
+// Commands use the launch stack's axes. Convert them to the lander's frame,
+// where +y is the thrust axis, and turn about the cabin rather than a spent stage.
+function landerAttitudeMat(base) {
+  const q = RCS.q;
+  return mAbout(base, [0, 2.65*landerLayout(MDIA).s, 0],
+                qMat([q[0], -q[2], q[1], q[3]]));
 }
 
 // While attached, the lander's thrust axis follows the stack's +x. Once
@@ -4148,6 +4162,12 @@ function rcsAlpha(M, L, R) {
 // still aboard; propellant burned after that is not tracked, so the stack is
 // never modelled lighter than it really is.
 function craftInertia(t) {
+  if (isLandingMission() && Number.isFinite(tLanderDrop) && t >= tLanderDrop) {
+    const L = landerLayout(MDIA);
+    const M = MD?.m?.length ? samp(MD.t, MD.m, Math.max(0, t - MS.t_pdi))
+                          : +(run.params?.l_dry || 3500) + +(run.params?.l_prop || 9000);
+    return { M: Math.max(500, M), L: L.height, R: MDIA/2 };
+  }
   const sp = attachedSpan();
   const L = Math.max(1, sp.x1 - sp.x0);
   const R = Math.max(0.3, SECR[LASTST] || (TOPD || DIA)/2);
@@ -4166,6 +4186,7 @@ function rcsAuth(t) {
 // every time the clock sped up. Commanding needs real time — integrating a
 // 0.18 rad/s rate at x2000 is not a manoeuvre. Holding needs nothing at all.
 function rcsActive(ph) {
+  if (EVA.active || SURF.active) return false;
   if (warpEff > 1.01) return false;
   return coastActive(ph);
 }
@@ -4173,7 +4194,8 @@ function rcsActive(ph) {
 // is relative to the vehicle and runs on wall time, so unlike reaction-wheel
 // commanding it remains available while the mission clock is compressed.
 function coastActive(ph) {
-  if (ph.w === 'eci') return !BURNW.some(b => simT >= b[0] && simT <= b[1]);
+  if (ph.w === 'eci') return !BURNW.some(b => simT >= b[0] && simT <= b[1]) &&
+    ![tLOI, tDOI].some(t => Number.isFinite(t) && Math.abs(simT - t) < 1e-6);
   // an ascent that never made orbit still coasts, and it coasts in the pad
   // world — the wheels come alive once the last engine has quit
   if (ph.w === 'pad') return simT > secoT + 2 && state(simT).thr < 1e3;
@@ -4190,6 +4212,8 @@ const RCS_ALIGN_LEAD = 60;
 // it is the view being taken away from you.
 function rcsMustAlign(ph) {
   if (ph.w === 'entry' || ph.w === 'moon') return true;
+  if (isLandingMission() && [tLOI, tDOI, tPDI].some(t =>
+      Number.isFinite(t) && simT >= t - RCS_ALIGN_LEAD && simT <= t)) return true;
   if (BURNW.some(b => simT >= b[0] - RCS_ALIGN_LEAD && simT <= b[1])) return true;
   if (isFinite(tEI) && simT >= tEI - RCS_ALIGN_LEAD) return true;
   if (ph.w === 'pad' && !(simT > secoT + 2)) return true;   // still under power
@@ -4198,6 +4222,9 @@ function rcsMustAlign(ph) {
 // how long until the hold is given up, for the readout — a crew wants warning
 function rcsAlignIn() {
   let best = Infinity;
+  if (isLandingMission()) for (const t of [tLOI, tDOI, tPDI])
+    if (Number.isFinite(t) && simT < t - RCS_ALIGN_LEAD)
+      best = Math.min(best, t - RCS_ALIGN_LEAD - simT);
   for (const b of BURNW) if (simT < b[0] - RCS_ALIGN_LEAD)
     best = Math.min(best, b[0] - RCS_ALIGN_LEAD - simT);
   if (isFinite(tEI) && simT < tEI - RCS_ALIGN_LEAD)
@@ -4798,7 +4825,7 @@ const CAMS_MOON_ALL = ['auto','wide','chase','onboard','ground','cabin','free'];
 // Read as FUNCTIONS, not as constants: HASCAB is not known until the geometry
 // arrives, and a const evaluated at load would freeze the list before the
 // vehicle was ever seen.
-const camList = l => HASCAB ? l : l.filter(m => m !== 'cabin');
+const camList = l => HASCAB || isLandingMission() ? l : l.filter(m => m !== 'cabin');
 const CAMS = () => camList(CAMS_ALL);
 // The lander is a crewed vehicle with its own cockpit, not the capsule's
 // cabin, so it is offered in the moon world whether or not the launch
@@ -5274,8 +5301,10 @@ function evaHatchPoint(K) {
 function evaHatchStation(Kin) {
   const K = Kin || cabK();
   if (!K) return null;
+  // Aim at the lower door panel, visible below the console's switch strip.
+  // A ray at the hatch centre crosses that strip first from either crew seat.
   if (K.panel) return {key:'hatch',label:'AIRLOCK · EVA',r:.20*K.s,
-    p:[K.hatch[0]-.14*K.s,K.hatch[1],K.hatch[2]]};
+    p:[K.hatch[0]-.14*K.s,K.hatch[1]-.18*K.s,K.hatch[2]]};
   const u = K.xa + 0.50*K.rp, rc = K.rcone(u);
   return { key: 'hatch', label: 'HATCH · EVA', r: Math.max(0.10*K.rp, 0.20),
            p: [K.xb + u, -0.92*rc, 0] };
@@ -5299,6 +5328,7 @@ function evaEgress(ph) {
                 q: HEAD.q.slice(), rw: CAB.rw, yaw: headYaw, pitch: headPitch };
   CAB.seat = null;                       // you cannot egress strapped in
   CAB.keys = {}; CAB.v = [0,0,0]; CAB.rw = 0;
+  RCS.keys = {}; RCS.w = [0,0,0];
   CAB.touch = true; CAB.n = null; CAB.push = 0;
   EVA.anchor = evaHatchPoint(K);
   EVA.out = K.panel ? K.hatchNormal : [0,-1,0]; // outward normal at the hatch
@@ -5420,6 +5450,7 @@ const SURF = { active: false, p: [0,0,0], v: [0,0,0], yaw: 0, pitch: 0,
 // contact light. Before arrival the lander is flying and the hatch stays shut.
 function landed(ph) {
   return isLandingMission() && !!ph && ph.w === 'moon' && !!MS &&
+         run.metrics?.outcome === 'touchdown' &&
          simT >= MS.t_td + 0.5;
 }
 // Local vertical at a world point: the Moon-fixed radial through it, which near
@@ -5496,6 +5527,8 @@ function surfEgress(ph) {
   SURF.yaw = Math.atan2(hz, hx);
   SURF.v = [0,0,0]; SURF.onGround = true; SURF.keys = {};
   SURF.active = true;
+  CAB.keys = {}; CAB.v = [0,0,0]; CAB.rw = 0;
+  RCS.keys = {}; RCS.w = [0,0,0];
   EVA.state = 'inside'; EVA.suited = true;
   CAB.seat = null;
   headLevel();
@@ -5607,6 +5640,7 @@ function cabSit(i, Kin) {
   if (!K) return false;
   CAB.seat = Math.min(Math.max(i | 0, 0), cabSeatZ(K).length - 1);
   CAB.v = [0,0,0]; CAB.p = [0,0,0];
+  CAB.keys = {}; RCS.keys = {};
   CAB.touch = true; CAB.n = null; CAB.push = 0;
   headLevel();                                // strapping in squares you up
   sfxStrap();
@@ -5634,6 +5668,7 @@ function cabStand(Kin) {
     headTurn(ax, Math.atan2(s, Math.max(-1, Math.min(1, V.dot(f0, fT)))));
   headYaw = headPitch = 0;
   CAB.seat = null; CAB.v = [0,0,0]; CAB.rw = 0;
+  CAB.keys = {}; RCS.keys = {};
   CAB.touch = true; CAB.n = null; CAB.push = 0;   // a hand still on the couch
   sfxSwitch();                                    // the harness letting go
   cabToast('UNBUCKLED · ZERO G');
@@ -6368,10 +6403,9 @@ function frame(now) {
   // Floating is relative to the cabin and therefore runs on wall time even
   // when the mission clock is compressed. Burns and entry still pin the crew
   // into the couch; an unpowered coast does not.
-  // The LM cabin opens for the whole lunar endgame, so floating is allowed
-  // there even under thrust; a capsule still only lets go on an unpowered coast.
+  // Cabin translation is available on coast or after touchdown.
   cabStep(dtReal, camMode === 'cabin' && !EVA.active && !SURF.active &&
-    (coastActive(ph) || (isLandingMission() && (ph.w === 'moon' || eciLanderPhase(ph)))));
+    (coastActive(ph) || landed(ph)));
   // The spacewalk lives and dies with the coast: while the phase allows it the
   // astronaut is on the rope, and the instant the window closes (a burn lights,
   // entry starts, the descent begins) the crew is brought back through the
@@ -6432,7 +6466,8 @@ function buildScene(ph) {
     // the wheels turn the stack about its own middle; with none commanded
     // rcsMat is the identity and this is the bare placement it always was
     const craftM = mAbout(mBasis(bxp, byv, bzp, st.pos), rcsPivot(), rcsMat());
-    const cam = cameraPad(simT, st, craftM);
+    const cabinM = isLandingMission() ? landerStackMat(craftM) : craftM;
+    const cam = cameraPad(simT, st, cabinM);
     const tailX = attachedTailX(secGone);
     const noz = V.add(st.pos, V.scale(st.dir, tailX));
     // The exhaust leaves each BELL, not the centreline: world positions for
@@ -6480,7 +6515,7 @@ function buildScene(ph) {
     // or just off the table
     TRENCH = st.h < 260;
     return {
-      world: 'pad', st, cam, craftM, craftPos: st.pos,
+      world: 'pad', st, cam, craftM: cabinM, stackM: craftM, craftPos: st.pos,
       earthC: [0, -RE, 0], moonC: null,
       eMat: anchorMat(run.sites.launch_lat, run.sites.launch_lon),
       spin: OME*Math.max(simT, 0), near: 1,
@@ -6500,7 +6535,7 @@ function buildScene(ph) {
     // Over the lunar endgame the LANDER is the crew's vehicle, so the cabin
     // camera, the console screens and the picker all ride eciLanderMat; the
     // stack sections (a drifting kick stage) still ride stackM.
-    const craftM = (MS && eciLanderPhase(ph)) ?
+    const craftM = isLandingMission() ?
       (simT >= tLanderDrop ? eciLanderMat(cs) : landerStackMat(stackM)) : stackM;
     const cam = cameraEci(simT, cs, ph, craftM);
     const noz = V.add(cs.pos, V.scale(cs.bx, -0.5));
@@ -6518,7 +6553,7 @@ function buildScene(ph) {
   }
   if (ph.w === 'moon') {
     const ms = moonState(simT);
-    const craftM = mBasis(ms.bx, ms.by, ms.bz, ms.pos);
+    const craftM = landerAttitudeMat(mBasis(ms.bx, ms.by, ms.bz, ms.pos));
     const cam = cameraMoon(simT, ms, craftM);
     const noz = V.add(ms.pos, V.scale(ms.thrust, landerLayout(MDIA).nozzle[1]));
     PUP = null;                  // vacuum: nothing rises, nothing settles
@@ -6847,12 +6882,17 @@ function drawWorldMeshes(sc, proj, inCab) {
       bindMeshBuf(armBuf);
       for (const a of armDraw) drawRange(armMat(a, simT), proj, a.first, a.count);
     }
-    const rocketM = sc.craftM;
+    const rocketM = sc.stackM || sc.craftM;
     bindMeshBuf(rocketBuf);
     for (const s of secDraw) {
       if (skip(s)) continue;
+      if (inCab && isLandingMission() && s.name === 'lander') continue;
       drawSec(s, rocketM, proj);
     }
+    if (inCab && isLandingMission() && lmCabBuf) {
+      bindMeshBuf(lmCabBuf); drawRangeInside(sc.craftM, proj, 0, lmCabN);
+    }
+    bindMeshBuf(rocketBuf);
     for (const d of debris) {
       const dbz = [0,0,1], dby = V.cross(dbz, d.bx);
       const m = mSpin(mBasis(d.bx, dby, dbz, d.p), d.draw.cen || [0,0,0],
@@ -6893,7 +6933,7 @@ function drawWorldMeshes(sc, proj, inCab) {
     }
     if ((landerHere || (inCab && isLandingMission())) && landerBuf) {
       if (inCab && lmCabBuf) { bindMeshBuf(lmCabBuf); drawRangeInside(sc.craftM, proj, 0, lmCabN); }
-      else drawWhole(landerBuf, landerN, eciLanderMat(cs), proj);
+      else drawWhole(landerBuf, landerN, sc.craftM, proj);
     }
   } else if (sc.world === 'moon') {
     // The ground, coarsest ring first: they nest, and the depth buffer would
@@ -7296,6 +7336,7 @@ function scrTape(g, x, y, w, h, val, span, unit) {
 // there is an ascent or a descent — so the switch falls back rather than
 // showing an empty box, and the title says which one you are looking at.
 function trajView() {
+  if (curWorld === 'moon' && isLandingMission()) return 'DESCENT';
   const v = TRAJ_VIEWS[cabTraj];
   return v === 'ORBIT' && !(hasCis && CIS && CIS.n > 8) ? 'PROFILE' : v;
 }
@@ -7511,17 +7552,17 @@ function scrProfile(g) {
   g.stroke();
 }
 function cabScreenPaint(sc) {
-  const st = sc.st, cs = sc.cs, es = sc.es;
+  const st = sc.st, cs = sc.cs, es = sc.es, ms = sc.ms;
   const km = m => !isFinite(m) ? '—' :
     Math.abs(m) < 1e4 ? m.toFixed(0) + ' m' : (m/1000).toFixed(1) + ' km';
-  const alt = st ? st.h : es ? es.h : cs ? cs.rE - RE : 0;
-  const spd = st ? st.v : es ? es.v : cs ? cs.speed : 0;
+  const alt = ms ? ms.h : st ? st.h : es ? es.h : cs ? cs.rE - RE : 0;
+  const spd = ms ? -ms.vv : st ? st.v : es ? es.v : cs ? cs.speed : 0;
 
   // left: the flight tape — altitude and speed as moving scales, which is what
   // a crew reads at a glance rather than a number they have to parse
   scrPane(0, 'FLIGHT', [], g => {
-    scrTape(g, 34, 96, 148, 208, alt/1000, 60, 'ALT km');
-    scrTape(g, 238, 96, 148, 208, spd, 2000, 'VEL m/s');
+    scrTape(g, 34, 96, 148, 208, ms && alt<1000 ? alt : alt/1000, ms ? (alt<1000?100:10) : 60, ms && alt<1000 ? 'ALT m' : 'ALT km');
+    scrTape(g, 238, 96, 148, 208, spd, ms ? Math.max(10,Math.abs(spd)*.6) : 2000, ms ? 'SINK m/s' : 'VEL m/s');
     g.fillStyle = SCR_HI; g.font = '600 22px ui-monospace, monospace';
     g.fillText(fmtClock(simT), 34, 344);
   });
@@ -7531,12 +7572,12 @@ function cabScreenPaint(sc) {
   // rather than five — five would be drawn straight through the graph
   const page = CAB_PAGES[cabPage];
   const rows = cabRows(sc, page);
-  const view = trajView();
+  const view = ms ? 'DESCENT' : trajView();
   // ORBIT takes the whole pane — a plot of a trajectory wants the area, and
   // its two numbers go inside its own frame. PROFILE keeps two rows above it.
   scrPane(1, page === 'TRAJECTORY' ? `TRAJECTORY · ${view}` : page,
-          page !== 'TRAJECTORY' ? rows : view === 'ORBIT' ? [] : rows.slice(0, 2),
-          page !== 'TRAJECTORY' ? null
+          page !== 'TRAJECTORY' || ms ? rows : view === 'ORBIT' ? [] : rows.slice(0, 2),
+          page !== 'TRAJECTORY' || ms ? null
             : view === 'ORBIT' ? scrOrbit : scrProfile);
 
   // right: systems, with a dot per line, because a status list is how a
@@ -7547,7 +7588,8 @@ function cabScreenPaint(sc) {
       ['CABIN PRESS', 'NOMINAL', 1], ['O2 / CO2', 'NOMINAL', 1],
       ['POWER', 'NOMINAL', 1], ['COMMS', 'LOCKED', 1],
       ['LIGHTS', lit, cabLight === 2 ? 0 : 1],
-      ['REACTION WHEELS', RCS.live ? 'ARMED' : 'STOWED', RCS.live ? 1 : 2],
+      [isLandingMission() ? 'RCS THRUSTERS' : 'REACTION WHEELS',
+       RCS.live ? 'ARMED' : 'STOWED', RCS.live ? 1 : 2],
       ['THERMAL', sc.world === 'entry' ? 'ENTRY' : 'NOMINAL',
        sc.world === 'entry' ? 2 : 1],
     ];
@@ -7579,7 +7621,7 @@ function cabScreenPaint(sc) {
 // surfaces that carry them — the same decal path the screens use (paint weight
 // 1, sampled from uLiv with the placard texture bound), but built once and
 // never repainted, because a label does not change.
-const DEC_CW = 256, DEC_CH = 128, DEC_NX = 4, DEC_NY = 5;
+const DEC_CW = 256, DEC_CH = 128, DEC_NX = 4, DEC_NY = 7;
 let decCv = null, decTex = null, decBuf = null, decN = 0, decVerts = null;
 // atlas cells, by name
 const DEC = { caution: 0, stow1: 1, stow2: 2, stow3: 3, stow4: 4, stow5: 5,
@@ -7675,6 +7717,10 @@ function decPaint() {
     g.fillText(s, (DEC_CW - fit(s, 40, DEC_CW - 24))/2, DEC_CH/2 + 15);
     g.restore();
   });
+  ['SEAT', 'TIME +', 'TIME −', 'TRAJ', 'HELP', 'LIGHT', 'DISPLAY', 'AUDIO', 'NULL', 'LEVEL'].forEach((label,i) => {
+    cell(18+i, DARK); g.fillStyle=LBL;
+    g.fillText(label, (DEC_CW-fit(label,38,DEC_CW-20))/2, 78); g.restore();
+  });
 }
 function cabDecalInit() {
   if (decCv) return;
@@ -7742,11 +7788,19 @@ function decOnWall(out, i, r0, r1, x0, x1, b0, b1, n) {
 }
 const D2R = Math.PI/180;
 function cabDecalBuild() {
-  // The placards are the capsule's locker-and-rail fit-out; the LM has none of
-  // those rails, so it draws no decals rather than capsule labels floating in a
-  // cylinder. Its console bay legends are the only ones it needs, and those are
-  // painted on the screens themselves.
-  if (isLandingMission()) return;
+  if (isLandingMission()) {
+    const L=landerLayout(MDIA), out=[], n=CAP_FN.length;
+    for(let i=0;i<n;i++) {
+      const z=L.panel.zW*.9*(2*i/(n-1)-1), w=L.panel.zW*1.8/(n-1)*.86;
+      const [u0,u1,v0,v1]=decUV(18+i), x=L.panel.x-.078*L.s;
+      const q=[[[x,2.409*L.s,z-w/2],u0,v1],[[x,2.409*L.s,z+w/2],u1,v1],
+               [[x,2.446*L.s,z+w/2],u1,v0],[[x,2.446*L.s,z-w/2],u0,v0]];
+      for(const tri of [[0,1,2],[0,2,3]]) for(const j of tri)
+        out.push(...q[j][0],-1,0,0,1,1,1,q[j][1],q[j][2],1);
+    }
+    decVerts=new Float32Array(out); decBuf=buffer(decVerts); decN=out.length/VST;
+    return;
+  }
   const K = cabK();
   if (!K) return;
   const rp = K.rp, Lc = K.Lc;
@@ -7941,7 +7995,7 @@ function fmtEta(dt) {
   return (dt/86400).toFixed(2) + ' d';
 }
 function cabRows(sc, page) {
-  const st = sc.st, cs = sc.cs, es = sc.es;
+  const st = sc.st, cs = sc.cs, es = sc.es, ms = sc.ms;
   const km = m => !isFinite(m) ? '—' :
     Math.abs(m) < 1e4 ? m.toFixed(0) + ' m' : (m/1000).toFixed(1) + ' km';
   const deg = a => (a*180/Math.PI).toFixed(1) + '°';
@@ -7972,17 +8026,16 @@ function cabRows(sc, page) {
     // reached orbit — so it goes here instead of another word that says
     // NOMINAL. A display that reports a system it does not model is not a
     // display, it is a picture of one.
-    const mkg = st ? st.m : (run.metrics && run.metrics.prop_margin_kg !== undefined
-                             ? NaN : NaN);
+    const mkg = ms ? ms.m : st ? st.m : craftInertia(simT).M;
     return [['LIGHTS', CAB_LIGHTS[cabLight].n], ['ATT RATE', rate],
             ['CLOCK', warpEff > 1.5 ? '×' + Math.round(warpEff) : 'REAL'],
-            ['CREW', !CAB.live ? 'STOWED'
-                     : CAB.seat !== null ? 'STRAPPED IN' : 'FREE'],
-            ['STACK', isFinite(mkg) ? (mkg/1000).toFixed(1) + ' t' :
-                      LASTST ? 'KICK + POD' : 'POD'],
+            ['CREW', EVA.active || SURF.active ? 'EVA' : CAB.seat !== null ? 'STRAPPED IN' : 'FREE'],
+            [isLandingMission() ? 'VEH MASS' : 'STACK', isFinite(mkg) ? (mkg/1000).toFixed(1)+' t' : '—'],
             nextRow];
   }
   if (page === 'TRAJECTORY') {
+    if (ms) return [['TO SITE', km(ms.dr)], ['TERRAIN', km(ms.elev)],
+                    ['NAV ERROR', km(ms.navdh)], ['HORIZ VEL', ms.vh.toFixed(1)+' m/s'], nextRow];
     if (cs) {
       const ap = apsides(cs.pos, cs.vel);
       // the period is what turns two altitudes into an orbit you can plan in
@@ -8003,6 +8056,9 @@ function cabRows(sc, page) {
                        ? fmtEta(Math.max(0, tSplash - simT)) : '—'], nextRow];
     return [['STANDBY', '—']];
   }
+  if (ms) return [['ALTITUDE', km(ms.h)], ['SINK RATE', (-ms.vv).toFixed(1)+' m/s'],
+                  ['HORIZ VEL', ms.vh.toFixed(1)+' m/s'], ['THROTTLE', (100*ms.thr).toFixed(0)+'%'],
+                  ['PROP LEFT', Math.max(0,ms.m-Number(run.params?.l_dry || 3500)).toFixed(0)+' kg'], nextRow];
   if (st) return [['ALTITUDE', km(st.h)], ['VELOCITY', st.v.toFixed(0) + ' m/s'],
                   ['ACCEL', (st.m > 0 ? st.thr/st.m/9.81 : 0).toFixed(2) + ' g'],
                   ['DYN PRESS', st.q.toFixed(1) + ' kPa'], nextRow];
@@ -8030,10 +8086,23 @@ const fmtDist = m => m < 1e6 ? (m/1000).toFixed(1) + ' km' :
   m < 1e8 ? Math.round(m/1000).toLocaleString() + ' km' :
   (m/1e6).toFixed(0) + ',000 km';
 function drawHUD(sc, ph) {
+  const hatch = $('hatch_action');
+  const outside = EVA.active || SURF.active;
+  const showHatch = outside || (camMode === 'cabin' && (HASCAB || isLandingMission()));
+  hatch.classList.toggle('hidden', !showHatch);
+  if (showHatch) {
+    const gate = outside ? { ok: true } : evaGate(ph);
+    hatch.disabled = !gate.ok;
+    hatch.textContent = !gate.ok ? 'HATCH · LOCKED · ' + gate.why.toUpperCase()
+      : outside ? 'HATCH · RE-ENTER'
+      : EVA.state === 'suited' ? (landed(ph) ? 'HATCH · WALK ON MOON' : 'HATCH · SPACEWALK')
+      : 'HATCH · SUIT UP';
+  }
   const ck = $('clock');
   ck.childNodes[0].nodeValue = fmtClock(simT);
   ck.classList.toggle('go', simT >= 0);
-  $('phase').textContent = ph.n + (warpEff > 1.5 ? ` · ×${Math.round(warpEff)}` : '');
+  $('phase').textContent = (landed(ph) ? 'SURFACE' : ph.n) +
+    (warpEff > 1.5 ? ` · ×${Math.round(warpEff)}` : '');
   let rows;
   if (sc.world === 'pad') {
     const st = sc.st, acc = st.m > 0 ? st.thr/st.m/9.81 : 0;
@@ -8084,7 +8153,7 @@ function drawHUD(sc, ph) {
   } else if (RCS.live) {
     const d = RCS.w.map(v => v*180/Math.PI);
     const n = v => (v >= 0 ? '+' : '') + v.toFixed(1);
-    rows.push(['WHEELS', RCS.rate > 3e-4 ? `${n(d[2])} ${n(d[1])} ${n(d[0])} °/s`
+    rows.push([isLandingMission() ? 'RCS' : 'WHEELS', RCS.rate > 3e-4 ? `${n(d[2])} ${n(d[1])} ${n(d[0])} °/s`
                          : flying ? 'READY · WASD QE' : 'HOLDING']);
   } else {
     const s = rcsAlignIn();
@@ -8259,6 +8328,7 @@ function warpStep(dir) {
   return manualWarp === 0 ? 'AUTO' : warpLabel(manualWarp).toUpperCase();
 }
 function initControls() {
+  $('hatch_action').addEventListener('click', () => evaToggle(phaseAt(simT)));
   refreshCams('pad');
   syncHelp();
   // the hint has done its job by the time the vehicle is off the pad
@@ -8282,9 +8352,7 @@ function initControls() {
   // the console's own time caps drive the same control, so the chip row has to
   // follow — two places showing different clock rates is worse than one
   speedSync = () => chipRow($('speed'), sp, warpLabel(manualWarp), setSpeed);
-  // The capsule's switches and fit-out only exist for a capsule cabin; the LM
-  // cockpit is a camera, not an interactive interior, so it is not "inside"
-  // for the picker.
+  // Both crewed vehicles share the picker and keyboard controls.
   const inside = () => !SURF.active && camMode === 'cabin' &&
                        (HASCAB || isLandingMission());
   // A switch takes the click; anything else starts a head turn. Right click on
@@ -8378,7 +8446,7 @@ function initControls() {
     const kk = e.key.length === 1 ? e.key.toLowerCase() : '';
     // the keyboard way in and out of a couch, for anyone who would rather not
     // hunt for it with the mouse
-    if (kk === 'g' && inside() && !EVA.active) {
+    if (kk === 'g' && inside() && !EVA.active && !e.repeat) {
       const K = cabK();
       if (CAB.seat !== null) cabStand();
       else if (K) cabSit(cabSeatHome(K));
@@ -8386,7 +8454,7 @@ function initControls() {
     }
     // V suits up, egresses and re-enters. Not in CAB_KEYS, so it never fights
     // the translation keys; the hatch cap is the same control with a pointer.
-    if (kk === 'v' && (inside() || SURF.active)) {
+    if (kk === 'v' && (inside() || SURF.active || EVA.active) && !e.repeat) {
       evaToggle(phaseAt(simT));
       e.preventDefault();
     }
@@ -8724,12 +8792,12 @@ window.__selftest = function () {
     return ok;
   }, true);
   eq('and withdrawn when there is neither a cabin nor a lander', () => {
-    const h = HASCAB; HASCAB = false;
+    const h = HASCAB, mode = run.mode; HASCAB = false; run.mode = 'orbit';
     // A landing run carries the lander, whose cockpit is its own interior, so
     // the moon list keeps `cabin` there even without a capsule cabin.
     const ok = !CAMS().includes('cabin') && CAMS().length === 5 &&
                (!!MS || !CAMS_MOON().includes('cabin'));
-    HASCAB = h;
+    HASCAB = h; run.mode = mode;
     return ok;
   }, true);
   eq('and the director never cuts to it either', () => {
@@ -8989,7 +9057,7 @@ window.__selftest = function () {
   eq('lander hatch picking agrees with the visible hatch',()=>{
     const h=evaHatchStation(LK),p=evaHatchPoint(LK);
     return V.len(V.sub(h.p,p));
-  },.14*LK.s,1e-8);
+  },Math.hypot(.14,.18)*LK.s,1e-8);
   eq('lander screens preserve their canvas aspect',()=>lmFrame(1).S/lmFrame(1).H,SCR_W/SCR_H,1e-8);
   eq('33 engines occupy three rings',()=>new Set(clusterPts(33,3.6,.945).map(p=>Math.hypot(p[0],p[1]).toFixed(6))).size,3);
   eq('first-stage bell throats enter the mounting plate',()=>{
@@ -10221,6 +10289,8 @@ async function boot() {
                      new URLSearchParams(run.params || {}).toString()),
       'geometry');
     VEHNAME = vehName(geo.name);
+    MDIA = geo.payload?.diameter_m || 4.2;
+    $('modelslink').href=geo.payload?.kind==='bus' ? 'models_page.html' : 'models_page.html?craft='+(isLandingMission()?'lander':'capsule')+'&diameter='+MDIA;
     $('ov_title').textContent = VEHNAME;
     document.title = VEHNAME + ' — mission';
     await step('plotting the trajectory…');
@@ -10236,12 +10306,12 @@ async function boot() {
     await step('building the pad…');
     buildStatics();
     buildLandTex();
-    if (MS) {
+    if (isLandingMission()) {
       await step('building the ground…');
-  moonRings = buildMoonTerrain();
-  buildLander();
-  buildLMCabin();
-      pickGroundCam();
+      if (MS) { moonRings = buildMoonTerrain(); pickGroundCam(); }
+      MDIA = MS?.diameter || geo.payload?.diameter_m || 4.2;
+      buildLander();
+      buildLMCabin();
     }
     buildToasts();
     // Seat the crew once, here, now the capsule exists to say how many couches
