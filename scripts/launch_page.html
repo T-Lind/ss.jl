@@ -5288,7 +5288,7 @@ function evaGate(ph) {
   // EVA takes over from the rope. Suiting up is the same first press either way.
   if (landed(ph)) return { ok: true, why: '' };
   if (!coastActive(ph)) {
-    if (ph.w === 'entry') return { ok: false, why: 'entry' };
+    if (ph.w === 'entry') return { ok: false, why: isFinite(tSplash) && simT >= tSplash ? 'splashdown' : 'entry' };
     if (ph.w === 'moon') return { ok: false, why: MS && simT >= MS.t_td ? lunarHatchReason(run) : 'descent' };
     if (ph.w === 'pad')   return { ok: false, why: simT < 0 ? 'on the pad' : 'powered flight' };
     return { ok: false, why: 'powered flight' };
@@ -6216,6 +6216,18 @@ function cameraEntry(t, es, M) {
     const dip = Math.acos(RE/(RE + Math.max(es.h, 0)));
     const L = V.len(V.sub(eye, p));
     eye = V.add(eye, V.scale(es.up, L*Math.tan(Math.min(0.6*dip, 0.3*fov))));
+    if (isFinite(tDrog) && t >= tDrog) {
+      const main = isFinite(tMain) && t >= tMain, start = main ? tMain : tDrog;
+      const scale = 0.15 + 0.85*Math.min(1, (t - start)/1.2);
+      const pr = podRange(), station = pr ? capStations(pr.x0) : null;
+      const attach = station ? Math.max(0.4, station.xtop) : 2.2;
+      const extent = attach + ((main ? 8.5 : 3.2) + (main ? 4.6 : 1.15))*scale;
+      const blend = Math.min(1, (t - tDrog)/2);
+      // Frame the capsule and canopy together as deployment completes.
+      look = V.add(p, V.scale(es.vdir, -0.5*extent*blend));
+      const lens = fitFov(V.len(V.sub(look, eye)), Math.max(18, 1.8*extent));
+      fov += (lens - fov)*blend;
+    }
   } else if (mode === 'onboard') {
     eye = V.add(p, V.add(V.scale(es.bx, 4.5), V.scale(side, 2.2)));
     look = V.add(p, V.scale(es.vdir, -60));    // looking back up the wake

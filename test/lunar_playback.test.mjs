@@ -96,6 +96,24 @@ test('chase frames the whole lander clear of the HUD during approach', () => {
   }
 });
 
+test('entry chase frames the deployed canopy and capsule together', () => {
+  const c=scene();Object.assign(c,{camMode:'chase',RE:6378137,tDrog:50,tMain:90,
+    podRange:()=>({x0:0}),capStations:()=>({xtop:2.2})});
+  for(const name of ['cameraEntry','fitFov','fovZoom'])runInContext(fn(name),c);
+  const unit=a=>a.map(x=>x/Math.hypot(...a));
+  const es={pos:[0,1000,0],up:[0,1,0],vdir:[0,-1,0],h:1000,g:0};
+  for(const [t,extent,radius] of [[53,2.2+3.2+1.15,1.15],[93,2.2+8.5+4.6,4.6]]) {
+    const cam=c.cameraEntry(t,es,null),axis=unit(sub(cam.look,cam.eye));
+    const right=unit(cross(axis,cam.up)),up=cross(right,axis),tan=Math.tan(c.fovZoom(cam.fov,1)/2);
+    for(const y of [0,extent])for(const x of [-radius,radius])for(const z of [-radius,radius]) {
+      const ray=sub([x,1000+y,z],cam.eye),depth=dot(ray,axis);
+      assert.ok(depth>0 && Math.abs(dot(ray,right)/(depth*tan))<1 &&
+        Math.abs(dot(ray,up)/(depth*tan))<0.75,'canopy and capsule stay clear of frame edges and the HUD');
+    }
+  }
+  assert.equal(c.cameraEntry(50,es,null).fov,0.3,'deployment starts without a lens jump');
+});
+
 test('only confirmed touchdown receives surface exploration time', () => {
   for (const outcome of ['propellant','timeout','crash','tipped','diverged']) {
     const run={metrics:{outcome},site:{t_td:12345}};

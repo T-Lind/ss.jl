@@ -22,7 +22,7 @@ function flight() {
     run: { mode: 'landing', params: {}, metrics: { outcome: 'touchdown' } },
     HASCAB: false, camMode: 'cabin', simT: 100, warpEff: 1,
     BURNW: [], tLOI: 300, tDOI: 400, tPDI: 500, tLanderDrop: 400,
-    tEI: NaN, secoT: 50, RCS_ALIGN_LEAD: 60, MDIA: 4.2,
+    tEI: NaN, tSplash: NaN, secoT: 50, RCS_ALIGN_LEAD: 60, MDIA: 4.2,
     RCS: { q: [1, 0, 0, 0] }, EVA: { active: false }, SURF: { active: false },
     MD: { t: [0, 100], m: [9000, 5000], pitch: [0] }, MS: { t_pdi: 500, t_td: 600 },
     geo: { sections: [{ name: 'lander', x0: 40 }], stages: [{ diameter_m: 9 }] }, DIA: 9,
@@ -96,6 +96,9 @@ test('hatch supports coast and touchdown while locking for burns, entry and fail
   c.BURNW = [[90, 110]];
   assert.equal(c.evaGate({ w: 'eci' }).ok, false);
   assert.equal(c.evaGate({ w: 'entry' }).ok, false);
+  c.tSplash=99;
+  assert.equal(c.evaGate({ w: 'entry' }).why, 'splashdown');
+  c.tSplash=NaN;
   c.BURNW = []; c.simT = 300;
   assert.equal(c.evaGate({ w: 'eci' }).ok, false); // impulsive LOI
   c.simT = 550;
