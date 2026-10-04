@@ -790,6 +790,9 @@ function panel_landing(p)::Dict{String,Any}
     push!(events, Dict("phase" => "lunar", "name" => string(d.outcome),
                        "t" => ls.t_touchdown))
 
+    target_miss = aiming ? R_MOON * acos(clamp(
+        sin(ls.lat_land) * sind(ts[2]) + cos(ls.lat_land) * cosd(ts[2]) *
+        cos(ls.lon_land - deg2rad_(ts[3])), -1.0, 1.0)) : NaN
     prop_margin = cis.m - (ls.lv.stages[end].mdry + ls.lv.payload_mass)
     # LOI and DOI are main-engine ignitions on the far side of the cruise, so
     # they are what the coast slews toward and settles propellant for.
@@ -799,7 +802,7 @@ function panel_landing(p)::Dict{String,Any}
     Dict{String,Any}(
         "ok" => true, "mode" => "landing",
         "metrics" => Dict(
-            "on_target" => d.outcome === :touchdown,
+            "on_target" => d.outcome === :touchdown && (!aiming || target_miss <= 10e3),
             "outcome" => string(d.outcome),
             "liftoff_t" => liftoff_mass(ls.lv) / 1e3,
             "park_perigee_km" => (el.rp - RE_MEAN) / 1e3,
@@ -831,6 +834,7 @@ function panel_landing(p)::Dict{String,Any}
             "land_lon" => rad2deg_(ls.lon_land),
             "target_lat" => aiming ? ts[2] : NaN,
             "target_lon" => aiming ? ts[3] : NaN,
+            "target_miss_km" => target_miss / 1e3,
             "ground_elev_m" => d.elev,
             "ground_slope_deg" => rad2deg_(d.slope),
             "site_score_deg" => isnan(d.site_score) ? 0.0 : rad2deg_(d.site_score),

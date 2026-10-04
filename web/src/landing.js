@@ -591,7 +591,7 @@ export function tune_braking(l, r0, v0, m0, opts = {}) {
     }
   }
 
-  const newton = (p0, pr) => {
+  const newton = (p0, pr, scale = 1.0, pitchMin = -30.0) => {
     let bp = [Infinity, p0, pr];
     for (let it = 1; it <= max_iter; it++) {
       const [f1, f2, leg] = resid(p0, pr);
@@ -599,7 +599,7 @@ export function tune_braking(l, r0, v0, m0, opts = {}) {
       if (sc < bp[0]) bp = [sc, p0, pr];
       if (Math.abs(f1) < 0.1 && Math.abs(f2) < 0.1 && leg.outcome === 'gate')
         return [true, p0, pr];
-      const d1 = deg2rad_(0.4), d2 = 4.0e-5;
+      const d1 = deg2rad_(0.4), d2 = 4.0e-5 * scale;
       const [f1a, f2a] = resid(p0 + d1, pr);
       const [f1b, f2b] = resid(p0, pr + d2);
       const j11 = (f1a - f1) / d1, j21 = (f2a - f2) / d1;
@@ -609,9 +609,9 @@ export function tune_braking(l, r0, v0, m0, opts = {}) {
       const dp0 = -(j22 * f1 - j12 * f2) / det;
       const dpr = -(-j21 * f1 + j11 * f2) / det;
       p0 += clamp(0.7 * dp0, -deg2rad_(4.0), deg2rad_(4.0));
-      pr += clamp(0.7 * dpr, -2.0e-4, 2.0e-4);
-      p0 = clamp(p0, -deg2rad_(30.0), deg2rad_(60.0));
-      pr = clamp(pr, -1.0e-3, 4.0e-3);
+      pr += clamp(0.7 * dpr, -2.0e-4 * scale, 2.0e-4 * scale);
+      p0 = clamp(p0, deg2rad_(pitchMin), deg2rad_(60.0));
+      pr = clamp(pr, -1.0e-3 * scale, 4.0e-3 * scale);
     }
     return [false, bp[1], bp[2]];
   };
@@ -630,6 +630,24 @@ export function tune_braking(l, r0, v0, m0, opts = {}) {
     }
     [ok, p0, pr] = newton(bl[1], bl[2]);
   }
+  if (ok) return [p0, pr, true];
+
+  // The reference pitch-rate limits describe a several-minute burn. A
+  // light custom lander brakes in under two minutes and needs a faster
+  // rotation from downward braking to upward arrest. Retry in burn-time
+  // units rather than accepting a gate with hundreds of m/s of sink.
+  const burn_s = m0 / lander_mdot(l) * (1 - Math.exp(-vnorm(v0) / (G0 * l.isp)));
+  const scale = clamp(720.0 / Math.max(1.0, burn_s), 1.0, 32.0);
+  let wide = [score(p0, pr), p0, pr];
+  for (let pi = -60; pi <= 24; pi += 3) {
+    for (let ri = 0; ri <= 10; ri++) {
+      const pp = deg2rad_(pi), rr = ri * 1.5e-4 * scale;
+      const sc = score(pp, rr);
+      if (sc < wide[0]) wide = [sc, pp, rr];
+    }
+  }
+  const retry = newton(wide[1], wide[2], scale, -60.0);
+  if (retry[0] || score(retry[1], retry[2]) < score(p0, pr)) [ok, p0, pr] = retry;
   if (ok) return [p0, pr, true];
 
   const [f1, f2, leg] = resid(p0, pr);
@@ -698,7 +716,7 @@ export function terminal_descent(l, r0, v0, m0, opts = {}) {
     const an = vnorm(a_des);
     const thr = clamp(mm * an / l.thrust, l.throttle_min, 1.0);
     const dir = an > 1e-9 ? vscale(a_des, 1 / an) : ur;
-    return [dir, thr];
+    return [dir, thr, mm * an / l.thrust];
   };
 
   // what the vehicle flies on: its own estimate, or the truth
@@ -709,7 +727,7 @@ export function terminal_descent(l, r0, v0, m0, opts = {}) {
     const ta = t0 + t;
     const h = _alt(cfg, r, ta);
     const [rg, vg, hg] = guide(ta);
-    const [dir, thr] = command(rg, vg, m, hg, ta);
+    const [dir, thr, requested] = command(rg, vg, m, hg, ta);
     min_thr = Math.min(min_thr, thr);
     if (log !== null && kount % log_every === 0) {
       const [ur] = _descent_frame(r, hhat);
@@ -720,6 +738,15 @@ export function terminal_descent(l, r0, v0, m0, opts = {}) {
     kount += 1;
     if (h <= 0.0) { outcome = 'touchdown'; break; }
     if (m <= m_dry + 1e-9) { outcome = 'propellant'; break; }
+    // Once drift is arrested, a rising lander that already asks for less
+    // than minimum thrust cannot follow the landing profile. End this
+    // unsupported continuous-throttle descent instead of cycling up/down
+    // for the full timeout. Engine pulsing is not modelled.
+    const vrg = vsub(vg, _surface_vel(cfg, rg, ta)), urg = vunit(rg);
+    if (requested < l.throttle_min && vdot(vrg, urg) >= 0.0 &&
+        vnorm(vsub(vrg, vscale(urg, vdot(vrg, urg)))) < 1.5) {
+      outcome = 'throttle_limited'; break;
+    }
     const step = Math.min(dt, (m - m_dry) / (thr * mdot_full));
     // zero-order hold on the command across the control cycle
     const a_th = vscale(dir, thr * l.thrust);
@@ -844,7 +871,9 @@ export function powered_descent(l, r0, v0, m0, opts = {}) {
                r0, hhat, cfg, nav, target);
   const prop_left = term.m - m_dry;
   // what the residual is actually worth: seconds of hover at touchdown mass
-  const hover = prop_left / (term.m * MU_MOON / vnorm(term.r) ** 2 / (G0 * l.isp));
+  const hover_thrust = term.m * MU_MOON / vnorm(term.r) ** 2;
+  const hover = hover_thrust < l.throttle_min * l.thrust ? 0.0
+    : prop_left / (hover_thrust / (G0 * l.isp));
 
   // the ground it actually arrived on
   const t_td = cfg.t0 + leg.t + term.t;
@@ -917,6 +946,11 @@ export function moonlanding(opts = {}) {
     detail: 'lunar orbit insertion and DOI complete', current: 4, total: 6 });
   if (cis.outcome !== 'perilune')
     throw new Error(`trans-lunar leg did not reach perilune (outcome: ${cis.outcome})`);
+  // The abort free return may miss its Earth corridor while still reaching
+  // the Moon correctly. Judge this landing by the flown lunar encounter,
+  // rather than the corrector's combined Moon/Earth convergence flag.
+  if (Math.abs(cis.perilune_alt - h_moon_park) > Math.max(100e3, .1 * h_moon_park))
+    throw new Error(`trans-lunar targeting missed the lunar orbit (${Math.round(cis.perilune_alt/1000)} km perilune, ${Math.round(h_moon_park/1000)} km requested); no lunar landing simulated`);
 
   // --- insertion ---------------------------------------------------------
   const t_loi = cis.t;

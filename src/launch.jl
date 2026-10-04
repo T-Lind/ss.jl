@@ -386,7 +386,7 @@ function _ascent_deriv!(dx::Vector{Float64}, x::Vector{Float64},
         dm = -thr * stage_mdot(st)
     end
     for (i, b) in enumerate(lv.boosters)
-        ctx.bstate[i] === :burning || continue
+        ctx.phase !== :coast && ctx.bstate[i] === :burning || continue
         thrust_mag += booster_thrust(b, pamb)
         dm -= booster_mdot(b)
     end
@@ -591,6 +591,20 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
                 prop_left[ctx.stage] = 0.0
                 x[7] -= st.mdry                       # drop the spent stage
                 ev!(Symbol(:sep_, st.name))
+                # All strap-ons belong to the first core. Drop their unused
+                # fuel too; a waiting or still-burning set cannot propel an
+                # upper stage after its attachment has separated.
+                if ctx.stage == 1
+                    for (i, b) in enumerate(lv.boosters)
+                        ctx.bstate[i] === :gone && continue
+                        prop = ctx.bstate[i] === :waiting ? b.stage.mprop :
+                               ctx.bstate[i] === :burning ?
+                               max(0.0, b.stage.mprop - stage_mdot(b.stage) * (t - ctx.b_tign[i])) : 0.0
+                        ctx.bstate[i] = :gone
+                        x[7] -= b.count * (b.stage.mdry + prop)
+                        ev!(Symbol(:sep_, b.stage.name))
+                    end
+                end
                 if ctx.stage < nst
                     ctx.stage += 1
                     ctx.burning = false               # short inter-stage coast
@@ -652,6 +666,8 @@ function simulate_ascent(lv::LaunchVehicle, guid::AscentGuidance;
         end
 
         if t >= next_log
+            # Log the engines and mass after this step's discrete transitions.
+            d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0, atmosphere)
             logrec!(d)
             next_log += log_dt
         end
@@ -731,7 +747,7 @@ function _ascent_data(x, lv::LaunchVehicle, ctx::AscentCtx, theta_g0, t, r_site0
              core_throttle(lv, ctx, x[7], pamb) *
              stage_thrust(lv.stages[ctx.stage], pamb) : 0.0
     for (i, b) in enumerate(lv.boosters)
-        ctx.bstate[i] === :burning && (thrust += booster_thrust(b, pamb))
+        ctx.phase !== :coast && ctx.bstate[i] === :burning && (thrust += booster_thrust(b, pamb))
     end
     # downrange: great-circle from the launch site's inertial position
     dr = RE_MEAN * acos(clamp(vdot(vunit(r_site0), rhat), -1.0, 1.0))

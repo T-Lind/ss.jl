@@ -115,7 +115,7 @@ test('entry chase frames the deployed canopy and capsule together', () => {
 });
 
 test('only confirmed touchdown receives surface exploration time', () => {
-  for (const outcome of ['propellant','timeout','crash','tipped','diverged']) {
+  for (const outcome of ['propellant','timeout','throttle_limited','crash','tipped','diverged']) {
     const run={metrics:{outcome},site:{t_td:12345}};
     assert.equal(flight.landingEndTime(run),12345);
     assert.notEqual(flight.lunarEndLabel(run),'SURFACE');
@@ -203,4 +203,22 @@ test('fast playback stops at the exact endpoint and renders its final phase', ()
   assert.equal(c.simT,100);assert.equal(c.running,false);assert.equal(c.ended,true);
   assert.equal(painted,'PROPELLANT DEPLETED');assert.equal(cards,1);
   c.frame(100);assert.equal(c.simT,100);assert.equal(cards,1);
+});
+
+test('minimum throttle failures are clear in history, terminal state and design warnings',()=>{
+  const run={mode:'landing',metrics:{outcome:'throttle_limited'},descent:{h:[.078]},events:[{phase:'lunar',name:'throttle_limited'}]};
+  assert.equal(flight.lunarEndLabel(run),'THROTTLE LIMIT');assert.equal(flight.successfulTouchdown(run),false);
+  assert.match(flight.landingSummary(run),/78 m above ground/);assert.match(flight.landingSummary(run),/Lower minimum throttle or increase lander dry mass/);
+  assert.equal(flight.lunarHatchReason(run),'minimum throttle too high');assert.equal(verdict(run),'failed');
+  assert.equal(flight.landingOutcome({events:run.events}),'throttle_limited');
+  assert.match(flight.landerThrottleWarning(100,45,10),/2,770 kg/);assert.equal(flight.landerThrottleWarning(3500,45,10),'');
+});
+
+test('legacy playback drops every booster no later than its first-stage attachment',()=>{
+  const start=source.indexOf('  BNAMES.forEach((nm, i) => {'),end=source.indexOf('\n  });',start)+7;
+  assert.ok(start>=0&&end>start);
+  const c=createContext({BNAMES:['late','early','cold'],dropT:{stage1:15},
+    BSEP:[{name:'sep_early',t:5},{name:'sep_late',t:60}],SEPS:[{name:'sep_sable1',t:15}]});
+  runInContext(source.slice(start,end),c);
+  assert.equal(c.dropT.booster1,15);assert.equal(c.dropT.booster2,5);assert.equal(c.dropT.booster3,15);
 });

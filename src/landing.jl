@@ -191,8 +191,8 @@ that decide whether the vehicle survived it.
 """
 struct DescentResult
     log::DescentLog
-    outcome::Symbol             # :touchdown | :timeout | :crash | :tipped | :propellant | :diverged
-    t_touchdown::Float64        # seconds from PDI
+    outcome::Symbol             # :touchdown | :timeout | :crash | :tipped | :propellant | :throttle_limited | :diverged
+    t_touchdown::Float64        # seconds from PDI to touchdown or failed-descent endpoint
     t_gate::Float64             # seconds from PDI to high gate; NaN if never reached
     v_vertical::Float64         # touchdown sink rate [m/s] (positive = down)
     v_horizontal::Float64       # touchdown lateral speed [m/s]
@@ -201,7 +201,7 @@ struct DescentResult
     dv_terminal::Float64        # ideal delta-v spent below high gate [m/s]
     prop_used::Float64          # [kg]
     prop_left::Float64          # [kg]
-    hover_s::Float64            # seconds of hover the residual buys at touchdown mass
+    hover_s::Float64            # attainable hover seconds; zero if below the throttle floor
     min_throttle::Float64       # deepest commanded throttle
     pitch0::Float64             # braking-phase initial pitch [rad]
     pitch_rate::Float64         # braking-phase pitch rate [rad/s]
@@ -874,7 +874,7 @@ function tune_braking(l::Lander, r0::V3, v0::V3, m0::Float64;
     end
     verbose && @info "braking seed" pitch0_deg = rad2deg_(best[2]) rate = best[3] score = best[1]
 
-    function newton(p0, pr)
+    function newton(p0, pr, scale = 1.0, pitch_min = -30.0)
         local bp = (Inf, p0, pr)
         for it in 1:max_iter
             f1, f2, leg = resid(p0, pr)
@@ -883,7 +883,7 @@ function tune_braking(l::Lander, r0::V3, v0::V3, m0::Float64;
             verbose && @info "braking newton" it f1 f2 pitch0_deg = rad2deg_(p0) rate = pr outcome = leg.outcome
             (abs(f1) < 0.1 && abs(f2) < 0.1 && leg.outcome === :gate) &&
                 return (true, p0, pr)
-            d1 = deg2rad_(0.4); d2 = 4.0e-5
+            d1 = deg2rad_(0.4); d2 = 4.0e-5 * scale
             f1a, f2a, _ = resid(p0 + d1, pr)
             f1b, f2b, _ = resid(p0, pr + d2)
             j11 = (f1a - f1) / d1; j21 = (f2a - f2) / d1
@@ -893,9 +893,9 @@ function tune_braking(l::Lander, r0::V3, v0::V3, m0::Float64;
             dp0 = -( j22 * f1 - j12 * f2) / det
             dpr = -(-j21 * f1 + j11 * f2) / det
             p0 += clamp(0.7 * dp0, -deg2rad_(4.0), deg2rad_(4.0))
-            pr += clamp(0.7 * dpr, -2.0e-4, 2.0e-4)
-            p0 = clamp(p0, -deg2rad_(30.0), deg2rad_(60.0))
-            pr = clamp(pr, -1.0e-3, 4.0e-3)
+            pr += clamp(0.7 * dpr, -2.0e-4 * scale, 2.0e-4 * scale)
+            p0 = clamp(p0, deg2rad_(pitch_min), deg2rad_(60.0))
+            pr = clamp(pr, -1.0e-3 * scale, 4.0e-3 * scale)
         end
         (false, bp[2], bp[3])
     end
@@ -910,6 +910,21 @@ function tune_braking(l::Lander, r0::V3, v0::V3, m0::Float64;
         end
         verbose && @info "braking restart" pitch0_deg = rad2deg_(bl[2]) rate = bl[3] score = bl[1]
         ok, p0, pr = newton(bl[2], bl[3])
+    end
+    ok && return (p0, pr, true)
+
+    # Reference limits assume a several-minute braking burn. Short burns
+    # need a faster rotation from downward braking to upward arrest.
+    burn_s = m0 / lander_mdot(l) * (1 - exp(-vnorm(v0) / (G0 * l.isp)))
+    scale = clamp(720.0 / max(1.0, burn_s), 1.0, 32.0)
+    wide = (score(p0, pr), p0, pr)
+    for pp in deg2rad_.(-60.0:3.0:24.0), rr in (0:10) .* (1.5e-4 * scale)
+        sc = score(pp, rr)
+        sc < wide[1] && (wide = (sc, pp, rr))
+    end
+    retry = newton(wide[2], wide[3], scale, -60.0)
+    if retry[1] || score(retry[2], retry[3]) < score(p0, pr)
+        ok, p0, pr = retry
     end
     ok && return (p0, pr, true)
 
@@ -1027,7 +1042,7 @@ function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
         an = vnorm(a_des)
         thr = clamp(mm * an / l.thrust, l.throttle_min, 1.0)
         dir = an > 1e-9 ? vscale(a_des, 1 / an) : ur
-        (dir, thr)
+        (dir, thr, mm * an / l.thrust)
     end
 
     # what the vehicle flies on: its own estimate, or the truth if nothing is
@@ -1039,7 +1054,7 @@ function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
         ta = t0 + t
         h = _alt(cfg, r, ta)
         rg, vg, hg = guide(ta)
-        dir, thr = command(rg, vg, m, hg, ta)
+        dir, thr, requested = command(rg, vg, m, hg, ta)
         min_thr = min(min_thr, thr)
         if log !== nothing && kount % log_every == 0
             ur, _ = _descent_frame(r, hhat)
@@ -1054,6 +1069,16 @@ function terminal_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
         end
         if m <= m_dry + 1e-9
             outcome = :propellant
+            break
+        end
+        # A rising lander with drift arrested and demand below the engine's
+        # floor cannot follow this continuous-throttle landing profile.
+        # Engine pulsing is not modelled; report the limit instead of
+        # repeatedly climbing and falling until timeout.
+        vrg = vsub(vg, _surface_vel(cfg, rg, ta)); urg = vunit(rg)
+        if requested < l.throttle_min && vdot(vrg, urg) >= 0.0 &&
+           vnorm(vsub(vrg, vscale(urg, vdot(vrg, urg)))) < 1.5
+            outcome = :throttle_limited
             break
         end
         step = min(dt, (m - m_dry) / (thr * mdot_full))
@@ -1205,7 +1230,9 @@ function powered_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
                   r0, hhat, cfg, nav, target)
     prop_left = term.m - m_dry
     # what the residual is actually worth: seconds of hover at touchdown mass
-    hover = prop_left / (term.m * MU_MOON / vnorm(term.r)^2 / (G0 * l.isp))
+    hover_thrust = term.m * MU_MOON / vnorm(term.r)^2
+    hover = hover_thrust < l.throttle_min * l.thrust ? 0.0 :
+            prop_left / (hover_thrust / (G0 * l.isp))
 
     # the ground it actually arrived on
     t_td = cfg.t0 + leg.t + term.t
@@ -1330,6 +1357,10 @@ function moonlanding(; lander::Lander = default_lander(),
                           theta_g0 = theta_g0)
     cis.outcome == :perilune ||
         error("trans-lunar leg did not reach perilune (outcome: $(cis.outcome))")
+    # A stalled abort free return can still have a valid Moon encounter.
+    # Judge the landing by its flown perilune, not the Earth return corridor.
+    abs(cis.perilune_alt - h_moon_park) <= max(100e3, 0.1 * h_moon_park) ||
+        error("trans-lunar targeting missed the lunar orbit ($(round(cis.perilune_alt/1000)) km perilune, $(round(h_moon_park/1000)) km requested); no lunar landing simulated")
 
     # --- insertion ---------------------------------------------------------
     t_loi = cis.t

@@ -259,6 +259,7 @@
 </div>
 
 <script type="module">
+import {landerThrottleWarning} from './static/flight_state.js';
 import {landerExterior} from './static/lander_model.js';
 'use strict';
 import { fin, fmt, fmtMass } from './static/fmt.js';
@@ -923,11 +924,11 @@ const VEHICLES = {
     // so the vehicle also flies with the search turned off.
     nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 1,
     opt_kick: true, payload_kind: 'capsule', pod_mass: 45000, cargo_mass: 0,
-    s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000,
+    s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000, s1_dry_auto: false,
       s1_diameter: 10.1,
-    s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000,
+    s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000, s2_dry_auto: false,
       s2_diameter: 10.1,
-    s3_engine: 'j2', s3_engines: 1, s3_prop: 106600, s3_dry: 13500,
+    s3_engine: 'j2', s3_engines: 1, s3_prop: 106600, s3_dry: 13500, s3_dry_auto: false,
       s3_diameter: 6.6,
   },
   'Starship (expendable)': {
@@ -1090,7 +1091,9 @@ function podNote() {
     const m = (+$('l_dry').value || 0) + (+$('l_prop').value || 0);
     const d = +$('l_diameter').value || 4.2;
     $('pod_note').textContent = `lunar lander ${(m/1000).toFixed(1)} t wet · ${d.toFixed(2)} m envelope`;
-    $('lander_note').textContent = `${(m/1000).toFixed(1)} t wet · ${(+$('l_prop').value || 0).toFixed(0)} kg descent propellant`;
+    const warning = landerThrottleWarning($('l_dry').value, $('l_thrust_kn').value, $('l_throttle_min').value);
+    $('lander_note').textContent = `${(m/1000).toFixed(1)} t wet · ${(+$('l_prop').value || 0).toFixed(0)} kg descent propellant` + (warning ? ' · ' + warning : '');
+    $('lander_note').style.color = warning ? '#d9a95c' : '';
     return;
   }
   // The envelope is fitted to the SPACECRAFT, not to spacecraft + cargo: a

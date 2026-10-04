@@ -3,6 +3,7 @@ using SatelliteSim
 using Statistics
 
 include("landing_regressions.jl")
+include("staging_regressions.jl")
 
 @testset "SatelliteSim" begin
 

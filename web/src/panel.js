@@ -444,6 +444,9 @@ function panel_landing(p, onProgress) {
     onProgress,
   });
   const asc = ls.ascent, cis = ls.cislunar, d = ls.descent;
+  const target_miss = aiming ? R_MOON * Math.acos(Math.max(-1, Math.min(1,
+    Math.sin(ls.lat_land) * Math.sin(deg2rad_(ts.lat)) +
+    Math.cos(ls.lat_land) * Math.cos(deg2rad_(ts.lat)) * Math.cos(ls.lon_land - deg2rad_(ts.lon))))) : NaN;
   const el = asc.elements;
   const sc = scene_payload(asc, cis);
 
@@ -478,7 +481,7 @@ function panel_landing(p, onProgress) {
   return {
     ok: true, mode: 'landing',
     metrics: {
-      on_target: d.outcome === 'touchdown',
+      on_target: d.outcome === 'touchdown' && (!aiming || target_miss <= 10e3),
       outcome: String(d.outcome),
       liftoff_t: liftoff_mass(ls.lv) / 1e3,
       park_perigee_km: (el.rp - RE_MEAN) / 1e3,
@@ -510,6 +513,7 @@ function panel_landing(p, onProgress) {
       land_lon: rad2deg_(ls.lon_land),
       target_lat: aiming ? ts.lat : NaN,
       target_lon: aiming ? ts.lon : NaN,
+      target_miss_km: target_miss / 1e3,
       ground_elev_m: d.elev,
       ground_slope_deg: rad2deg_(d.slope),
       site_score_deg: Number.isNaN(d.site_score) ? 0.0 : rad2deg_(d.site_score),

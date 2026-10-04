@@ -191,7 +191,7 @@ export function _ascent_deriv(dx, x, lv, guid, ctx, atm, grav, theta_g0, t) {
     dm = -thr * stage_mdot(st);
   }
   for (let i = 0; i < lv.boosters.length; i++) {
-    if (ctx.bstate[i] !== 'burning') continue;
+    if (ctx.phase === 'coast' || ctx.bstate[i] !== 'burning') continue;
     thrust_mag += booster_thrust(lv.boosters[i], pamb);
     dm -= booster_mdot(lv.boosters[i]);
   }
@@ -248,7 +248,7 @@ export function _ascent_data(x, lv, ctx, theta_g0, t, r_site0, atm = USSA76) {
     ? core_throttle(lv, ctx, x[6], pamb) * stage_thrust(lv.stages[ctx.stage - 1], pamb)
     : 0.0;
   for (let i = 0; i < lv.boosters.length; i++)
-    if (ctx.bstate[i] === 'burning') thrust += booster_thrust(lv.boosters[i], pamb);
+    if (ctx.phase !== 'coast' && ctx.bstate[i] === 'burning') thrust += booster_thrust(lv.boosters[i], pamb);
   const dr = RE_MEAN * Math.acos(Math.min(1, Math.max(-1, vdot(vunit(r_site0), rhat))));
   return { h, vrel: Vr, vin, gamma, gamma_rel, mach: Vr / asnd, qbar, pamb,
            lat, lon, thrust, downrange: dr };
@@ -357,6 +357,21 @@ export function simulate_ascent(lv, guid, { atmosphere = USSA76, gravity = j2Gra
         prop_left[ctx.stage - 1] = 0.0;
         x[6] -= st.mdry;
         ev(`sep_${st.name}`);
+        // Every strap-on is attached to the first core. Separation carries
+        // away its remaining fuel as well as its dry hardware, even if it
+        // is still burning or has not reached its ignition delay.
+        if (ctx.stage === 1) {
+          for (let i = 0; i < lv.boosters.length; i++) {
+            if (ctx.bstate[i] === 'gone') continue;
+            const b = lv.boosters[i];
+            const prop = ctx.bstate[i] === 'waiting' ? b.stage.mprop
+              : ctx.bstate[i] === 'burning'
+                ? Math.max(0, b.stage.mprop - stage_mdot(b.stage) * (t - ctx.b_tign[i])) : 0;
+            ctx.bstate[i] = 'gone';
+            x[6] -= b.count * (b.stage.mdry + prop);
+            ev(`sep_${b.stage.name}`);
+          }
+        }
         if (ctx.stage < nst) {
           ctx.stage += 1; ctx.burning = false; ctx.t_stage_ign = t + guid.stage_gap;
         } else {
@@ -393,7 +408,11 @@ export function simulate_ascent(lv, guid, { atmosphere = USSA76, gravity = j2Gra
       ev(`ignition_${lv.stages[ctx.stage - 1].name}`);
     }
 
-    if (t >= next_log) { logrec(d); next_log += log_dt; }
+    if (t >= next_log) {
+      // Log the engines and mass after this step's discrete transitions.
+      d = _ascent_data(x, lv, ctx, theta_g0, t, r_site0, atmosphere);
+      logrec(d); next_log += log_dt;
+    }
 
     const thr_now = ctx.burning && ctx.stage >= 1 ? core_throttle(lv, ctx, x[6], d.pamb) : 0.0;
     let dts = dt;

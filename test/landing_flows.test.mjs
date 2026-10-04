@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { panelRun } from '../web/src/panel.js';
-import { lander, powered_descent, _descent_leg, target_parking } from '../web/src/landing.js';
+import { lander, powered_descent, _descent_leg, target_parking, tune_braking } from '../web/src/landing.js';
 import { coplanar_moon, moonfixed_inv } from '../web/src/moon.js';
 import { R_MOON, MU_MOON } from '../web/src/constants.js';
 import { vdot, vunit, vnorm } from '../web/src/vec3.js';
@@ -66,6 +66,38 @@ test('Saturn V with the shipped Aitken lander reaches the named site and lands s
   const rad=Math.PI/180,lat=m.land_lat*rad,tl=m.target_lat*rad;
   const sep=Math.acos(Math.min(1,Math.max(-1,Math.sin(lat)*Math.sin(tl)+Math.cos(lat)*Math.cos(tl)*Math.cos((m.land_lon-m.target_lon)*rad))));
   assert.ok(R_MOON*sep<10000,'lands within 10 km of the selected site');
+  assert.ok(Math.abs(m.target_miss_km-R_MOON*sep/1000)<1e-6);
   assert.ok(Math.abs(out.descent.h.at(-1))<.005);assert.equal(out.events.at(-1).name,'touchdown');
   assert.ok(out.events.some(e=>e.name==='high_gate'));assert.equal(out.descent.t.at(-1),m.descent_s);
+});
+
+test('short high-thrust braking reaches a flyable gate, with honest minimum-throttle limits', () => {
+  const r=[R_MOON+15291.055387647589,0,0],v=[.148114443,1692.33544,0],m=3344.6766118550195;
+  const l=lander({mdry:100,mprop:m-100,thrust:45000,isp:311,throttle_min:.1});
+  const [p,rate,ok]=tune_braking(l,r,v,m,{h_gate:2000});
+  assert.equal(ok,true);assert.ok(rate>.004,'short burn requires more pitch rotation than the reference limit');
+  const gate=_descent_leg(l,r,v,m,p,rate);
+  assert.equal(gate.outcome,'gate');assert.ok(Math.abs(gate.h-2000)<100);assert.ok(Math.abs(gate.vv+45)<10);
+  const limited=powered_descent(l,r,v,m,{h_gate:2000});
+  assert.equal(limited.outcome,'throttle_limited');assert.ok(limited.log.h.at(-1)>0);
+  assert.ok(limited.t_touchdown<500,'ends before repeated floor-throttle oscillation');
+  assert.ok(limited.min_throttle>=.1);assert.ok(limited.prop_left>0);
+  assert.equal(limited.hover_s,0,'fuel remaining does not imply a possible steady hover');
+  const capable=powered_descent({...l,throttle_min:.02},r,v,m,{h_gate:2000});
+  assert.equal(capable.outcome,'touchdown');assert.ok(capable.v_vertical<3);assert.ok(capable.v_horizontal<1.5);
+  assert.ok(Math.abs(capable.log.h.at(-1))<.001);assert.ok(capable.min_throttle>=.02);
+});
+
+test('the reported custom Saturn V crash becomes an explicit airborne throttle limit', () => {
+  const p={...saturn(),l_dry:100,l_prop:9000,s1_dry_auto:true,s2_dry_auto:true,s3_dry_auto:true};
+  const out=panelRun(params(p),'landing');
+  assert.equal(out.ok,true);assert.equal(out.metrics.outcome,'throttle_limited');assert.equal(out.metrics.on_target,false);
+  assert.ok(out.descent.h.at(-1)>0);assert.equal(out.events.at(-1).name,'throttle_limited');
+  assert.ok(out.metrics.touchdown_v<1);assert.ok(out.metrics.touchdown_vh<1);assert.ok(out.metrics.prop_left_kg>1000);
+  assert.equal(out.events.at(-1).t,out.site.t_td);
+});
+
+test('an unconverged Moon transfer cannot produce a spurious landing', () => {
+  const p={...saturn(),l_dry:3500,l_prop:15000,s1_dry_auto:true,s2_dry_auto:true,s3_dry_auto:true};
+  assert.throws(()=>panelRun(params(p),'landing'),/trans-lunar targeting missed the lunar orbit.*no lunar landing simulated/);
 });

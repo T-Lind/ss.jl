@@ -551,7 +551,7 @@
 <script type="module">
 'use strict';
 import { earthAngle, launchHours, sunEci, moonOrientation, moonTexel, MOON_MAP_URL } from '/static/celestial.js';
-import { successfulTouchdown, lunarEndLabel, landingSummary } from '/static/flight_state.js';
+import { successfulTouchdown, lunarEndLabel, landingSummary, landerThrottleWarning } from '/static/flight_state.js';
 import { fin, fmt, fmtKm } from '/static/fmt.js';
 import * as api from '/static/api.js';
 import { allowsShortcut, keyboardAction } from '/static/ui.js';
@@ -884,11 +884,11 @@ const VEHICLES = {
     // so the vehicle also flies with the search turned off.
     nstages: 3, nboost: 0, diameter: 10.1, fairing_on: false, kick_deg: 1,
     opt_kick: true, pod_mass: 45000,
-    s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000,
+    s1_engine: 'f1', s1_engines: 5, s1_prop: 2077000, s1_dry: 130000, s1_dry_auto: false,
       s1_diameter: 10.1,
-    s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000,
+    s2_engine: 'j2', s2_engines: 5, s2_prop: 451000, s2_dry: 36000, s2_dry_auto: false,
       s2_diameter: 10.1,
-    s3_engine: 'j2', s3_engines: 1, s3_prop: 106600, s3_dry: 13500,
+    s3_engine: 'j2', s3_engines: 1, s3_prop: 106600, s3_dry: 13500, s3_dry_auto: false,
       s3_diameter: 6.6,
   },
   'Starship (expendable)': {
@@ -1103,7 +1103,7 @@ function renderAll() {
       ['lander wet mass', V(m.lander_wet_t,1,'t')],
       ['TLI Δv', V(m.tli_dv,0,'m/s')],
       ['launcher margin', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
-      ['pad to surface', V(m.t_days,2,'d')],
+      [successfulTouchdown(run) ? 'pad to surface' : 'mission elapsed', V(m.t_days,2,'d')],
     ]],
     ['lunar orbit', [
       ['lunar orbit', V(m.perilune_km,0,'km')],
@@ -1124,6 +1124,7 @@ function renderAll() {
       [successfulTouchdown(run) ? 'landing site' : 'endpoint coordinates', fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°'],
       ['site targeted', fin(m.target_lat)
         ? fmt(m.target_lat,2)+'°, '+fmt(m.target_lon,2)+'°' : 'free return'],
+      ['distance to targeted site', V(m.target_miss_km,1,'km')],
       ['ground off sphere', (m.ground_elev_m>=0?'+':'')+V(m.ground_elev_m,0,'m')],
       ['slope', V(m.ground_slope_deg,1,'°')],
       ['nav altitude error', V(m.nav_alt_err_m,0,'m')],
@@ -2207,10 +2208,12 @@ function updateLanderNote() {
   // insertion from a free return plus a descent is about 2.8 km/s
   const need = 2800;
   const twr = T / (wet * 1.625);
+  const warning = landerThrottleWarning(dry, T/1000, $('l_throttle_min').value);
   $('l_derived').innerHTML =
     `${(wet/1000).toFixed(1)} t wet · Δv <b class="${dv < need ? 'bad' : dv < need*1.15 ? 'warn' : 'good'}">` +
     `${Math.round(dv)} m/s</b> ideal (baseline ≈ ${need}; named sites can need more for plane change)` +
-    ` · lunar T/W <b class="${twr < 1.05 ? 'bad' : ''}">${twr.toFixed(2)}</b> at ignition`;
+    ` · lunar T/W <b class="${twr < 1.05 ? 'bad' : ''}">${twr.toFixed(2)}</b> at ignition` +
+    (warning ? `<br><span class="warn">${warning}</span>` : '');
 }
 
 // ---------------------------------------------------------------- wire up --

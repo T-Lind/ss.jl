@@ -1522,7 +1522,7 @@ const EVNAME = {
   loi: 'LUNAR ORBIT INSERTION', doi: 'DESCENT ORBIT INSERTION',
   pdi: 'POWERED DESCENT IGNITION', high_gate: 'HIGH GATE',
   touchdown: 'TOUCHDOWN — CONTACT LIGHT', crash: 'IMPACT',
-  tipped: 'TIPPED OVER', propellant: 'PROPELLANT DEPLETION',
+  tipped: 'TIPPED OVER', throttle_limited: 'THROTTLE LIMIT', propellant: 'PROPELLANT DEPLETION',
 };
 const EVSUF = { sep: 'SEPARATION', ignition: 'IGNITION', deploy: 'DEPLOY',
                 jettison: 'JETTISON', burnout: 'BURNOUT' };
@@ -1719,7 +1719,10 @@ function buildData() {
   // set 1's boosters vanishing at set 2's event and vice versa.
   BNAMES.forEach((nm, i) => {
     const e = BSEP.find(x => x.name.endsWith('_' + nm));
-    if (e) dropT['booster' + (i+1)] = e.t;
+    // A saved older run may omit booster events at core separation.
+    const coreSep = SEPS[0];   // event names differ from geometry's stage1 key
+    const time = Math.min(e ? e.t : Infinity, coreSep ? coreSep.t : Infinity);
+    if (isFinite(time)) dropT['booster' + (i+1)] = time;
   });
 
   // --- every event the run reported, plus derived max-q --------------------
@@ -6535,8 +6538,8 @@ function buildScene(ph) {
         const e = list.find(x => x.name.endsWith('_' + nm));
         return e ? e.t : d;
       };
-      const t0 = at(BIGN, -Infinity);
-      const t1 = at(BOUT, at(BSEP, Infinity));   // dry, else dropped, else never
+      const t0 = at(BIGN, Infinity);   // no ignition event means the set stayed cold
+      const t1 = Math.min(secoT, at(BOUT, at(BSEP, Infinity)));   // dry, else dropped, else never
       if (!(simT >= t0 && simT < t1)) return;
       const R = (SECR.stage1 || DIA/2) + (+BSET.diameter_m / 2);
       for (let j = 0; j < BSET.count; j++) {

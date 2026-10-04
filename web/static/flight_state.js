@@ -6,7 +6,7 @@ export function landingOutcome(run) {
   const events=run?.events||[];
   for(let i=events.length-1;i>=0;i--) {
     const e=events[i];
-    if(e.phase==='lunar'&&['touchdown','crash','tipped','propellant','timeout','diverged'].includes(e.name))return e.name;
+    if(e.phase==='lunar'&&['touchdown','crash','tipped','propellant','timeout','throttle_limited','diverged'].includes(e.name))return e.name;
   }
   return 'unknown';
 }
@@ -14,7 +14,7 @@ export const successfulTouchdown=run=>landingOutcome(run)==='touchdown';
 export function lunarEndLabel(run) {
   const result=landingOutcome(run);
   return result==='touchdown'?'SURFACE':result==='crash'||result==='surface'?'IMPACT':result==='tipped'?'TIPPED'
-    :result==='propellant'?'PROPELLANT DEPLETED':result==='timeout'?'DESCENT TIMED OUT':'DESCENT ABORTED';
+    :result==='throttle_limited'?'THROTTLE LIMIT':result==='propellant'?'PROPELLANT DEPLETED':result==='timeout'?'DESCENT TIMED OUT':'DESCENT ABORTED';
 }
 export function landingEndTime(run, surfaceDuration = 300) {
   return run.site.t_td + (successfulTouchdown(run) ? 16 + surfaceDuration : 0);
@@ -26,6 +26,8 @@ export function landingSummary(run) {
   if (result === 'crash' || result === 'surface' || result === 'tipped')
     return `${result === 'tipped' ? 'Lander tipped' : 'Landing impact'}: ${(+m.touchdown_v || 0).toFixed(1)} m/s sink, ` +
       `${(+m.touchdown_vh || 0).toFixed(1)} m/s lateral.`;
+  if (result === 'throttle_limited')
+    return `Minimum throttle is too high for the remaining mass${above}; no touchdown simulated. Lower minimum throttle or increase lander dry mass.`;
   const reason = result === 'propellant' ? 'Propellant depleted' : result === 'timeout' ? 'Descent timed out' : 'Descent stopped';
   const budget = result === 'propellant' && Number.isFinite(m.loi_dv) && Number.isFinite(m.lander_dv)
     ? ` LOI/plane change used ${m.loi_dv.toFixed(0)} m/s; ` +
@@ -35,5 +37,12 @@ export function landingSummary(run) {
 export function lunarHatchReason(run) {
   const result=landingOutcome(run);
   return result==='crash'?'landing impact':result==='tipped'?'lander tipped'
-    :result==='propellant'?'propellant depleted':result==='unknown'?'touchdown unconfirmed':'descent '+result;
+    :result==='throttle_limited'?'minimum throttle too high':result==='propellant'?'propellant depleted':result==='unknown'?'touchdown unconfirmed':'descent '+result;
+}
+
+// Minimum thrust sets a lower mass limit for a steady lunar hover.
+export function landerThrottleWarning(dry, thrustKN, minimumPercent) {
+  const minMass = Math.max(1, +thrustKN || 0) * 1000 * Math.min(1, Math.max(.02, (+minimumPercent || 0)/100)) / 1.625;
+  return minMass > Math.max(100, +dry || 0)
+    ? `At minimum throttle, this engine cannot hover below ${Math.ceil(minMass).toLocaleString('en-US')} kg. Keep enough fuel at touchdown, lower minimum throttle, or increase dry mass.` : '';
 }

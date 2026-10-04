@@ -39,3 +39,29 @@ using Test, SatelliteSim
         @test isapprox(S.vnorm(rr), rp; atol = 1.0)
     end
 end
+
+@testset "short braking programs and minimum-throttle failures" begin
+    S=SatelliteSim
+    r=(R_MOON+15291.055387647589,0.0,0.0);v=(.148114443,1692.33544,0.0);m=3344.6766118550195
+    l=Lander(mdry=100.0,mprop=m-100,thrust=45000.0,isp=311.0,throttle_min=.1)
+    p,rate,ok=S.tune_braking(l,r,v,m;h_gate=2000.0)
+    @test ok
+    @test rate>.004
+    gate=S._descent_leg(l,r,v,m,p,rate)
+    @test gate.outcome===:gate
+    @test abs(gate.h-2000)<100
+    @test abs(gate.vv+45)<10
+    limited=powered_descent(l,r,v,m;h_gate=2000.0)
+    @test limited.outcome===:throttle_limited
+    @test limited.log.h[end]>0
+    @test limited.t_touchdown<500
+    @test limited.min_throttle>=.1
+    @test limited.prop_left>0
+    @test limited.hover_s==0
+    capable=powered_descent(Lander(mdry=100.0,mprop=m-100,thrust=45000.0,isp=311.0,throttle_min=.02),r,v,m;h_gate=2000.0)
+    @test capable.outcome===:touchdown
+    @test capable.v_vertical<3
+    @test capable.v_horizontal<1.5
+    @test abs(capable.log.h[end])<.001
+    @test capable.min_throttle>=.02
+end
