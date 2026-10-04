@@ -2335,24 +2335,15 @@ function cameraMoon(t, ms, M) {
   let eye, look = mid, up = ms.up, fov = 0.5;
   if (mode === 'ground') {
     // A camera standing off to one side of the site, watching it come down.
-    // Framed on the point between the vehicle and the ground under it, so the
-    // shot holds both all the way in and ends on the landing rather than on
-    // the sky above it.
+    // Follow the vehicle with a useful apparent size. Trying to hold both a
+    // high lander and the site in a wide lens makes the craft a few pixels tall.
     if (!MOONCAM) pickGroundCam();
     const gp = moonPos(MOONCAM.x, MOONCAM.z, 0);
     eye = aboveGround([gp[0], MOONCAM.y, gp[2]]);
-    const site = [moonPos(0, 0, 0)[0], groundY(0, 0), moonPos(0, 0, 0)[2]];
-    const toSite = V.norm(V.sub(site, eye)), toCraft = V.norm(V.sub(mid, eye));
-    // Fit both sight lines, favouring the craft to keep it below the top HUD.
-    // A position blend with a capped world-space span can crop both the lander and the
-    // ground out of the shot; changing that blend at 25 m also snaps the view.
-    const facing = V.norm(V.add(V.scale(toSite, 0.4), V.scale(toCraft, 0.6)));
-    look = V.add(eye, facing);
+    look = mid;
     up = [0, 1, 0];
-    const halfAngle = Math.acos(Math.max(-1, Math.min(1,
-      Math.min(V.dot(facing, toSite), V.dot(facing, toCraft)))));
-    const distance = Math.max(10, Math.min(V.len(V.sub(site, eye)), V.len(V.sub(mid, eye))));
-    fov = Math.max(0.1, Math.min(2.2, 2*(halfAngle + Math.atan(10/distance) + 0.04)));
+    const span = Math.max(18, Math.min(65, 18 + ms.h*0.12));
+    fov = fitFov(Math.max(30, V.len(V.sub(mid, eye))), span);
   } else {
     const Rd = freeDist || 40;
     const cp = Math.cos(freePitch), sp = Math.sin(freePitch);

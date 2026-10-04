@@ -51,12 +51,13 @@ test('far-downrange camera clearance preserves direction and respects actual ter
   assert.equal(c.liftMoonCamera(high),high);
 });
 
-test('ground camera holds the lander and site throughout approach without a 25m aim snap', () => {
+test('ground camera keeps the approaching lander visible without a 25m aim snap', () => {
   const c=scene();
   Object.assign(c,{SURF:{active:false},camMode:'ground',MDIA:4.2,MOONCAM:{x:100,z:0,y:103},
     landerLayout:()=>({s:1}),landerRig:()=>null});
   runInContext('const groundY=(x,z)=>moonPos(x,z,terrainHeight(MS.terrain,moonDir(x,z)))[1];',c);
   runInContext(fn('cameraMoon'),c);
+  runInContext(fn('fitFov'),c);
   runInContext(fn('fovZoom'),c);
   let previous;
   for(const h of [1000,600,300,100,26,25,24,10,0]) {
@@ -65,11 +66,13 @@ test('ground camera holds the lander and site throughout approach without a 25m 
     cam.fov=c.fovZoom(cam.fov,1);
     const length=a=>Math.hypot(...a), unit=a=>a.map(x=>x/length(a));
     const axis=unit(direction);
-    for(const target of [[0,100,0],[pos[0],pos[1]+2.65,pos[2]]]) {
+    for(const target of h===0 ? [[0,100,0],[pos[0],pos[1]+2.65,pos[2]]] : [[pos[0],pos[1]+2.65,pos[2]]]) {
       const angle=Math.acos(Math.max(-1,Math.min(1,dot(axis,unit(sub(target,cam.eye))))));
-      assert.ok(angle<cam.fov/2,`altitude ${h}: site and craft must remain in view`);
+      assert.ok(angle<cam.fov/2,`altitude ${h}: craft stays in view, with terrain at contact`);
       if(target[1]>100)assert.ok(Math.tan(angle)/Math.tan(cam.fov/2)<0.75,'lander clears the top HUD');
     }
+    const distance=length(sub([pos[0],pos[1]+2.65,pos[2]],cam.eye));
+    assert.ok(600*landerLayout().height/(2*distance*Math.tan(cam.fov/2))>35,'lander must be more than a few pixels tall');
     if(previous && h>=24 && h<=25)assert.ok(length(sub(axis,previous))<0.01,'aim stays continuous across 25m');
     previous=axis;
   }
