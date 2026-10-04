@@ -6411,8 +6411,10 @@ function frame(now) {
   const wTarget = running ?
     (manualWarp > 0 ? manualWarp : ph.warp(simT)) : 0;
   if (running) {
-    const k = wTarget < warpCur ? 6.0 : 1.8;
-    warpCur += (Math.max(wTarget, 1) - warpCur)*Math.min(1, dtReal*k);
+    // Slow down immediately: easing out of cruise can skip an entire descent
+    // even after the pilot has selected ×1. Only speed increases ease in.
+    if (wTarget < warpCur) warpCur = Math.max(wTarget, 1);
+    else warpCur += (Math.max(wTarget, 1) - warpCur)*Math.min(1, dtReal*1.8);
     warpEff = manualWarp > 0 ? warpCur :
       Math.min(warpCur, Math.max(1, (ph.t1 - simT)/0.8));
   } else warpEff = 0;

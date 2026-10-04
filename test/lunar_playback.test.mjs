@@ -187,22 +187,40 @@ test('terminal timeline position stays finite and a short arrow tap rewinds imme
   assert.ok(jumped<99.5,'tap must work without waiting for requestAnimationFrame');
 });
 
-test('fast playback stops at the exact endpoint and renders its final phase', () => {
+function playbackClock({time=99,manual=10000,warp=10000,phaseWarp=10000}={}) {
   const noop=()=>{},PH=[{n:'DESCENT',t0:0,t1:100,w:'moon',warp:()=>10000},
     {n:'PROPELLANT DEPLETED',t0:100,t1:100,w:'moon',warp:()=>1}];
+  PH[0].warp=()=>phaseWarp;
   let cards=0,painted;
-  const c=createContext({Math,PH,simT:99,tEnd:100,lastNow:0,started:true,running:true,ended:false,
-    manualWarp:10000,warpCur:10000,warpEff:1,toasts:[],dropT:{},tSplash:NaN,splashed:false,
+  const c=createContext({Math,PH,simT:time,tEnd:100,lastNow:0,started:true,running:true,ended:false,
+    manualWarp:manual,warpCur:warp,warpEff:1,toasts:[],dropT:{},tSplash:NaN,splashed:false,
     camMode:'chase',EVA:{active:false},SURF:{active:false},zoomK:1,PARTWARP:300,parts:[],debris:[],
     requestAnimationFrame:noop,perfPush:noop,scrubStep:noop,audioEvents:noop,rcsStep:noop,cabStep:noop,
     rcsActive:()=>false,rcsMustAlign:()=>false,coastActive:()=>false,landed:()=>false,
     buildScene:()=>({world:'moon',cam:{fov:60,eye:[0,0,0]}}),refreshCams:noop,eciLanderPhase:()=>false,
     fovZoom:f=>f,updateAudio:noop,drawScene:noop,drawHUD:(_s,p)=>painted=p.n,drawSeek:noop,
     showEndCard:()=>cards++,stepDebris:noop,stepParticles:noop});
-  runInContext(fn('phaseAt'),c);runInContext(fn('frame'),c);c.frame(50);
+  runInContext(fn('phaseAt'),c);runInContext(fn('frame'),c);
+  return {c,get cards(){return cards;},get painted(){return painted;}};
+}
+
+test('fast playback stops at the exact endpoint and renders its final phase', () => {
+  const clock=playbackClock(),{c}=clock;c.frame(50);
   assert.equal(c.simT,100);assert.equal(c.running,false);assert.equal(c.ended,true);
-  assert.equal(painted,'PROPELLANT DEPLETED');assert.equal(cards,1);
-  c.frame(100);assert.equal(c.simT,100);assert.equal(cards,1);
+  assert.equal(clock.painted,'PROPELLANT DEPLETED');assert.equal(clock.cards,1);
+  c.frame(100);assert.equal(c.simT,100);assert.equal(clock.cards,1);
+});
+
+test('slowing cruise playback takes effect before the next simulation step', () => {
+  for(const [manual,phaseWarp,target] of [[1,10000,1],[100,10000,100],[0,1,1]]) {
+    const clock=playbackClock({time:50,manual,phaseWarp}),{c}=clock;
+    c.frame(50);
+    assert.equal(c.warpEff,target);
+    assert.equal(c.simT,50+.05*target,'speed reduction must not overshoot a short descent');
+    assert.equal(c.running,true);assert.equal(clock.cards,0);
+  }
+  const {c}=playbackClock({time:50,manual:100,warp:1});c.frame(50);
+  assert.ok(c.warpEff>1&&c.warpEff<100,'speed increases retain the smooth ramp');
 });
 
 test('minimum throttle failures are clear in history, terminal state and design warnings',()=>{
