@@ -429,10 +429,10 @@ export function simulate_ascent(lv, guid, { atmosphere = USSA76, gravity = j2Gra
 const stage_burn_time_of = st => st.mprop / (st.thrust_vac / (G0 * st.isp_vac));
 
 export function tune_ascent(lv, guid, { tol_h = 1.0e3, tol_gamma = deg2rad_(0.05),
-    max_iter = 30, verbose = false, optimize_kick = false, recover_kick = true,
+    max_iter = 30, verbose = false, optimize_kick = false, recover_kick = true, onProgress = null,
     ...kwargs } = {}) {
   if (optimize_kick)
-    return _tune_with_kick(lv, guid, { tol_h, tol_gamma, max_iter, verbose, ...kwargs });
+    return _tune_with_kick(lv, guid, { tol_h, tol_gamma, max_iter, verbose, onProgress, ...kwargs });
 
   let p1 = guid.pitch0, p2 = guid.pitch_rate, res;
   const resid = g => {
@@ -441,6 +441,8 @@ export function tune_ascent(lv, guid, { tol_h = 1.0e3, tol_gamma = deg2rad_(0.05
   };
   const rebuild = (a, b) => reguid(guid, { pitch0: a, pitch_rate: b });
   for (let it = 0; it < max_iter; it++) {
+    if (onProgress) onProgress({ ok: true, stage: 'ascent',
+      detail: `solving ascent guidance · iteration ${it + 1} of ${max_iter}`, current: 1, total: 6 });
     const g = rebuild(p1, p2);
     const [f1, f2, r] = resid(g);
     res = r;
@@ -464,17 +466,22 @@ export function tune_ascent(lv, guid, { tol_h = 1.0e3, tol_gamma = deg2rad_(0.05
   res = r;
   if (recover_kick && guid.cutoff === 'energy' && !r.reached_orbit &&
       pad_thrust(lv) > 1.05 * liftoff_mass(lv) * G0)
-    return _tune_with_kick(lv, guid, { tol_h, tol_gamma, max_iter, verbose, ...kwargs });
+    return _tune_with_kick(lv, guid, { tol_h, tol_gamma, max_iter, verbose, onProgress, ...kwargs });
   return [g, r];
 }
 
 const _with_kick = (g, ka) => reguid(g, { kick_angle: ka });
 
-function _tune_with_kick(lv, guid, { tol_h, tol_gamma, max_iter, verbose, ...kwargs }) {
+function _tune_with_kick(lv, guid, { tol_h, tol_gamma, max_iter, verbose, onProgress, ...kwargs }) {
+  let candidates = 0;
   const scan = angles => {
     const out = [];
     for (const ka of angles) {
       if (ka <= 0) continue;
+      candidates++;
+      if (onProgress) onProgress({ ok: true, stage: 'ascent',
+        detail: `optimizing pitch kick · candidate ${candidates}, ${(ka * 180 / Math.PI).toFixed(2)}°`,
+        current: 1, total: 6 });
       const [g, r] = tune_ascent(lv, _with_kick(guid, ka),
         { tol_h, tol_gamma, max_iter, optimize_kick: false, recover_kick: false, ...kwargs });
       const ok = r.reached_orbit && Math.abs(r.h_cut - g.h_target) < tol_h &&
@@ -500,6 +507,6 @@ function _tune_with_kick(lv, guid, { tol_h, tol_gamma, max_iter, verbose, ...kwa
     best = pick([best, ...scan([lo, hi])]);
   }
   return best === null
-    ? tune_ascent(lv, guid, { tol_h, tol_gamma, max_iter, optimize_kick: false, recover_kick: false, ...kwargs })
+    ? tune_ascent(lv, guid, { tol_h, tol_gamma, max_iter, optimize_kick: false, recover_kick: false, onProgress, ...kwargs })
     : best;
 }

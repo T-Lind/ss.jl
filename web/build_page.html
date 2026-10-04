@@ -26,10 +26,14 @@
      panel_page.html; only what is local to the builder stays here */
   body { margin: 0; background: var(--ground); color: var(--text);
          font: 13.5px/1.45 var(--sans); }
+  .app > *, .row > *, .row3 > *, .tiles > * { min-width: 0; }
+  input, select { min-width: 0; }
   .app { display: grid; grid-template-columns: 340px minmax(0, 1fr) 340px;
          gap: 16px; max-width: 1560px; margin: 0 auto; padding: 16px; }
-  @media (max-width: 1100px) { .app { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 1100px) { .app { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
     .mid { grid-column: 1 / -1; order: -1; } }
+  @media (max-width: 800px) { .app { grid-template-columns: minmax(0, 1fr); }
+    .mid { grid-column: auto; order: 0; } }
   h1 { color: var(--text); font-size: 17px; margin: 0 0 2px; }
   h2 { color: var(--text); font-family: var(--mono); font-size: var(--t-label);
        margin: 0; letter-spacing: .18em; text-transform: uppercase;
@@ -75,6 +79,7 @@
   #view { width: 100%; height: calc(100vh - 150px); min-height: 420px;
           display: block; cursor: grab; touch-action: none;
           border-radius: 8px; background: #131312; }
+  @media (max-width: 800px) { #view { height: 420px; min-height: 320px; } }
   .chip { display: inline-block; background: #2a2a28; border: 1px solid rgba(255,255,255,.12);
           border-radius: 6px; padding: 4px 9px; margin: 0 6px 6px 0; font-size: 11.5px;
           cursor: pointer; font-variant-numeric: tabular-nums; text-decoration: none;
@@ -258,6 +263,7 @@ import {landerExterior} from './static/lander_model.js';
 'use strict';
 import { fin, fmt, fmtMass } from './static/fmt.js';
 import * as api from './static/api.js';
+import { keyboardAction } from './static/ui.js';
 import * as vehicle from './static/vehicle.js';
 import { own } from './static/vehicle.js';
 import { busy, fail, reportUncaught } from './static/busy.js';
@@ -437,7 +443,7 @@ function buildStages(keep) {
   setVals(vals);
   for (let k = 1; k <= NSTAGES; k++) {
     const kk = k;
-    $(`s${k}_rm`).onclick = () => removeStage(kk);
+    keyboardAction($(`s${k}_rm`)).onclick = () => removeStage(kk);
     $(`s${k}_rm`).style.display = NSTAGES > 2 ? '' : 'none';
   }
   $('addstage').disabled = NSTAGES >= 5;
@@ -553,8 +559,8 @@ function params() {
 // panel (in any other tab) applies it on its storage event — so the mission
 // page's geometry view follows this page live. Which keys travel, and why
 // only those, is documented in ./static/vehicle.js.
-function saveVehicle() {
-  vehicle.save(params());
+function saveVehicle(submitted) {
+  vehicle.save(submitted);
   // Tell mission control the stack moved, so returning to it does not read as
   // "nothing happened". Cleared when the panel takes it.
   vehicle.markDirty('the vehicle changed in the builder');
@@ -577,17 +583,19 @@ function refreshLinks() {
 // ------------------------------------------------------------- geometry --
 let geo = null, fetchTimer = 0, inflight = 0;
 function fetchGeo() {
+  ++inflight; // invalidate a reply as soon as an edit is scheduled
+  refreshLinks();
   clearTimeout(fetchTimer);
   fetchTimer = setTimeout(doFetchGeo, 150);   // one request per burst of edits
 }
 async function doFetchGeo() {
   refreshLinks();
-  const my = ++inflight;
+  const my = inflight, submitted = params();
   try {
     // transport-level, not api.geometry: the staleness check has to happen
     // between parsing and validating, or a reply that a newer edit already
     // superseded raises an error banner for a request nobody is waiting on
-    const j = await api.post('/api/geometry', params());
+    const j = await api.post('/api/geometry', submitted);
     if (my !== inflight) return;               // a newer edit superseded this
     if (!j.ok) {
       $('state').className = 'status err';
@@ -595,7 +603,7 @@ async function doFetchGeo() {
       return;
     }
     geo = j;
-    saveVehicle();
+    saveVehicle(submitted);
     $('state').className = 'status';
     $('state').textContent =
       `${(j.stages || []).length} stages` +
@@ -1015,12 +1023,12 @@ function initPresets() {
   $('vpresets').innerHTML = Object.keys(VEHICLES)
     .map(k => `<span class="chip" data-p="${k}">${k}</span>`).join('');
   for (const el of $('vpresets').querySelectorAll('.chip'))
-    el.onclick = () => applyPreset(el.dataset.p);
+    keyboardAction(el).onclick = () => applyPreset(el.dataset.p);
   $('podpresets').innerHTML = PODS
     .map(([k, m, d]) => `<span class="chip" data-m="${m}" data-d="${d}">${k}</span>`)
     .join('');
   for (const el of $('podpresets').querySelectorAll('.chip'))
-    el.onclick = () => {
+    keyboardAction(el).onclick = () => {
       $('pod_mass').value = el.dataset.m;
       $('pod_dia').value = el.dataset.d;      // the size it actually was
       podNote(); fetchGeo();

@@ -210,14 +210,14 @@ export function earthorbit(opts = {}) {
   const az = launch_azimuth(tgt.inclination, site_lat);
   const guid0 = ascentGuidance({ azimuth: az, h_target: h_park, kick_angle,
                                  site_lat, site_lon });
-  let [guid, asc] = tune_ascent(lv, guid0, { optimize_kick, theta_g0, verbose });
+  let [guid, asc] = tune_ascent(lv, guid0, { optimize_kick, theta_g0, verbose, onProgress });
   if (asc.reached_orbit && tgt.inclination >= site_lat) {
     const miss = tgt.inclination - asc.elements.i;
     if (Math.abs(miss) > deg2rad_(1.0)) {
       const az2 = launch_azimuth(tgt.inclination + miss, site_lat);
       const guid2 = ascentGuidance({ azimuth: az2, h_target: h_park, kick_angle,
                                      site_lat, site_lon });
-      const [g2, a2] = tune_ascent(lv, guid2, { optimize_kick, theta_g0, verbose });
+      const [g2, a2] = tune_ascent(lv, guid2, { optimize_kick, theta_g0, verbose, onProgress });
       if (a2.reached_orbit &&
           Math.abs(a2.elements.i - tgt.inclination) < Math.abs(miss)) {
         guid = g2; asc = a2;

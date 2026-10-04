@@ -2,6 +2,7 @@ import {landerLayout,landerExterior,landerInterior,landerDisplay} from './lander
 import {capsulePreview} from './capsule_preview.js';
 import * as api from './api.js';
 import * as vehicle from './vehicle.js';
+import {allowsShortcut} from './ui.js';
 
 const $=id=>document.getElementById(id),cv=$('view');
 const gl=cv.getContext('webgl',{antialias:true,preserveDrawingBuffer:true});
@@ -143,6 +144,7 @@ function start() {
   for(const type of ['pointerup','pointercancel','lostpointercapture']) cv.addEventListener(type,()=>drag=null);
   cv.addEventListener('wheel',e=>{e.preventDefault();if(!L)return;if(kind==='cabin')zoom=Math.max(.9,Math.min(3,zoom*Math.exp(-e.deltaY*.001)));else dist=Math.max(L.diameter*.8,Math.min(L.diameter*8,dist*Math.exp(e.deltaY*.001)));render();},{passive:false});
   cv.addEventListener('keydown',e=>{
+    if(!allowsShortcut(e))return;
     if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','+','=','-','r','R'].includes(e.key)) return;
     if(!L)return; e.preventDefault(); if(e.key.toLowerCase()==='r') {reset();return;}
     if(e.key==='ArrowLeft')yaw-=.08;if(e.key==='ArrowRight')yaw+=.08;

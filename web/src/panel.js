@@ -37,9 +37,9 @@ export function gets(p, k, def) {
 }
 
 function getf(p, k, def) {
-  if (k in p && p[k] !== '') {
+  if (k in p && String(p[k]).trim() !== '') {
     const n = Number(p[k]);
-    if (Number.isNaN(n)) throw new Error(`cannot parse ${k}=${p[k]} as a number`);
+    if (!Number.isFinite(n)) throw new Error(`${k} must be a finite number`);
     return n;
   }
   return def;
@@ -929,9 +929,15 @@ export const LANDING_METRICS = ['prop_left_kg', 'hover_s', 'descent_dv', 'loi_dv
   'touchdown_v', 'touchdown_vh', 'downrange_km', 'prop_margin_kg', 'min_throttle_pct',
   'liftoff_t', 'tli_dv', 't_days', 'ground_slope_deg', 'ground_elev_m',
   'redesignate_m', 'nav_alt_err_m'];
+export const ORBIT_METRICS = ['prop_margin_kg', 'orbit_rp_km', 'orbit_ra_km',
+  'orbit_incl_deg', 'period_min', 'burn_dv_total', 'park_apogee_km',
+  'liftoff_t', 't_days', 'rcs_used_kg', 'rcs_margin_kg'];
 
 const solve_metrics = p => mission_mode(p) === 'landing' ? LANDING_METRICS
-  : mission_mode(p) === 'suborbital' ? SUBORBITAL_METRICS : SOLVE_METRICS;
+  : mission_mode(p) === 'suborbital' ? SUBORBITAL_METRICS
+  : mission_mode(p) === 'orbit' ? [...ORBIT_METRICS,
+      ...(getb(p, 'deorbit', false) ? ['peak_g', 'peak_q_wcm2', 'v_splash', 'heat_mj'] : [])]
+  : SOLVE_METRICS;
 
 // Numeric parameters that may be swept or solved for, for this stack height.
 export function sweepable(p) {
@@ -1040,6 +1046,7 @@ export function catalogue_payload() {
                'flyby_wire', 'payload_kind', 'bus_mass', 'cargo_mass'],
     solve_metrics: SOLVE_METRICS, sweep_metrics: SWEEP_METRICS,
     landing_metrics: LANDING_METRICS, suborbital_metrics: SUBORBITAL_METRICS,
+    orbit_metrics: ORBIT_METRICS,
     max_stages: 5,
   };
 }
@@ -1052,5 +1059,5 @@ export function panelRun(p, mode, onProgress) {
 export const run = panelRun;
 export function panelGeometry(p) { return rocket_geometry(p); }
 export function panelCatalogue() { return catalogue_payload(); }
-export function panelSweep(p) { return run_sweep(p); }
-export function panelSolve(p) { return run_solve(p); }
+export function panelSweep(p, onProgress) { return run_sweep(p, onProgress); }
+export function panelSolve(p, onProgress) { return run_solve(p, onProgress); }

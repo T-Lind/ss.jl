@@ -24,7 +24,7 @@ export function translunar_design(lv, opts = {}) {
   const az = launch_azimuth(inclination, site_lat);
   const guid0 = ascentGuidance({ azimuth: az, h_target: h_park, kick_angle,
                                  site_lat, site_lon });
-  const [guid, asc] = tune_ascent(lv, guid0, { optimize_kick, theta_g0, verbose });
+  const [guid, asc] = tune_ascent(lv, guid0, { optimize_kick, theta_g0, verbose, onProgress });
   if (onProgress) onProgress({ ok: true, stage: 'ascent',
     detail: 'ascent to the parking orbit complete', current: 2, total: 6 });
   const partial = { guid, ascent: asc, eph: null, t_ign: NaN, dv: NaN, cis: null,

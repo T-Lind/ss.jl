@@ -14,9 +14,11 @@
      to be dark. Only what is genuinely local to this page stays here. */
   body { margin: 0; background: var(--ground); color: var(--text);
          font: 13.5px/1.45 var(--sans); }
+  .app > *, .stage > *, .row > *, .row3 > * { min-width: 0; }
+  input, select { min-width: 0; }
   .app { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px;
          max-width: 1560px; margin: 0 auto; padding: 16px; }
-  @media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .app { grid-template-columns: minmax(0, 1fr); } }
   h1 { color: var(--text); font-size: 17px; margin: 0 0 2px; }
   h2 { color: var(--text); font-family: var(--mono); font-size: var(--t-label);
        margin: 0; letter-spacing: .18em; text-transform: uppercase;
@@ -83,7 +85,7 @@
   .stage { display: grid; grid-template-columns: minmax(0, 1fr) 300px;
            gap: 12px; align-items: start; margin-bottom: 12px; }
   .stage .card { margin-bottom: 0; }
-  @media (max-width: 1150px) { .stage { grid-template-columns: 1fr; } }
+  @media (max-width: 1150px) { .stage { grid-template-columns: minmax(0, 1fr); } }
   #scene { width: 100%; height: 470px; display: block; cursor: grab;
            touch-action: none; border-radius: 8px; background: #131312; }
   #geo { width: 100%; height: 380px; display: block; cursor: grab;
@@ -176,6 +178,7 @@
     <a class="navlink" id="nav_build" href="build_page.html">vehicle builder</a>
     <a class="navlink" id="nav_analysis" href="analysis_page.html">analysis</a>
     <a class="navlink" id="nav_launch" href="launch_page.html">launch view</a>
+    <a class="navlink" href="models_page.html">spacecraft viewer</a>
   </span>
   <span class="appnav-end">
     <span class="u-label" id="nav_note">circumlunar free return</span>
@@ -551,6 +554,7 @@ import { earthAngle, launchHours, sunEci, moonOrientation, moonTexel, MOON_MAP_U
 import { successfulTouchdown, lunarEndLabel } from './static/flight_state.js';
 import { fin, fmt, fmtKm } from './static/fmt.js';
 import * as api from './static/api.js';
+import { allowsShortcut, keyboardAction } from './static/ui.js';
 import * as vehicle from './static/vehicle.js';
 // The metric vocabulary and the limit table are shared with /analysis, which
 // names the same quantities in its sweep and solve pickers.
@@ -931,20 +935,25 @@ function params() {
 }
 
 async function doRun() {
+  if ($('run').disabled) return;
+  const submitted = params();
   $('run').disabled = true;
   $('status').className = 'status';
   $('status').textContent = 'designing + flying mission…';
   showVerdict('running', 'RUNNING', 'designing and flying the mission…');
   // A mission is seven to twelve seconds of real simulation. Before this the
   // only sign it had started was a status line at the bottom of a sidebar.
-  const done = busy('designing and flying the mission…');
+  const controller = new AbortController();
+  const done = busy('designing and flying the mission…', { onCancel: () => controller.abort(), cancelLabel: api.cancelLabel });
   const t0 = performance.now();
   try {
-    const j = await api.run(params(), { onProgress: done.progress });
-    j._params = Object.fromEntries(params());
+    const j = await api.run(submitted, { onProgress: done.progress, signal: controller.signal });
+    j._params = Object.fromEntries(submitted);
     run = j;
     clearFailures();
     clearStale();
+    if (params().toString() !== submitted.toString())
+      markStale('the configuration changed while this mission was running');
     // A partial mission (ascent failed, coast timed out) is served with every
     // leg that flew; the dashboard renders what exists. A render throw on a
     // partial is survivable — the status line and the launch view are the
@@ -960,10 +969,11 @@ async function doRun() {
     // one list is the truth and eviction happens in one place
     loadHistory();
   } catch (e) {
-    $('status').className = 'status err';
+    $('status').className = e.name === 'AbortError' ? 'status' : 'status err';
     $('status').textContent = String(e.message || e);
-    showVerdict('failed', 'RUN FAILED', String(e.message || e));
-    fail(e, 'mission');
+    showVerdict(e.name === 'AbortError' ? 'idle' : 'failed',
+      e.name === 'AbortError' ? (api.cancelLabel === 'Stop waiting' ? 'STOPPED WAITING' : 'RUN CANCELLED') : 'RUN FAILED', String(e.message || e));
+    if (e.name !== 'AbortError') fail(e, 'mission');
   } finally {
     done();
     $('run').disabled = false;
@@ -1075,12 +1085,12 @@ function setVerdict(j) {
   const drift = m.design_status && m.design_status !== 'converged' &&
                 m.design_status !== 'no_design'
     ? ` · targeting ${String(m.design_status).replace(/_/g, ' ')}` : '';
-  const where = isFinite(m.splash_lat)
+  const where = fin(m.splash_lat)
     ? `splashdown ${fmt(m.splash_lat,1)}°, ${fmt(m.splash_lon,1)}°`
-    : j.mode === 'landing' && isFinite(m.land_lat)
+    : j.mode === 'landing' && fin(m.land_lat)
     ? `touchdown ${fmt(m.land_lat,1)}°, ${fmt(m.land_lon,1)}°` : 'on target';
   showVerdict('nominal', 'NOMINAL',
-              `${where}${isFinite(m.t_days) ? ' · ' + fmt(m.t_days,1) + ' d' : ''}${drift}`);
+              `${where}${fin(m.t_days) ? ' · ' + fmt(m.t_days,1) + ' d' : ''}${drift}`);
 }
 
 function renderAll() {
@@ -1234,7 +1244,7 @@ function renderHistory() {
     return;
   }
   host.replaceChildren(...history.map((h, i) => {
-    const el = document.createElement('span');
+    const el = keyboardAction(document.createElement('span'));
     // `sel` marks the run currently on screen, which after a restore is the
     // whole point: it says WHICH of these you are looking at.
     el.className = 'chip hchip is-' + runs.verdict(h) +
@@ -1242,8 +1252,9 @@ function renderHistory() {
     el.dataset.id = h.id;
     el.title = `${runs.modeLabel(h.mode)} — ${runs.ago(h.at)}`;
     el.innerHTML =
-      `<b>#${history.length - i}</b> <span class="hv">${h.vname || ''}</span> ` +
+      `<b>#${history.length - i}</b> <span class="hv"></span> ` +
       `<span class="hd"></span>`;
+    el.querySelector('.hv').textContent = h.vname || '';
     el.querySelector('.hd').textContent = runs.describe(h);
     el.onclick = () => restore(h.id);
     return el;
@@ -1270,6 +1281,8 @@ async function restore(id) {
     clearStale();
     renderAll();
     setVerdict(j);
+    renderHistory();
+    syncLinks();
     $('status').className = 'status';
     $('status').textContent = `showing run ${id}`;
     fetchGeo();
@@ -1801,9 +1814,12 @@ function geoStyle(name) {
   return { col: [v, v, v - 8], short: 'S' + k };
 }
 
+let geoRequest = 0;
 async function fetchGeo() {
+  const request = ++geoRequest;
   try {
     const j = await api.geometry(params());
+    if (request !== geoRequest) return;
     geo = j;
     geoKey = '';
     const ds = (j.stages || []).map(s => +s.diameter_m);
@@ -1853,6 +1869,7 @@ async function fetchGeo() {
       (bs.core_throttle < 1 ? ` · core ${Math.round(bs.core_throttle*100)}%` : '');
     drawGeo();
   } catch (e) {
+    if (request !== geoRequest) return;
     $('geo_info').textContent = 'geometry: ' + String(e.message || e);
   }
   // fetchGeo runs on every change that alters the vehicle, which makes it the
@@ -2056,7 +2073,7 @@ function initPresets() {
     DEFAULTS[f] = $(f).type === 'checkbox' ? $(f).checked : $(f).value;
   const chips = (host, keys, run) => {
     $(host).innerHTML = keys.map(k => `<span class="chip" data-p="${k}">${k}</span>`).join('');
-    for (const el of $(host).querySelectorAll('.chip')) el.onclick = () => run(el.dataset.p);
+    for (const el of $(host).querySelectorAll('.chip')) keyboardAction(el).onclick = () => run(el.dataset.p);
   };
   const presetsFor = () => landing() ? LANDING_PRESETS : orbitm() ? ORBIT_PRESETS :
                            subm() ? SUB_PRESETS : PRESETS;
@@ -2092,11 +2109,7 @@ function setMode(m) {
   $('card_landing').classList.toggle('hidden', !landing());
   $('moonview').classList.toggle('hidden', !landing());
   subNote();
-  // the cinematic view flies the pad-to-splashdown profile; say so rather
-  // than quietly showing a different mission
-  $('launchbtn').title = landing()
-    ? 'cinematic launch view — flies this vehicle on the free-return profile, pad to splashdown'
-    : "cinematic pad-cam liftoff, flown from this run's parameters";
+  $('launchbtn').title = 'cinematic launch view — plays the selected mission run';
   // the nav bar states the mission being flown, so what the page is for is
   // legible without reading the mode switch
   $('nav_note').textContent = landing() ? 'lunar landing'
@@ -2316,7 +2329,7 @@ for (const f of ['l_dry','l_prop','l_isp','l_thrust_kn','l_throttle_min','l_diam
 // trajectory calculation, so an accidental keypress cannot spend seconds
 // flying a new mission or replace the result under inspection.
 window.addEventListener('keydown', e => {
-  if (/^(INPUT|SELECT|TEXTAREA)$/.test((e.target.tagName || ''))) return;
+  if (!allowsShortcut(e)) return;
   const k = e.key.toLowerCase();
   if (e.key === ' ') { togglePlay(); e.preventDefault(); }
   else if (e.key === 'ArrowRight' && S) { geoFollow = true; ti = Math.min(S.n-1, ti + Math.max(1, S.n/200|0)); $('scrub').value = 1000*ti/(S.n-1); }
@@ -2385,10 +2398,12 @@ $('pod_mass').addEventListener('change', () => { podNote(); fetchGeo(); });
 
 // collapsible cards: click the header, and the state is remembered for the
 // session so a page you have arranged stays arranged
+for (const chip of document.querySelectorAll('span.chip')) keyboardAction(chip);
 for (const hd of document.querySelectorAll('h2.fold'))
-  hd.onclick = () => {
+  keyboardAction(hd).onclick = () => {
     const c = hd.parentElement;
     c.classList.toggle('closed');
+    hd.setAttribute('aria-expanded', String(!c.classList.contains('closed')));
     try { sessionStorage.setItem('fold:' + c.id, c.classList.contains('closed')); }
     catch (e) {}
   };
@@ -2400,6 +2415,7 @@ for (const c of document.querySelectorAll('.card')) {
         sessionStorage.getItem('fold:' + c.id) === 'true')
       c.classList.add('closed');
   } catch (e) {}
+  c.querySelector('h2.fold')?.setAttribute('aria-expanded', String(!c.classList.contains('closed')));
 }
 
 // The vehicle is EDITED on /build and FLOWN from here; localStorage is the

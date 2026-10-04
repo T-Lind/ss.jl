@@ -9,6 +9,43 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chartExtent } from '../scripts/static/charts.js';
 import { mapPath } from '../scripts/static/groundtrack.js';
+import { allowsShortcut, escapeHTML, keyboardAction } from '../scripts/static/ui.js';
+
+test('global shortcuts preserve text editing, browser shortcuts and focused button activation', () => {
+  const event = { key: 'a', target: { closest: () => null } };
+  assert.equal(allowsShortcut(event), true);
+  for (const key of ['ctrlKey', 'metaKey', 'altKey', 'isComposing', 'defaultPrevented'])
+    assert.equal(allowsShortcut({ ...event, [key]: true }), false, key);
+  assert.equal(allowsShortcut({ ...event, target: { closest: () => ({}) } }), false);
+  const button = { closest: selector => selector.startsWith('button') ? {} : null };
+  assert.equal(allowsShortcut({ ...event, key: ' ', target: button }), false);
+  assert.equal(allowsShortcut({ ...event, key: 'Enter', target: button }), false);
+  assert.equal(allowsShortcut({ ...event, key: 'l', target: button }), true);
+  const modal = { closest: selector => selector.includes('[role="dialog"]') ? {} : null };
+  assert.equal(allowsShortcut({ ...event, key: 'r', target: modal }), false);
+});
+
+test('compact controls activate once from the keyboard without triggering playback shortcuts', () => {
+  const attrs = {}, listeners = [];
+  let clicks = 0, prevented = 0, stopped = 0;
+  const element = { tagName: 'SPAN', setAttribute: (k, v) => attrs[k] = v,
+    addEventListener: (type, listener) => { if (type === 'keydown') listeners.push(listener); },
+    click: () => clicks++ };
+  keyboardAction(element);
+  keyboardAction(element); // static and generated-control setup can overlap
+  assert.equal(attrs.role, 'button');
+  assert.equal(element.tabIndex, 0);
+  const event = { key: ' ', preventDefault: () => prevented++, stopPropagation: () => stopped++ };
+  for (const listener of listeners) listener(event);
+  for (const listener of listeners) listener({ ...event, repeat: true });
+  assert.equal(clicks, 1);
+  assert.equal(prevented, 2);
+  assert.equal(stopped, 2);
+});
+
+test('user-supplied names render as text even when they contain HTML', () => {
+  assert.equal(escapeHTML('<img src="x"> & \'flight\''), '&lt;img src=&quot;x&quot;&gt; &amp; &#39;flight&#39;');
+});
 
 // A canvas 2D context that records the path it is asked to build, so the
 // dateline logic can be asserted without a browser.

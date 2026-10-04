@@ -66,7 +66,13 @@ function parse_form(body::AbstractString)
     d
 end
 
-getf(d, k, def) = haskey(d, k) && !isempty(d[k]) ? parse(Float64, d[k]) : def
+function getf(d, k, def)
+    text = strip(get(d, k, ""))
+    isempty(text) && return def
+    value = parse(Float64, text)
+    isfinite(value) || throw(ArgumentError("$k must be a finite number"))
+    value
+end
 "A form checkbox: present and truthy, absent and defaulted."
 getb(d, k, def) = haskey(d, k) ? gets(d, k, "0") in ("1", "true", "on") : def
 
@@ -91,9 +97,17 @@ function json(io::IO, x)
     elseif x isa AbstractString || x isa Symbol
         print(io, '"')
         for c in string(x)
-            c == '"' ? print(io, "\\\"") :
-            c == '\\' ? print(io, "\\\\") :
-            c == '\n' ? print(io, "\\n") : print(io, c)
+            if c == '"'
+                print(io, "\\\"")
+            elseif c == '\\'
+                print(io, "\\\\")
+            elseif c < ' '
+                # JSON forbids every unescaped control character, including
+                # tabs and carriage returns in names or error messages.
+                print(io, "\\u", string(UInt32(c); base = 16, pad = 4))
+            else
+                print(io, c)
+            end
         end
         print(io, '"')
     elseif x isa Bool || x === nothing
@@ -1323,9 +1337,17 @@ const LANDING_METRICS = ["prop_left_kg", "hover_s", "descent_dv", "loi_dv",
                          "tli_dv", "t_days", "ground_slope_deg",
                          "ground_elev_m", "redesignate_m", "nav_alt_err_m"]
 
+const ORBIT_METRICS = ["prop_margin_kg", "orbit_rp_km", "orbit_ra_km",
+                        "orbit_incl_deg", "period_min", "burn_dv_total",
+                        "park_apogee_km", "liftoff_t", "t_days",
+                        "rcs_used_kg", "rcs_margin_kg"]
+
 "The metric list for whichever mission the panel is configured for."
 solve_metrics(p) = mission_mode(p) === :landing ? LANDING_METRICS :
                    mission_mode(p) === :suborbital ? SUBORBITAL_METRICS :
+                   mission_mode(p) === :orbit ? vcat(ORBIT_METRICS,
+                       getb(p, "deorbit", false) ?
+                           ["peak_g", "peak_q_wcm2", "v_splash", "heat_mj"] : String[]) :
                    SOLVE_METRICS
 
 """
@@ -1738,6 +1760,7 @@ catalogue_payload() = Dict{String,Any}(
     "sweep_metrics" => SWEEP_METRICS,
     "landing_metrics" => LANDING_METRICS,
     "suborbital_metrics" => SUBORBITAL_METRICS,
+    "orbit_metrics" => ORBIT_METRICS,
     "max_stages" => 5)
 
 """

@@ -298,7 +298,7 @@
   font-weight: 600;
 }
 .chip:focus-visible,
-.navlink:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+.navlink:focus-visible, [role="button"]:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 
 /* ---------------------------------------------------------------------- nav
  *
@@ -335,7 +335,7 @@
   white-space: nowrap;
 }
 .appnav-brand .dot { color: var(--amber); }
-.appnav-links { display: flex; gap: var(--s1); margin-left: var(--s2); }
+.appnav-links { display: flex; flex-wrap: wrap; gap: var(--s1); margin-left: var(--s2); min-width: 0; }
 .navlink {
   font-family: var(--sans);
   font-size: 12.5px;
@@ -355,6 +355,11 @@
   font-weight: 600;
 }
 .appnav-end { margin-left: auto; display: flex; align-items: center; gap: var(--s3); }
+@media (max-width: 800px) {
+  .appnav { flex-wrap: wrap; gap: var(--s2); }
+  .appnav-links { order: 2; flex-basis: 100%; margin-left: 0; }
+  .appnav-end { flex-wrap: wrap; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }

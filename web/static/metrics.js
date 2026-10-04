@@ -13,6 +13,7 @@ export const PARAM_LABEL = {
   pod_mass: 'pod mass', h_park_km: 'parking alt', hp_moon_km: 'perilune',
   hp_return_km: 'return perigee', incl_deg: 'inclination',
   diameter: 'diameter', fairing: 'fairing mass',
+  bus_mass: 'bus mass', cargo_mass: 'cargo mass', kick_deg: 'pitch kick',
 };
 
 /** Per-stage fields, suffixed onto `stage N `. */
@@ -39,6 +40,10 @@ export const LPARAM_LABEL = {
 /** Every metric the server will chart or root-find against, with its unit. */
 export const METRIC_LABEL = {
   prop_margin_kg: 'launcher prop margin [kg]',
+  orbit_rp_km: 'orbit perigee [km]', orbit_ra_km: 'orbit apogee [km]',
+  orbit_incl_deg: 'orbit inclination [°]', period_min: 'orbital period [min]',
+  burn_dv_total: 'orbit maneuver Δv [m/s]', rcs_used_kg: 'RCS used [kg]',
+  rcs_margin_kg: 'RCS margin [kg]',
   perilune_km: 'perilune [km]', vac_perigee_km: 'return perigee [km]',
   peak_g: 'peak entry g', peak_q_wcm2: 'peak q̇ [W/cm²]',
   t_days: 'mission days', liftoff_t: 'liftoff mass [t]',

@@ -11,6 +11,8 @@
 // this request BETWEEN parsing and validating — folding the check into the
 // transport would turn a superseded reply into a spurious error banner.
 
+export const cancelLabel = 'Stop waiting';
+
 /** Fetch and parse, nothing more. Throws only on network or parse failure,
  *  with the path in the message — a bare "Failed to fetch" names no endpoint. */
 export async function post(path, body, options = {}) {
@@ -35,17 +37,19 @@ export async function post(path, body, options = {}) {
   }
   let r;
   try {
-    r = await fetch(path, { method: 'POST', body: u });
+    r = await fetch(path, { method: 'POST', body: u, signal: options.signal });
+    try {
+      return await r.json();
+    } catch (e) {
+      if (options.signal?.aborted) throw e;
+      throw new Error(`${path}: HTTP ${r.status}, unreadable reply`);
+    }
   } catch (e) {
-    throw new Error(`${path}: ${e.message || 'network error'}`);
+    if (options.signal?.aborted) throw new DOMException('stopped waiting; computation continues in the background', 'AbortError');
+    throw new Error(e.message?.startsWith(`${path}:`) ? e.message : `${path}: ${e.message || 'network error'}`);
   } finally {
     stopped = true;
     if (poll) clearInterval(poll);
-  }
-  try {
-    return await r.json();
-  } catch (e) {
-    throw new Error(`${path}: HTTP ${r.status}, unreadable reply`);
   }
 }
 

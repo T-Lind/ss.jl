@@ -10,6 +10,16 @@ using Sockets
 
 include(joinpath(@__DIR__, "..", "scripts", "panelapp.jl"))
 
+@testset "panel serialization and numeric inputs" begin
+    @test PanelApp.json("\t\r\n\b\f\0") == "\"\\u0009\\u000d\\u000a\\u0008\\u000c\\u0000\""
+    @test PanelApp.json("\"\\Moon 🌕") == "\"\\\"\\\\Moon 🌕\""
+    for text in ("NaN", "Inf", "-Inf", "1e999")
+        @test_throws ArgumentError PanelApp.getf(Dict("diameter" => text), "diameter", 1.8)
+    end
+    @test PanelApp.getf(Dict("diameter" => "  "), "diameter", 1.8) == 1.8
+    @test PanelApp.getf(Dict("diameter" => " 2.4 "), "diameter", 1.8) == 2.4
+end
+
 """
 A TCP port free on the IPv4 loopback interface, verified free on the IPv6
 loopback too when this host has one to offer.

@@ -59,7 +59,9 @@ export function describe(d) {
     if (fin(m.apogee_km)) bits.push(`apogee ${fmt(m.apogee_km, 0)} km`);
     if (fin(m.range_km) && m.range_km > 1) bits.push(`${fmt(m.range_km, 0)} km downrange`);
   } else if (d.mode === 'orbit') {
-    if (fin(m.h_park_km)) bits.push(`${fmt(m.h_park_km, 0)} km orbit`);
+    if (fin(m.orbit_rp_km) && fin(m.orbit_ra_km))
+      bits.push(`${fmt(m.orbit_rp_km, 0)}×${fmt(m.orbit_ra_km, 0)} km orbit`);
+    else if (fin(m.h_park_km)) bits.push(`${fmt(m.h_park_km, 0)} km orbit`);
     if (fin(m.peak_g)) bits.push(`${fmt(m.peak_g, 1)} g`);
   } else if (d.mode === 'landing') {
     if (fin(m.touchdown_v)) bits.push(`touchdown ${fmt(m.touchdown_v, 1)} m/s`);

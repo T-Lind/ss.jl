@@ -5,10 +5,9 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, normalize } from 'node:path';
+import { dirname, relative, resolve, isAbsolute } from 'node:path';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const port = Number(process.argv[2]) || 8099;
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -31,18 +30,32 @@ const ROUTES = {
   '/home': '/index.html',
 };
 
-createServer(async (req, res) => {
-  const url = decodeURIComponent((req.url || '/').split('?')[0]);
-  const target = ROUTES[url] || (url === '/' ? '/index.html' : url);
-  const rel = normalize(target).replace(/^(\.\.[/\\])+/, '');
-  const file = join(root, rel);
-  if (!file.startsWith(root)) { res.writeHead(403).end('forbidden'); return; }
-  try {
-    const body = await readFile(file);
-    const ext = file.slice(file.lastIndexOf('.'));
-    res.writeHead(200, { 'content-type': TYPES[ext] || 'application/octet-stream' });
-    res.end(body);
-  } catch {
-    res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
-  }
-}).listen(port, () => console.log(`web/ on http://127.0.0.1:${port}`));
+export function createDevServer() {
+  return createServer(async (req, res) => {
+    if (!['GET', 'HEAD'].includes(req.method)) {
+      res.writeHead(405, { allow: 'GET, HEAD' }).end('method not allowed'); return;
+    }
+    let url;
+    try { url = decodeURIComponent((req.url || '/').split('?')[0]); }
+    catch { res.writeHead(400).end('invalid URL encoding'); return; }
+    const target = ROUTES[url] || (url === '/' ? '/index.html' : url);
+    const file = resolve(root, '.' + target.replaceAll('\\', '/'));
+    const rel = relative(root, file);
+    if (rel === '..' || rel.startsWith('../') || rel.startsWith('..\\') || isAbsolute(rel)) {
+      res.writeHead(403).end('forbidden'); return;
+    }
+    try {
+      const body = await readFile(file);
+      const ext = file.slice(file.lastIndexOf('.'));
+      res.writeHead(200, { 'content-type': TYPES[ext] || 'application/octet-stream' });
+      res.end(req.method === 'HEAD' ? undefined : body);
+    } catch {
+      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+    }
+  });
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const port = Number(process.argv[2] ?? 8099);
+  createDevServer().listen(port, '127.0.0.1', () => console.log(`web/ on http://127.0.0.1:${port}`));
+}

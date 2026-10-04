@@ -140,7 +140,7 @@
 <nav class="appnav">
   <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
   <span class="appnav-links">
-    <a class="navlink" href="/">mission control</a>
+    <a class="navlink" id="nav_home" href="/">mission control</a>
     <a class="navlink" href="/build">vehicle builder</a>
     <a class="navlink" id="analysislink" href="/analysis">analysis</a>
     <a class="navlink" href="#" aria-current="page">launch view</a>
@@ -211,6 +211,7 @@ import { successfulTouchdown, lunarEndLabel, lunarHatchReason } from '/static/fl
 import { landerLayout, landerExterior, landerInterior, landerDisplay, clampLanderEye } from '/static/lander_model.js';
 import { engineCluster, stageBells } from '/static/engine_layout.js';
 import * as api from '/static/api.js';
+import { allowsShortcut, keyboardAction } from '/static/ui.js';
 import * as runs from '/static/runs.js';
 import { suite, report, requested } from '/static/selftest.js';
 
@@ -1458,6 +1459,8 @@ const qs = (() => {
 document.getElementById('analysislink').href =
   RUN_ID ? '/analysis?run=' + encodeURIComponent(RUN_ID) :
   qs     ? '/analysis?' + qs : '/analysis';
+document.getElementById('nav_home').href = '/' +
+  (RUN_ID ? '?run=' + encodeURIComponent(RUN_ID) : '');
 let run = null, geo = null;
 // What is painted on the hull and announced over it. Geometry supplies the
 // configured vehicle's name; old servers and empty builder names fall back to
@@ -8335,7 +8338,8 @@ function scrubStep(dtReal) {
 function chipRow(el, items, cur, cb) {
   el.innerHTML = '';
   for (const it of items) {
-    const c = document.createElement('span');
+    const c = keyboardAction(document.createElement('span'));
+    c.setAttribute('aria-pressed', String(it === cur));
     c.className = 'chip' + (it === cur ? ' on' : '');
     c.textContent = it;
     c.onclick = () => { cb(it); chipRow(el, items, it, cb); };
@@ -8435,6 +8439,7 @@ function initControls() {
     freeDist = Math.min(LEN*60, Math.max(6, (freeDist || LEN*3.6)*(e.deltaY > 0 ? 1.15 : 0.87)));
   }, { passive: false });
   window.addEventListener('keydown', e => {
+    if (!allowsShortcut(e)) return;
     if (e.key === ' ') {
       // On the surface the big bar is the jump the suit is for; everywhere else
       // it is the pause it has always been.
@@ -10397,6 +10402,9 @@ async function boot() {
       `pad to the surface of the Moon in ${tD.toFixed(1)} days` :
       // a suborbital flight is minutes, not days, and its whole story is how
       // high or how far — so it gets told in its own units
+      run.mode === 'orbit' ?
+      `${mass}${LEN.toFixed(1)} m — Earth orbit at ${(M.orbit_rp_km || 0).toFixed(0)}×${(M.orbit_ra_km || 0).toFixed(0)} km` +
+      (run.entry ? ` and re-entry in ${(tD*1440).toFixed(0)} minutes` : `, ${(tD*1440).toFixed(0)} minutes simulated`) :
       run.mode === 'suborbital' ?
       `${mass}${LEN.toFixed(1)} m — ` +
       ((run.suborbital || {}).profile === 'downrange'

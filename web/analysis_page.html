@@ -9,6 +9,8 @@
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
+  .app > *, .charts > *, .studies > *, .row > *, .row3 > * { min-width: 0; }
+  input, select { min-width: 0; }
   body { margin: 0; background: var(--ground); color: var(--text);
          font: 13.5px/1.45 var(--sans); }
   .wrap { max-width: 1480px; margin: 0 auto; padding: var(--s4);
@@ -41,7 +43,7 @@
    * six numbers on the axes; the point of moving them off mission control was
    * to stop treating them as decoration. */
   .plots { display: grid; gap: var(--s3);
-           grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+           grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); }
   .plot { background: var(--surface); border: 1px solid var(--line);
           border-radius: var(--radius); padding: var(--s2);
           box-shadow: inset 0 1px rgba(255,255,255,.02); position:relative; }
@@ -106,7 +108,7 @@
   .subnav a.is-on { color:#12151A; background:var(--amber); border-color:var(--amber); }
   .wrap > section[id^="sec_"] { scroll-margin-top: calc(var(--appnav-h, 36px) + 54px); }
   .studies { display: grid; gap: var(--s3);
-             grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+             grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
              align-items: start; }
 
   label { display: block; color: var(--text-3); font-size: var(--t-label);
@@ -154,6 +156,7 @@
          want is in the place you last saw it -->
     <a class="navlink" href="#" aria-current="page">analysis</a>
     <a class="navlink" id="nav_launch" href="launch_page.html">launch view</a>
+    <a class="navlink" href="models_page.html">spacecraft viewer</a>
   </span>
   <span class="u-label" id="appver" data-appver></span>
   <span class="appnav-end u-label" id="nav_note">analysis</span>
@@ -342,6 +345,7 @@
 'use strict';
 import { fin, fmt } from './static/fmt.js';
 import * as api from './static/api.js';
+import { escapeHTML } from './static/ui.js';
 import { drawLine, niceStep, fmtTick, fmtPeak } from './static/charts.js';
 import { drawGroundTrack } from './static/groundtrack.js';
 import { drawMoonGroundTrack } from './static/moongroundtrack.js';
@@ -436,14 +440,17 @@ async function fly(refly = false) {
   $('rerun').disabled = true;
   $('hdr_facts').textContent = refly || !RUN_ID
     ? 'flying the mission…' : 'loading the run…';
-  const done = busy($('hdr_facts').textContent);
+  const controller = new AbortController();
+  const done = busy($('hdr_facts').textContent, refly ? { onCancel: () => controller.abort(), cancelLabel: api.cancelLabel } : {});
   try {
     // A stored run is fetched, not re-flown. Re-flying is what made "open the
     // analysis of this flight" produce a second, subtly different flight.
     if (!RUN_ID && !refly) throw new Error('no trajectory has been selected');
     const j = (RUN_ID && !refly) ? await runs.get(RUN_ID) :
-              await api.run(Q, { onProgress: done.progress });
+              await api.run(Q, { onProgress: done.progress, signal: controller.signal });
     adopt(j);
+    if (j.id) window.history.replaceState(null, '', '?run=' + encodeURIComponent(j.id));
+    fillParams();
     clearFailures();
     showRun();
     renderHeader();
@@ -453,8 +460,8 @@ async function fly(refly = false) {
     syncLinks();
   } catch (e) {
     $('hdr_facts').innerHTML =
-      `<span style="color:var(--failed)">${String(e.message || e)}</span>`;
-    fail(e, 'analysis');
+      `<span style="color:var(--failed)">${escapeHTML(e.message || e)}</span>`;
+    if (e.name !== 'AbortError') fail(e, 'analysis');
   } finally {
     done();
     $('rerun').disabled = false;
@@ -507,13 +514,13 @@ function renderHeader() {
   // The facts a reader needs to know WHICH run these plots are of. Not a
   // second metrics panel — mission control owns that — just enough identity
   // that a sweep chart below can be trusted to belong to this vehicle.
-  const bits = [`<b>${Q.get('vname') || 'Sable'}</b>`];
+  const bits = [`<b>${escapeHTML(Q.get('vname') || 'Sable')}</b>`];
   if (fin(m.liftoff_t)) bits.push(`<b>${fmt(m.liftoff_t, 1)}</b> t on the pad`);
   if (fin(m.peak_g)) bits.push(`<b>${fmt(m.peak_g, 1)}</b> g peak`);
   if (fin(m.t_days)) bits.push(`<b>${fmt(m.t_days, 1)}</b> d`);
   bits.push(run.outcome === 'nominal' && m.on_target
     ? '<span style="color:var(--nominal)">nominal</span>'
-    : `<span style="color:var(--failed)">${run.outcome || 'off target'}</span>`);
+    : `<span style="color:var(--failed)">${escapeHTML(run.outcome || 'off target')}</span>`);
   $('hdr_facts').innerHTML = bits.join(' · ');
 }
 
@@ -859,7 +866,13 @@ function renderEvents() {
 // Exactly the numeric fields this configuration has, so a four-stage vehicle
 // immediately makes its fourth stage's propellant load solvable.
 function fillParams() {
-  const opts = Object.keys(PARAM_LABEL).map(k => [k, PARAM_LABEL[k]]);
+  const ignored = orbitm() ? ['hp_moon_km', 'hp_return_km', 'incl_deg']
+    : subm() ? ['h_park_km', 'hp_moon_km', 'hp_return_km', 'incl_deg'] : [];
+  const opts = Object.keys(PARAM_LABEL).filter(k => !ignored.includes(k)
+    && (k !== 'bus_mass' || Q.get('payload_kind') === 'bus')
+    && (k !== 'pod_mass' || (!landing() && Q.get('payload_kind') !== 'bus'))
+    && (!landing() || !['bus_mass', 'cargo_mass'].includes(k)))
+    .map(k => [k, PARAM_LABEL[k]]);
   if (landing()) for (const k in LPARAM_LABEL) opts.push([k, LPARAM_LABEL[k]]);
   if (subm()) for (const k in SPARAM_LABEL) opts.push([k, SPARAM_LABEL[k]]);
   for (let k = 1; k <= nStages(); k++)
@@ -867,9 +880,11 @@ function fillParams() {
   const html = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
   for (const el of document.querySelectorAll('select[data-solvable]')) {
     el.innerHTML = html;
-    el.value = landing() ? 'l_prop' : subm() ? 'sub_apogee_km' : 'pod_mass';
+    el.value = landing() ? 'l_prop' : subm() ? 'sub_apogee_km'
+      : Q.get('payload_kind') === 'bus' ? 'bus_mass' : 'pod_mass';
   }
-  $('solve_param').value = landing() ? 'l_prop' : subm() ? 'sub_apogee_km' : 'hp_moon_km';
+  $('solve_param').value = landing() ? 'l_prop' : subm() ? 'sub_apogee_km'
+    : orbitm() ? (Q.get('payload_kind') === 'bus' ? 'bus_mass' : 'pod_mass') : 'hp_moon_km';
   if (landing()) { $('sweep_min').value = 6000; $('sweep_max').value = 12000; }
 
   // A sweep and a solve do not accept the same metrics on the flyby. Perilune
@@ -878,7 +893,10 @@ function fillParams() {
   // design stops closing) and root-finding against one is meaningless. The
   // server keeps the two lists apart; so does this.
   const base = landing() ? CATALOGUE.landing_metrics :
-               subm() ? CATALOGUE.suborbital_metrics : null;
+               subm() ? CATALOGUE.suborbital_metrics :
+               orbitm() ? [...(CATALOGUE.orbit_metrics || []),
+                 ...(['1','true','on'].includes(Q.get('deorbit'))
+                   ? ['peak_g','peak_q_wcm2','v_splash','heat_mj'] : [])] : null;
   for (const id of ['solve_metric', 'sweep_metric']) {
     const ms = (base || (id === 'sweep_metric' ? CATALOGUE.sweep_metrics
                                                : CATALOGUE.solve_metrics))
@@ -887,6 +905,7 @@ function fillParams() {
     sel.innerHTML = ms.map(m => `<option value="${m}">${metricLabel(m)}</option>`).join('');
     const want = landing() ? (id === 'sweep_metric' ? 'hover_s' : 'prop_left_kg')
                : subm()    ? (id === 'sweep_metric' ? 'peak_g' : 'apogee_km')
+               : orbitm() ? (id === 'sweep_metric' ? 'orbit_ra_km' : 'prop_margin_kg')
                :             (id === 'sweep_metric' ? 'perilune_km' : 'prop_margin_kg');
     sel.value = ms.includes(want) ? want : ms[0];
   }
@@ -905,12 +924,13 @@ async function doSweep() {
   $('sweepbtn').disabled = true;
   $('sweep_out').className = 'out';
   $('sweep_out').textContent = 'sweeping — each step flies a whole mission…';
-  const done = busy('running parameter sweep…');
+  const controller = new AbortController();
+  const done = busy('running parameter sweep…', { onCancel: () => controller.abort(), cancelLabel: api.cancelLabel });
   try {
     const u = new URLSearchParams(Q);
     for (const f of ['sweep_param','sweep_min','sweep_max','sweep_n'])
       u.set(f, $(f).value);
-    sweepData = await api.sweep(u, { onProgress: done.progress });
+    sweepData = await api.sweep(u, { onProgress: done.progress, signal: controller.signal });
     drawSweep();
     const nOk = sweepData.runs.filter(x => x.ok && x.metrics.on_target).length;
     $('sweep_out').innerHTML = `<b>${nOk}</b>/${sweepData.runs.length} on target` +
@@ -927,7 +947,7 @@ function drawSweep() {
   const j = sweepData, key = $('sweep_metric').value;
   const xs = [], ys = [];
   for (let i = 0; i < j.values.length; i++)
-    if (j.runs[i].ok && j.runs[i].metrics.on_target && isFinite(j.runs[i].metrics[key])) {
+    if (j.runs[i].ok && j.runs[i].metrics.on_target && fin(j.runs[i].metrics[key])) {
       xs.push(j.values[i]); ys.push(j.runs[i].metrics[key]);
     }
   drawLine('sweepchart', [{xs, ys, color: ACC, unit: ''}],
@@ -938,12 +958,13 @@ async function doSolve() {
   $('solvebtn').disabled = true;
   $('solve_out').className = 'out';
   $('solve_out').textContent = 'searching — each step flies a whole mission…';
-  const done = busy('searching for the target…');
+  const controller = new AbortController();
+  const done = busy('searching for the target…', { onCancel: () => controller.abort(), cancelLabel: api.cancelLabel });
   try {
     const u = new URLSearchParams(Q);
     for (const f of ['solve_param','solve_metric','solve_target','solve_min','solve_max','solve_iters'])
       u.set(f, $(f).value);
-    const j = await api.solve(u, { onProgress: done.progress });
+    const j = await api.solve(u, { onProgress: done.progress, signal: controller.signal });
     const pl = paramLabel(j.param), ml = metricLabel(j.metric);
     // an end that produced no valid mission was walked inward; saying so
     // matters, because then the fix is not "widen the range"

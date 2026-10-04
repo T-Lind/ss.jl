@@ -12,6 +12,8 @@ import { panelRun, panelGeometry, panelSweep, panelSolve,
  *  into sessionStorage so a run survives the navigation to /launch or
  *  /analysis — the server's store spanned requests, and this is the same
  *  session. A run too big for the quota simply stays in memory. */
+export const cancelLabel = 'Cancel';
+
 const RUNS = new Map();
 const RUN_ORDER = [];
 const MAX_RUNS = 12;
@@ -21,18 +23,39 @@ let RUN_SEQ = 0;
 function loadStore() {
   try {
     const data = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null');
-    if (!data) return;
-    for (const r of data.runs || []) RUNS.set(r.id, r);
-    RUN_ORDER.push(...(data.order || []));
-    RUN_SEQ = data.seq || RUN_ORDER.length;
+    if (!data || !Array.isArray(data.runs) || !Array.isArray(data.order)) return;
+    const valid = new Map(data.runs.filter(r => r && r.ok === true && /^r\d+$/.test(r.id)
+      && Number.isSafeInteger(Number(r.id.slice(1))))
+      .map(r => [r.id, r]));
+    for (const id of [...new Set(data.order)].slice(0, MAX_RUNS)) {
+      if (!valid.has(id)) continue;
+      RUNS.set(id, valid.get(id));
+      RUN_ORDER.push(id);
+    }
+    RUN_SEQ = Math.max(Number.isSafeInteger(data.seq) && data.seq >= 0 ? data.seq : 0,
+      ...RUN_ORDER.map(id => Number(id.slice(1))));
   } catch (e) { /* no storage, or a corrupt entry: start empty */ }
 }
 
 function saveStore() {
+  // A dozen lunar flights can exceed the browser's storage quota. Persist
+  // the newest flights that fit instead of leaving a stale store behind:
+  // navigation to Launch or Analysis must be able to retrieve the latest id.
+  const order = RUN_ORDER.filter(id => RUNS.has(id));
+  while (order.length) {
+    try {
+      const runs = order.map(id => RUNS.get(id));
+      sessionStorage.setItem(STORE_KEY, JSON.stringify({ runs, order, seq: RUN_SEQ }));
+      return;
+    } catch (e) {
+      order.pop();
+    }
+  }
+  // Preserve the sequence even if storage cannot hold a single trajectory.
+  // This avoids recycling an old id for a different flight after navigation.
   try {
-    const runs = RUN_ORDER.filter(id => RUNS.has(id)).map(id => RUNS.get(id));
-    sessionStorage.setItem(STORE_KEY, JSON.stringify({ runs, order: RUN_ORDER, seq: RUN_SEQ }));
-  } catch (e) { /* over quota: the in-memory store still works this page */ }
+    sessionStorage.setItem(STORE_KEY, JSON.stringify({ runs: [], order: [], seq: RUN_SEQ }));
+  } catch (e) { /* unavailable storage: this page's in-memory history works */ }
 }
 
 loadStore();
@@ -71,7 +94,7 @@ export function runsList() {
 export function runsGet(id) {
   const payload = RUNS.get(id);
   if (!payload) return { ok: false, error: `no run "${id}" — history keeps the last ` +
-    `${MAX_RUNS} runs of this session, and starts empty each time the app opens` };
+    `${MAX_RUNS} runs of this session (fewer when browser storage is full), and starts empty each time the app opens` };
   return payload;
 }
 
@@ -88,6 +111,17 @@ const paramsFrom = body => {
 // overlay animates and the stage updates arrive while the flight is computed.
 let worker = null, jobSeq = 0;
 const pending = new Map();
+const cancelled = () => Object.assign(new Error('operation cancelled'), { name: 'AbortError' });
+
+function stopWorker(error) {
+  if (worker) worker.terminate();
+  worker = null;
+  for (const job of pending.values()) {
+    job.cleanup();
+    job.reject(error);
+  }
+  pending.clear();
+}
 
 function ensureWorker() {
   if (worker) return worker;
@@ -101,26 +135,30 @@ function ensureWorker() {
     if (!job) return;
     if (progress) { if (job.onProgress) job.onProgress(progress); return; }
     pending.delete(id);
+    job.cleanup();
     if (error !== undefined) job.reject(new Error(error));
     else job.resolve(result);
   };
   worker.onerror = e => {
     const err = new Error(e.message || 'the simulation worker stopped');
-    for (const [, job] of pending) job.reject(err);
-    pending.clear();
-    worker = null;
+    stopWorker(err);
   };
   return worker;
 }
 
-function inWorker(path, p, onProgress) {
+function inWorker(path, p, onProgress, signal) {
+  if (signal?.aborted) return Promise.reject(cancelled());
   const w = ensureWorker();
   if (!w) return null;
   jobSeq += 1;
   const id = 'w' + jobSeq;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject, onProgress });
-    w.postMessage({ id, path, params: p });
+    const abort = () => stopWorker(cancelled());
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    pending.set(id, { resolve, reject, onProgress, cleanup });
+    signal?.addEventListener('abort', abort, { once: true });
+    try { w.postMessage({ id, path, params: p }); }
+    catch (error) { pending.delete(id); cleanup(); reject(error); }
   });
 }
 
@@ -130,11 +168,12 @@ function inWorker(path, p, onProgress) {
 export async function post(path, body, options = {}) {
   const p = paramsFrom(body);
   const onProgress = options && options.onProgress;
-  const job = inWorker(path, p, onProgress);
+  const job = inWorker(path, p, onProgress, options.signal);
   if (job) {
     let out;
     try { out = await job; }
-    catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+    catch (err) { return { ok: false, error: String(err && err.message ? err.message : err),
+      cancelled: err.name === 'AbortError' }; }
     return path === '/api/run' && out && out.ok === true ? rememberRun(out, p) : out;
   }
   // No worker at all (an engine without module workers, or opened over
@@ -159,7 +198,11 @@ export async function post(path, body, options = {}) {
 
 /** Apply the {ok, error} contract, preferring the builder's own wording. */
 export function expect(j, what) {
-  if (!j || !j.ok) throw new Error((j && j.error) || `${what} failed`);
+  if (!j || !j.ok) {
+    const error = new Error((j && j.error) || `${what} failed`);
+    if (j?.cancelled) error.name = 'AbortError';
+    throw error;
+  }
   return j;
 }
 

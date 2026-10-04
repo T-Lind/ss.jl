@@ -58,6 +58,9 @@ const CSS = `
 .busy-log { list-style:none; padding:7px 0 0; margin:0; border-top:1px solid var(--line);
             display:flex; flex-direction:column; gap:4px }
 .busy-log li { color:var(--text-3); font:10.5px/1.35 var(--mono) }
+.busy-cancel { width:auto; align-self:flex-end; padding:6px 12px; cursor:pointer;
+  color:var(--text); background:var(--raise); border:1px solid var(--line); border-radius:var(--radius-sm); font:12px var(--sans) }
+.busy-cancel:focus-visible { outline:2px solid var(--amber); outline-offset:2px }
 .busy-log li::before { content:'✓'; color:var(--nominal); margin-right:7px }
 
 .busy-errs { position: fixed; z-index: 95; right: 14px; bottom: 14px;
@@ -99,6 +102,7 @@ function ensure() {
 }
 
 let depth = 0, scrim = null, timer = null, started = 0;
+let background = [], previousFocus = null;
 
 /**
  * Cover the page while something slow happens.
@@ -111,12 +115,17 @@ let depth = 0, scrim = null, timer = null, started = 0;
  *     const done = busy('flying the mission…');
  *     try { await work(); } finally { done(); }
  */
-export function busy(what) {
+export function busy(what, { onCancel, cancelLabel = 'Cancel' } = {}) {
   ensure();
   if (depth++ === 0) {
     started = performance.now();
+    previousFocus = document.activeElement;
     scrim = document.createElement('div');
     scrim.className = 'busy-scrim';
+    scrim.setAttribute('role', 'dialog');
+    scrim.setAttribute('aria-modal', 'true');
+    scrim.setAttribute('aria-label', what || 'working…');
+    scrim.tabIndex = -1;
     scrim.innerHTML =
       `<div class="busy-card" role="status" aria-live="polite">
          <div class="busy-head">
@@ -128,7 +137,29 @@ export function busy(what) {
          <ul class="busy-log" hidden></ul>
        </div>`;
     scrim.querySelector('.busy-what').textContent = what || 'working…';
+    if (onCancel) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button'; cancel.className = 'busy-cancel';
+      cancel.textContent = cancelLabel;
+      cancel.onclick = () => { cancel.disabled = true; onCancel(); };
+      scrim.querySelector('.busy-card').appendChild(cancel);
+    }
     document.body.appendChild(scrim);
+    background = [...document.body.children].filter(el => el !== scrim)
+      .map(el => [el, el.inert]);
+    for (const [el] of background) el.inert = true;
+    const focusAction = () => (scrim.querySelector('.busy-cancel:not(:disabled)') || scrim)
+      .focus({ preventScroll: true });
+    scrim.addEventListener('keydown', event => {
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        focusAction();
+      } else if (event.key === 'Escape') {
+        const cancel = scrim.querySelector('.busy-cancel:not(:disabled)');
+        if (cancel) { event.preventDefault(); cancel.click(); }
+      }
+    });
+    focusAction();
     const t = scrim.querySelector('.busy-t');
     timer = setInterval(() => {
       t.textContent = ((performance.now() - started) / 1000).toFixed(1) + ' s';
@@ -144,6 +175,12 @@ export function busy(what) {
     clearInterval(timer); timer = null;
     if (scrim) scrim.remove();
     scrim = null;
+    for (const [el, inert] of background) el.inert = inert;
+    background = [];
+    const focus = previousFocus;
+    previousFocus = null;
+    // Callers re-enable their action in the same finally block.
+    queueMicrotask(() => { if (focus?.isConnected) focus.focus({ preventScroll: true }); });
   };
   end.progress = p => {
     if (!scrim || !p) return;
