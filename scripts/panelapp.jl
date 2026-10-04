@@ -1826,7 +1826,10 @@ nothing to show. Genuine server faults are the 500 in `handle`.
 """
 function safe_call(f, body::AbstractString)
     try
-        f(parse_form(body))
+        # Keep numerical inference out of the HTTP router. Otherwise the first
+        # health/page request compiles every mission, sweep and solve branch
+        # before the socket handler can send a response.
+        Base.invokelatest(f, parse_form(body))
     catch err
         error_payload(err)
     end
@@ -2063,15 +2066,20 @@ function stop_panel(s::PanelServer)
 end
 
 """
-    main(port)
+    main(port; public=false, warm=!public)
 
-What `scripts/panel.jl` calls: warm the stack up so the first browser request
-is not also the first compile, then serve until interrupted.
+What `scripts/panel.jl` calls. Local sessions warm the mission stack first;
+public services open their HTTP port without a numerical warmup so deployment
+health checks do not wait for compilation. Missions compile on their first run.
 """
-function main(port::Int = 8137; public::Bool = false)
-    println("warming up (first mission run compiles the stack)...")
+function main(port::Int = 8137; public::Bool = false, warm::Bool = !public)
     t0 = time()
-    panel_mission(Dict{String,String}())
+    if warm
+        println("warming up (first mission run compiles the stack)...")
+        # Do not infer the mission stack while compiling this entry point,
+        # including when the public service has explicitly skipped warmup.
+        Base.invokelatest(panel_mission, Dict{String,String}())
+    end
     host = public ? "0.0.0.0" : "localhost"
     @printf("ready in %.1f s — panel at http://%s:%d  (Ctrl-C to stop)\n",
             time() - t0, host, port)

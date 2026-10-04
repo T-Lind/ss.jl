@@ -12,7 +12,11 @@ COPY scripts/ ./scripts/
 
 ENV HOST=0.0.0.0 \
     PORT=10000 \
-    JULIA_NUM_THREADS=auto
+    JULIA_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=1
 EXPOSE 10000
 
-CMD ["julia", "--project=.", "--compiled-modules=existing", "-t", "auto", "scripts/panel.jl"]
+# Leave room for native code and libraries on the 512 MiB free instance.
+# The entry point also clamps older Render environments still set to `auto`.
+ENTRYPOINT ["sh", "scripts/container_entrypoint.sh"]
+CMD ["scripts/panel.jl"]

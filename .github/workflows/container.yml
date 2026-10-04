@@ -1,0 +1,34 @@
+name: Container
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: cold Docker startup on free-instance limits
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the deployed image
+        run: docker build -t ssjl:ci .
+      - name: Boot and probe the cold server
+        run: bash scripts/check_container.sh
+      - name: Container diagnostics
+        if: always()
+        run: |
+          docker logs ssjl-ci || true
+          docker inspect ssjl-ci --format '{{json .State}}' || true
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ssjl-ci || true

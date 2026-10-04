@@ -802,6 +802,14 @@ trial. Free services sleep when idle and Julia has a noticeable cold start;
 move the service to a paid instance before treating it as a public production
 demo. The server reads Render's PORT and binds publicly only when
 HOST=0.0.0.0; local julia ... scripts/panel.jl remains loopback-only.
+Public startup serves pages and health checks before compiling any mission.
+The Docker defaults use two Julia threads, one BLAS thread and a 256 MiB heap
+hint to leave memory for the compiler and native libraries on a free instance.
+JULIA_NUM_THREADS can be increased for a larger instance; the first mission
+request compiles its numerical path. CI also builds and boots the Docker image
+with the free instance's memory and CPU limits before checking its HTTP API.
+The container treats the older `auto` thread setting as two threads, and
+SSJL_HEAP_SIZE_HINT can override the 256 MiB default when needed.
 ### Mission-control panel
 
 `scripts/panel.jl` serves a local cockpit (pure stdlib — a raw-`Sockets`
