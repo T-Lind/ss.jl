@@ -551,7 +551,7 @@
 <script type="module">
 'use strict';
 import { earthAngle, launchHours, sunEci, moonOrientation, moonTexel, MOON_MAP_URL } from './static/celestial.js';
-import { successfulTouchdown, lunarEndLabel } from './static/flight_state.js';
+import { successfulTouchdown, lunarEndLabel, landingSummary } from './static/flight_state.js';
 import { fin, fmt, fmtKm } from './static/fmt.js';
 import * as api from './static/api.js';
 import { allowsShortcut, keyboardAction } from './static/ui.js';
@@ -833,6 +833,7 @@ const LANDING_PRESETS = {
   'heavy lander':   {l_dry: 6000, l_prop: 16000, l_thrust_kn: 75},
   'light lander':   {l_dry: 1200, l_prop: 3400, l_thrust_kn: 16},
   'thin margins':   {l_prop: 7200},
+  'Aitken lander':  {target: 'aitken', l_dry: 3500, l_prop: 15000, l_thrust_kn: 45, l_isp: 311, l_throttle_min: 10},
 };
 
 // Vehicle presets. Each is the whole launcher: stack height, engines,
@@ -1063,8 +1064,7 @@ function setVerdict(j) {
   }
   if (j.mode === 'landing' && !m.on_target)
     return showVerdict('failed', 'DESCENT FAILED',
-                       `the descent ended in "${m.outcome}" — see the descent card ` +
-                       'for what ran out');
+                       landingSummary(j));
   if (!m.on_target)
     return showVerdict('failed', 'OFF TARGET',
                        'targeting could not reach the requested perilune/perigee with ' +
@@ -1118,11 +1118,11 @@ function renderAll() {
       ['propellant left', V(m.prop_left_kg,0,'kg')],
       ['hover margin', V(m.hover_s,0,'s'), limit('hover_s',m.hover_s)],
     ]],
-    ['touchdown', [
+    [successfulTouchdown(run) ? 'touchdown' : 'descent endpoint', [
       ['sink rate', V(m.touchdown_v,2,'m/s'), limit('touchdown_v',m.touchdown_v)],
       ['lateral rate', V(m.touchdown_vh,2,'m/s'), limit('touchdown_vh',m.touchdown_vh)],
-      ['landing site', fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°'],
-      ['site targeted', isFinite(m.target_lat)
+      [successfulTouchdown(run) ? 'landing site' : 'endpoint coordinates', fmt(m.land_lat,1)+'°, '+fmt(m.land_lon,1)+'°'],
+      ['site targeted', fin(m.target_lat)
         ? fmt(m.target_lat,2)+'°, '+fmt(m.target_lon,2)+'°' : 'free return'],
       ['ground off sphere', (m.ground_elev_m>=0?'+':'')+V(m.ground_elev_m,0,'m')],
       ['slope', V(m.ground_slope_deg,1,'°')],
@@ -1161,10 +1161,11 @@ function renderAll() {
       ['prop margin', V(m.prop_margin_kg,0,'kg'), limit('prop_margin_kg',m.prop_margin_kg)],
     ]],
     ['orbit', [
-      ['achieved orbit', V(m.orbit_rp_km,0,'')+'×'+V(m.orbit_ra_km,0,'km')],
+      [run.orbit?.burns?.some(b => b.name === 'deorbit') ? 'post-deorbit orbit' : 'achieved orbit',
+        V(m.orbit_rp_km,0,'')+'×'+V(m.orbit_ra_km,0,'km')],
       ['inclination', V(m.orbit_incl_deg,2,'°')],
       ['period', V(m.period_min,0,'min')],
-      ['transfer Δv', V(m.burn_dv_total,0,'m/s')],
+      ['maneuver Δv', V(m.burn_dv_total,0,'m/s')],
       ['mission time', V(m.t_days,2,'d')],
     ]],
     ['entry', [
@@ -2088,7 +2089,7 @@ function initPresets() {
       for (const f of keep) if (DEFAULTS[f] !== undefined) setField(f, DEFAULTS[f]);
       for (const kk in o) if (kk !== '_p') setField(kk, o[kk]);
       if (o._p) SUBPROF = o._p;
-      orbitNote(); subNote();
+      orbitNote(); subNote(); podNote(); updateLanderNote();
       fetchGeo();
       markStale('a mission preset has changed since this run');
     });
@@ -2208,7 +2209,7 @@ function updateLanderNote() {
   const twr = T / (wet * 1.625);
   $('l_derived').innerHTML =
     `${(wet/1000).toFixed(1)} t wet · Δv <b class="${dv < need ? 'bad' : dv < need*1.15 ? 'warn' : 'good'}">` +
-    `${Math.round(dv)} m/s</b> ideal (needs ≈ ${need})` +
+    `${Math.round(dv)} m/s</b> ideal (baseline ≈ ${need}; named sites can need more for plane change)` +
     ` · lunar T/W <b class="${twr < 1.05 ? 'bad' : ''}">${twr.toFixed(2)}</b> at ignition`;
 }
 

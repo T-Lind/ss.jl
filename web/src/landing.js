@@ -96,7 +96,7 @@ export const descentResult = (o = {}) => ({
   log: o.log ?? descentLog(),
   outcome: o.outcome ?? 'timeout',       // touchdown | timeout | crash | tipped | propellant | diverged
   t_touchdown: o.t_touchdown ?? 0.0,
-  t_gate: o.t_gate ?? 0.0,
+  t_gate: o.t_gate ?? NaN,               // absent when braking never reached high gate
   v_vertical: o.v_vertical ?? 0.0,
   v_horizontal: o.v_horizontal ?? 0.0,
   downrange: o.downrange ?? 0.0,
@@ -297,7 +297,10 @@ export function doi_burn(r_m, v_m, h_pdi) {
 // in which case the caller keeps the natural equatorial orbit.
 export function target_parking(eph, t_loi, r_m, v_m, h_moon_park, h_pdi,
                                u_t, n_rev = 0) {
-  const rp = R_MOON + h_moon_park;
+  // The finite TLI burn can miss the requested perilune. Circularize at the
+  // achieved radius; using the requested radius creates an eccentric orbit
+  // whose phasing no longer reaches the selected landing site.
+  const rp = vnorm(r_m);
   const v_circ = Math.sqrt(MU_MOON / rp);
   const rhat = vunit(r_m);
   const a_desc = 0.5 * (rp + R_MOON + h_pdi);
@@ -312,7 +315,7 @@ export function target_parking(eph, t_loi, r_m, v_m, h_moon_park, h_pdi,
     // perilune and the site on top of each other: any plane through them is
     // fine, so keep the arrival plane and let the phase carry the vehicle
     const h = vnorm(cr) > 1e-9 ? vunit(cr) : vunit(vcross(rhat, [0, 0, 1]));
-    let vp = vsub(v_m, vscale(h, vdot(v_m, h)));
+    let vp = vsub(vsub(v_m, vscale(h, vdot(v_m, h))), vscale(rhat, vdot(v_m, rhat)));
     if (vnorm(vp) < 1e-12) vp = vcross(h, rhat);
     const what = vunit(vp);
     v_park = vscale(what, v_circ);
@@ -429,7 +432,7 @@ const _descent_normal = (r, v) => vunit(vcross(r, v));
 // the clock runs out.
 export function _descent_leg(l, r0, v0, m0, pitch0, pitch_rate, opts = {}) {
   const { vh_gate = 150.0, dt = 0.5, t_max = 1200.0, log = null,
-          r_ref = r0, log_every = 4, cfg = descentConfig(), nav = null } = opts;
+          r_ref = r0, log_every = 4, cfg = descentConfig(), nav = null, refine_contact = true } = opts;
   let r = r0, v = v0, m = m0, t = 0.0;
   const mdot = lander_mdot(l);
   const m_dry = m0 - l.mprop;
@@ -480,6 +483,20 @@ export function _descent_leg(l, r0, v0, m0, pitch0, pitch_rate, opts = {}) {
     const k4r = v4,                           k4v = acc(r4, m4, t + step);
     let rn = vadd(r, vscale(vadd(vadd(k1r, vscale(vadd(k2r, k3r), 2.0)), k4r), step / 6));
     let vn = vadd(v, vscale(vadd(vadd(k1v, vscale(vadd(k2v, k3v), 2.0)), k4v), step / 6));
+    // Stop at contact, including a terrain wall during the braking phase.
+    // Otherwise a fast impact can put the final render well below ground.
+    if (refine_contact && _alt(cfg, rn, t + step) <= 0.0) {
+      let lo = 0.0, hi = 1.0;
+      for (let i = 0; i < 40; i++) {
+        const f = (lo + hi) / 2;
+        if (_alt(cfg, vadd(r, vscale(vsub(rn, r), f)), t + step * f) > 0.0) lo = f; else hi = f;
+      }
+      const f = (lo + hi) / 2;
+      r = vadd(r, vscale(vsub(rn, r), f)); v = vadd(v, vscale(vsub(vn, v), f));
+      m -= mdot * step * f; t += step * f;
+      outcome = 'surface';
+      break;
+    }
     // land exactly on the gate rather than stepping past it; only worth doing
     // when the gate is called on truth
     if (nav === null && vhof(rn, vn, t + step) < vh_gate) {
@@ -543,7 +560,9 @@ export function tune_braking(l, r0, v0, m0, opts = {}) {
           cfg = descentConfig(), verbose = false } = opts;
   const ncfg = nominal(cfg);
   const resid = (p0, pr) => {
-    const leg = _descent_leg(l, r0, v0, m0, p0, pr, { vh_gate, cfg: ncfg });
+    // Surface hits are failure penalties in this coarse search. Keep their
+    // control-step residuals; only the flown leg needs precise contact time.
+    const leg = _descent_leg(l, r0, v0, m0, p0, pr, { vh_gate, cfg: ncfg, refine_contact: false });
     if (leg.outcome === 'gate') {
       return [(leg.h - h_gate) / 1000.0, (leg.vv - vv_gate) / 100.0, leg];
     } else if (leg.outcome === 'climbing') {
@@ -764,9 +783,12 @@ export function powered_descent(l, r0, v0, m0, opts = {}) {
   // shooter finished loose. Only a leg that never reached the gate is
   // unflyable.
   if (leg.outcome !== 'gate') {
+    if (!L.t.length || L.t.at(-1) !== leg.t)
+      _log_descent(L, leg.t, leg.r, leg.v, leg.m, 1.0,
+        clamp(p0 + pr * leg.t, -deg2rad_(60.0), deg2rad_(89.0)), r0, hhat, cfg, nav);
     return descentResult({
-      log: L, outcome: leg.outcome,
-      t_touchdown: leg.t, t_gate: leg.t,
+      log: L, outcome: leg.outcome === 'surface' ? 'crash' : leg.outcome,
+      t_touchdown: leg.t, t_gate: NaN,
       v_vertical: -leg.vv, v_horizontal: leg.vh,
       downrange: L.downrange.length === 0 ? 0.0 : L.downrange[L.downrange.length - 1],
       dv_braking: dv_brake, dv_terminal: 0.0,

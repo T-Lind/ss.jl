@@ -785,8 +785,8 @@ function panel_landing(p)::Dict{String,Any}
     push!(events, Dict("phase" => "lunar", "name" => "loi", "t" => ls.t_loi))
     push!(events, Dict("phase" => "lunar", "name" => "doi", "t" => ls.t_doi))
     push!(events, Dict("phase" => "lunar", "name" => "pdi", "t" => ls.t_pdi))
-    push!(events, Dict("phase" => "lunar", "name" => "high_gate",
-                       "t" => ls.t_pdi + d.t_gate))
+    isfinite(d.t_gate) && push!(events, Dict("phase" => "lunar", "name" => "high_gate",
+                                          "t" => ls.t_pdi + d.t_gate))
     push!(events, Dict("phase" => "lunar", "name" => string(d.outcome),
                        "t" => ls.t_touchdown))
 

@@ -2,6 +2,8 @@ using Test
 using SatelliteSim
 using Statistics
 
+include("landing_regressions.jl")
+
 @testset "SatelliteSim" begin
 
 @testset "atmosphere (USSA76)" begin

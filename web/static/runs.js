@@ -12,6 +12,7 @@
 // depending on which page you are on is not a history.
 
 import { fin, fmt } from './fmt.js';
+import { successfulTouchdown, lunarEndLabel } from './flight_state.js';
 import { runsList, runsGet } from './api.js';
 
 /** Every run this session has flown, newest first. Never throws: an empty
@@ -59,12 +60,13 @@ export function describe(d) {
     if (fin(m.range_km) && m.range_km > 1) bits.push(`${fmt(m.range_km, 0)} km downrange`);
   } else if (d.mode === 'orbit') {
     if (fin(m.orbit_rp_km) && fin(m.orbit_ra_km))
-      bits.push(`${fmt(m.orbit_rp_km, 0)}×${fmt(m.orbit_ra_km, 0)} km orbit`);
+      bits.push(`${fmt(m.orbit_rp_km, 0)}×${fmt(m.orbit_ra_km, 0)} km ${fin(m.peak_g) ? 'deorbit ellipse' : 'orbit'}`);
     else if (fin(m.h_park_km)) bits.push(`${fmt(m.h_park_km, 0)} km orbit`);
     if (fin(m.peak_g)) bits.push(`${fmt(m.peak_g, 1)} g`);
   } else if (d.mode === 'landing') {
-    if (fin(m.touchdown_v)) bits.push(`touchdown ${fmt(m.touchdown_v, 1)} m/s`);
-    if (fin(m.prop_margin_kg)) bits.push(`${fmt(m.prop_margin_kg, 0)} kg margin`);
+    if (successfulTouchdown(d) && fin(m.touchdown_v)) bits.push(`touchdown ${fmt(m.touchdown_v, 1)} m/s`);
+    else bits.push(lunarEndLabel(d).toLowerCase());
+    if (fin(m.prop_left_kg)) bits.push(`${fmt(m.prop_left_kg, 0)} kg lander fuel`);
   } else {
     if (fin(m.perilune_km)) bits.push(`peri ${fmt(m.perilune_km, 0)} km`);
     if (fin(m.peak_g)) bits.push(`${fmt(m.peak_g, 1)} g`);
@@ -76,6 +78,7 @@ export function describe(d) {
 
 /** Did it do what it was asked to? Drives the colour, so it is one function. */
 export function verdict(d) {
+  if (d.mode === 'landing') return !successfulTouchdown(d) ? 'failed' : d.metrics?.on_target === false ? 'off' : 'nominal';
   if (d.outcome && d.outcome !== 'nominal') return 'failed';
   const m = d.metrics || {};
   if (m.on_target === false) return 'off';

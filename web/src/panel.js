@@ -467,7 +467,8 @@ function panel_landing(p, onProgress) {
   events.push({ phase: 'lunar', name: 'loi', t: ls.t_loi });
   events.push({ phase: 'lunar', name: 'doi', t: ls.t_doi });
   events.push({ phase: 'lunar', name: 'pdi', t: ls.t_pdi });
-  events.push({ phase: 'lunar', name: 'high_gate', t: ls.t_pdi + d.t_gate });
+  if (Number.isFinite(d.t_gate))
+    events.push({ phase: 'lunar', name: 'high_gate', t: ls.t_pdi + d.t_gate });
   events.push({ phase: 'lunar', name: String(d.outcome), t: ls.t_touchdown });
 
   const prop_margin = cis.m - (ls.lv.stages[ls.lv.stages.length - 1].mdry + ls.lv.payload_mass);

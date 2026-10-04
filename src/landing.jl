@@ -193,7 +193,7 @@ struct DescentResult
     log::DescentLog
     outcome::Symbol             # :touchdown | :timeout | :crash | :tipped | :propellant | :diverged
     t_touchdown::Float64        # seconds from PDI
-    t_gate::Float64             # seconds from PDI to high gate (end of braking)
+    t_gate::Float64             # seconds from PDI to high gate; NaN if never reached
     v_vertical::Float64         # touchdown sink rate [m/s] (positive = down)
     v_horizontal::Float64       # touchdown lateral speed [m/s]
     downrange::Float64          # surface arc flown from ignition [m]
@@ -437,7 +437,9 @@ end
 function target_parking(eph::CircularMoonEphemeris, t_loi::Float64, r_m::V3,
                         v_m::V3, h_moon_park::Float64, h_pdi::Float64,
                         u_t::V3, n_rev::Int = 0)
-    rp = R_MOON + h_moon_park
+    # Circularize at the achieved perilune. The requested radius may differ
+    # after a finite TLI burn; using it here breaks the circular phasing.
+    rp = vnorm(r_m)
     v_circ = sqrt(MU_MOON / rp)
     rhat = vunit(r_m)
     a_desc = 0.5 * (rp + R_MOON + h_pdi)
@@ -453,7 +455,7 @@ function target_parking(eph::CircularMoonEphemeris, t_loi::Float64, r_m::V3,
         # perilune and the site on top of each other: any plane through them is
         # fine, so keep the arrival plane and let the phase carry the vehicle
         h = vnorm(cr) > 1e-9 ? vunit(cr) : vunit(vcross(rhat, (0.0, 0.0, 1.0)))
-        vp = vsub(v_m, vscale(h, vdot(v_m, h)))
+        vp = vsub(vsub(v_m, vscale(h, vdot(v_m, h))), vscale(rhat, vdot(v_m, rhat)))
         if vnorm(vp) < 1e-12
             vp = vcross(h, rhat)
         end
@@ -653,7 +655,8 @@ function _descent_leg(l::Lander, r0::V3, v0::V3, m0::Float64,
                       t_max::Float64 = 1200.0, log::Union{Nothing,DescentLog} = nothing,
                       r_ref::V3 = r0, log_every::Int = 4,
                       cfg::DescentConfig = DescentConfig(),
-                      nav::Union{Nothing,NavState} = nothing)
+                      nav::Union{Nothing,NavState} = nothing,
+                      refine_contact::Bool = true)
     r, v, m, t = r0, v0, m0, 0.0
     mdot = lander_mdot(l)
     m_dry = m0 - l.mprop
@@ -717,10 +720,29 @@ function _descent_leg(l::Lander, r0::V3, v0::V3, m0::Float64,
         k4r = v4;                           k4v = acc(r4, m4, t + step)
         rn = vadd(r, vscale(vadd(vadd(k1r, vscale(vadd(k2r, k3r), 2.0)), k4r), step/6))
         vn = vadd(v, vscale(vadd(vadd(k1v, vscale(vadd(k2v, k3v), 2.0)), k4v), step/6))
-        # land exactly on the gate rather than stepping past it: over half a
-        # second the state is linear to well under a metre. Only worth doing
-        # when the gate is called on truth — a vehicle calling it on its own
-        # estimate at 4 Hz cannot split a control cycle either.
+        # Locate ground contact before recording a braking impact. A fast
+        # vehicle can otherwise end a whole control step below the terrain.
+        if refine_contact && _alt(cfg, rn, t + step) <= 0.0
+            lo, hi = 0.0, 1.0
+            for _ in 1:40
+                f = (lo + hi) / 2
+                if _alt(cfg, vadd(r, vscale(vsub(rn, r), f)), t + step * f) > 0.0
+                    lo = f
+                else
+                    hi = f
+                end
+            end
+            f = (lo + hi) / 2
+            r = vadd(r, vscale(vsub(rn, r), f))
+            v = vadd(v, vscale(vsub(vn, v), f))
+            m -= mdot * step * f
+            t += step * f
+            outcome = :surface
+            break
+        end
+        # Land exactly on high gate when it is called on truth. Over half a
+        # second the state is linear to well under a metre; a navigation
+        # estimate at 4 Hz cannot split its control cycle this way.
         if nav === nothing && vhof(rn, vn, t + step) < vh_gate
             lo, hi = 0.0, 1.0
             for _ in 1:40
@@ -814,7 +836,10 @@ function tune_braking(l::Lander, r0::V3, v0::V3, m0::Float64;
                       verbose::Bool = false)
     ncfg = nominal(cfg)
     function resid(p0, pr)
-        leg = _descent_leg(l, r0, v0, m0, p0, pr; vh_gate = vh_gate, cfg = ncfg)
+        # Ground hits only score a failure penalty in this coarse search;
+        # precise contact time is needed on the flown leg below.
+        leg = _descent_leg(l, r0, v0, m0, p0, pr; vh_gate = vh_gate, cfg = ncfg,
+                           refine_contact = false)
         if leg.outcome === :gate
             return ((leg.h - h_gate) / 1000.0, (leg.vv - vv_gate) / 100.0, leg)
         elseif leg.outcome === :climbing
@@ -1111,8 +1136,13 @@ function powered_descent(l::Lander, r0::V3, v0::V3, m0::Float64;
     # so it either saves the landing or it does not, and the touchdown state
     # says which. Only a leg that never reached the gate is unflyable.
     if leg.outcome !== :gate
-        return DescentResult(L, leg.outcome,
-                             leg.t, leg.t, -leg.vv, leg.vh,
+        if isempty(L.t) || L.t[end] != leg.t
+            _log_descent!(L, leg.t, leg.r, leg.v, leg.m, 1.0,
+                          clamp(p0 + pr * leg.t, -deg2rad_(60.0), deg2rad_(89.0)),
+                          r0, hhat, cfg, nav)
+        end
+        return DescentResult(L, leg.outcome === :surface ? :crash : leg.outcome,
+                             leg.t, NaN, -leg.vv, leg.vh,
                              isempty(L.downrange) ? 0.0 : L.downrange[end],
                              dv_brake, 0.0, m0 - leg.m, leg.m - m_dry, 0.0, 1.0,
                              p0, pr, leg.r, leg.v, leg.m,

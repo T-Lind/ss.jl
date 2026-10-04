@@ -346,6 +346,7 @@
 import { fin, fmt } from './static/fmt.js';
 import * as api from './static/api.js';
 import { escapeHTML } from './static/ui.js';
+import { successfulTouchdown, lunarEndLabel, landingSummary } from './static/flight_state.js';
 import { drawLine, niceStep, fmtTick, fmtPeak } from './static/charts.js';
 import { drawGroundTrack } from './static/groundtrack.js';
 import { drawMoonGroundTrack } from './static/moongroundtrack.js';
@@ -790,7 +791,7 @@ function renderMoon() {
   const has = !!(m && m.orbit && m.orbit.x && m.orbit.x.length > 1);
   $('sec_moon').classList.toggle('hidden', !has);
   if (!has) return;
-  drawMoonGroundTrack('moongroundmap', m, { label: 'touchdown' });
+  drawMoonGroundTrack('moongroundmap', m, { label: successfulTouchdown(run) ? 'touchdown' : lunarEndLabel(run).toLowerCase() });
 }
 
 // Altitude against downrange, in the plane the descent actually flies. The
@@ -806,9 +807,10 @@ function drawDescent() {
     $(id).classList.toggle('hidden', !has);
   if (!has) return;
   const gate = m.gate_s;
-  const iGate = Math.max(1, d.t.findIndex(t => t >= gate));
+  const iGate = fin(gate) ? d.t.findIndex(t => t >= gate) : -1;
   const seg = (a, b) => ({ xs: d.dr.slice(a, b), ys: d.h.slice(a, b) });
-  const s1 = seg(0, iGate + 1), s2 = seg(iGate, d.t.length);
+  const s1 = seg(0, iGate >= 0 ? iGate + 1 : d.t.length);
+  const s2 = iGate >= 0 ? seg(iGate, d.t.length) : { xs: [], ys: [] };
   // the section's own legend names the two phases, so the series carry no
   // labels here — they would land on top of the high-gate callout
   drawLine('c_desc_prof', [
@@ -816,7 +818,10 @@ function drawDescent() {
       { xs: s2.xs, ys: s2.ys, color: '#d55181', unit: 'km' },
     ], 'descent altitude vs downrange', { y0: 0, xu: 'km', yu: 'km', nopeak: true,
         labelAt: 'start',
-        marks: [{ x: d.dr[iGate], y: d.h[iGate], color: '#8fbef0', label: 'high gate' }] });
+        marks: [
+          ...(iGate >= 0 ? [{ x: d.dr[iGate], y: d.h[iGate], color: '#8fbef0', label: 'high gate' }] : []),
+          ...(!successfulTouchdown(run) ? [{ x: d.dr.at(-1), y: d.h.at(-1), color: '#e66767', label: lunarEndLabel(run).toLowerCase() }] : []),
+        ] });
   drawLine('c_desc_v', [
       { xs: d.t, ys: d.vh, color: '#c98500', label: 'horizontal', unit: 'm/s' },
       { xs: d.t, ys: d.vv, color: '#8fbef0', label: 'vertical', unit: 'm/s' },
@@ -837,8 +842,7 @@ function drawDescent() {
       'navigation altitude residual vs time', {xu:'s',yu:'m',nopeak:true});
   const bad = m.outcome !== 'touchdown';
   $('desc_note').innerHTML = bad
-    ? `<span style="color:var(--failed)">${m.outcome}</span> — arrived at ` +
-      `${fmt(m.touchdown_v,1)} m/s sink, ${fmt(m.touchdown_vh,1)} m/s lateral`
+    ? `<span style="color:var(--failed)">${escapeHTML(landingSummary(run))}</span>`
     : `braking ${fmt(m.braking_dv,0)} m/s for ${fmt(m.gate_s,0)} s, then ` +
       `${fmt(m.terminal_dv,0)} m/s throttled to ${fmt(m.touchdown_v,2)} m/s of ` +
       `sink · ${fmt(m.prop_left_kg,0)} kg left · ${fmt(m.hover_s,0)} s of hover`;

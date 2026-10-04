@@ -112,14 +112,21 @@
              align-items: center; justify-content: center; gap: 14px; cursor: pointer;
              background: radial-gradient(ellipse at 50% 60%, rgba(6,8,12,.35), rgba(2,3,5,.88));
              color: var(--ink); text-align: center; }
-  #overlay h1 { font: 300 34px system-ui; letter-spacing: 10px; }
-  #overlay .sub { color: var(--dim); font: 13px system-ui; letter-spacing: 2px; }
+  #overlay h1 { font: 300 clamp(18px, 3vw, 34px) system-ui;
+                letter-spacing: clamp(2px, .75vw, 10px); max-width: calc(100vw - 32px); }
+  #overlay .sub { color: var(--dim); font: 13px system-ui; letter-spacing: 2px;
+                  max-width: calc(100vw - 32px); }
   #overlay .big { font: 600 15px system-ui; letter-spacing: 4px; color: var(--acc);
                   border: 1px solid var(--acc); border-radius: 30px; padding: 10px 26px;
-                  margin-top: 10px; }
+                  margin-top: 10px; background: transparent; cursor: pointer; }
   #overlay table { font: 13px ui-monospace, Consolas, monospace; border-collapse: collapse; }
+  #overlay .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
   #overlay td { padding: 3px 14px; text-align: left; }
   #overlay td:first-child { color: var(--dim); }
+  @media (max-width: 600px) {
+    #overlay table { font-size: 11px; }
+    #overlay td { padding: 3px 6px; }
+  }
   #err { color: #e08080; font: 13px ui-monospace, monospace; max-width: 600px; }
   /* the empty state: pick a flight, or go and make one */
   .emptyruns { display: flex; flex-direction: column; gap: 6px;
@@ -199,7 +206,10 @@
   <h1 id="ov_title">SABLE</h1>
   <div class="sub" id="ov_sub">designing mission…</div>
   <div id="ov_body"></div>
-  <div class="big hidden" id="ov_go">CLICK TO LAUNCH · T–15</div>
+  <div class="actions">
+    <button type="button" class="big hidden" id="ov_close">INSPECT FLIGHT</button>
+    <button type="button" class="big hidden" id="ov_go">CLICK TO LAUNCH · T–15</button>
+  </div>
   <div id="err" class="hidden"></div>
 </div>
 
@@ -207,7 +217,7 @@
 'use strict';
 import { fin } from '/static/fmt.js';
 import { sunEci, sunAtSite, launchHours, earthAngle, daylight, sunVisibility, lunarSun, lunarEarthMatrix } from '/static/celestial.js';
-import { successfulTouchdown, lunarEndLabel, lunarHatchReason } from '/static/flight_state.js';
+import { successfulTouchdown, lunarEndLabel, lunarHatchReason, landingEndTime, landingSummary } from '/static/flight_state.js';
 import { landerLayout, landerExterior, landerInterior, landerDisplay, clampLanderEye } from '/static/lander_model.js';
 import { engineCluster, stageBells } from '/static/engine_layout.js';
 import * as api from '/static/api.js';
@@ -1528,7 +1538,7 @@ function eventLabel(name) {
 // last hundred seconds are the landing
 function descentWarp(t) {
   if (t < MS.t_pdi - 2) return 600;
-  if (t < MS.t_gate - 30) return 6;
+  if (t < (fin(MS.t_gate) ? MS.t_gate : MS.t_td) - 30) return 6;
   if (t < MS.t_td - 100) return 3;
   return 1;
 }
@@ -1684,7 +1694,7 @@ function buildData() {
                 : MS.t_pdi;
   }
   tEnd = isFinite(tSplash) ? tSplash + 12
-       : MS ? MS.t_td + 16 + SURFACE_DUR
+       : MS ? landingEndTime(run, SURFACE_DUR)
        : hasEnt ? ENT.t[ENT.n-1] + 10
        : hasCis ? CIS.t[CIS.n-1] : A.t[A.t.length-1] + 30;
 
@@ -1790,11 +1800,12 @@ function buildData() {
       add(ACH.tli ? 'OFF-NOMINAL COAST' : 'ORBIT', cisEnd, 'eci', { pace: 26 });
     }
   }
-  if (MS) add('DESCENT', MS.t_td + 0.5, 'moon', { warp: descentWarp });
+  if (MS) add('DESCENT', MS.t_td, 'moon', { warp: descentWarp });
   // Once the vehicle is down the clock keeps running so the crew can walk: a
   // landed phase, still in the moon world and at real time, where the hatch is
   // open and the surface EVA below is available.
-  if (MS) add(lunarEndLabel(run), MS.t_td + 16 + SURFACE_DUR, 'moon', { warp: () => 1 });
+  if (MS) PH.push({ n: lunarEndLabel(run), t0: MS.t_td,
+    t1: landingEndTime(run, SURFACE_DUR), w: 'moon', warp: () => 1 });
   if (hasEnt) add('ENTRY', tEnd, 'entry', { warp: entryWarp });
   if (!PH.length) add('FLIGHT', tEnd, 'pad');
   // a paced phase compresses to roughly a fixed wall-clock length, so a
@@ -2065,6 +2076,19 @@ function moonPos(x, z, h) {
 }
 const groundY = (x, z) => moonPos(x, z, terrainHeight(MS.terrain, moonDir(x, z)))[1];
 
+// Camera positions are Cartesian; moonDir takes surface arcs. Use the actual
+// radial direction so a far-downrange camera cannot jump onto unrelated ground.
+function liftMoonCamera(p, clearance = 1.2) {
+  const radial = [p[0], p[1] + RM, p[2]], radius = V.len(radial);
+  if (radius < 1) return p;
+  const u = V.scale(radial, 1 / radius);
+  const fixed = V.add(V.add(V.scale(MS.ed, u[0]), V.scale(MS.u, u[1])), V.scale(MS.ec, u[2]));
+  const minRadius = RM + terrainHeight(MS.terrain, fixed) + clearance;
+  if (radius >= minRadius) return p;
+  const raised = V.scale(u, minRadius);
+  return [raised[0], raised[1] - RM, raised[2]];
+}
+
 // Where to stand to watch it land. The obvious answer — a fixed offset from
 // the site — puts the camera in whatever the terrain happens to be doing
 // there, and on ground chosen by a hazard scan for being flat, what is next
@@ -2108,9 +2132,9 @@ function pickGroundCam() {
 // exactly four and the ring is exactly 120 cells across so that the hole for
 // the next ring in falls on cell boundaries — off by half a cell and every
 // ring boundary is a visible crack.
-function buildMoonTerrain() {
+function buildMoonTerrain({ N = 120, extents = [40, 160, 640, 2560, 10240, 40960, 163840, 655360] } = {}) {
   const tr = MS.terrain;
-  const N = 120, EX = [40, 160, 640, 2560, 10240, 40960, 163840, 655360];
+  const EX = extents;
   const rings = [];
   let inner = 0;
   // Regolith reflects about a tenth of what falls on it, and a picture of it
@@ -2131,15 +2155,9 @@ function buildMoonTerrain() {
       const q = [P(i,j), P(i+1,j), P(i+1,j+1), P(i,j+1)];
       // vertex normals from the height field, so adjacent rings shade alike
       const nAt = (ii, jj) => {
-        const a = ii > 0 ? H[(ii-1)*(N+1)+jj] : H[ii*(N+1)+jj];
-        const b = ii < N ? H[(ii+1)*(N+1)+jj] : H[ii*(N+1)+jj];
-        const c = jj > 0 ? H[ii*(N+1)+jj-1] : H[ii*(N+1)+jj];
-        const d = jj < N ? H[ii*(N+1)+jj+1] : H[ii*(N+1)+jj];
-        const u = moonPos(-E + ii*step, -E + jj*step, 0);
-        const up = V.norm(V.add(u, [0, RM, 0]));
-        const t1 = V.norm(V.cross([0,1,0], up)), t2 = V.cross(up, t1);
-        const g1 = (b - a)/(2*step), g2 = (d - c)/(2*step);
-        return V.norm(V.sub(up, V.add(V.scale(t2, g1), V.scale(t1, g2))));
+        const dx = V.sub(P(Math.min(N, ii+1), jj), P(Math.max(0, ii-1), jj));
+        const dz = V.sub(P(ii, Math.min(N, jj+1)), P(ii, Math.max(0, jj-1)));
+        return V.norm(V.cross(dz, dx));
       };
       const nq = [nAt(i,j), nAt(i+1,j), nAt(i+1,j+1), nAt(i,j+1)];
       const emit = k => {
@@ -2151,7 +2169,7 @@ function buildMoonTerrain() {
         out.push(q[k][0], q[k][1], q[k][2], nq[k][0], nq[k][1], nq[k][2],
                  c[0], c[1], c[2], 0, 0, 0);
       };
-      emit(0); emit(1); emit(2); emit(0); emit(2); emit(3);
+      emit(0); emit(2); emit(1); emit(0); emit(3); emit(2);
     }
     if (out.length) rings.push({ buf: buffer(new Float32Array(out)),
                                  n: out.length/VST, e: E });
@@ -2199,7 +2217,7 @@ function moonState(t) {
 }
 
 function autoPickMoon(t) {
-  const g = MS.t_gate, td = MS.t_td;
+  const g = fin(MS.t_gate) ? MS.t_gate : MS.t_td, td = MS.t_td;
   // The braking phase is eight minutes of a vehicle pointing backwards at
   // full thrust a hundred kilometres up, and the ground under it is too far
   // away to have any texture: that is a shot of the vehicle, not of the Moon.
@@ -2229,7 +2247,7 @@ function landerRig(mode, pos, up, fwd, thrust, h, thr, M) {
     // nothing but ground
     eye = V.add(V.add(mid, V.scale(fwd, -back)),
                 V.add(V.scale(s, side), V.scale(up, -6*k)));
-    look = V.add(mid, V.scale(up, -Math.min(h*0.25, 14)));
+    look = V.add(mid, V.scale(up, -Math.min(h*0.1, 5*k)));
     fov = fitFov(V.len(V.sub(mid, eye)), 34*k);
   } else if (mode === 'onboard') {
     // out of the forward window, looking down the approach at the site
@@ -2307,10 +2325,7 @@ function cameraMoon(t, ms, M) {
   // and the ground is a one-sided sheet: from beneath it, the shot is the
   // empty hull behind the terrain instead of the surface. Lifting the eye to
   // the ground under it is enough, and is what a camera on a stand does.
-  const aboveGround = p => {
-    const g = groundY(p[0], p[2]) + 1.2;
-    return p[1] < g ? [p[0], g, p[2]] : p;
-  };
+  const aboveGround = p => liftMoonCamera(p);
   const rig = landerRig(mode, ms.pos, ms.up, ms.fwd, ms.thrust, ms.h, ms.thr, M);
   if (rig) {
     if (rig.shake > 0) rig.eye = V.add(rig.eye, shakeVec(rig.shake));
@@ -2325,16 +2340,19 @@ function cameraMoon(t, ms, M) {
     // the sky above it.
     if (!MOONCAM) pickGroundCam();
     const gp = moonPos(MOONCAM.x, MOONCAM.z, 0);
-    eye = [gp[0], MOONCAM.y, gp[2]];
+    eye = aboveGround([gp[0], MOONCAM.y, gp[2]]);
     const site = [moonPos(0, 0, 0)[0], groundY(0, 0), moonPos(0, 0, 0)[2]];
-    const aim = V.add(ms.pos, V.scale(ms.up, 2.6));
-    // hold both the vehicle and the ground it is heading for while it is
-    // still high, then tighten onto the vehicle as it arrives — a shot framed
-    // for a descent from a hundred metres has nothing in it once it lands
-    look = V.lerp(site, aim, ms.h < 25 ? 0.85 : 0.55);
+    const toSite = V.norm(V.sub(site, eye)), toCraft = V.norm(V.sub(mid, eye));
+    // Fit both sight lines, favouring the craft to keep it below the top HUD.
+    // A position blend with a capped world-space span can crop both the lander and the
+    // ground out of the shot; changing that blend at 25 m also snaps the view.
+    const facing = V.norm(V.add(V.scale(toSite, 0.4), V.scale(toCraft, 0.6)));
+    look = V.add(eye, facing);
     up = [0, 1, 0];
-    const span = Math.max(15, Math.min(220, 13 + ms.h*1.15));
-    fov = fitFov(Math.max(30, V.len(V.sub(ms.pos, eye))), span);
+    const halfAngle = Math.acos(Math.max(-1, Math.min(1,
+      Math.min(V.dot(facing, toSite), V.dot(facing, toCraft)))));
+    const distance = Math.max(10, Math.min(V.len(V.sub(site, eye)), V.len(V.sub(mid, eye))));
+    fov = Math.max(0.1, Math.min(2.2, 2*(halfAngle + Math.atan(10/distance) + 0.04)));
   } else {
     const Rd = freeDist || 40;
     const cp = Math.cos(freePitch), sp = Math.sin(freePitch);
@@ -4724,7 +4742,7 @@ let camMode = 'chase', freeYaw = -2.4, freePitch = 0.12, freeDist = 0;
 // the rigs' own lenses, which an operator preference must not disturb.
 let zoomK = 1;
 function fovZoom(fov, k) {
-  return Math.min(1.5, Math.max(0.015, fov/k));
+  return Math.min(Math.max(1.5, fov), Math.max(0.015, fov/k));
 }
 // ------------------------------------------------------------ looking round --
 // Two different things, because a crew member in a couch and a crew member
@@ -6377,7 +6395,7 @@ function frame(now) {
   // forth across T-0 stays silent instead of spamming the ignition tone.
   scrubStep(dtReal);
 
-  const ph = phaseAt(simT);
+  let ph = phaseAt(simT);
   if (frame._ph !== ph.n) {
     // entering a slower phase snaps the warp down instantly (never coast
     // through a burn or the flyby at cruise warp)
@@ -6392,9 +6410,10 @@ function frame(now) {
     warpEff = manualWarp > 0 ? warpCur :
       Math.min(warpCur, Math.max(1, (ph.t1 - simT)/0.8));
   } else warpEff = 0;
-  const dt = dtReal * warpEff;
+  const dt = Math.min(dtReal * warpEff, Math.max(0, tEnd - simT));
   const tPrev = simT;
   simT += dt;
+  ph = phaseAt(simT);
 
   audioEvents(tPrev, simT);
   for (const q of toasts) if (!q.done && simT >= q.t) {
@@ -6471,7 +6490,7 @@ function frame(now) {
   drawHUD(scene, ph);
   drawSeek();
 
-  if (!ended && simT > tEnd) { ended = true; running = false; showEndCard(); }
+  if (!ended && simT >= tEnd) { ended = true; running = false; showEndCard(); }
 }
 
 // assemble everything the renderer needs for the current instant
@@ -8238,12 +8257,15 @@ function drawHUD(sc, ph) {
 }
 // phase-segmented timeline (equal width per phase — a broken time axis)
 const seekCv = $('seek');
+function phaseFraction(p, t) {
+  return p.t1 > p.t0 ? Math.max(0, Math.min(1, (t - p.t0)/(p.t1 - p.t0))) : t >= p.t1 ? 1 : 0;
+}
 function segX(t, w) {
   const np = PH.length, sw = w/np;
   for (let i = 0; i < np; i++) {
     const p = PH[i];
     if (t < p.t1 || i === np-1)
-      return i*sw + Math.max(0, Math.min(1, (t - p.t0)/(p.t1 - p.t0)))*sw;
+      return i*sw + phaseFraction(p, t)*sw;
   }
   return w;
 }
@@ -8321,12 +8343,16 @@ function seekTo(t) {
 // 90 s entry. Holding the key accelerates; releasing stops dead. Pause state
 // survives the scrub: scrubbing while paused stays paused (and silent).
 let scrubDir = 0, scrubT0 = 0;
+function startScrub(d) {
+  scrubDir = d; scrubT0 = performance.now();
+  scrubStep(1/60); // a quick tap must work even between animation frames
+}
 function scrubStep(dtReal) {
   if (!scrubDir || !PH.length) return;
   const held = (performance.now() - scrubT0)/1000;
   const rate = Math.min(1.8, 0.12*Math.pow(3.0, held));   // phases per second
   const p = phaseAt(simT), i = PH.indexOf(p);
-  let f = i + Math.max(0, Math.min(1, (simT - p.t0)/(p.t1 - p.t0)))
+  let f = i + phaseFraction(p, simT)
         + scrubDir*rate*dtReal;
   f = Math.max(0, Math.min(PH.length - 1e-6, f));
   const j = Math.max(0, Math.min(PH.length - 1, Math.floor(f)));
@@ -8453,7 +8479,7 @@ function initControls() {
     if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
       e.preventDefault();
       const d = e.key === 'ArrowRight' ? 1 : -1;
-      if (scrubDir !== d) { scrubDir = d; scrubT0 = performance.now(); }
+      if (scrubDir !== d) startScrub(d);
     }
     const i = +e.key;
     const cl = cameraModes();
@@ -8543,14 +8569,26 @@ function showEndCard() {
   row('splashdown', fin(m.splash_lat),
       `${(m.splash_lat || 0).toFixed(1)}°, ${(m.splash_lon || 0).toFixed(1)}° ` +
       `at ${(m.v_splash || 0).toFixed(1)} m/s`);
-  $('ov_title').textContent = isFinite(tSplash) ? 'SPLASHDOWN' : 'END OF MISSION';
-  $('ov_sub').textContent = isFinite(tSplash) ?
+  row(successfulTouchdown(run) ? 'landing coordinates' : 'descent endpoint', MS && fin(m.land_lat), `${(+m.land_lat || 0).toFixed(2)}°, ${(+m.land_lon || 0).toFixed(2)}°`);
+  row('descent sink · lateral', MS && fin(m.touchdown_v), `${(+m.touchdown_v || 0).toFixed(1)} · ${(+m.touchdown_vh || 0).toFixed(1)} m/s`);
+  row('lander propellant left', MS && fin(m.prop_left_kg), `${(+m.prop_left_kg || 0).toFixed(0)} kg`);
+  $('ov_title').textContent = MS ? lunarEndLabel(run) : isFinite(tSplash) ? 'SPLASHDOWN' : 'END OF MISSION';
+  $('ov_sub').textContent = MS ? (successfulTouchdown(run) ? 'touchdown confirmed — mission complete' : landingSummary(run)) : isFinite(tSplash) ?
     'pod recovered — mission complete' : (EVS.length ? EVS[EVS.length-1].s : '');
   $('ov_body').innerHTML = `<table>${rows.join('')}</table>`;
   $('ov_go').textContent = 'REPLAY';
   $('ov_go').classList.remove('hidden');
+  $('ov_close').textContent = MS && successfulTouchdown(run) ? 'EXPLORE SURFACE' : 'INSPECT FLIGHT';
+  $('ov_close').classList.remove('hidden');
+  $('ov_close').onclick = event => {
+    event.stopPropagation();
+    $('overlay').classList.add('hidden');
+  };
   $('overlay').classList.remove('hidden');
-  $('overlay').onclick = () => {
+  $('overlay').style.cursor = 'default';
+  $('overlay').onclick = null;
+  $('ov_go').onclick = event => {
+    event.stopPropagation();
     $('overlay').classList.add('hidden');
     scorch = 0; seekTo(-15);
   };
@@ -10403,7 +10441,7 @@ async function boot() {
       // a suborbital flight is minutes, not days, and its whole story is how
       // high or how far — so it gets told in its own units
       run.mode === 'orbit' ?
-      `${mass}${LEN.toFixed(1)} m — Earth orbit at ${(M.orbit_rp_km || 0).toFixed(0)}×${(M.orbit_ra_km || 0).toFixed(0)} km` +
+      `${mass}${LEN.toFixed(1)} m — ${run.orbit?.burns?.some(b => b.name === 'deorbit') ? 'post-deorbit orbit' : 'Earth orbit'} at ${(M.orbit_rp_km || 0).toFixed(0)}×${(M.orbit_ra_km || 0).toFixed(0)} km` +
       (run.entry ? ` and re-entry in ${(tD*1440).toFixed(0)} minutes` : `, ${(tD*1440).toFixed(0)} minutes simulated`) :
       run.mode === 'suborbital' ?
       `${mass}${LEN.toFixed(1)} m — ` +
@@ -10414,6 +10452,8 @@ async function boot() {
       `${mass}${LEN.toFixed(1)} m — ` +
       `around the Moon and home in ${tD.toFixed(1)} days`;
     $('ov_go').classList.remove('hidden');
+    $('ov_go').onclick = null;
+    $('overlay').style.cursor = 'pointer';
     $('overlay').onclick = () => {
       $('overlay').classList.add('hidden');
       initAudio();
