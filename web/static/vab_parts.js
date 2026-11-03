@@ -508,11 +508,20 @@ export const MISSIONS = [
     params: { mode: 'landing' } },
 ];
 
+/** [id, name, latitude°, longitude°] — the panel's LAUNCH_SITES. */
 export const LAUNCH_SITES = [
-  ['cape', 'Cape Canaveral', 28.5], ['vandenberg', 'Vandenberg', 34.6], ['wallops', 'Wallops', 37.9],
-  ['baikonur', 'Baikonur', 45.9], ['kourou', 'Kourou', 5.2], ['tanegashima', 'Tanegashima', 30.4],
-  ['sriharikota', 'Sriharikota', 13.7], ['wenchang', 'Wenchang', 19.6], ['mahia', 'Mahia', -39.3],
+  ['cape', 'Cape Canaveral', 28.5, -80.6], ['vandenberg', 'Vandenberg', 34.6, -120.6],
+  ['wallops', 'Wallops', 37.9, -75.5], ['baikonur', 'Baikonur', 45.9, 63.3],
+  ['kourou', 'Kourou', 5.2, -52.8], ['tanegashima', 'Tanegashima', 30.4, 131.0],
+  ['sriharikota', 'Sriharikota', 13.7, 80.2], ['wenchang', 'Wenchang', 19.6, 110.9],
+  ['mahia', 'Mahia', -39.3, 177.9],
 ];
+/** The simulator's launch_h for a local mean solar time at a site:
+ *  launch_h = 0 is Greenwich noon, so local time = 12 + launch_h + lon/15. */
+export function launchHourFor(lon, localHour = 9.5) {
+  const h = ((localHour - 12 - lon / 15) % 24 + 24) % 24;
+  return Math.round(h * 4) / 4;
+}
 export const LANDING_SITES = [
   ['auto', 'Free-return site (auto)'], ['tranquillity', 'Mare Tranquillitatis · Apollo 11'],
   ['procellarum', 'Oceanus Procellarum · Apollo 12'], ['framauro', 'Fra Mauro · Apollo 14'],

@@ -75,7 +75,13 @@
 
   /* ---- canvas ---- */
   .center { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+  #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .viewtog { position: absolute; top: 10px; left: 12px; z-index: 5; display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .viewtog button { background: rgba(19,25,34,.9); border: 0; padding: 5px 11px; font-size: 12px; color: var(--text-2); }
+  .viewtog button[aria-pressed="true"] { background: var(--raise); color: var(--text); }
+  .viewtog button + button { border-left: 1px solid var(--line); }
+  .viewtog[hidden] { display: none; }
   .hold-banner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5;
                  background: rgba(19,25,34,.94); border: 1px solid var(--line); border-radius: 20px;
                  padding: 6px 14px; font-size: 12.5px; white-space: nowrap; pointer-events: none; }
@@ -245,7 +251,9 @@
   </aside>
 
   <main class="center" id="center">
+    <canvas id="gl" aria-label="Vehicle assembly, 3D view"></canvas>
     <canvas id="cv" aria-label="Vehicle assembly drawing"></canvas>
+    <div class="viewtog" id="viewTog" role="group" aria-label="View mode"><button data-v="3d" aria-pressed="true">3D</button><button data-v="2d" aria-pressed="false">Blueprint</button></div>
     <div class="hold-banner" id="holdBanner" hidden></div>
     <div class="empty" id="emptyMsg" hidden><p>Hold a payload from the palette, then click the top of the stack. Double-click any part to add it straight away.</p></div>
     <button class="fit" id="bFit">Fit</button>
@@ -282,7 +290,7 @@
       <p class="md" id="mDesc"></p>
       <label class="fld"><span>Launch site</span><select id="lSite"></select></label>
       <label class="fld" id="lLandWrap"><span>Landing site</span><select id="lLand"></select></label>
-      <label class="fld"><span>Launch time [h]</span><input type="number" id="lTime" min="0" max="24" step="0.5" value="12"></label>
+      <label class="fld"><span>Launch time [h after Greenwich noon]</span><input type="number" id="lTime" min="0" max="24" step="0.25" value="3.5"></label>
       <label class="chk"><input type="checkbox" id="lKick"> Search for the best pitch kick</label>
       <p class="dvcheck" id="dvCheck"></p>
       <p class="err" id="lErr" hidden></p>
@@ -298,12 +306,13 @@
 // ================================================================ imports
 import {
   palette, withId, emptyAssembly, analyse, layout, toParams, fromParams, missionsFor,
-  engineById, engineList, PRESETS, MISSIONS, LAUNCH_SITES, LANDING_SITES, TANK_DIAMETERS,
+  engineById, engineList, PRESETS, MISSIONS, LAUNCH_SITES, launchHourFor, LANDING_SITES, TANK_DIAMETERS,
   TANK_CLASS, CAPSULES, PROBES, LANDERS, PROP_COLORS, propFromLength, G0,
 } from './static/vab_parts.js';
 import * as api from './static/api.js';
 import * as vehicle from './static/vehicle.js';
 import { busy, fail, reportUncaught } from './static/busy.js';
+import { createVabRenderer } from './static/vab_render3d.js';
 
 // ================================================================ state
 const STORE_KEY = 'ssjl.vab';
@@ -767,7 +776,7 @@ function drawGhost(c) {
   c.save(); c.globalAlpha = 0.5; drawGhostShape(c, holdPart, T2); c.restore();
 }
 
-function draw() {
+function draw2D() {
   frame = 0;
   if (!cw || !ch || !an) return;
   if (view.auto) fitView();
@@ -790,6 +799,7 @@ function resize() {
   cw = r.width; ch = r.height;
   const k = dpr();
   el.cv.width = Math.max(1, Math.round(cw * k)); el.cv.height = Math.max(1, Math.round(ch * k));
+  if (R3) R3.resize();
   draw();
 }
 
@@ -1306,6 +1316,16 @@ function toggleMenu(open) {
 }
 function buildSites() {
   el.lSite.innerHTML = LAUNCH_SITES.map(([k, n, lat]) => `<option value="${k}">${esc(n)} · ${lat}°</option>`).join('');
+  // Default to a mid-morning launch at whichever site is picked, until the
+  // time is typed: launch_h is measured from Greenwich noon, so the same
+  // number is dawn at the Cape and dusk at Baikonur.
+  let timeTyped = false;
+  const morning = () => { if (timeTyped) return;
+    const s = LAUNCH_SITES.find(x => x[0] === el.lSite.value) || LAUNCH_SITES[0];
+    el.lTime.value = launchHourFor(s[3]); };
+  el.lTime.addEventListener('input', () => { timeTyped = true; });
+  el.lSite.addEventListener('change', morning);
+  morning();
   el.lLand.innerHTML = LANDING_SITES.map(([k, n]) => `<option value="${k}">${esc(n)}</option>`).join('');
 }
 
@@ -1464,7 +1484,7 @@ function bind() {
   };
   document.addEventListener('click', e => { if (!e.target.closest('.menu-wrap')) toggleMenu(false); });
   $('#bNew').onclick = () => { cancelHold(); sel = null; commit(emptyAssembly('Untitled')); };
-  $('#bFit').onclick = () => { view.auto = true; requestDraw(); };
+  $('#bFit').onclick = () => { if (use3d && R3) { autoFit3 = true; lastFitH = -1; } else view.auto = true; requestDraw(); };
   $('#tPal').onclick = () => document.body.classList.toggle('show-left');
   $('#tRep').onclick = () => document.body.classList.toggle('show-right');
 
@@ -1492,9 +1512,9 @@ function bind() {
 
   const cv = el.cv;
   cv.addEventListener('pointerdown', e => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 && e.button !== 2) return;
     const p = pos(e);
-    press = { x: p.x, y: p.y, moved: false };
+    press = { x: p.x, y: p.y, moved: false, button: e.button, pan: e.button === 2 || e.shiftKey };
     cv.setPointerCapture(e.pointerId);
   });
   cv.addEventListener('pointermove', e => {
@@ -1502,27 +1522,57 @@ function bind() {
     pointer = p;
     if (press) {
       if (!press.moved && Math.hypot(p.x - press.x, p.y - press.y) > 4) press.moved = true;
-      if (press.moved) { view.auto = false; view.ox += e.movementX; view.oy += e.movementY; }
+      if (press.moved) {
+        if (use3d && R3) {
+          autoFit3 = false;
+          const c = cam3();
+          if (press.pan) c.target[1] += e.movementY * c.dist * 0.0022;
+          else {
+            c.yaw -= e.movementX * 0.006;
+            c.pitch = clamp(c.pitch + e.movementY * 0.005, -5 * DEG, 60 * DEG);
+          }
+        } else if (press.button === 0) { view.auto = false; view.ox += e.movementX; view.oy += e.movementY; }
+      }
     }
-    if (holdPart) { const n = hitNode(p); hovKey = n ? n.key : null; }
+    if (use3d && R3) {
+      if (holdPart) { const n = hitNode3(p); hovKey = n ? n.key : null; hov = null; }
+      else if (!press || !press.moved) hov = R3.pickPart(p.x, p.y) || null;
+    } else if (holdPart) { const n = hitNode(p); hovKey = n ? n.key : null; }
     else { const h = hitPart(p); hov = h ? h.id : null; }
     requestDraw();
   });
   cv.addEventListener('pointerup', e => {
-    if (press && !press.moved) handleClick(pos(e));
+    if (press && !press.moved) {
+      if (press.button === 2) { if (holdPart) cancelHold(); }
+      else if (use3d && R3) handleClick3(pos(e));
+      else handleClick(pos(e));
+    }
     press = null;
+    requestDraw();
   });
   cv.addEventListener('pointerleave', () => { pointer = null; hov = null; hovKey = null; requestDraw(); });
   cv.addEventListener('wheel', e => {
     e.preventDefault();
+    if (use3d && R3) {
+      autoFit3 = false;
+      const p = pos(e), f = Math.exp(e.deltaY * 0.0012), yc = R3.heightAt(p.x, p.y), c = cam3();
+      if (yc !== null && f < 1) c.target[1] += (yc - c.target[1]) * (1 - f) * 0.6;
+      c.dist = clamp(c.dist * f, 1.5, 3000);
+      requestDraw();
+      return;
+    }
     const p = pos(e), ns = clamp(view.s * Math.exp(-e.deltaY * 0.0015), 2, 400), k = ns / view.s;
     view.ox = p.x - (p.x - view.ox) * k;
     view.oy = p.y - (p.y - view.oy) * k;
     view.s = ns; view.auto = false;
     requestDraw();
   }, { passive: false });
-  cv.addEventListener('dblclick', () => { view.auto = true; requestDraw(); });
-  cv.addEventListener('contextmenu', e => { e.preventDefault(); if (holdPart) cancelHold(); });
+  cv.addEventListener('dblclick', () => {
+    if (use3d && R3) { autoFit3 = true; lastFitH = -1; } else view.auto = true;
+    requestDraw();
+  });
+  cv.addEventListener('contextmenu', e => { e.preventDefault(); });
+
 
   document.addEventListener('keydown', e => {
     if (el.dlg.open) return;
@@ -1552,6 +1602,181 @@ function bind() {
   new ResizeObserver(resize).observe(el.center);
 }
 
+
+// ================================================================ 3D view
+// The WebGL hangar draws the vehicle; the 2D overlay (#cv) draws attach nodes,
+// stage brackets and labels on top of it, and receives all pointer input.
+let R3 = null, use3d = true, autoFit3 = true, lastFitH = -1, curNodes3 = [];
+const cam3 = () => R3.camera;
+const DEG = Math.PI / 180;
+
+function initRenderer() {
+  try { R3 = createVabRenderer($('#gl')); } catch (e) { R3 = null; }
+  $$('#viewTog [data-v]').forEach(b => { b.onclick = () => setView3(b.dataset.v === '3d'); });
+  if (!R3) { use3d = false; $('#viewTog').hidden = true; $('#gl').hidden = true; resize(); return; }
+  setView3(true);
+}
+
+function setView3(on) {
+  use3d = !!R3 && on;
+  $('#gl').hidden = !use3d;
+  $$('#viewTog [data-v]').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.v === '3d') === use3d)));
+  if (use3d) { autoFit3 = true; lastFitH = -1; }
+  resize();
+}
+
+// Attach points in world space. Same rules as the 2D nodes (computeNodes).
+function nodes3D(p) {
+  const out = [], parts = asm.parts, payIdx = parts.findIndex(q => q.type === 'payload'), H = lay.height;
+  const add = (kind, idx, x, y, z, label, key) => out.push({ kind, idx, x, y, z, label, key: key || kind + ':' + idx });
+  if (p.type === 'payload') add('payload', 0, 0, H + 1.6, 0, payIdx >= 0 ? 'replace payload' : 'top of stack');
+  else if (p.type === 'fairing') {
+    const pr = payIdx >= 0 ? rowOf.get(parts[payIdx].id) : null;
+    add('fairing', payIdx + 1, 0, pr ? pr.y0 : H + 1.6, 0, 'around payload');
+  } else if (p.type === 'boosters') {
+    const sp = stageSpan(1);
+    if (sp && an.stages[0]) {
+      const reach = an.stages[0].diameter / 2 + p.diameter + 0.9, y = (sp.y0 + sp.y1) / 2;
+      add('boosters', -1, reach, y, 0, 'radial boosters', 'boosters:+');
+      add('boosters', -1, -reach, y, 0, 'radial boosters', 'boosters:-');
+    }
+  } else {
+    const top = parts.findIndex(q => !isFixed(q)), first = top < 0 ? parts.length : top;
+    const idxs = new Set([first, parts.length]);
+    for (let i = first + 1; i < parts.length; i++) idxs.add(i);
+    const low = lay.rows.length ? lay.rows[0].y0 : 0;
+    for (const i of idxs) {
+      if (i >= parts.length) add('stack', parts.length, 0, low - 1.5, 0, 'bottom of stack');
+      else {
+        const r = rowOf.get(parts[i].id);
+        if (r) add('stack', i, 0, r.y1, 0, i === first && payIdx >= 0 ? 'directly under payload' : 'insert here');
+      }
+    }
+  }
+  return out;
+}
+
+// Size and material of a held part, for the renderer's ghost.
+function ghostDims(p) {
+  const core = an.stages[0] ? an.stages[0].diameter : 1.8;
+  if (p.type === 'payload') {
+    if (p.kind === 'capsule') return { d: p.diameter, h: 0.85 * p.diameter, prop: 'kerolox', n: 1, core };
+    if (p.kind === 'bus') { const d = Math.max(0.8, 0.5 * Math.cbrt(p.mass)); return { d, h: 0.8 * d, prop: 'kerolox', n: 1, core }; }
+    return { d: p.lander.diameter, h: 0.9 * p.lander.diameter, prop: 'kerolox', n: 1, core };
+  }
+  if (p.type === 'tank') return { d: p.diameter, h: p.length, prop: 'kerolox', n: 1, core };
+  if (p.type === 'engine') {
+    const e = engineById(catalogue, p.engine), per = e ? e.thrust_kn : 100;
+    const h = Math.max(0.6, Math.min(5.5, 0.75 * Math.sqrt(per / 100) + 0.4)) * Math.min(1, 1.8 / 1.2 + 0.2);
+    return { d: core, h, prop: e ? e.prop : 'kerolox', n: p.count, core };
+  }
+  if (p.type === 'decoupler') return { d: core, h: 0.25, prop: 'kerolox', n: 1, core };
+  if (p.type === 'fairing') return { d: 2.6, h: 4, prop: 'kerolox', n: 1, core };
+  const e = engineById(catalogue, p.engine);
+  return { d: p.diameter, h: p.length, core, prop: e ? e.prop : 'kerolox', n: p.engines || 1 };
+}
+
+// The ghost sits at the hovered attach point; nothing shows until one is hovered.
+function ghost3() {
+  if (!holdPart || !hovKey) return null;
+  const n = curNodes3.find(q => q.key === hovKey);
+  if (!n) return null;
+  const g = ghostDims(holdPart);
+  if (n.kind === 'boosters') return { part: holdPart, d: g.d, h: g.h, y: 0, radial: true, core: g.core, prop: g.prop, n: g.n };
+  const base = n.kind === 'payload' || n.kind === 'fairing' ? n.y : n.y - g.h / 2;
+  return { part: holdPart, d: g.d, h: g.h, y: base, radial: false, core: g.core, prop: g.prop, n: g.n };
+}
+
+function scene3() {
+  return { lay, asm, catalogue, selectedId: sel, hoverId: hov, boostersId: BOOSTERS, ghost: ghost3() };
+}
+
+function draw() {
+  frame = 0;
+  if (!cw || !ch || !an) return;
+  if (use3d && R3) draw3D(); else draw2D();
+}
+
+function draw3D() {
+  if (autoFit3 && Math.abs(ext.height - lastFitH) > 0.01) { R3.fit(ext.height, ext.halfW); lastFitH = ext.height; }
+  curNodes3 = holdPart ? nodes3D(holdPart) : [];
+  R3.draw(scene3());
+  draw3DOverlay();
+  el.empty.hidden = asm.parts.length > 0 || !!asm.boosters;
+  el.cv.style.cursor = holdPart ? 'crosshair' : hov ? 'pointer' : 'grab';
+}
+
+// Screen x of a cylinder's silhouette at height y, measured on the camera's
+// right-hand side. With g, also the radial booster set around the axis.
+function silhouetteX(R, y, g = null) {
+  const yaw = R3.camera.yaw, rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  let x = -Infinity;
+  for (const s of [-1, 1]) x = Math.max(x, R3.project([s * R * rx, y, s * R * rz]).x);
+  if (g) for (let i = 0; i < g.count; i++) {
+    const t = Math.PI * 2 * i / g.count, cx = g.off * Math.cos(t), cz = g.off * Math.sin(t), rb = g.bd / 2;
+    x = Math.max(x, R3.project([cx + rb * rx, y, cz + rb * rz]).x, R3.project([cx - rb * rx, y, cz - rb * rz]).x);
+  }
+  return x;
+}
+
+function draw3DOverlay() {
+  const c = ctx, k = dpr();
+  c.setTransform(k, 0, 0, k, 0, 0);
+  c.clearRect(0, 0, cw, ch);
+  c.font = '11px system-ui, sans-serif';
+  if (holdPart) for (const n of curNodes3) {
+    const p = R3.project([n.x, n.y, n.z]);
+    n.sx = p.x; n.sy = p.y;
+    if (!p.visible) continue;
+    const hot = n.key === hovKey, rad = hot ? 11 : 8;
+    c.beginPath(); c.arc(p.x, p.y, rad, 0, Math.PI * 2);
+    c.fillStyle = hot ? '#3FB950' : 'rgba(63,185,80,0.28)'; c.fill();
+    c.strokeStyle = '#3FB950'; c.lineWidth = 2; c.stroke();
+    if (hot) {
+      const w = c.measureText(n.label).width + 14;
+      c.fillStyle = 'rgba(19,25,34,0.95)'; c.fillRect(p.x + 16, p.y - 10, w, 20);
+      c.fillStyle = '#E4E9F0'; c.fillText(n.label, p.x + 23, p.y + 4);
+    }
+  }
+  // stage brackets, just right of the vehicle's silhouette
+  an.stages.forEach(s => {
+    const sp = stageSpan(s.k);
+    if (!sp) return;
+    let xr = -Infinity;
+    for (const r of lay.rows) if (r.stage === s.k) for (const y of [r.y0, r.y1]) xr = Math.max(xr, silhouetteX(r.d / 2, y));
+    const gb = s.k === 1 ? boosterGeom() : null;
+    if (gb) for (const y of [sp.y0 + 0.5, sp.y1 - 0.5]) xr = Math.max(xr, silhouetteX(0, y, gb));
+    if (!isFinite(xr)) return;
+    const x = xr + 16, a = R3.project([0, sp.y0, 0]), b = R3.project([0, sp.y1, 0]);
+    const top = Math.min(a.y, b.y), hgt = Math.max(2, Math.abs(a.y - b.y)), g = geo?.stages?.[s.k - 1];
+    c.fillStyle = STAGE_COLORS[s.k - 1] || '#999';
+    c.fillRect(x, top, 4, hgt);
+    c.font = '600 11px ui-monospace, Consolas, monospace';
+    c.fillText(`S${s.k}`, x + 10, top + hgt / 2 + (g ? -2 : 4));
+    if (g) {
+      c.fillStyle = '#8B97A8'; c.font = '10px ui-monospace, Consolas, monospace';
+      c.fillText(`${(g.dv_mps / 1000).toFixed(2)} km/s`, x + 10, top + hgt / 2 + 11);
+    }
+  });
+}
+
+function hitNode3(p) {
+  let best = null, bd = 14;
+  for (const n of curNodes3) {
+    const q = R3.project([n.x, n.y, n.z]);
+    if (!q.visible) continue;
+    const d = Math.hypot(q.x - p.x, q.y - p.y);
+    if (d <= bd) { best = n; bd = d; }
+  }
+  return best;
+}
+
+function handleClick3(p) {
+  if (holdPart) { const n = hitNode3(p); if (n) placeAt(n); return; }
+  sel = R3.pickPart(p.x, p.y) || null;
+  renderInspector();
+}
+
 async function init() {
   reportUncaught();
   catalogue = await api.catalogue();
@@ -1559,6 +1784,7 @@ async function init() {
   cats.forEach(c => c.parts.forEach(it => ITEMS.set(it.key, it)));
   asm = startAssembly();
   touch();
+  initRenderer();
   buildCats(); buildPresets(); buildSites(); bind(); buildGrid();
   resize();
   renderInspector(); renderSide(); updateChrome();
