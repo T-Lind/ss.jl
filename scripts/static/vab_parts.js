@@ -134,6 +134,11 @@ export function engineById(catalogue, id) {
   return engineList(catalogue).find(e => e.id === id) || null;
 }
 
+/** Imported manual engines keep their actual performance on the part. */
+export function engineForPart(catalogue, part) {
+  return part.engine === 'manual' && part.custom ? part.custom : engineById(catalogue, part.engine);
+}
+
 /** Standard tank diameters [m], from small launchers to Saturn class. */
 export const TANK_DIAMETERS = [1.2, 1.8, 2.4, 3.0, 3.7, 5.0, 6.6, 9.0, 10.1];
 export const TANK_CLASS = { 1.2: 'XS', 1.8: 'S', 2.4: 'M', 3.0: 'M+', 3.7: 'L', 5.0: 'XL',
@@ -233,7 +238,8 @@ export function analyse(asm, catalogue) {
     const tanks = seg.filter(p => p.type === 'tank');
     const engines = seg.filter(p => p.type === 'engine');
     const engine = engines[engines.length - 1] || null;
-    const e = engine ? engineById(catalogue, engine.engine) : null;
+    const e = engine ? engineForPart(catalogue, engine) : null;
+    if (engine && !e) issues.push({ level: 'error', msg: `stage ${k} has an unknown engine`, partId: engine.id });
     if (!engine) issues.push({ level: 'error', msg: `stage ${k} has no engine`, partId: seg[seg.length - 1].id });
     if (engines.length > 1) issues.push({ level: 'error', msg: `stage ${k} has ${engines.length} engine parts — a stage burns one engine type; set the cluster count instead`, partId: engines[0].id });
     if (engine && seg[seg.length - 1] !== engine) issues.push({ level: 'error', msg: `stage ${k}: the engine must be at the bottom of its stage (add a decoupler below it)`, partId: engine.id });
@@ -244,9 +250,9 @@ export function analyse(asm, catalogue) {
     // equivalent length at the stage diameter, same barrel volume
     const domes = 0.9 * diameter;
     const barrel = tanks.reduce((s, t) => s + Math.max(0, t.length - 0.9 * t.diameter) * (t.diameter / diameter) ** 2, 0);
-    const length = tanks.length ? barrel + domes : 0;
+    const length = tanks.length ? barrel + domes : e?.prop === 'solid' ? 4 * diameter : 0;
     const prop = e ? e.prop : 'kerolox';
-    const mprop = tanks.length ? propFromLength(length, diameter, prop) : 0;
+    const mprop = length > 0 ? propFromLength(length, diameter, prop) : 0;
     const n = engine ? Math.max(1, Math.min(33, Math.round(engine.count || 1))) : 0;
     let dry = null, dryAuto = false;
     if (engine && engine.dry != null && engine.dry > 0) dry = engine.dry;
@@ -260,7 +266,7 @@ export function analyse(asm, catalogue) {
 
   let boosters = null;
   if (asm.boosters) {
-    const b = asm.boosters, e = engineById(catalogue, b.engine);
+    const b = asm.boosters, e = engineForPart(catalogue, b);
     if (!e) issues.push({ level: 'error', msg: 'the boosters have no engine' });
     const prop = e ? e.prop : 'kerolox';
     const mprop = propFromLength(b.length, b.diameter, prop);
@@ -290,7 +296,7 @@ export function toParams(asm, catalogue) {
   const a = analyse(asm, catalogue);
   if (!a.ok) throw new Error(a.issues.find(i => i.level === 'error').msg);
   const u = new URLSearchParams();
-  const set = (k, v) => u.set(k, typeof v === 'number' ? String(+v.toFixed(4)) : String(v));
+  const set = (k, v) => u.set(k, String(v));
   set('vname', asm.name || 'Untitled');
   set('nstages', a.stages.length);
   set('diameter', a.stages[0].diameter);
@@ -302,11 +308,10 @@ export function toParams(asm, catalogue) {
     set(pre + 'diameter', dia);
     set(pre + 'engines', n);
     if (eng.generic) {
-      const g = GENERIC_ENGINES[eng.id];
       set(pre + 'engine', 'manual');
-      set(pre + 'propellant', g.prop);
-      set(pre + 'thrust_kn', g.thrust_kn * n);
-      set(pre + 'isp', g.isp_vac);
+      set(pre + 'propellant', eng.prop);
+      set(pre + 'thrust_kn', eng.thrust_kn * n);
+      set(pre + 'isp', eng.isp_vac);
       set(pre + 'dry', dry);
       set(pre + 'dry_auto', '0');
     } else {
@@ -367,7 +372,7 @@ export function fromParams(input, catalogue) {
   };
   const engines = engineList(catalogue);
   // The engine part for a stage's fields: the named engine, else the generic
-  // engine that matches per-engine thrust, Isp and propellant within 2 %.
+  // engine that matches exactly. Other manual engines retain their figures.
   const enginePart = (pre, def) => {
     const n = Math.max(1, Math.round(f(pre + 'engines', def.ne)));
     const name = g(pre + 'engine', 'manual');
@@ -378,12 +383,12 @@ export function fromParams(input, catalogue) {
     }
     const per = f(pre + 'thrust_kn', def.thrust) / n, isp = f(pre + 'isp', def.isp);
     const prop = g(pre + 'propellant', def.ptype);
-    const close = (x, y) => Math.abs(x - y) <= 0.02 * Math.max(Math.abs(y), 1);
+    const close = (x, y) => Math.abs(x - y) <= 1e-12 * Math.max(Math.abs(y), 1);
     let e = engines.find(x => x.generic && x.prop === prop && close(x.thrust_kn, per) && close(x.isp_vac, isp));
-    if (!e) e = engines.filter(x => x.generic && x.prop === prop)
-      .sort((x, y) => Math.abs(x.thrust_kn - per) - Math.abs(y.thrust_kn - per))[0] ||
-      engines.find(x => x.generic);
-    return { e, part: { type: 'engine', engine: e.id, count: n, dry: f(pre + 'dry', def.dry) } };
+    if (!e) e = { id: 'manual', label: 'Custom engine', prop, thrust_kn: per, isp_vac: isp,
+                  mass_kg: per * 1e3 / (G0 * 100), generic: true };
+    return { e, part: { type: 'engine', engine: e.id, count: n, dry: f(pre + 'dry', def.dry),
+                        ...(e.id === 'manual' ? { custom: { ...e } } : {}) } };
   };
   const tankLen = (pre, def, d, prop) => g(pre + 'size_by', 'prop') === 'length'
     ? Math.max(f(pre + 'len', 10), 0.95 * d)
@@ -398,11 +403,11 @@ export function fromParams(input, catalogue) {
     const d = f(pre + 'diameter', coreD);
     const { e, part } = enginePart(pre, def);
     if (k !== nst) stack.push({ type: 'decoupler' });
-    stack.push({ type: 'tank', diameter: d, length: +tankLen(pre, def, d, e.prop).toFixed(2) });
+    stack.push({ type: 'tank', diameter: d, length: tankLen(pre, def, d, e?.prop || def.ptype) });
     stack.push(part);
   }
   const top = [];
-  if (q.has('l_dry') && !q.has('pod_mass') && !q.has('payload_kind')) {
+  if (g('mode', '') === 'landing' || (q.has('l_dry') && !q.has('pod_mass') && !q.has('payload_kind'))) {
     top.push({ type: 'payload', kind: 'lander', name: 'Lander', lander: {
       dry: f('l_dry', 3500), prop: f('l_prop', 9000), thrust_kn: f('l_thrust_kn', 45),
       isp: f('l_isp', 311), throttle_min: f('l_throttle_min', 10), diameter: f('l_diameter', 4.2) } });
@@ -424,7 +429,8 @@ export function fromParams(input, catalogue) {
     const { e, part } = enginePart('b_', BR);
     const d = f('b_diameter', coreD * 0.85);
     asm.boosters = { type: 'boosters', count: Math.min(8, Math.max(2, nb)), diameter: d,
-      length: +tankLen('b_', BR, d, e.prop).toFixed(2), engine: part.engine, engines: part.count,
+      length: tankLen('b_', BR, d, e?.prop || BR.ptype), engine: part.engine, engines: part.count,
+      ...(part.custom ? { custom: part.custom } : {}),
       throttle: f('b_throttle', 100), ign: f('b_ign_delay', 0), sep: f('b_sep_delay', 0), dry: part.dry };
   }
   return asm;
@@ -547,7 +553,7 @@ export function layout(asm, catalogue) {
     let h, d;
     if (p.type === 'tank') { h = p.length; d = p.diameter; }
     else if (p.type === 'engine') {
-      const e = engineById(catalogue, p.engine);
+      const e = engineForPart(catalogue, p);
       const st = a.stages.find(s => s.engine === p);
       d = st ? st.diameter : 1.8;
       const per = e ? e.thrust_kn : 100;

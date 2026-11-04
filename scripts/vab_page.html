@@ -306,7 +306,7 @@
 // ================================================================ imports
 import {
   palette, withId, emptyAssembly, analyse, layout, toParams, fromParams, missionsFor,
-  engineById, engineList, PRESETS, MISSIONS, LAUNCH_SITES, launchHourFor, LANDING_SITES, TANK_DIAMETERS,
+  engineForPart, engineList, PRESETS, MISSIONS, LAUNCH_SITES, launchHourFor, LANDING_SITES, TANK_DIAMETERS,
   TANK_CLASS, CAPSULES, PROBES, LANDERS, PROP_COLORS, propFromLength, G0,
 } from '/static/vab_parts.js';
 import * as api from '/static/api.js';
@@ -549,7 +549,7 @@ function drawThumb(cv, item) {
     else drawLander(c, { d: 26, y0: 14, y1: 14 + 0.9 * 26 }, T);
   } else if (p.type === 'tank') drawTank(c, { d: clamp(14 + 3.2 * p.diameter, 14, 50), y0: 0, y1: 46, prop: 'kerolox' }, T);
   else if (p.type === 'engine') {
-    const e = engineById(catalogue, p.engine), n = e && e.thrust_kn >= 1000 ? 3 : e && e.thrust_kn >= 100 ? 2 : 1;
+    const e = engineForPart(catalogue, p), n = e && e.thrust_kn >= 1000 ? 3 : e && e.thrust_kn >= 100 ? 2 : 1;
     drawEngine(c, { d: n === 1 ? 22 : n === 2 ? 34 : 48, y0: 0, y1: 28, n }, T);
   } else if (p.type === 'decoupler') drawDecoupler(c, { d: 44, y0: 0, y1: 6 }, T);
   else if (p.type === 'fairing') { drawCapsule(c, { d: 16, y0: 6, y1: 24, crewed: false }, T); drawFairing(c, { d: 30, y0: 0, y1: 52 }, T); }
@@ -567,7 +567,7 @@ function drawGhostShape(c, p, T) {
     else { const d = p.lander.diameter, h = 0.9 * d; drawLander(c, { d, y0: -h / 2, y1: h / 2 }, T); }
   } else if (p.type === 'tank') drawTank(c, { d: p.diameter, y0: -p.length / 2, y1: p.length / 2, prop: 'kerolox' }, T);
   else if (p.type === 'engine') {
-    const e = engineById(catalogue, p.engine), per = e ? e.thrust_kn : 100;
+    const e = engineForPart(catalogue, p), per = e ? e.thrust_kn : 100;
     const h = Math.max(0.6, Math.min(5.5, 0.75 * Math.sqrt(per / 100) + 0.4)) * Math.min(1, 1.8 / 1.2 + 0.2);
     drawEngine(c, { d: 1.8, y0: -h / 2, y1: h / 2, n: p.count }, T);
   } else if (p.type === 'decoupler') drawDecoupler(c, { d: 1.8, y0: -0.12, y1: 0.12 }, T);
@@ -956,6 +956,8 @@ function engineIn(f, cur) {
   const opt = e => `<option value="${esc(e.id)}"${e.id === cur ? ' selected' : ''}>${esc(e.label)} · ${
     e.thrust_kn >= 1000 ? (e.thrust_kn / 1000).toFixed(2) + ' MN' : Math.round(e.thrust_kn) + ' kN'} · ${e.isp_vac} s</option>`;
   const list = engineList(catalogue);
+  const current = sel === BOOSTERS ? asm.boosters : part(sel);
+  if (cur === 'manual' && current?.custom) list.push(current.custom);
   return `<select data-f="${f}"><optgroup label="Catalogue">${list.filter(e => !e.generic).map(opt).join('')}</optgroup>` +
          `<optgroup label="Generic (estimated)">${list.filter(e => e.generic).map(opt).join('')}</optgroup></select>`;
 }
@@ -1057,7 +1059,7 @@ function derivedFor(kind) {
     return `this tank alone holds ${fmtT(propFromLength(p.length, p.diameter, prop))} of ${prop}`;
   }
   if (kind === 'engine' && p) {
-    const e = engineById(catalogue, p.engine);
+    const e = engineForPart(catalogue, p);
     return e ? `${p.count} × ${Math.round(e.thrust_kn)} kN = ${Math.round(p.count * e.thrust_kn)} kN · ${e.prop}` : '';
   }
   if (kind === 'booster' && an.boosters) {
@@ -1279,7 +1281,7 @@ function itemStats(item) {
     add('default length', `${p.length} m`);
     add('kerolox at default', fmtT(propFromLength(p.length, p.diameter, 'kerolox')));
   } else if (p.type === 'engine') {
-    const e = engineById(catalogue, p.engine) || {};
+    const e = engineForPart(catalogue, p) || {};
     add('thrust', e.thrust_kn >= 1000 ? `${(e.thrust_kn / 1000).toFixed(2)} MN` : `${Math.round(e.thrust_kn)} kN`);
     add('Isp vac', `${e.isp_vac} s`);
     if (e.isp_sl) add('Isp sea level', `${Math.round(e.isp_sl)} s`);
@@ -1290,7 +1292,7 @@ function itemStats(item) {
   else if (p.type === 'fairing') { add('mass', fmtT(p.mass)); add('jettison', '120 km'); }
   else if (p.type === 'boosters') {
     add('sets', `${p.count} × ⌀${p.diameter} m × ${p.length} m`);
-    add('engine', engineById(catalogue, p.engine)?.label || p.engine);
+    add('engine', engineForPart(catalogue, p)?.label || p.engine);
     add('engines each', p.engines);
   }
   return `<dl>${rows.join('')}</dl>`;
@@ -1666,13 +1668,13 @@ function ghostDims(p) {
   }
   if (p.type === 'tank') return { d: p.diameter, h: p.length, prop: 'kerolox', n: 1, core };
   if (p.type === 'engine') {
-    const e = engineById(catalogue, p.engine), per = e ? e.thrust_kn : 100;
+    const e = engineForPart(catalogue, p), per = e ? e.thrust_kn : 100;
     const h = Math.max(0.6, Math.min(5.5, 0.75 * Math.sqrt(per / 100) + 0.4)) * Math.min(1, 1.8 / 1.2 + 0.2);
     return { d: core, h, prop: e ? e.prop : 'kerolox', n: p.count, core };
   }
   if (p.type === 'decoupler') return { d: core, h: 0.25, prop: 'kerolox', n: 1, core };
   if (p.type === 'fairing') return { d: 2.6, h: 4, prop: 'kerolox', n: 1, core };
-  const e = engineById(catalogue, p.engine);
+  const e = engineForPart(catalogue, p);
   return { d: p.diameter, h: p.length, core, prop: e ? e.prop : 'kerolox', n: p.engines || 1 };
 }
 

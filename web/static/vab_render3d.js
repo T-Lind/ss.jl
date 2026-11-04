@@ -555,6 +555,7 @@ export function createVabRenderer(canvas) {
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // the vehicle: opaque parts first, then the translucent fairing and ghost
+    gl.depthMask(true);
     gl.useProgram(lit.p);
     gl.uniformMatrix4fv(lit.u.uVP, false, cs.vp);
     gl.uniform3fv(lit.u.uEye, cs.eye);
