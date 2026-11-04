@@ -23,7 +23,7 @@
   .u-label { font-family: var(--mono); font-size: var(--t-label); letter-spacing: .16em; text-transform: uppercase; color: var(--text-3); }
 
   /* ---- layout: toolbar over (palette | canvas | report) ---- */
-  .vab { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 296px minmax(0, 1fr) 340px;
+  .vab { position: relative; flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: clamp(240px, 21vw, 296px) minmax(0, 1fr) clamp(288px, 24vw, 340px);
          grid-template-rows: auto minmax(0, 1fr); }
   .toolbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px 12px;
              background: var(--surface); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
@@ -74,24 +74,27 @@
   .tip dt { color: var(--text-3); } .tip dd { margin: 0; font-family: var(--mono); text-align: right; }
 
   /* ---- canvas ---- */
-  .center { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+  .center { container-type: inline-size; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   .viewtog { position: absolute; top: 10px; left: 12px; z-index: 5; display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
   .viewtog button { background: rgba(19,25,34,.9); border: 0; padding: 5px 11px; font-size: 12px; color: var(--text-2); }
-  .viewtog button[aria-pressed="true"] { background: var(--raise); color: var(--text); }
+  .viewtog button[aria-pressed="true"] { background: var(--raise); color: var(--text); box-shadow: inset 0 -2px var(--amber); }
+  .viewtog button:disabled, .camera-tools button:disabled { opacity: .55; cursor: default; }
   .viewtog button + button { border-left: 1px solid var(--line); }
   .viewtog[hidden] { display: none; }
-  .hold-banner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5;
+  .hold-banner { position: absolute; top: 52px; left: 50%; transform: translateX(-50%); z-index: 5;
                  background: rgba(19,25,34,.94); border: 1px solid var(--line); border-radius: 20px;
                  padding: 6px 14px; font-size: 12.5px; white-space: nowrap; pointer-events: none; }
   .hold-banner b { color: var(--nominal); }
   .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
            text-align: center; color: var(--text-2); pointer-events: none; padding: 24px; }
   .empty p { max-width: 380px; }
-  .fit { position: absolute; top: 10px; right: 12px; z-index: 5; background: var(--raise); border: 1px solid var(--line);
-         border-radius: 4px; padding: 5px 10px; font-size: 12px; }
+  .camera-tools { position: absolute; bottom: 10px; left: 12px; z-index: 5; display: flex; gap: 4px; }
+  .camera-tools button { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 5px 10px; font-size: 12px; }
+  .drawer-shade { display: none; }
   .stale-banner { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); z-index: 80; background: var(--marginal-d); border: 1px solid var(--marginal); color: var(--marginal); padding: 8px 14px; border-radius: 6px; font-size: 12.5px; }
+  @container (max-width: 565px) { .canvas-hint { display: none; } }
   .canvas-hint { position: absolute; right: 12px; bottom: 10px; font: 10.5px var(--mono); color: var(--text-3); pointer-events: none; }
   .inspector { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 6; width: min(600px, calc(100% - 28px));
                max-height: calc(100% - 28px); overflow: auto; background: rgba(19,25,34,.97); border: 1px solid var(--line);
@@ -199,15 +202,20 @@
   .dlg-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--line); }
 
   /* ---- narrow screens: palette and report become drawers ---- */
-  @media (max-width: 899px) {
+  @media (max-width: 1000px) {
     .vab { grid-template-columns: minmax(0, 1fr); }
     .drawer-btn { display: inline-block; }
-    .left, .right { position: fixed; top: 0; bottom: 0; width: min(330px, 88vw); z-index: 60; transition: transform .2s ease; }
-    .left { left: 0; transform: translateX(-104%); }
-    .right { right: 0; transform: translateX(104%); }
-    body.show-left .left, body.show-right .right { transform: none; }
+    .center, .left, .right, .drawer-shade { grid-area: 2 / 1; }
+    .left, .right { position: relative; width: min(330px, 88vw); z-index: 12; visibility: hidden; }
+    .right { justify-self: end; }
+    body.show-left .left, body.show-right .right { visibility: visible; }
+    body:is(.show-left,.show-right) .drawer-shade { display: block; position: relative; z-index: 11; border: 0; background: rgba(4,9,16,.53); }
+    .toolbar { gap: 5px; padding: 5px 8px; }
+    .toolbar .name { width: clamp(90px, 20vw, 160px); }
+    .toolbar .launch { padding: 7px 12px; }
     .canvas-hint { display: none; }
-    .dlg-body { grid-template-columns: 1fr; }
+    .dlg-body { display: block; overflow: auto; }
+    .missions, .dlg-side { overflow: visible; }
     .dlg-side { border-left: 0; border-top: 1px solid var(--line); }
   }
   .inspector.collapsed .ins-b, .inspector.collapsed .ins-f { display: none; }
@@ -277,11 +285,12 @@
       <div class="menu" id="liveryMenu" hidden></div>
     </div>
     <span class="tb-spacer"></span>
-    <button class="btn drawer-btn" id="tPal">Parts</button>
-    <button class="btn drawer-btn" id="tRep">Report</button>
+    <button class="btn drawer-btn" id="tPal" aria-controls="palette" aria-expanded="false">Parts</button>
+    <button class="btn drawer-btn" id="tRep" aria-controls="right" aria-expanded="false">Report</button>
     <button class="launch" id="bLaunch" disabled>LAUNCH ▸</button>
   </header>
 
+  <button type="button" class="drawer-shade" id="closeDrawer" aria-label="Close side panel"></button>
   <aside class="left" id="palette" aria-label="Parts palette">
     <nav class="cats" id="cats"></nav>
     <div class="pal-main">
@@ -296,8 +305,8 @@
     <div class="viewtog" id="viewTog" role="group" aria-label="View mode"><button data-v="3d" aria-pressed="true">3D</button><button data-v="2d" aria-pressed="false">Blueprint</button><button id="xrayBtn" aria-pressed="false" title="Show the payload through the fairing">X-ray</button><button id="explodeBtn" aria-pressed="false" title="Separate the launch stages for inspection">Explode</button></div>
     <div class="hold-banner" id="holdBanner" hidden></div>
     <div class="empty" id="emptyMsg" hidden><p>Hold a payload from the palette, then click the top of the stack. Double-click any part to add it straight away.</p></div>
-    <button class="fit" id="bFit">Fit</button>
-    <div class="canvas-hint">wheel zoom · drag pan · double-click fit</div>
+    <div class="camera-tools"><button id="engineView" title="Look up at the first-stage nozzles">Engine deck</button><button id="bFit" title="Frame the whole vehicle">Fit</button></div>
+    <div class="canvas-hint" id="canvasHint"></div>
     <section class="inspector" id="inspector" hidden></section>
   </main>
 
@@ -631,6 +640,11 @@ function touch() {
   const g = boosterGeom();
   if (g) { halfW = Math.max(halfW, g.off + g.bd / 2); height = Math.max(height, g.bellH + g.L + 0.7 * g.bd); }
   ext = { halfW, height };
+  const xray = $('#xrayBtn');
+  xray.disabled = !lay.fairing;
+  xray.title = lay.fairing ? 'Show the payload through the fairing' : 'Add a fairing to use X-ray';
+  if (!lay.fairing) { xrayOn = false; xray.setAttribute('aria-pressed', 'false'); }
+  $('#engineView').disabled = !an.stages.length;
 }
 
 
@@ -945,7 +959,7 @@ function duplicateSel() {
 }
 
 // ================================================================ hold
-function startHold(item) { holdItem = item; holdPart = item.make(); setHoldUI(); requestDraw(); }
+function startHold(item) { holdItem = item; holdPart = item.make(); setDrawer(null); setHoldUI(); requestDraw(); }
 function cancelHold() { holdItem = null; holdPart = null; hovKey = null; setHoldUI(); requestDraw(); }
 function setHoldUI() {
   if (holdPart) {
@@ -1976,6 +1990,20 @@ function startAssembly() {
   return fromParams(PRESETS['Sable'], catalogue);
 }
 
+function setDrawer(side) {
+  for (const [name, id] of [['left', 'tPal'], ['right', 'tRep']]) {
+    const open = side === name;
+    document.body.classList.toggle('show-' + name, open);
+    $('#' + id).setAttribute('aria-expanded', String(open));
+  }
+}
+
+function fitVehicle() {
+  autoFit3 = true; view.auto = true;
+  if (use3d && R3) { cam3().yaw = 25 * DEG; cam3().pitch = 12 * DEG; }
+  requestDraw();
+}
+
 function bind() {
   el.name.addEventListener('input', () => mutate(n => { n.name = el.name.value; }, { coalesce: 'name', fromIns: true }));
   el.undo.onclick = undo;
@@ -1989,9 +2017,19 @@ function bind() {
   };
   document.addEventListener('click', e => { if (!e.target.closest('.menu-wrap')) toggleMenu(false); });
   $('#bNew').onclick = () => { cancelHold(); sel = null; commit(emptyAssembly('Untitled')); };
-  $('#bFit').onclick = () => { autoFit3 = true; view.auto = true; requestDraw(); };
-  $('#tPal').onclick = () => document.body.classList.toggle('show-left');
-  $('#tRep').onclick = () => document.body.classList.toggle('show-right');
+  $('#bFit').onclick = fitVehicle;
+  $('#engineView').onclick = () => {
+    if (!an.stages.length) return;
+    autoFit3 = false;
+    const width = an.boosters ? ext.halfW : an.stages[0].diameter / 2;
+    R3.fit(width * 2.2, width);
+    cam3().target[1] = 0;
+    cam3().pitch = -82 * DEG;
+    requestDraw();
+  };
+  $('#tPal').onclick = () => setDrawer(document.body.classList.contains('show-left') ? null : 'left');
+  $('#tRep').onclick = () => setDrawer(document.body.classList.contains('show-right') ? null : 'right');
+  $('#closeDrawer').onclick = () => setDrawer(null);
 
   el.search.addEventListener('input', () => { query = el.search.value; buildGrid(); });
   el.cats.onclick = e => {
@@ -2034,7 +2072,7 @@ function bind() {
           if (press.pan) c.target[1] += e.movementY * c.dist * 0.0022;
           else {
             c.yaw -= e.movementX * 0.006;
-            c.pitch = clamp(c.pitch + e.movementY * 0.005, -5 * DEG, 60 * DEG);
+            c.pitch = clamp(c.pitch + e.movementY * 0.005, -86 * DEG, 80 * DEG);
           }
         } else if (press.button === 0) { view.auto = false; view.ox += e.movementX; view.oy += e.movementY; }
       }
@@ -2072,17 +2110,15 @@ function bind() {
     view.s = ns; view.auto = false;
     requestDraw();
   }, { passive: false });
-  cv.addEventListener('dblclick', () => {
-    autoFit3 = true; view.auto = true;
-    requestDraw();
-  });
+  cv.addEventListener('dblclick', fitVehicle);
   cv.addEventListener('contextmenu', e => { e.preventDefault(); });
 
 
   document.addEventListener('keydown', e => {
     if (el.dlg.open) return;
     if (e.key === 'Escape') {
-      if (!el.presetMenu.hidden) toggleMenu(false);
+      if (document.body.matches('.show-left, .show-right')) setDrawer(null);
+      else if (!el.presetMenu.hidden) toggleMenu(false);
       else if (holdPart) cancelHold();
       else if (sel) { sel = null; renderInspector(); }
       return;
@@ -2138,13 +2174,14 @@ function focusStage(k) {
     autoFit3 = false;
     R3.fit(height * 1.2, width);
     cam3().target[1] = mid;
+    if (cam3().pitch < -50 * DEG) cam3().pitch = 12 * DEG;
   } else {
     view.auto = false;
     view.s = clamp(Math.min(ch * 0.68 / Math.max(1, height), cw * 0.32 / Math.max(1, width)), 2, 400);
     view.ox = cw / 2;
     view.oy = ch / 2 + mid * view.s;
   }
-  document.body.classList.remove('show-right');
+  setDrawer(null);
   requestDraw();
 }
 
@@ -2162,6 +2199,8 @@ function initRenderer() {
 function setView3(on) {
   use3d = !!R3 && on;
   $('#gl').hidden = !use3d;
+  $('#engineView').hidden = !use3d;
+  $('#canvasHint').textContent = use3d ? 'drag to orbit · Shift-drag to pan · wheel to zoom' : 'drag to pan · wheel to zoom · double-click to fit';
   $$('#viewTog [data-v]').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.v === '3d') === use3d)));
   if (use3d) autoFit3 = true;
   resize();
@@ -2208,9 +2247,8 @@ function ghostDims(p) {
   }
   if (p.type === 'tank') return { d: p.diameter, h: p.length, prop: 'kerolox', n: 1, core };
   if (p.type === 'engine') {
-    const e = engineForPart(catalogue, p), per = e ? e.thrust_kn : 100;
-    const h = Math.max(0.6, Math.min(5.5, 0.75 * Math.sqrt(per / 100) + 0.4)) * Math.min(1, 1.8 / 1.2 + 0.2);
-    return { d: core, h, prop: e ? e.prop : 'kerolox', n: p.count, core };
+    const e = engineForPart(catalogue, p);
+    return { prop: e ? e.prop : 'kerolox', n: p.count, core };
   }
   if (p.type === 'decoupler') return { d: core, h: 0.25, prop: 'kerolox', n: 1, core };
   if (p.type === 'fairing') return { d: 2.6, h: 4, prop: 'kerolox', n: 1, core };
@@ -2219,11 +2257,25 @@ function ghostDims(p) {
 }
 
 // The ghost sits at the hovered attach point; nothing shows until one is hovered.
+let enginePreview = null;
 function ghost3() {
   if (!holdPart || !hovKey) return null;
   const n = curNodes3.find(q => q.key === hovKey);
   if (!n) return null;
   const g = ghostDims(holdPart);
+  // Preview an engine against the same stage and tank as its eventual installation.
+  if (holdPart.type === 'engine') {
+    if (enginePreview?.lay !== lay || enginePreview.part !== holdPart || enginePreview.idx !== n.idx) {
+      const proposed = { ...asm, parts: asm.parts.slice() };
+      const part = { ...holdPart, id: 'preview-engine' };
+      insertStack(proposed, n.idx, part);
+      const preview = layout(proposed, catalogue, exploded);
+      const row = preview.rows.find(r => r.part === part);
+      enginePreview = { lay, part: holdPart, idx: n.idx, d: row.d, h: row.y1 - row.y0, stage: row.stage || 1, count: preview.analysis.stages.length };
+    }
+    const { d, h, stage, count } = enginePreview;
+    return { ...g, part: holdPart, d, h, stage, count, y: n.y - h / 2 };
+  }
   if (n.kind === 'boosters') return { part: holdPart, d: g.d, h: g.h, y: 0, radial: true, core: g.core, prop: g.prop, n: g.n };
   const base = n.kind === 'payload' || n.kind === 'fairing' ? n.y : n.y - g.h / 2;
   return { part: holdPart, d: g.d, h: g.h, y: base, radial: false, core: g.core, prop: g.prop, n: g.n };
@@ -2277,6 +2329,8 @@ function draw3DOverlay() {
       c.fillStyle = '#E4E9F0'; c.fillText(n.label, p.x + 23, p.y + 4);
     }
   }
+  // From the engine deck, the stage spans project on top of one another.
+  if (Math.abs(cam3().pitch) > 65 * DEG) return;
   // stage brackets, just right of the vehicle's silhouette
   an.stages.forEach(s => {
     const sp = stageSpan(s.k);

@@ -17,10 +17,10 @@ function fn(name, text = source) {
 test('flight events seek to the chosen instant and distinguish inspecting from dismissing', () => {
   const rows = { children: [], replaceChildren() { this.children = []; }, append(row) { this.children.push(row); } };
   const dialog = { showModal() { this.open = true; }, close() { this.open = false; this.onclose(); } };
-  const c = createContext({ started: true, running: true, fin, tEnd: 99, fmtClock: String,
+  const c = createContext({ started: true, running: true, simT: 5, fin, tEnd: 99, fmtClock: String,
     EVS: [{ t: 2, phase: 'ascent', s: 'IGNITION', mass_kg: 2000, h_km: 0, v_mps: 0 },
           { t: 20, phase: 'ascent', s: 'SEPARATION' }, { t: 100, s: 'OUTSIDE PLAYBACK' }],
-    document: { createElement: () => ({ append(...items) { this.children = items; } }) },
+    document: { createElement: () => ({ append(...items) { this.children = items; }, setAttribute(k,v) { this[k] = v; }, scrollIntoView() {} }) },
     $: id => ({ eventLog: dialog, eventRows: rows })[id],
     jumpTo(t) { c.at = t; },
   });
@@ -28,6 +28,7 @@ test('flight events seek to the chosen instant and distinguish inspecting from d
   c.openEventLog();
   assert.equal(c.running, false);
   assert.equal(rows.children.length, 2);
+  assert.equal(rows.children[0]['aria-current'], 'time');
   assert.match(rows.children[0].children[2].textContent, /0.0 km · 0 m\/s · 2.0 t/);
   dialog.close();
   assert.equal(c.running, true);

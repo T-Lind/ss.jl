@@ -25,7 +25,7 @@
   /* --- ink --------------------------------------------------------------- */
   --text:     #E4E9F0;
   --text-2:   #8B97A8;   /* labels, units, secondary values */
-  --text-3:   #5A6675;   /* captions, disabled, axis ticks */
+  --text-3:   #8592A4;   /* captions, disabled, axis ticks */
 
   /* --- reserved meaning --------------------------------------------------
    * amber is LIVE MISSION STATE and nothing else: the clock, the active
@@ -347,6 +347,7 @@
   white-space: nowrap;
 }
 .navlink:hover { background: var(--raise); color: var(--text); }
+:where(button, a, select, input, [role="button"]):focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
 /* The page you are on is stated, not merely implied by which link is missing */
 .navlink[aria-current="page"] {
   background: var(--raise);
@@ -356,9 +357,11 @@
 }
 .appnav-end { margin-left: auto; display: flex; align-items: center; gap: var(--s3); }
 @media (max-width: 800px) {
-  .appnav { flex-wrap: wrap; gap: var(--s2); }
-  .appnav-links { order: 2; flex-basis: 100%; margin-left: 0; }
-  .appnav-end { flex-wrap: wrap; }
+  .appnav { flex-wrap: nowrap; gap: var(--s2); padding: 5px 8px; }
+  .appnav-brand { flex-shrink: 0; }
+  .appnav-links { flex: 1; flex-wrap: nowrap; margin-left: 0; overflow-x: auto; scrollbar-width: thin; }
+  .appnav-links .navlink { flex-shrink: 0; padding: 7px 9px; }
+  .appnav > .appnav-end, .appnav > [data-appver] { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

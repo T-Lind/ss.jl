@@ -5,7 +5,8 @@
 // from the layout rows, so the vehicle on screen is the stack the simulator
 // is handed. Units are metres, y up, the vehicle axis on x = z = 0.
 //
-// No imports, on purpose: the page passes a canvas and a scene.
+// Use the flight mesh's nozzle positions for the hangar and placement preview.
+import { stageBells } from './engine_layout.js';
 
 const TAU = Math.PI * 2;
 const FOV = 35 * Math.PI / 180;
@@ -194,32 +195,6 @@ function buildTank(B, y0, y1, d, prop, ox, oz, paint = null) {
   lathe(B, P, 48, ox, oz);
 }
 
-// Bell positions for n engines inside a stage of diameter d: one bell for
-// one engine; up to eight on a ring; more gets a centre bell plus rings.
-function bellLayout(n, d) {
-  if (n <= 1) return [{ x: 0, z: 0, bw: 0.5 * d }];
-  const sizes = [];
-  let rem = n - (n > 8 ? 1 : 0), cap = 8;
-  while (rem > 0) { const s = Math.min(rem, cap); sizes.push(s); rem -= s; cap += 8; }
-  const centre = n > 8, K = sizes.length;
-  for (let bw = 0.5 * d; bw > 0.01 * d; bw *= 0.96) {
-    const Rout = 0.5 * d - 0.72 * bw;
-    const radii = sizes.map((_, k) => Rout - (K - 1 - k) * 1.7 * bw);
-    const fits = radii.every((R, k) => R > 0 && (2 * Math.PI * R) / sizes[k] >= 1.15 * bw)
-      && (!centre || radii[0] - 0.72 * bw >= 0.72 * 1.25 * bw + 0.05 * bw);
-    if (!fits) continue;
-    const out = centre ? [{ x: 0, z: 0, bw: 1.25 * bw }] : [];
-    sizes.forEach((s, k) => {
-      for (let i = 0; i < s; i++) {
-        const t = TAU * i / s + k * 0.4;
-        out.push({ x: radii[k] * Math.cos(t), z: radii[k] * Math.sin(t), bw });
-      }
-    });
-    return out;
-  }
-  return [{ x: 0, z: 0, bw: 0.3 * d }];
-}
-
 // A quad from four points in order, flat-shaded with normal n.
 function quadFace(B, p, n, col) {
   const a = B.vert(p[0], n, col), b = B.vert(p[1], n, col), c = B.vert(p[2], n, col), d = B.vert(p[3], n, col);
@@ -246,19 +221,30 @@ function prismCrinkle(B, sides, R, y0, y1, rot, col, col2, ox = 0, oz = 0) {
   }
 }
 
-function buildEngine(B, y0, y1, d, n, ox, oz) {
+function buildEngine(B, y0, y1, d, n, ox, oz, stage = 1, count = 2) {
   const h = y1 - y0, plateH = Math.min(0.6, Math.max(0.25, 0.2 * h)), top = y1 - plateH, Rp = 0.49 * d;
   lathe(B, [{ r: 0, y: top, c: C.dark }, { r: Rp, y: top, c: C.dark },
             { r: Rp, y: y1, c: C.dark }, { r: 0, y: y1, c: C.dark }], 40, ox, oz);
   const bh = top - y0;
-  for (const b of bellLayout(n, d)) {
-    const rBot = 0.72 * b.bw, rTop = 0.5 * b.bw, P = [];
-    for (let k = 0; k <= 8; k++) {
+  const bells = stageBells(n, d, stage - 1, count);
+  for (const [dx, dz, exit] of bells.pts) {
+    const cx = ox + dx, cz = oz + dz, throat = bells.throatRadius;
+    const bellH = Math.min(bh * 0.82, bells.length), lip = y0 + bellH * 0.035;
+    // Trace the inside of the nozzle to its lip and back up the outer wall.
+    const P = [{ r: 0, y: y0 + bellH, c: C.throat }, { r: throat * 0.92, y: y0 + bellH, c: C.throat }];
+    for (let k = 7; k >= 0; k--) {
       const t = k / 8;
-      const r = rBot + (rTop - rBot) * Math.pow(t, 1.8), y = y0 + t * bh;
-      P.push({ r, y, c: t > 0.9 ? C.throat : mix3(C.copperDark, C.copper, Math.min(1, t * 2.2)) });
+      P.push({ r: (exit - (exit - throat) * t ** 1.6) * 0.96, y: y0 + t * bellH, c: C.copperDark });
     }
-    lathe(B, P, 28, ox + b.x, oz + b.z);
+    P.push({ r: exit, y: y0, c: C.metal }, { r: exit, y: lip, c: C.metal });
+    for (let k = 1; k <= 8; k++) {
+      const t = k / 8;
+      P.push({ r: exit - (exit - throat) * t ** 1.6, y: y0 + t * bellH, c: C.copper });
+    }
+    P.push({ r: throat * 1.2, y: y0 + bellH, c: C.gun }, { r: throat * 1.2, y: top, c: C.gun });
+    lathe(B, P, 28, cx, cz);
+    for (const side of [-1, 1])
+      tube(B, [cx + side * throat, y0 + bellH, cz], [cx + side * exit * 0.86, top, cz], exit * 0.09, C.metal);
   }
 }
 
@@ -403,7 +389,7 @@ function buildStack(scene) {
   rows.forEach((r, j) => {
     const p = r.part, B = new Build(), R = r.d / 2, paint = p.paint || null;
     if (p.type === 'tank') buildTank(B, r.y0, r.y1, r.d, propOf.get(p.id) || 'kerolox', 0, 0, paint);
-    else if (p.type === 'engine') buildEngine(B, r.y0, r.y1, r.d, Math.max(1, Math.min(33, p.count || 1)), 0, 0);
+    else if (p.type === 'engine') buildEngine(B, r.y0, r.y1, r.d, Math.max(1, Math.min(33, p.count || 1)), 0, 0, r.stage || 1, an.stages.length);
     else if (p.type === 'decoupler') buildDecoupler(B, r.y0, r.y1, r.d, 0, 0);
     else if (p.type === 'payload') {
       if (p.kind === 'capsule') buildCapsule(B, r.y0, r.y1, r.d, 0, 0, paint, p.crewed !== false);
@@ -445,7 +431,7 @@ function buildGhostMesh(gh) {
   const B = new Build(), p = gh.part, d = gh.d, h = gh.h;
   if (gh.radial) buildBoosters(B, { count: p.count, bd: p.diameter, L: p.length, n: gh.n, prop: gh.prop, core: gh.core });
   else if (p.type === 'tank') buildTank(B, 0, h, d, gh.prop, 0, 0);
-  else if (p.type === 'engine') buildEngine(B, 0, h, d, gh.n, 0, 0);
+  else if (p.type === 'engine') buildEngine(B, 0, h, d, gh.n, 0, 0, gh.stage, gh.count);
   else if (p.type === 'decoupler') buildDecoupler(B, 0, h, d, 0, 0);
   else if (p.type === 'fairing') buildFairing(B, 0, h, d);
   else if (p.type === 'payload') {
@@ -469,8 +455,8 @@ uniform vec3 uEye; uniform vec3 uKey; uniform float uMetal; uniform float uShin;
 uniform vec3 uTint; uniform float uTintK; uniform float uAlpha; uniform float uGhost;
 void main() {
   vec3 N = normalize(vN);
-  if (!gl_FrontFacing) N = -N;
   vec3 V = normalize(uEye - vW);
+  if (dot(N, V) < 0.0) N = -N;
   vec3 base = pow(vC, vec3(2.2));
   vec3 L = normalize(uKey);
   float ndl = max(dot(N, L), 0.0);
@@ -483,7 +469,8 @@ void main() {
   vec3 R = reflect(-V, N);
   vec3 env = mix(vec3(0.05, 0.06, 0.08), vec3(0.85, 0.9, 1.0), smoothstep(-0.25, 0.85, R.y));
   // two soft-box reflections give metal its streaks
-  float strip = exp(-pow((R.x + 0.45) * 3.5, 2.0)) * 0.9 + exp(-pow((R.x - 0.6) * 5.0, 2.0)) * 0.35;
+  vec2 streak = vec2((R.x + 0.45) * 3.5, (R.x - 0.6) * 5.0);
+  float strip = dot(exp(-streak * streak), vec2(0.9, 0.35));
   col += (env + vec3(strip)) * base * uMetal * 0.6;
   col += keyCol * spec * 0.8;
   col += vec3(0.35, 0.55, 0.95) * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.22;
@@ -620,10 +607,12 @@ export function createVabRenderer(canvas) {
   }
 
   function sync(scene) {
-    const key = JSON.stringify([scene.asm.parts, scene.asm.boosters, scene.lay.height]);
-    if (key !== state.key) { rebuild(scene); state.key = key; }
+    if (scene.lay !== state.scene?.lay) {
+      const key = JSON.stringify([scene.asm.parts, scene.asm.boosters, scene.lay.height]);
+      if (key !== state.key) { rebuild(scene); state.key = key; }
+    }
     const gh = scene.ghost;
-    const gkey = gh ? JSON.stringify([gh.part, gh.d, gh.h, gh.radial, gh.core, gh.prop, gh.n]) : '';
+    const gkey = gh ? JSON.stringify([gh.part, gh.d, gh.h, gh.radial, gh.core, gh.prop, gh.n, gh.stage, gh.count]) : '';
     if (gkey !== state.gkey) {
       if (state.ghost) freeMesh(state.ghost);
       state.ghost = null;
@@ -667,7 +656,7 @@ export function createVabRenderer(canvas) {
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0.02, 0.027, 0.039, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    gl.enableVertexAttribArray(0); gl.enableVertexAttribArray(1); gl.enableVertexAttribArray(2);
+    gl.enableVertexAttribArray(0); gl.disableVertexAttribArray(1); gl.disableVertexAttribArray(2);
     const cs = camState();
     const pxPerM = 2 * Math.tan(FOV / 2) / Math.max(1, canvas.clientHeight);
 
@@ -686,18 +675,19 @@ export function createVabRenderer(canvas) {
     gl.uniform1f(floor.u.uPx, pxPerM);
     gl.bindBuffer(gl.ARRAY_BUFFER, floorBuf);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    if (cs.eye[1] >= 0) gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.depthMask(false);
     gl.useProgram(blobP.p);
     gl.uniformMatrix4fv(blobP.u.uVP, false, cs.vp);
     gl.uniform1f(blobP.u.uR, state.blob);
     gl.bindBuffer(gl.ARRAY_BUFFER, blobBuf);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    if (cs.eye[1] >= 0 && state.meshes.length) gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // the vehicle: opaque parts first, then the translucent fairing and ghost
     gl.depthMask(true);
     gl.useProgram(lit.p);
+    gl.enableVertexAttribArray(1); gl.enableVertexAttribArray(2);
     gl.uniformMatrix4fv(lit.u.uVP, false, cs.vp);
     gl.uniform3fv(lit.u.uEye, cs.eye);
     gl.uniform3fv(lit.u.uKey, KEY);
@@ -737,17 +727,22 @@ export function createVabRenderer(canvas) {
   function hitCyl(o, d, c) {
     const ox = o[0] - c.cx, oz = o[2] - c.cz;
     const a = d[0] * d[0] + d[2] * d[2];
-    if (a < 1e-12) return null;
+    let cap = null;
+    if (Math.abs(d[1]) > 1e-9) for (const y of [c.y0, c.y1]) {
+      const t = (y - o[1]) / d[1];
+      if (t > 0 && (cap === null || t < cap) && Math.hypot(ox + t*d[0], oz + t*d[2]) <= c.r) cap = t;
+    }
+    if (a < 1e-12) return cap;
     const b = 2 * (ox * d[0] + oz * d[2]), cc = ox * ox + oz * oz - c.r * c.r;
     const disc = b * b - 4 * a * cc;
-    if (disc < 0) return null;
+    if (disc < 0) return cap;
     const sq = Math.sqrt(disc);
     for (const t of [(-b - sq) / (2 * a), (-b + sq) / (2 * a)]) {
       if (t <= 0) continue;
       const y = o[1] + t * d[1];
-      if (y >= c.y0 && y <= c.y1) return t;
+      if (y >= c.y0 && y <= c.y1) return cap === null ? t : Math.min(t, cap);
     }
-    return null;
+    return cap;
   }
 
   return {

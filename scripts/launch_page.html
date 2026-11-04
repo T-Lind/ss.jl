@@ -48,6 +48,9 @@
            font: 600 28px ui-monospace, Consolas, monospace; letter-spacing: 2px;
            color: var(--acc); }
   #clock.go { color: var(--go); }
+  #playback { margin-top: 5px; padding: 3px 9px; border-radius: 4px; background: rgba(8,12,18,.85);
+    color: var(--ink); border: 1px solid rgba(255,255,255,.23); font: 12px system-ui; cursor: pointer; }
+  #playback[data-paused="true"] { color: var(--acc); border-color: var(--acc); }
   #phase { font: 500 11px system-ui; letter-spacing: 5px; color: var(--dim);
            margin-top: 3px; }
   /* The HUD sits over whatever the camera happens to be looking at — sunlit
@@ -145,15 +148,31 @@
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .runpick:hover { border-color: var(--acc); color: var(--acc); }
   #eventLog { color: var(--ink); background: #151922; border: 1px solid #47505d; border-radius: 10px;
-    width: min(520px, 90vw); max-height: min(70vh, 640px); padding: 16px; }
+    width: min(520px, 90vw); max-height: min(70vh, 640px); padding: 16px; margin: auto; }
+  #eventLog[open] { display: flex; flex-direction: column; gap: 10px; }
   #eventLog::backdrop { background: rgba(5, 9, 14, .55); }
   #eventLog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   #eventLog h2 { font: 600 20px system-ui; margin: 0; }
   #eventLog p { font: 13px system-ui; color: var(--dim); }
-  #eventRows { display: grid; gap: 4px; }
+  #eventRows { display: grid; gap: 4px; overflow-y: auto; overscroll-behavior: contain; }
   #eventRows button { background: #202733; color: var(--ink); border: 1px solid transparent; border-radius: 4px;
     display: grid; grid-template-columns: 112px 1fr; gap: 3px 8px; padding: 9px; text-align: left; cursor: pointer; }
   #eventRows button:is(:hover, :focus-visible) { border-color: var(--acc); }
+  #eventRows button[aria-current="time"] { box-shadow: inset 3px 0 var(--acc); background: #32303a; }
+  @media (max-width: 900px) {
+    #speed, #cams, #viewopts { left: 8px; right: 8px; overflow-x: auto; scrollbar-width: none; gap: 4px; }
+    #speed { bottom: 20px; } #cams { bottom: 50px; } #viewopts { bottom: 80px; }
+    #speed > *, #cams > *, #viewopts > * { flex-shrink: 0; }
+    #hatch_action { bottom: 112px; }
+    #help { top: 54px; right: 8px; max-height: calc(100% - 168px); overflow: auto; max-width: calc(100vw - 16px); }
+    #keys { display: none; }
+    .fh-root .fh-attitude { bottom: 112px; }
+  }
+  @media (max-width: 600px) {
+    #clock { top: 49px; left: auto; right: 8px; transform: none; font-size: 19px; }
+    #stats { top: 49px; left: 6px; padding: 4px 6px; font-size: 10px; line-height: 1.45; }
+    #stats b { width: 75px; } #stats span { min-width: 0; }
+  }
   #eventRows time { font: 12px ui-monospace, monospace; color: var(--acc); }
   #eventRows small { grid-column: 2; color: var(--dim); }
   .hidden { display: none !important; }
@@ -178,7 +197,7 @@
     <span class="u-label" data-appver></span>
   </span>
 </nav>
-<div class="hud" id="clock">T–00:15<div id="phase">ASCENT</div></div>
+<div class="hud" id="clock">T–00:15<div id="phase">ASCENT</div><button type="button" id="playback" aria-label="Pause replay">Ⅱ Pause</button></div>
 <div class="hud" id="stats"></div>
 <div class="hud" id="toast"></div>
 <button id="hatch_action" class="hidden" type="button">HATCH · SUIT UP</button>
@@ -225,7 +244,7 @@
 <div id="cabtip" class="hidden"></div>
 <dialog id="eventLog" aria-labelledby="eventTitle">
   <header><h2 id="eventTitle">Flight events</h2><form method="dialog"><button class="chip">Close</button></form></header>
-  <p>Select an event to pause there. Press Space to resume.</p><div id="eventRows"></div>
+  <p>Select an event to pause there. Use Resume or press Space to continue.</p><div id="eventRows"></div>
 </dialog>
 <canvas id="seek"></canvas>
 <div id="overlay">
@@ -8403,6 +8422,12 @@ function drawHUD(sc, ph) {
   const ck = $('clock');
   ck.childNodes[0].nodeValue = fmtClock(simT);
   ck.classList.toggle('go', simT >= 0);
+  const play = $('playback');
+  if (play.dataset.paused !== String(!running)) {
+    play.dataset.paused = String(!running);
+    play.textContent = running ? 'Ⅱ Pause' : '▶ Resume';
+    play.setAttribute('aria-label', running ? 'Pause replay' : 'Resume replay');
+  }
   $('phase').textContent = (landed(ph) ? 'SURFACE' : ph.n) +
     (warpEff > 1.5 ? ` · ×${Math.round(warpEff)}` : '');
   let rows;
@@ -8823,7 +8848,7 @@ function toggleInstruments() {
 function openEventLog() {
   const dialog = $('eventLog'), rows = $('eventRows');
   if (!started || dialog.open) return;
-  let resume = running;
+  let resume = running, selected = false, currentRow = null;
   running = false;
   rows.replaceChildren();
   const events = EVS.filter(e => e.t >= -15 && e.t <= tEnd);
@@ -8839,16 +8864,22 @@ function openEventLog() {
     if (fin(e.q_kpa)) readings.push(e.q_kpa.toFixed(1) + ' kPa');
     detail.textContent = readings.filter(Boolean).join(' · ');
     row.append(time, name, detail);
+    if (e.t <= simT) currentRow = row;
     row.onclick = () => {
-      resume = false;
+      resume = false; selected = true;
       jumpTo(e.t, tEnd);
       dialog.close();
     };
     rows.append(row);
   }
   if (!events.length) rows.textContent = 'This flight contains no recorded events.';
-  dialog.onclose = () => { running = resume; $('eventButton')?.blur(); };
+  if (currentRow) currentRow.setAttribute('aria-current', 'time');
+  dialog.onclose = () => {
+    running = resume;
+    if (selected) $('playback')?.focus();
+  };
   dialog.showModal();
+  currentRow?.scrollIntoView({ block: 'nearest' });
 }
 
 function syncViewOpts() {
@@ -8872,6 +8903,7 @@ function syncViewOpts() {
   el.appendChild(log);
 }
 function initControls() {
+  $('playback').onclick = () => { running = !running; };
   $('hatch_action').addEventListener('click', () => evaToggle(phaseAt(simT)));
   refreshCams('pad');
   syncHelp();
