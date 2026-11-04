@@ -19,6 +19,7 @@ using Printf
 const PAGE_PATH = Ref(joinpath(@__DIR__, "panel_page.html"))
 const LAUNCH_PATH = Ref(joinpath(@__DIR__, "launch_page.html"))
 const BUILD_PATH = Ref(joinpath(@__DIR__, "build_page.html"))
+const VAB_PATH = Ref(joinpath(@__DIR__, "vab_page.html"))
 const MODELS_PATH = Ref(joinpath(@__DIR__, "models_page.html"))
 const ANALYSIS_PATH = Ref(joinpath(@__DIR__, "analysis_page.html"))
 
@@ -1888,6 +1889,10 @@ function route(method::AbstractString, path::AbstractString,
         elseif method in ("GET", "HEAD") &&
                (path == "/build" || startswith(path, "/build?"))
             return ("200 OK", "text/html; charset=utf-8", read(BUILD_PATH[], String))
+        elseif method in ("GET", "HEAD") &&
+               (path == "/vab" || startswith(path, "/vab?"))
+            # the part-based vehicle assembly; /build stays as the numeric editor
+            return ("200 OK", "text/html; charset=utf-8", read(VAB_PATH[], String))
         elseif method in ("GET", "HEAD") &&
                (path == "/models" || startswith(path, "/models?"))
             return ("200 OK", "text/html; charset=utf-8", read(MODELS_PATH[], String))

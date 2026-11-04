@@ -151,7 +151,7 @@
   <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
   <span class="appnav-links">
     <a class="navlink" id="nav_home" href="/">mission control</a>
-    <a class="navlink" id="nav_build" href="/build">vehicle builder</a>
+    <a class="navlink" id="nav_build" href="/vab">vehicle builder</a>
     <!-- same order on every page: the bar is only worth having if the link you
          want is in the place you last saw it -->
     <a class="navlink" href="#" aria-current="page">analysis</a>
@@ -395,7 +395,7 @@ function syncLinks() {
   const rq = run && run.id ? '?run=' + encodeURIComponent(run.id) : '';
   $('nav_home').href = '/' + rq;
   $('nav_launch').href = '/launch' + rq;
-  $('nav_build').href = '/build?' + Q.toString();
+  $('nav_build').href = '/vab?' + Q.toString();
 }
 // NOT called here: `run` is declared below, and reading a `let` above its
 // declaration throws — which in a module aborts everything after it, so the
@@ -1193,7 +1193,7 @@ window.__selftest = function () {
   eq('the mission mode came from the query', () => typeof MODE, 'string');
   eq('the query carries a mode', () => Q.has('mode') || MODE === 'flyby', true);
   eq('nav links carry the configuration',
-     () => $('nav_build').getAttribute('href').startsWith('/build?'), true);
+     () => $('nav_build').getAttribute('href').startsWith('/vab?'), true);
   eq('and the selftest flag is not carried into the run',
      () => Q.has('selftest'), false);
 

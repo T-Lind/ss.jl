@@ -321,7 +321,7 @@ end
         #
         # There is no browser here to prove that with, so the assertion is on
         # the thing that caused it: no in-app link opens a new window.
-        for page in ("/", "/build", "/analysis", "/launch", "/models", "/models?view=cabin")
+        for page in ("/", "/build", "/vab", "/analysis", "/launch", "/models", "/models?view=cabin")
             st, hdrs, bod = http("GET", page; port = port)
             @test st == 200
             @test !occursin("target=\"_blank\"", bod)

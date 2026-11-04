@@ -53,7 +53,7 @@
   /* The HUD sits over whatever the camera happens to be looking at — sunlit
      concrete one second, black sky the next. A shadow alone loses on light
      ground, so the readouts carry their own backing. */
-  #stats { left: 20px; bottom: 64px; font: 12px ui-monospace, Consolas, monospace;
+  #stats { left: 20px; top: 58px; font: 12px ui-monospace, Consolas, monospace;
            line-height: 1.85; padding: 8px 12px 8px 10px; border-radius: 8px;
            background: linear-gradient(90deg, rgba(8,9,11,.55), rgba(8,9,11,.28));
            backdrop-filter: blur(2px); }
@@ -148,7 +148,7 @@
   <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
   <span class="appnav-links">
     <a class="navlink" id="nav_home" href="./">mission control</a>
-    <a class="navlink" href="build_page.html">vehicle builder</a>
+    <a class="navlink" href="vab_page.html">vehicle builder</a>
     <a class="navlink" id="analysislink" href="analysis_page.html">analysis</a>
     <a class="navlink" href="#" aria-current="page">launch view</a>
     <a class="navlink" id="modelslink" href="models_page.html">spacecraft viewer</a>
@@ -220,6 +220,9 @@ import { sunEci, sunAtSite, launchHours, earthAngle, daylight, sunVisibility, lu
 import { successfulTouchdown, lunarEndLabel, lunarHatchReason, landingEndTime, landingSummary } from './static/flight_state.js';
 import { landerLayout, landerExterior, landerInterior, landerDisplay, clampLanderEye } from './static/lander_model.js';
 import { engineCluster, stageBells } from './static/engine_layout.js';
+import { createFlightHud } from './static/flight_hud.js';
+import { createLanderHud } from './static/lander_hud.js';
+import { PROP_COLORS } from './static/vab_parts.js';
 import * as api from './static/api.js';
 import { allowsShortcut, keyboardAction } from './static/ui.js';
 import * as runs from './static/runs.js';
@@ -6299,6 +6302,20 @@ function setMeshHeat(sc, view) {
     view[2]*c[0] + view[6]*c[1] + view[10]*c[2] + view[14]]);
   gl.uniform1f(MESH.u.uHeatR, POD_RP || 0.75);
 }
+// Earthshine: fill light on the lunar night side, from the Earth hanging in
+// the sky. The Earth's phase seen from the Moon is the complement of the
+// Moon's seen from Earth, so a site in lunar night faces a nearly full Earth
+// — about forty times brighter than a full Moon is to us. Physically that is
+// still a millionth of sunlight; the view is exposure-adapted the way an eye
+// is, so the fill is scaled to read (faint, blue-grey, shapes not colour)
+// rather than to photometry. Zero with the Earth below the site's horizon.
+function earthshine(sc, sun) {
+  if (sc.world !== 'moon' || !sc.earthC) return 0;
+  const eDir = V.norm(V.sub(sc.earthC, [0, 0, 0]));
+  const full = 0.5*(1 - V.dot(sun, eDir));            // Earth's lit fraction
+  const above = Math.max(0, Math.min(1, (eDir[1] + 0.05)/0.2));
+  return 0.20*full*above*(1 - daylight(sun));
+}
 function beginMeshes(view, sunV, fogDen, fogCol, amb, engI, engV, engC) {
   gl.useProgram(MESH.p);
   gl.uniform3fv(MESH.u.uSunV, sunV);
@@ -7068,7 +7085,8 @@ function drawScene(sc) {
   // a cabin has its own lighting: raise the fill so interior surfaces facing
   // away from the sun still read (the plasma/engine point light still applies)
   const amb = inCab ? 0.52 : sc.world === 'eci' ? 0.24 :
-              sc.world === 'moon' ? 0.04 + .18*daylight(sun) : .035 + (.265 + .16*dens)*light;
+              sc.world === 'moon' ? 0.04 + .18*daylight(sun) + earthshine(sc, sun)
+                                  : .035 + (.265 + .16*dens)*light;
   // Both mesh passes want identical program state, and MESH's uniforms are
   // per-program so in principle one setup would carry — but the passes are
   // separated by two other programs and a framebuffer switch, so state that is
@@ -8262,6 +8280,172 @@ function drawHUD(sc, ph) {
                                  + (zoomK !== 1 ? ' ×' + zoomK.toFixed(2) : '')]]);
   }
   $('stats').innerHTML = rows.map(r => `<b>${r[0]}</b><span>${r[1]}</span>`).join('<br>');
+  updateInstruments(sc, ph);
+}
+
+// ------------------------------------------------------------ instruments --
+// The flight instruments: an attitude ball with speed, altitude, throttle and
+// g; a staging board; and, once the lander is down to its own descent, a
+// descent console. They READ the flight — every number is the same sampled
+// trajectory the scene is drawn from — and change nothing in it.
+const G0 = 9.80665;
+const FH = createFlightHud(document.body);
+const LH = createLanderHud(document.body);
+FH.setVisible(false); LH.setVisible(false);
+const col3 = (M, j) => V.norm([M[4*j], M[4*j+1], M[4*j+2]]);
+// a world-space vector as north/east/up components, given local up and the
+// planet's pole in the same world frame
+function neuFrame(up, pole) {
+  let n = V.sub(pole, V.scale(up, V.dot(pole, up)));
+  n = V.len(n) > 1e-6 ? V.norm(n) : V.norm(V.sub([1, 0, 0], V.scale(up, up[0])));
+  const e = V.cross(n, up);                 // east = north x up (right-handed)
+  return v => [V.dot(v, n), V.dot(v, e), V.dot(v, up)];
+}
+function attitudeOf(M, toNEU) {
+  const nose = col3(M, 0), roof = col3(M, 1), right = V.cross(nose, roof);
+  return { nose: toNEU(nose), right: toNEU(right), roof: toNEU(roof) };
+}
+// The planet's pole in a site-anchored world: eMat takes world directions into
+// Earth-fixed ones, so the pole is its third row.
+const poleOf = sc => V.norm([sc.eMat[2], sc.eMat[5], sc.eMat[8]]);
+function fullThrustAt(t) {
+  // vacuum thrust of whatever is attached and lit, for the throttle gauge
+  if (!geo || !geo.stages) return 0;
+  const i = geo.stages.findIndex((s, k) => !secGone['stage' + (k + 1)]);
+  let T = i >= 0 ? +geo.stages[i].thrust_kn*1e3 : 0;
+  (geo.boosters || []).forEach((b, j) => {
+    if (secGone['booster' + (j + 1)]) return;
+    const nm = BNAMES[j], at = (L, d) => (L.find(x => x.name.endsWith('_' + nm)) || { t: d }).t;
+    if (t >= at(BIGN, 0) && t < at(BOUT, Infinity)) T += b.count*b.thrust_kn*1e3;
+  });
+  return T;
+}
+// What is left in each stage. During the ascent the logged mass is exact, so
+// the active core stage reads it directly once the hardware above it and any
+// strap-ons are taken off; strap-ons burn at constant flow between their own
+// ignition and burnout events; the last stage's coast burns (TLI, transfers)
+// draw at its rated flow through the burn windows the run reports.
+function stageBoard() {
+  if (!geo || !geo.stages || !A) return [];
+  const S = geo.stages, t = simT, out = [];
+  const pay = +geo.payload?.mass_kg || 0;
+  const stackKg = S.reduce((a, s) => a + s.dry_kg + s.prop_kg, 0) +
+                  (geo.boosters || []).reduce((a, b) => a + b.set_mass_kg, 0);
+  const fairKg = Math.max(0, (+geo.liftoff_mass_kg || 0) - stackKg - pay);
+  const bFuel = (b, j) => {
+    const nm = BNAMES[j], at = (L, d) => (L.find(x => x.name.endsWith('_' + nm)) || { t: d }).t;
+    const t0 = at(BIGN, 0), t1 = at(BOUT, t0 + (+b.burn_s || 1));
+    return 1 - Math.max(0, Math.min(1, (t - t0)/Math.max(1, t1 - t0)));
+  };
+  const active = S.findIndex((s, k) => !secGone['stage' + (k + 1)]);
+  const tEndA = A.t[A.t.length - 1];
+  const massFuel = (i, tt) => {
+    let rest = samp(A.t, A.m, Math.max(0, Math.min(tt, tEndA))) - pay - S[i].dry_kg;
+    for (let j = i + 1; j < S.length; j++) rest -= S[j].dry_kg + S[j].prop_kg;
+    if (!(tt >= fairT)) rest -= fairKg;
+    (geo.boosters || []).forEach((b, j) => {
+      if (!(tt >= (dropT['booster' + (j + 1)] ?? Infinity)))
+        rest -= b.count*(b.dry_kg + b.prop_kg*bFuel(b, j));
+    });
+    return Math.max(0, Math.min(1, rest/Math.max(1, S[i].prop_kg)));
+  };
+  (geo.boosters || []).forEach((b, j) => out.push({
+    id: 'b' + j, label: `${b.count}× strap-on`, kind: 'boosters',
+    sub: `${b.engines}× ${b.propellant} · ${(b.set_mass_kg/1000).toFixed(1)} t`,
+    color: PROP_COLORS[b.propellant] || '#e8a33c', fuel: bFuel(b, j),
+    state: secGone['booster' + (j + 1)] ? 'spent' : (t >= 0 && bFuel(b, j) < 1 && bFuel(b, j) > 0) ? 'active' : 'pending' }));
+  S.forEach((s, i) => {
+    let fuel = 1;
+    if (i === active || (i < active)) {
+      if (t <= tEndA) fuel = massFuel(i, t);
+      else {
+        // past the ascent log: the insertion value, less the coast burns
+        fuel = massFuel(i, tEndA);
+        const mdot = s.thrust_kn*1e3/(s.isp_s*G0);
+        for (const [a, b] of BURNW) fuel -= mdot*Math.max(0, Math.min(t, b) - a)/Math.max(1, s.prop_kg);
+        fuel = Math.max(0, fuel);
+      }
+    }
+    out.push({ id: 's' + i, label: `S${i + 1}`, kind: 'core',
+      sub: `${s.engines}× ${s.propellant} · ${(s.prop_kg/1000).toFixed(s.prop_kg < 1e4 ? 1 : 0)} t`,
+      color: PROP_COLORS[s.propellant] || '#e8a33c', fuel,
+      state: secGone['stage' + (i + 1)] ? 'spent' : i === active && t >= 0 ? 'active' : 'pending' });
+  });
+  if (isLandingMission() && MS && MD) {
+    const p = run.params || {}, dry = +p.l_dry || 3500, load = +p.l_prop || 9000;
+    const mNow = simT >= MS.t_pdi ? samp(MD.t, MD.m, simT - MS.t_pdi) : (isFinite(tLOI) && simT >= tLOI ? MD.m[0] : dry + load);
+    out.push({ id: 'lander', label: 'Lander', kind: 'lander', sub: `${(load/1000).toFixed(1)} t prop · ${p.l_thrust_kn || 45} kN`,
+      color: PROP_COLORS.hypergolic, fuel: Math.max(0, Math.min(1, (mNow - dry)/load)),
+      state: simT >= tLanderDrop || simT >= MS.t_pdi ? 'active' : 'pending' });
+  } else {
+    out.push({ id: 'pay', label: geo.payload?.kind === 'bus' ? 'Probe' : 'Capsule', kind: 'payload',
+      sub: `${(pay/1000).toFixed(pay < 1e4 ? 2 : 1)} t`, color: '#cfd6df', fuel: null,
+      state: active < 0 ? 'active' : 'pending' });
+  }
+  return out;
+}
+function descentPhase(ms) {
+  if (simT >= MS.t_td) return successfulTouchdown(run) ? (simT < MS.t_td + 4 ? 'TOUCHDOWN' : 'ON SURFACE') : 'ABORT';
+  if (simT < MS.t_pdi) return 'COAST';
+  if (fin(MS.t_gate) && simT < MS.t_gate) return 'BRAKING';
+  return ms.h > 150 ? 'APPROACH' : 'TERMINAL DESCENT';
+}
+let LPROF = null;
+function landerState(ms) {
+  const p = run.params || {}, dry = +p.l_dry || 3500;
+  const tp = simT - MS.t_pdi;
+  if (!LPROF || LPROF.md !== MD) {
+    const gi = fin(MS.t_gate) ? MD.t.findIndex(x => x >= MS.t_gate - MS.t_pdi) : -1;
+    LPROF = { md: MD, x: MS.lx.map(v => -v), h: MD.h.map(v => v*1000), gateI: gi >= 0 ? gi : null };
+  }
+  let i = 0;
+  { const T = MD.t; let lo = 0, hi = T.length - 1;
+    if (tp <= T[0]) i = 0; else if (tp >= T[hi]) i = hi;
+    else { while (hi - lo > 1) { const m = (lo + hi) >> 1; if (T[m] <= tp) lo = m; else hi = m; }
+           i = lo + (tp - T[lo])/((T[hi] - T[lo]) || 1); } }
+  const settled = simT >= MS.t_td;
+  const zl = (a, b) => samp(MD.t, MS.lz, Math.max(MD.t[0], tp + b)) - samp(MD.t, MS.lz, Math.max(MD.t[0], tp + a));
+  const prop = Math.max(0, ms.m - dry), prop0 = Math.max(1, MD.m[0] - dry);
+  const ok = successfulTouchdown(run);
+  return {
+    phase: descentPhase(ms), alt: ms.h, vs: ms.vv, vfwd: ms.vh, vlat: settled ? 0 : zl(-0.5, 0.5),
+    throttle: ms.thr, throttleMin: (+p.l_throttle_min || 10)/100, propKg: prop, prop0Kg: prop0,
+    toSite: ms.dr, navErr: ms.navdh, ground: ms.elev, tToTouchdown: Math.max(0, MS.t_td - simT),
+    pitch: settled ? 0 : 90 - samp(MD.t, MD.pitch, Math.max(MD.t[0], tp)),
+    lights: { pdi: simT >= MS.t_pdi && !settled, highGate: fin(MS.t_gate) && simT >= MS.t_gate && !settled,
+              lowGate: !settled && simT >= MS.t_pdi && ms.h < 150, contact: ms.h < 2 || settled && ok,
+              landed: settled && ok, lowFuel: prop/prop0 < 0.1 && !settled, abort: settled && !ok },
+    profile: { x: LPROF.x, h: LPROF.h, i, gateI: LPROF.gateI },
+  };
+}
+function updateInstruments(sc, ph) {
+  const moon = sc.world === 'moon';
+  LH.setVisible(moon && !SURF.active);
+  FH.setVisible(!moon && !SURF.active);
+  if (moon) { if (!SURF.active) LH.update(landerState(sc.ms)); return; }
+  const s = { stages: stageBoard(), speedMode: 'SURFACE', altLabel: 'ALT' };
+  if (sc.world === 'pad') {
+    const st = sc.st, up = V.norm(V.sub(st.pos, [0, -RE, 0])), toNEU = neuFrame(up, poleOf(sc));
+    const full = fullThrustAt(simT);
+    Object.assign(s, { speed: st.v, alt: st.h, vs: st.v*Math.sin(st.gam),
+      throttle: full > 0 ? Math.min(1, st.thr/full) : 0, accel_g: st.m > 0 ? st.thr/st.m/G0 : 0,
+      basis: attitudeOf(sc.stackM, toNEU), prograde: st.v > 2 ? toNEU(st.dir) : null });
+  } else if (sc.world === 'eci') {
+    const cs = sc.cs, nearMoon = cs.rM < 6.6e7;
+    const c = nearMoon ? cs.moon : [0, 0, 0];
+    const up = V.norm(V.sub(cs.pos, c)), toNEU = neuFrame(up, nearMoon ? CIS.nrm : [0, 0, 1]);
+    let vel = cs.vel;
+    if (nearMoon) vel = V.sub(vel, V.scale(V.sub(moonPositionAt(simT + 30), moonPositionAt(simT - 30)), 1/60));
+    Object.assign(s, { speedMode: 'ORBIT', speed: V.len(vel), alt: V.len(V.sub(cs.pos, c)) - (nearMoon ? RM : RE),
+      altLabel: nearMoon ? 'MOON ALT' : 'ALT', vs: V.dot(vel, up),
+      throttle: cs.burning ? 1 : 0, accel_g: null,
+      basis: attitudeOf(sc.craftM, toNEU), prograde: toNEU(V.norm(vel)) });
+  } else {
+    const es = sc.es, up = V.norm(V.sub(es.pos, [0, -RE, 0])), toNEU = neuFrame(up, poleOf(sc));
+    Object.assign(s, { speed: es.v, alt: es.h, vs: es.v*Math.sin(es.gam), throttle: 0, accel_g: es.g,
+      basis: attitudeOf(sc.craftM, toNEU), prograde: toNEU(es.vdir) });
+  }
+  FH.update(s);
 }
 // phase-segmented timeline (equal width per phase — a broken time axis)
 const seekCv = $('seek');

@@ -175,7 +175,7 @@
   <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
   <span class="appnav-links">
     <a class="navlink" href="./" aria-current="page">mission control</a>
-    <a class="navlink" id="nav_build" href="build_page.html">vehicle builder</a>
+    <a class="navlink" id="nav_build" href="vab_page.html">vehicle builder</a>
     <a class="navlink" id="nav_analysis" href="analysis_page.html">analysis</a>
     <a class="navlink" id="nav_launch" href="launch_page.html">launch view</a>
     <a class="navlink" href="models_page.html">spacecraft viewer</a>
@@ -999,7 +999,7 @@ function showIdle() {
   showVerdict('idle', 'NO RUN YET',
               history.length
                 ? 'press Run mission, or pick one of the earlier runs below'
-                : 'press Run mission — nothing is simulated until you ask');
+                : 'press Run mission — or build a rocket in the vehicle builder and launch it from there');
   $('status').className = 'status';
   $('status').textContent = 'ready';
   // Everything that describes a flight stays out of the way until there is
@@ -2241,7 +2241,7 @@ function syncLinks() {
   for (const [id, base, q] of [['nav_analysis', 'analysis_page.html', rq],
                                ['analysislink', 'analysis_page.html', rq],
                                ['nav_launch',   'launch_page.html',   rq],
-                               ['nav_build',    'build_page.html',    cfg]]) {
+                               ['nav_build',    'vab_page.html',    cfg]]) {
     const el = $(id);
     if (!el) continue;
     el.href = base + q;
@@ -2249,7 +2249,7 @@ function syncLinks() {
     // resolves to the most recent run, so history alone keeps it live. The
     // link always works; this says whether it leads anywhere yet.
     el.classList.toggle('is-empty',
-                        base !== 'build_page.html' && !run && !history.length);
+                        base !== 'vab_page.html' && !run && !history.length);
   }
 }
 /** Navigate to one of the run pages, carrying the run on screen. */
@@ -2324,7 +2324,7 @@ $('launchbtn').onclick = () => go('launch_page.html');
 // because the chip lives inside a fold header that would otherwise collapse
 $('buildbtn').onclick = e => {
   e.stopPropagation();
-  location.href = 'build_page.html?' + params();
+  location.href = 'vab_page.html?' + params();
 };
 for (const f of ['l_dry','l_prop','l_isp','l_thrust_kn','l_throttle_min','l_diameter'])
   $(f).addEventListener('input', updateLanderNote);

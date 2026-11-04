@@ -1,0 +1,1806 @@
+<!doctype html>
+<!-- Vehicle assembly: build a launcher out of parts, read its staging and
+     budget, then fly it. The data model and the parts-to-parameters contract
+     live in static/vab_parts.js; this page only edits and draws the stack. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vehicle assembly</title>
+<link rel="stylesheet" href="./static/tokens.css">
+<script type="module" src="./static/version.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--ground); color: var(--text); font: 13px/1.4 var(--sans);
+         overflow: hidden; display: flex; flex-direction: column; }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  [hidden] { display: none !important; }
+  .hint { color: var(--text-3); font-size: 12px; margin: 6px 0; }
+  .good { color: var(--nominal); } .warn { color: var(--marginal); } .bad { color: var(--failed); }
+  .u-label { font-family: var(--mono); font-size: var(--t-label); letter-spacing: .16em; text-transform: uppercase; color: var(--text-3); }
+
+  /* ---- layout: toolbar over (palette | canvas | report) ---- */
+  .vab { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 296px minmax(0, 1fr) 340px;
+         grid-template-rows: auto minmax(0, 1fr); }
+  .toolbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+             background: var(--surface); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .tb-group { display: flex; align-items: center; gap: 6px; }
+  .tb-spacer { flex: 1; }
+  .name { width: 180px; background: var(--ground); border: 1px solid var(--line); border-radius: 4px;
+          padding: 6px 9px; font-family: var(--mono); font-size: 13px; color: var(--text); }
+  .btn { background: var(--raise); border: 1px solid var(--line); border-radius: 4px; padding: 6px 11px;
+         color: var(--text); font-size: 12.5px; text-decoration: none; white-space: nowrap; }
+  .btn:hover { border-color: #3a4a62; }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .btn.link { color: var(--text-2); }
+  .launch { background: var(--amber); color: #111; border: 0; border-radius: 4px; padding: 9px 22px;
+            font-family: var(--mono); font-weight: 700; letter-spacing: .14em; font-size: 14px;
+            box-shadow: 0 0 0 1px rgba(240,165,0,.4), 0 6px 22px rgba(240,165,0,.18); }
+  .launch:disabled { background: var(--raise); color: var(--text-3); box-shadow: none; cursor: not-allowed; }
+  .drawer-btn { display: none; }
+  .menu-wrap { position: relative; }
+  .menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 50; min-width: 240px; display: grid;
+          background: var(--raise); border: 1px solid var(--line); border-radius: 6px; padding: 4px;
+          box-shadow: 0 14px 40px rgba(0,0,0,.5); }
+  .menu button { text-align: left; background: none; border: 0; padding: 7px 10px; border-radius: 4px; }
+  .menu button:hover { background: var(--surface); }
+
+  /* ---- palette ---- */
+  .left { display: grid; grid-template-columns: 70px minmax(0, 1fr); min-height: 0; background: var(--surface);
+          border-right: 1px solid var(--line); }
+  .cats { display: flex; flex-direction: column; gap: 4px; padding: 8px 6px; border-right: 1px solid var(--line); overflow: auto; }
+  .cat { font: 600 10.5px/1.2 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--text-2);
+         background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 9px 4px; text-align: center; }
+  .cat[aria-pressed="true"] { background: var(--raise); border-color: var(--line); color: var(--text); }
+  .pal-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .search { margin: 8px; background: var(--ground); border: 1px solid var(--line); border-radius: 4px; padding: 6px 9px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 8px 12px; overflow: auto; min-height: 0; align-content: start; }
+  .part { display: flex; flex-direction: column; gap: 3px; text-align: left; background: var(--raise); border: 1px solid var(--line);
+          border-radius: 5px; padding: 6px 6px 7px; min-width: 0; color: var(--text); }
+  .part:hover { border-color: #3a4a62; }
+  .part.on { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+  .thumb { width: 100%; height: 64px; display: block; }
+  .pn { font-weight: 600; font-size: 12px; line-height: 1.2; }
+  .ps { font-size: 10.5px; color: var(--text-2); line-height: 1.25; }
+  .tip { position: fixed; z-index: 70; width: 236px; pointer-events: none; background: rgba(19,25,34,.97);
+         border: 1px solid var(--line); border-radius: 6px; padding: 9px 11px; box-shadow: 0 12px 30px rgba(0,0,0,.5); }
+  .tip b { display: block; font-size: 13px; }
+  .tip > span { display: block; color: var(--text-2); font-size: 11.5px; margin-bottom: 6px; }
+  .tip dl { margin: 0; display: grid; gap: 3px; }
+  .tip dl div { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; }
+  .tip dt { color: var(--text-3); } .tip dd { margin: 0; font-family: var(--mono); text-align: right; }
+
+  /* ---- canvas ---- */
+  .center { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+  #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .viewtog { position: absolute; top: 10px; left: 12px; z-index: 5; display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .viewtog button { background: rgba(19,25,34,.9); border: 0; padding: 5px 11px; font-size: 12px; color: var(--text-2); }
+  .viewtog button[aria-pressed="true"] { background: var(--raise); color: var(--text); }
+  .viewtog button + button { border-left: 1px solid var(--line); }
+  .viewtog[hidden] { display: none; }
+  .hold-banner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5;
+                 background: rgba(19,25,34,.94); border: 1px solid var(--line); border-radius: 20px;
+                 padding: 6px 14px; font-size: 12.5px; white-space: nowrap; pointer-events: none; }
+  .hold-banner b { color: var(--nominal); }
+  .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+           text-align: center; color: var(--text-2); pointer-events: none; padding: 24px; }
+  .empty p { max-width: 380px; }
+  .fit { position: absolute; top: 10px; right: 12px; z-index: 5; background: var(--raise); border: 1px solid var(--line);
+         border-radius: 4px; padding: 5px 10px; font-size: 12px; }
+  .canvas-hint { position: absolute; right: 12px; bottom: 10px; font: 10.5px var(--mono); color: var(--text-3); pointer-events: none; }
+  .inspector { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 6; width: min(600px, calc(100% - 28px));
+               max-height: calc(100% - 28px); overflow: auto; background: rgba(19,25,34,.97); border: 1px solid var(--line);
+               border-radius: 6px; box-shadow: 0 16px 44px rgba(0,0,0,.55); }
+  .ins-h { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+  .ins-h .u-label { color: var(--amber); }
+  .ins-h .x { margin-left: auto; background: none; border: 0; font-size: 18px; color: var(--text-2); line-height: 1; }
+  .ins-b { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; padding: 12px; }
+  .ins-b > .hint, .ins-b > .derived, .ins-b > .seg, .ins-b > .chk { grid-column: 1 / -1; }
+  .ins-f { display: flex; gap: 8px; flex-wrap: wrap; padding: 9px 12px; border-top: 1px solid var(--line); }
+  .ins-f button { background: var(--raise); border: 1px solid var(--line); border-radius: 4px; padding: 5px 10px; font-size: 12px; }
+  .ins-f button:disabled { opacity: .35; cursor: default; }
+  .ins-f .danger { margin-left: auto; color: var(--failed); }
+  .fld { display: grid; gap: 3px; font-size: 11.5px; color: var(--text-2); min-width: 0; }
+  .fld .inp { display: flex; align-items: center; gap: 5px; }
+  .fld em { font-style: normal; color: var(--text-3); font-size: 11px; }
+  .fld input, .fld select, .ins-b input, .ins-b select { width: 100%; min-width: 0; background: var(--ground); border: 1px solid var(--line);
+    border-radius: 4px; padding: 5px 7px; font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+  .ins-b input[type=checkbox] { width: auto; }
+  .chk { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+  .lenrow { display: grid; grid-template-columns: 1fr 96px auto; gap: 8px; align-items: center; }
+  .lenrow input[type=range] { padding: 0; accent-color: var(--amber); }
+  .stepper { display: flex; gap: 4px; }
+  .stepper input { text-align: center; }
+  .stepper button, .seg button { background: var(--raise); border: 1px solid var(--line); border-radius: 4px; padding: 5px 10px; font-family: var(--mono); }
+  .seg { display: flex; gap: 4px; }
+  .seg button.on { border-color: var(--amber); color: var(--amber); }
+  .derived { margin: 0; font: 11.5px var(--mono); color: var(--text-2); }
+
+  /* ---- right column ---- */
+  .right { overflow: auto; min-height: 0; background: var(--surface); border-left: 1px solid var(--line); padding: 12px 14px 28px; }
+  .sec { margin-bottom: 20px; }
+  .sec > h2 { margin: 0 0 9px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+              font: 600 11px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--text-2); }
+  .sec > h2 span { font-size: 10.5px; letter-spacing: .04em; text-transform: none; }
+  .dim { opacity: .5; }
+  .stage { background: var(--raise); border: 1px solid var(--line); border-left: 3px solid var(--sc, var(--line));
+           border-radius: 5px; padding: 9px 11px; margin-bottom: 8px; }
+  .stage header { display: flex; align-items: baseline; gap: 8px; }
+  .sn { font: 700 11px var(--mono); color: var(--sc, var(--text-2)); letter-spacing: .08em; }
+  .stage h3 { margin: 0; font-size: 13px; font-weight: 600; }
+  .eng { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); margin-top: 6px; }
+  .bells { display: inline-flex; gap: 2px; align-items: flex-end; }
+  .bells i { display: inline-block; width: 7px; height: 11px; background: linear-gradient(#d9955c, #6b3d22 70%, #1c1310);
+             clip-path: polygon(22% 0, 78% 0, 100% 100%, 0 100%); }
+  .bells b { font-size: 11px; margin-left: 3px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0 4px; }
+  .stats dt { font: 10px var(--mono); color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; }
+  .stats dd { margin: 0; font: 600 14px var(--mono); font-variant-numeric: tabular-nums; }
+  .mass, .boost { margin: 2px 0 0; font: 11.5px var(--mono); color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .boost { color: var(--text-2); border-top: 1px solid var(--line); padding-top: 6px; margin-top: 6px; }
+  .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 0; border-bottom: 1px solid #1c2431; font-size: 12.5px; color: var(--text-2); }
+  .kv b { font: 600 14px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+  .budget { position: relative; height: 12px; background: var(--ground); border: 1px solid var(--line); border-radius: 3px; margin: 14px 0 4px; }
+  .budget .fill { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #2f6fb8, var(--data)); border-radius: 2px 0 0 2px; }
+  .budget .tick { position: absolute; top: -5px; bottom: -5px; width: 2px; background: var(--text-3); transform: translateX(-1px); }
+  .budget .tick.ok { background: var(--nominal); }
+  .budget .tick:hover { background: var(--text); }
+  .axis { display: flex; justify-content: space-between; font: 10px var(--mono); color: var(--text-3); }
+  .reach { list-style: none; margin: 10px 0 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; font-size: 11.5px; color: var(--text-3); }
+  .reach li { display: flex; gap: 5px; align-items: baseline; }
+  .reach li.good { color: var(--text); }
+  .reach li span { width: 10px; color: var(--nominal); }
+  .reach em { font-style: normal; font-family: var(--mono); color: var(--text-3); margin-left: auto; }
+  .caption { font-size: 11px; color: var(--text-3); margin: 8px 0 0; }
+  .issues { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .issues li { font-size: 12px; background: var(--raise); border-left: 3px solid var(--text-3); padding: 6px 9px; border-radius: 4px; }
+  .issues li.error { border-color: var(--failed); }
+  .issues li.warn { border-color: var(--marginal); }
+  .issues li.ok { border-color: var(--nominal); color: var(--text-2); }
+  .issues li[data-part] { cursor: pointer; }
+  .issues li[data-part]:hover { background: var(--surface); }
+  .issues b { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; margin-right: 4px; }
+
+  /* ---- launch dialog ---- */
+  dialog.dlg { width: min(1000px, calc(100vw - 32px)); height: min(680px, calc(100vh - 32px)); max-height: calc(100vh - 32px);
+               padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text);
+               display: none; flex-direction: column; }
+  dialog.dlg[open] { display: flex; }
+  dialog.dlg::backdrop { background: rgba(3,5,9,.72); }
+  .dlg-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  .dlg-head h1 { margin: 0; font-size: 16px; }
+  .dlg-head p { margin: 2px 0 0; color: var(--text-2); font-size: 12px; }
+  .dlg-head button { margin-left: auto; background: none; border: 0; font-size: 20px; color: var(--text-2); }
+  .dlg-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; min-height: 0; flex: 1; }
+  .missions { overflow: auto; padding: 10px 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+  .missions > h3 { margin: 10px 0 2px; font-weight: 400; }
+  .mission { display: flex; flex-direction: column; gap: 2px; text-align: left; background: var(--raise); border: 1px solid var(--line);
+             border-radius: 6px; padding: 9px 11px; color: var(--text); }
+  .mission.on { border-color: var(--amber); }
+  .mission:disabled { opacity: .45; cursor: not-allowed; }
+  .mn { font-weight: 600; }
+  .md { font-size: 12px; color: var(--text-2); }
+  .mdv { font: 11px var(--mono); color: var(--text-3); }
+  .mdv .why { font-style: normal; color: var(--marginal); margin-left: 4px; }
+  .dlg-side { border-left: 1px solid var(--line); padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+  .dlg-side .fld select, .dlg-side .fld input[type=number] { font-family: var(--sans); font-size: 13px; }
+  .dvcheck { font: 12px/1.45 var(--mono); margin: 0; }
+  .dlg-side .err { color: var(--failed); font-size: 12px; margin: 0; }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--line); }
+
+  /* ---- narrow screens: palette and report become drawers ---- */
+  @media (max-width: 899px) {
+    .vab { grid-template-columns: minmax(0, 1fr); }
+    .drawer-btn { display: inline-block; }
+    .left, .right { position: fixed; top: 0; bottom: 0; width: min(330px, 88vw); z-index: 60; transition: transform .2s ease; }
+    .left { left: 0; transform: translateX(-104%); }
+    .right { right: 0; transform: translateX(104%); }
+    body.show-left .left, body.show-right .right { transform: none; }
+    .canvas-hint { display: none; }
+    .dlg-body { grid-template-columns: 1fr; }
+    .dlg-side { border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<nav class="appnav">
+  <span class="appnav-brand">ss<span class="dot">.</span>jl</span>
+  <span class="appnav-links">
+    <a class="navlink" href="./">mission control</a>
+    <a class="navlink" href="vab_page.html" aria-current="page">vehicle builder</a>
+    <a class="navlink" href="analysis_page.html">analysis</a>
+    <a class="navlink" href="launch_page.html">launch view</a>
+    <a class="navlink" href="models_page.html">spacecraft viewer</a>
+  </span>
+  <span class="u-label" data-appver></span>
+  <span class="appnav-end u-label">parts in · one launch vehicle out</span>
+</nav>
+
+<div class="vab">
+  <header class="toolbar">
+    <div class="tb-group">
+      <label class="u-label" for="vname">Vehicle</label>
+      <input id="vname" class="name" maxlength="40" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="tb-group">
+      <button class="btn" id="bNew">New</button>
+      <div class="menu-wrap">
+        <button class="btn" id="bPresets" aria-haspopup="true" aria-expanded="false">Presets ▾</button>
+        <div class="menu" id="presetMenu" hidden></div>
+      </div>
+      <button class="btn" id="bUndo" title="Undo (Ctrl+Z)">Undo</button>
+      <button class="btn" id="bRedo" title="Redo (Ctrl+Shift+Z)">Redo</button>
+    </div>
+    <a class="btn link" id="bEng" href="build_page.html">Engineering editor</a>
+    <span class="tb-spacer"></span>
+    <button class="btn drawer-btn" id="tPal">Parts</button>
+    <button class="btn drawer-btn" id="tRep">Report</button>
+    <button class="launch" id="bLaunch" disabled>LAUNCH ▸</button>
+  </header>
+
+  <aside class="left" id="palette" aria-label="Parts palette">
+    <nav class="cats" id="cats"></nav>
+    <div class="pal-main">
+      <input type="search" class="search" id="search" placeholder="Search parts" aria-label="Search parts">
+      <div class="grid" id="grid"></div>
+    </div>
+  </aside>
+
+  <main class="center" id="center">
+    <canvas id="gl" aria-label="Vehicle assembly, 3D view"></canvas>
+    <canvas id="cv" aria-label="Vehicle assembly drawing"></canvas>
+    <div class="viewtog" id="viewTog" role="group" aria-label="View mode"><button data-v="3d" aria-pressed="true">3D</button><button data-v="2d" aria-pressed="false">Blueprint</button></div>
+    <div class="hold-banner" id="holdBanner" hidden></div>
+    <div class="empty" id="emptyMsg" hidden><p>Hold a payload from the palette, then click the top of the stack. Double-click any part to add it straight away.</p></div>
+    <button class="fit" id="bFit">Fit</button>
+    <div class="canvas-hint">wheel zoom · drag pan · double-click fit</div>
+    <section class="inspector" id="inspector" hidden></section>
+  </main>
+
+  <aside class="right" id="right" aria-label="Staging and report">
+    <section class="sec">
+      <h2>Staging</h2>
+      <div id="staging"></div>
+    </section>
+    <section class="sec">
+      <h2>Engineer's report</h2>
+      <div id="report"></div>
+    </section>
+    <section class="sec">
+      <h2>Issues <span id="issueCount"></span></h2>
+      <ul class="issues" id="issues"></ul>
+    </section>
+  </aside>
+</div>
+
+<div class="tip" id="tip" hidden></div>
+
+<dialog class="dlg" id="launchDlg" aria-labelledby="dlgTitle">
+  <header class="dlg-head">
+    <div><h1 id="dlgTitle">Fly this vehicle</h1><p>Pick a mission. The flight is simulated on the vehicle exactly as assembled.</p></div>
+    <button id="dlgClose" aria-label="Close">×</button>
+  </header>
+  <div class="dlg-body">
+    <div class="missions" id="missions"></div>
+    <div class="dlg-side">
+      <p class="md" id="mDesc"></p>
+      <label class="fld"><span>Launch site</span><select id="lSite"></select></label>
+      <label class="fld" id="lLandWrap"><span>Landing site</span><select id="lLand"></select></label>
+      <label class="fld"><span>Launch time [h after Greenwich noon]</span><input type="number" id="lTime" min="0" max="24" step="0.25" value="3.5"></label>
+      <label class="chk"><input type="checkbox" id="lKick"> Search for the best pitch kick</label>
+      <p class="dvcheck" id="dvCheck"></p>
+      <p class="err" id="lErr" hidden></p>
+    </div>
+  </div>
+  <footer class="dlg-foot">
+    <button class="btn" id="lCancel">Cancel</button>
+    <button class="launch" id="lGo">LAUNCH ▸</button>
+  </footer>
+</dialog>
+
+<script type="module">
+// ================================================================ imports
+import {
+  palette, withId, emptyAssembly, analyse, layout, toParams, fromParams, missionsFor,
+  engineForPart, engineList, PRESETS, MISSIONS, LAUNCH_SITES, launchHourFor, LANDING_SITES, TANK_DIAMETERS,
+  TANK_CLASS, CAPSULES, PROBES, LANDERS, PROP_COLORS, propFromLength, G0,
+} from './static/vab_parts.js';
+import * as api from './static/api.js';
+import * as vehicle from './static/vehicle.js';
+import { busy, fail, reportUncaught } from './static/busy.js';
+import { createVabRenderer } from './static/vab_render3d.js';
+
+// ================================================================ state
+const STORE_KEY = 'ssjl.vab';
+const BOOSTERS = '__boosters';          // the radial set has no part id
+const SHORT = { pods: 'Payload', tanks: 'Tanks', engines: 'Engines', struct: 'Struct', radial: 'Boosters' };
+const STAGE_COLORS = ['#4A9EFF', '#37C7A8', '#C77DFF', '#E88A5A', '#F2D16B'];
+
+const $ = (s, root = document) => root.querySelector(s);
+const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+const el = {
+  name: $('#vname'), cv: $('#cv'), center: $('#center'), grid: $('#grid'), cats: $('#cats'), search: $('#search'),
+  staging: $('#staging'), report: $('#report'), issues: $('#issues'), issueCount: $('#issueCount'),
+  ins: $('#inspector'), hold: $('#holdBanner'), empty: $('#emptyMsg'), tip: $('#tip'),
+  undo: $('#bUndo'), redo: $('#bRedo'), launch: $('#bLaunch'), presetBtn: $('#bPresets'), presetMenu: $('#presetMenu'),
+  dlg: $('#launchDlg'), missions: $('#missions'), lSite: $('#lSite'), lLand: $('#lLand'), lLandWrap: $('#lLandWrap'),
+  lTime: $('#lTime'), lKick: $('#lKick'), lErr: $('#lErr'), dvCheck: $('#dvCheck'), mDesc: $('#mDesc'), lGo: $('#lGo'),
+};
+const ctx = el.cv.getContext('2d');
+
+const ITEMS = new Map();                // palette key -> palette item
+let catalogue = {};
+let cats = [];
+let asm = emptyAssembly();
+let an = null;                          // analyse(asm)
+let lay = null;                         // layout(asm)
+let ext = { halfW: 1, height: 0 };      // world extents for fitting
+let propOf = new Map();                 // tank id -> propellant of its stage
+let rowOf = new Map();                  // part id -> layout row
+let hitBoxes = [];                      // screen boxes of drawn parts, bottom first
+let curNodes = [];                      // attach nodes for the held part
+let undoS = [], redoS = [], coalesce = null;
+let sel = null, hov = null, hovKey = null, pointer = null;
+let holdPart = null, holdItem = null;
+let curCat = 'pods', query = '';
+let geo = null, geoKey = '', geoSeq = 0, geoErr = null, evalTimer = 0;
+let view = { auto: true, s: 40, ox: 0, oy: 0 };
+let cw = 0, ch = 0, frame = 0, press = null;
+let mission = 'hop';
+const dpr = () => Math.min(3, window.devicePixelRatio || 1);
+
+// ================================================================ helpers
+const esc = v => String(v).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const fmtT = kg => kg >= 1e5 ? `${(kg / 1e3).toFixed(0)} t` : kg >= 1e3 ? `${(kg / 1e3).toFixed(1)} t` : `${Math.round(kg)} kg`;
+const fmtN = (v, d = 0) => Number(v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtDv = m => `${Math.round(m).toLocaleString('en-US')} m/s`;
+const f1 = (v, d = 1) => (v == null || !Number.isFinite(v) ? '—' : Number(v).toFixed(d));
+const twrClass = v => (v < 1 ? 'bad' : v < 1.2 ? 'warn' : 'good');
+const part = id => asm.parts.find(p => p.id === id);
+const isFixed = p => p.type === 'payload' || p.type === 'fairing';
+const pos = e => { const r = el.cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+
+// ================================================================ drawing primitives
+// Every shape takes a row {kind, d, y0, y1, ...} in world units (metres, y up)
+// and a transform T {X(x), Y(y), s}. Thumbnails reuse them with T.thumb: one
+// unit is one pixel and y is measured from the bottom of the box.
+const shift = (T, cx) => ({ ...T, X: x => T.X(x + cx) });
+const len = (T, v) => v * T.s;
+
+function metalGrad(c, T, d) {
+  const g = c.createLinearGradient(T.X(-d / 2), 0, T.X(d / 2), 0);
+  [[0, '#4a515b'], [0.12, '#9ba4af'], [0.3, '#f7f9fb'], [0.45, '#e3e7ec'], [0.75, '#c9cfd8'], [0.93, '#8a939f'], [1, '#4a515b']]
+    .forEach(([o, col]) => g.addColorStop(o, col));
+  return g;
+}
+
+function drawTank(c, r, T) {
+  const l = T.X(-r.d / 2), w = len(T, r.d), top = T.Y(r.y1), h = T.Y(r.y0) - top;
+  c.fillStyle = metalGrad(c, T, r.d);
+  c.fillRect(l, top, w, h);
+  if (!T.thumb) {                                   // panel seams every 2 m
+    c.strokeStyle = 'rgba(30,40,55,0.18)'; c.lineWidth = 1;
+    for (let y = Math.floor(r.y0 / 2) * 2 + 2; y < r.y1; y += 2) {
+      const sy = Math.round(T.Y(y)) + 0.5;
+      c.beginPath(); c.moveTo(l, sy); c.lineTo(l + w, sy); c.stroke();
+    }
+  }
+  const by = top + (T.thumb ? 4 : Math.max(4, 0.35 * T.s));
+  const bh = T.thumb ? 4 : Math.max(3, 0.22 * T.s);
+  c.globalAlpha = 0.92; c.fillStyle = PROP_COLORS[r.prop] || '#888'; c.fillRect(l, by, w, bh); c.globalAlpha = 1;
+  c.beginPath(); c.ellipse(T.X(0), top, w / 2, Math.max(1.5, 0.06 * w), 0, 0, Math.PI * 2);
+  c.fillStyle = '#f1f4f7'; c.fill();
+  c.strokeStyle = 'rgba(20,28,40,0.35)'; c.lineWidth = 1; c.strokeRect(l + 0.5, top, w - 1, h);
+}
+
+function drawEngine(c, r, T) {
+  const d = r.d, y0 = r.y0, y1 = r.y1, h = y1 - y0;
+  const plateH = T.thumb ? 5 : Math.min(0.6, Math.max(0.25, 0.2 * h));
+  const top = y1 - plateH;
+  const pg = c.createLinearGradient(0, T.Y(y1), 0, T.Y(top));
+  pg.addColorStop(0, '#3a4049'); pg.addColorStop(1, '#1d2127');
+  c.fillStyle = pg; c.fillRect(T.X(-d / 2), T.Y(y1), len(T, d), len(T, plateH));
+  const n = Math.max(1, r.n || 1), m = Math.min(n, 7);
+  const span = d * 0.92, sp = span / m, bw = Math.min(sp * 0.78, d * 0.5);
+  for (let i = 0; i < m; i++) {
+    const xc = -span / 2 + sp * (i + 0.5);
+    const g = c.createLinearGradient(0, T.Y(top), 0, T.Y(y0));
+    g.addColorStop(0, '#d9955c'); g.addColorStop(0.45, '#8a4f2c'); g.addColorStop(1, '#1c1310');
+    c.fillStyle = g; c.beginPath();
+    c.moveTo(T.X(xc - bw / 2), T.Y(top)); c.lineTo(T.X(xc + bw / 2), T.Y(top));
+    c.lineTo(T.X(xc + bw * 0.72), T.Y(y0)); c.lineTo(T.X(xc - bw * 0.72), T.Y(y0));
+    c.closePath(); c.fill();
+    c.fillStyle = '#120b08'; c.beginPath();
+    c.ellipse(T.X(xc), T.Y(top), Math.max(1, len(T, bw * 0.28)), Math.max(1, len(T, bw * 0.08)), 0, 0, Math.PI * 2);
+    c.fill();
+  }
+  if (n > 7) {
+    c.fillStyle = '#e6e9ee'; c.font = '600 10px ui-monospace, Consolas, monospace'; c.textAlign = 'center';
+    c.fillText(`×${n}`, T.X(0), T.Y(top) + 12); c.textAlign = 'start';
+  }
+}
+
+function drawDecoupler(c, r, T) {
+  const l = T.X(-r.d / 2), w = len(T, r.d), top = T.Y(r.y1), bot = T.Y(r.y0);
+  c.fillStyle = '#1a1d23'; c.fillRect(l, top, w, Math.max(2, bot - top));
+  c.fillStyle = '#F0A500'; c.globalAlpha = 0.9;
+  c.fillRect(l, top, w, 2); c.fillRect(l, Math.max(top, bot - 2), w, 2);
+  c.globalAlpha = 1;
+}
+
+function drawCapsule(c, r, T) {
+  const R = r.d / 2, R1 = r.d * 0.27, y0 = r.y0, y1 = r.y1, h = y1 - y0;
+  c.beginPath();
+  c.moveTo(T.X(-R), T.Y(y0)); c.lineTo(T.X(R), T.Y(y0));
+  c.lineTo(T.X(R1), T.Y(y1 - 0.28 * h));
+  c.quadraticCurveTo(T.X(R1 * 0.7), T.Y(y1 + 0.12 * h), T.X(0), T.Y(y1));
+  c.quadraticCurveTo(T.X(-R1 * 0.7), T.Y(y1 + 0.12 * h), T.X(-R1), T.Y(y1 - 0.28 * h));
+  c.closePath();
+  c.fillStyle = metalGrad(c, T, r.d); c.fill();
+  c.strokeStyle = 'rgba(0,0,0,0.35)'; c.lineWidth = 1; c.stroke();
+  const shTop = T.Y(y0 + 0.14 * h);                  // dark heat-shield lip
+  c.fillStyle = '#2b2622'; c.fillRect(T.X(-R * 1.02), shTop, len(T, r.d * 1.02), T.Y(y0) - shTop);
+  if (r.crewed) {
+    c.fillStyle = '#8ec9ff';
+    const rr = Math.max(1.2, len(T, 0.045 * r.d));
+    for (const xf of [-0.12, 0, 0.12]) { c.beginPath(); c.arc(T.X(xf * r.d), T.Y(y1 - 0.4 * h), rr, 0, Math.PI * 2); c.fill(); }
+  }
+}
+
+function drawBus(c, r, T) {
+  const R = r.d / 2, y0 = r.y0, y1 = r.y1, h = y1 - y0, ym = (y0 + y1) / 2, ph = 0.7 * h;
+  for (const s of [-1, 1]) {                         // two solar panels
+    const xa = s < 0 ? -R - 1.25 * r.d : R, xb = s < 0 ? -R : R + 1.25 * r.d;
+    const l = T.X(xa), w = T.X(xb) - l, top = T.Y(ym + ph / 2), hh = T.Y(ym - ph / 2) - top;
+    c.fillStyle = '#1b3a6b'; c.fillRect(l, top, w, hh);
+    c.strokeStyle = 'rgba(127,166,216,0.7)'; c.lineWidth = 1; c.strokeRect(l + 0.5, top + 0.5, w - 1, hh - 1);
+    c.beginPath();
+    for (let i = 1; i < 3; i++) {
+      const gx = l + w * i / 3, gy = top + hh * i / 3;
+      c.moveTo(gx, top); c.lineTo(gx, top + hh); c.moveTo(l, gy); c.lineTo(l + w, gy);
+    }
+    c.stroke();
+  }
+  const g = c.createLinearGradient(T.X(-R), 0, T.X(R), 0);
+  g.addColorStop(0, '#6e5320'); g.addColorStop(0.2, '#d7b25c'); g.addColorStop(0.4, '#f4dc96');
+  g.addColorStop(0.7, '#b08a3c'); g.addColorStop(1, '#5e4619');
+  c.fillStyle = g; c.fillRect(T.X(-R), T.Y(y1), len(T, r.d), T.Y(y0) - T.Y(y1));
+}
+
+function drawLander(c, r, T) {
+  const hw = r.d / 2, y0 = r.y0, y1 = r.y1, h = y1 - y0, cc = Math.min(0.28 * r.d, h / 2);
+  c.strokeStyle = '#b9b3a0'; c.lineWidth = T.thumb ? 1.5 : 2.2;
+  for (const s of [-1, 1]) {                         // splayed legs and footpads
+    c.beginPath(); c.moveTo(T.X(s * hw * 0.55), T.Y(y0 + 0.1 * h)); c.lineTo(T.X(s * hw * 1.25), T.Y(y0 - 0.55 * r.d)); c.stroke();
+    c.beginPath(); c.moveTo(T.X(s * hw * 1.1), T.Y(y0 - 0.55 * r.d)); c.lineTo(T.X(s * hw * 1.45), T.Y(y0 - 0.55 * r.d)); c.stroke();
+  }
+  const pts = [[-hw + cc, y0], [hw - cc, y0], [hw, y0 + cc], [hw, y1 - cc], [hw - cc, y1], [-hw + cc, y1], [-hw, y1 - cc], [-hw, y0 + cc]];
+  c.beginPath();
+  pts.forEach(([x, y], i) => (i ? c.lineTo(T.X(x), T.Y(y)) : c.moveTo(T.X(x), T.Y(y))));
+  c.closePath();
+  const g = c.createLinearGradient(T.X(-hw), 0, T.X(hw), 0);
+  g.addColorStop(0, '#7a5d22'); g.addColorStop(0.35, '#f0d68a'); g.addColorStop(0.7, '#b08a3c'); g.addColorStop(1, '#5e4619');
+  c.fillStyle = g; c.fill();
+  c.strokeStyle = 'rgba(0,0,0,0.35)'; c.lineWidth = 1; c.stroke();
+}
+
+function drawFairing(c, r, T) {
+  const R = r.d / 2, y0 = r.y0, y1 = r.y1, H = y1 - y0;
+  c.beginPath();
+  c.moveTo(T.X(-R), T.Y(y0));
+  c.bezierCurveTo(T.X(-R), T.Y(y0 + 0.62 * H), T.X(-R * 0.42), T.Y(y1), T.X(0), T.Y(y1));
+  c.bezierCurveTo(T.X(R * 0.42), T.Y(y1), T.X(R), T.Y(y0 + 0.62 * H), T.X(R), T.Y(y0));
+  c.closePath();
+  c.fillStyle = 'rgba(214,228,246,0.13)'; c.fill();
+  c.strokeStyle = 'rgba(214,228,246,0.62)'; c.lineWidth = 1.2; c.stroke();
+}
+
+function drawAdapter(c, r, T) {                       // conical interstage between unequal diameters
+  const a = r.d0 / 2, b = r.d1 / 2;
+  c.beginPath();
+  c.moveTo(T.X(-a), T.Y(r.y0)); c.lineTo(T.X(a), T.Y(r.y0));
+  c.lineTo(T.X(b), T.Y(r.y1)); c.lineTo(T.X(-b), T.Y(r.y1)); c.closePath();
+  c.fillStyle = metalGrad(c, T, Math.max(r.d0, r.d1)); c.fill();
+  c.strokeStyle = 'rgba(0,0,0,0.3)'; c.lineWidth = 1; c.stroke();
+}
+
+// A radial booster: body on top of its bells, bells ending at the pad (y = 0).
+function drawBooster(c, T0, cx, bd, L, bellH, n, prop) {
+  const T = shift(T0, cx), y1 = bellH + L, hw = bd / 2;
+  drawTank(c, { d: bd, y0: bellH, y1, prop }, T);
+  c.beginPath();
+  c.moveTo(T.X(-hw), T.Y(y1)); c.lineTo(T.X(hw), T.Y(y1));
+  c.bezierCurveTo(T.X(hw), T.Y(y1 + 0.3 * bd), T.X(hw * 0.35), T.Y(y1 + 0.62 * bd), T.X(0), T.Y(y1 + 0.7 * bd));
+  c.bezierCurveTo(T.X(-hw * 0.35), T.Y(y1 + 0.62 * bd), T.X(-hw), T.Y(y1 + 0.3 * bd), T.X(-hw), T.Y(y1));
+  c.closePath(); c.fillStyle = '#e9edf2'; c.fill();
+  drawEngine(c, { d: bd, y0: 0, y1: bellH, n }, T);
+}
+
+function drawRow(c, r, T) {
+  switch (r.kind) {
+    case 'tank': return drawTank(c, r, T);
+    case 'engine': return drawEngine(c, r, T);
+    case 'decoupler': return drawDecoupler(c, r, T);
+    case 'capsule': return drawCapsule(c, r, T);
+    case 'bus': return drawBus(c, r, T);
+    case 'lander': return drawLander(c, r, T);
+    case 'fairing': return drawFairing(c, r, T);
+    case 'adapter': return drawAdapter(c, r, T);
+  }
+}
+
+// Palette thumbnail: the part drawn at a fixed scale in its own small canvas.
+function drawThumb(cv, item) {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!item || !w || !h) return;
+  const k = window.devicePixelRatio || 1;
+  cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+  const c = cv.getContext('2d'); c.setTransform(k, 0, 0, k, 0, 0); c.clearRect(0, 0, w, h);
+  const T = { thumb: true, s: 1, X: x => w / 2 + x, Y: y => h - 8 - y };
+  const p = item.make();
+  if (p.type === 'payload') {
+    if (p.kind === 'capsule') { const d = clamp(16 + 4 * p.diameter, 16, 46); drawCapsule(c, { d, y0: 0, y1: d * 0.9, crewed: true }, T); }
+    else if (p.kind === 'bus') drawBus(c, { d: 18, y0: 0, y1: 24 }, T);
+    else drawLander(c, { d: 26, y0: 14, y1: 14 + 0.9 * 26 }, T);
+  } else if (p.type === 'tank') drawTank(c, { d: clamp(14 + 3.2 * p.diameter, 14, 50), y0: 0, y1: 46, prop: 'kerolox' }, T);
+  else if (p.type === 'engine') {
+    const e = engineForPart(catalogue, p), n = e && e.thrust_kn >= 1000 ? 3 : e && e.thrust_kn >= 100 ? 2 : 1;
+    drawEngine(c, { d: n === 1 ? 22 : n === 2 ? 34 : 48, y0: 0, y1: 28, n }, T);
+  } else if (p.type === 'decoupler') drawDecoupler(c, { d: 44, y0: 0, y1: 6 }, T);
+  else if (p.type === 'fairing') { drawCapsule(c, { d: 16, y0: 6, y1: 24, crewed: false }, T); drawFairing(c, { d: 30, y0: 0, y1: 52 }, T); }
+  else if (p.type === 'boosters') {
+    drawTank(c, { d: 16, y0: 0, y1: 50, prop: 'kerolox' }, T);
+    drawBooster(c, T, -14, 9, 40, 6, 2, 'kerolox'); drawBooster(c, T, 14, 9, 40, 6, 2, 'kerolox');
+  }
+}
+
+// The held part, centred on the cursor (T.Y(0) is the cursor's height).
+function drawGhostShape(c, p, T) {
+  if (p.type === 'payload') {
+    if (p.kind === 'capsule') { const d = p.diameter, h = 0.85 * d; drawCapsule(c, { d, y0: -h / 2, y1: h / 2, crewed: p.crewed !== false }, T); }
+    else if (p.kind === 'bus') { const d = Math.max(0.8, 0.5 * Math.cbrt(p.mass)), h = 0.8 * d; drawBus(c, { d, y0: -h / 2, y1: h / 2 }, T); }
+    else { const d = p.lander.diameter, h = 0.9 * d; drawLander(c, { d, y0: -h / 2, y1: h / 2 }, T); }
+  } else if (p.type === 'tank') drawTank(c, { d: p.diameter, y0: -p.length / 2, y1: p.length / 2, prop: 'kerolox' }, T);
+  else if (p.type === 'engine') {
+    const e = engineForPart(catalogue, p), per = e ? e.thrust_kn : 100;
+    const h = Math.max(0.6, Math.min(5.5, 0.75 * Math.sqrt(per / 100) + 0.4)) * Math.min(1, 1.8 / 1.2 + 0.2);
+    drawEngine(c, { d: 1.8, y0: -h / 2, y1: h / 2, n: p.count }, T);
+  } else if (p.type === 'decoupler') drawDecoupler(c, { d: 1.8, y0: -0.12, y1: 0.12 }, T);
+  else if (p.type === 'fairing') drawFairing(c, { d: 2.6, y0: -1.2, y1: 1.6 }, T);
+  else if (p.type === 'boosters') drawBooster(c, T, 0, p.diameter, p.length, Math.max(1.2, 0.9 * p.diameter), 2, 'kerolox');
+}
+
+// ================================================================ model -> view
+// Booster geometry in metres, or null. The set sits either side of stage 1
+// and its bells end at the same height as stage 1's (the pad).
+function boosterGeom() {
+  const b = an.boosters;
+  if (!b || !an.stages.length) return null;
+  const d1 = an.stages[0].diameter;
+  return { count: b.count, bd: b.diameter, L: b.length, bellH: Math.max(1.2, 0.9 * b.diameter),
+           off: d1 / 2 + b.diameter / 2 + 0.1, prop: b.prop, n: b.n };
+}
+
+function stageSpan(k) {
+  let y0 = Infinity, y1 = -Infinity;
+  for (const r of lay.rows) if (r.stage === k) { y0 = Math.min(y0, r.y0); y1 = Math.max(y1, r.y1); }
+  return isFinite(y0) ? { y0, y1 } : null;
+}
+
+// Recompute everything derived from asm. Called after every change.
+function touch() {
+  an = analyse(asm, catalogue);
+  lay = layout(asm, catalogue);
+  propOf = new Map();
+  an.stages.forEach(s => s.tanks.forEach(t => propOf.set(t.id, s.prop)));
+  rowOf = new Map(lay.rows.map(r => [r.part.id, r]));
+  if (sel === BOOSTERS ? !asm.boosters : !asm.parts.some(p => p.id === sel)) sel = null;
+  let halfW = 1;
+  for (const r of lay.rows) halfW = Math.max(halfW, (r.d / 2) * (r.part.type === 'payload' && r.part.kind === 'bus' ? 3.6 : 1));
+  if (lay.fairing) halfW = Math.max(halfW, lay.fairing.d / 2);
+  let height = lay.height;
+  const g = boosterGeom();
+  if (g) { halfW = Math.max(halfW, g.off + g.bd / 2); height = Math.max(height, g.bellH + g.L + 0.7 * g.bd); }
+  ext = { halfW, height };
+}
+
+const rowDraw = r => {
+  const p = r.part;
+  return { kind: p.type === 'payload' ? p.kind : p.type, d: r.d, y0: r.y0, y1: r.y1,
+           prop: propOf.get(p.id) || 'kerolox', n: p.count || 1, crewed: p.crewed !== false };
+};
+
+// ================================================================ view
+function fitView() {
+  const left = 64, right = 104, top = 64, bottom = el.ins.hidden ? 56 : 230;
+  let s = Math.min((ch - top - bottom) / Math.max(ext.height, 4), (cw - left - right) / Math.max(ext.halfW * 2, 4));
+  if (!(s > 0) || !isFinite(s)) s = 40;
+  view.s = clamp(s, 2, 400);
+  view.ox = (left + cw - right) / 2;
+  view.oy = ch - bottom;
+}
+
+function requestDraw() { if (!frame) frame = requestAnimationFrame(draw); }
+
+function drawBackdrop(c, T) {
+  const W = cw, H = ch;
+  const g = c.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b1018'); g.addColorStop(1, '#06080c');
+  c.fillStyle = g; c.fillRect(0, 0, W, H);
+  const steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+  const step = steps.find(v => v >= 64 / T.s) || 1000;
+  const xmin = -T.ox / T.s, xmax = (W - T.ox) / T.s, ymax = T.oy / T.s;
+  c.lineWidth = 1;
+  for (let i = Math.floor(xmin / step); i * step <= xmax; i++) {
+    const px = Math.round(T.X(i * step)) + 0.5;
+    c.strokeStyle = i % 5 === 0 ? 'rgba(110,160,220,0.11)' : 'rgba(110,160,220,0.05)';
+    c.beginPath(); c.moveTo(px, 0); c.lineTo(px, H); c.stroke();
+  }
+  for (let j = 0; j * step <= ymax; j++) {
+    const py = Math.round(T.Y(j * step)) + 0.5;
+    c.strokeStyle = j % 5 === 0 ? 'rgba(110,160,220,0.11)' : 'rgba(110,160,220,0.05)';
+    c.beginPath(); c.moveTo(0, py); c.lineTo(W, py); c.stroke();
+  }
+  const fy = Math.round(T.Y(0)) + 0.5;                // the pad, and what is under it
+  c.fillStyle = 'rgba(0,0,0,0.3)'; c.fillRect(0, fy, W, Math.max(0, H - fy));
+  c.strokeStyle = 'rgba(200,215,235,0.25)'; c.beginPath(); c.moveTo(0, fy); c.lineTo(W, fy); c.stroke();
+  // metre scale bar on the left
+  c.strokeStyle = 'rgba(140,160,185,0.35)'; c.beginPath(); c.moveTo(34.5, 0); c.lineTo(34.5, H); c.stroke();
+  c.fillStyle = '#5A6675'; c.font = '10px ui-monospace, Consolas, monospace';
+  for (let j = 0; j * step <= ymax; j++) {
+    const py = Math.round(T.Y(j * step)) + 0.5;
+    c.beginPath(); c.moveTo(30, py); c.lineTo(39, py); c.stroke();
+    c.fillText(`${+(j * step).toFixed(2)} m`, 42, py + 3);
+  }
+}
+
+// Draws the stack; returns the rightmost screen x used (for the stage brackets).
+function drawVehicle(c, T) {
+  hitBoxes = [];
+  let right = T.X(0);
+  const g = boosterGeom();
+  if (g) {
+    const top = T.Y(g.bellH + g.L + 0.7 * g.bd);
+    for (const sg of [-1, 1]) {
+      const cx = sg * g.off;
+      drawBooster(c, T, cx, g.bd, g.L, g.bellH, g.n, g.prop);
+      const l = T.X(cx - g.bd / 2), r = T.X(cx + g.bd / 2);
+      hitBoxes.push({ id: BOOSTERS, l, r, t: top, b: T.Y(0) });
+      right = Math.max(right, r);
+    }
+    if (g.count > 2) {
+      c.fillStyle = '#E4E9F0'; c.font = '600 11px ui-monospace, Consolas, monospace'; c.textAlign = 'center';
+      c.fillText(`×${g.count}`, T.X(g.off), top - 6); c.textAlign = 'start';
+    }
+  }
+  for (const r of lay.rows) {
+    drawRow(c, rowDraw(r), T);
+    const rr = T.X(r.d / 2);
+    hitBoxes.push({ id: r.part.id, l: T.X(-r.d / 2), r: rr, t: T.Y(r.y1), b: T.Y(r.y0) });
+    right = Math.max(right, rr);
+  }
+  for (let j = 1; j < lay.rows.length; j++) {          // interstages where diameters change
+    const lo = lay.rows[j - 1], up = lay.rows[j];
+    if (lo.d > 0 && up.d > 0 && Math.abs(up.d - lo.d) > 0.05)
+      drawAdapter(c, { d0: lo.d, d1: up.d, y0: up.y0, y1: up.y0 + Math.min(1.2, 0.25 * Math.max(lo.d, up.d) + 0.1) }, T);
+  }
+  if (lay.fairing) {
+    const f = lay.fairing;
+    drawFairing(c, { d: f.d, y0: f.y0, y1: f.y1 }, T);
+    hitBoxes.push({ id: f.part.id, l: T.X(-f.d / 2), r: T.X(f.d / 2), t: T.Y(f.y1), b: T.Y(f.y0) });
+  }
+  for (const b of hitBoxes) {
+    if (b.id === sel) {
+      c.save(); c.shadowColor = 'rgba(240,165,0,0.75)'; c.shadowBlur = 16;
+      c.strokeStyle = '#F0A500'; c.lineWidth = 2;
+      c.strokeRect(b.l - 1, b.t - 1, b.r - b.l + 2, b.b - b.t + 2); c.restore();
+    } else if (b.id === hov) {
+      c.strokeStyle = 'rgba(255,255,255,0.85)'; c.lineWidth = 1.5;
+      c.strokeRect(b.l - 1, b.t - 1, b.r - b.l + 2, b.b - b.t + 2);
+    }
+  }
+  return right;
+}
+
+function drawBrackets(c, T, right) {
+  const x = right + 14;
+  an.stages.forEach(s => {
+    const sp = stageSpan(s.k);
+    if (!sp) return;
+    const col = STAGE_COLORS[s.k - 1] || '#999';
+    const y0 = T.Y(sp.y0), y1 = T.Y(sp.y1), mid = (y0 + y1) / 2, g = geo?.stages?.[s.k - 1];
+    c.fillStyle = col; c.fillRect(x, y1, 4, Math.max(2, y0 - y1));
+    c.font = '600 11px ui-monospace, Consolas, monospace';
+    c.fillText(`S${s.k}`, x + 10, mid + (g ? -2 : 4));
+    if (g) {
+      c.fillStyle = '#8B97A8'; c.font = '10px ui-monospace, Consolas, monospace';
+      c.fillText(`${(g.dv_mps / 1000).toFixed(2)} km/s`, x + 10, mid + 11);
+    }
+  });
+}
+
+// Attach nodes for the held part, in screen space.
+function computeNodes(p, T) {
+  const out = [], parts = asm.parts, payIdx = parts.findIndex(q => q.type === 'payload');
+  const add = (kind, idx, sx, sy, label) => out.push({ kind, idx, sx, sy, label, key: kind + ':' + idx });
+  const topY = T.Y(lay.height) - 26;
+  if (p.type === 'payload') add('payload', 0, T.X(0), topY, payIdx >= 0 ? 'replace payload' : 'top of stack');
+  else if (p.type === 'fairing') {
+    const pr = payIdx >= 0 ? rowOf.get(parts[payIdx].id) : null;
+    add('fairing', payIdx + 1, T.X(0), pr ? T.Y(pr.y0) : topY, 'around payload');
+  } else if (p.type === 'boosters') {
+    const sp = stageSpan(1);
+    if (sp && an.stages[0]) {
+      const d1 = an.stages[0].diameter, sy = T.Y((sp.y0 + sp.y1) / 2);
+      add('boosters', -1, T.X(d1 / 2) + 26, sy, 'radial boosters');
+      add('boosters', -1, T.X(-d1 / 2) - 26, sy, 'radial boosters');
+    }
+  } else {
+    const top = parts.findIndex(q => !isFixed(q));
+    const first = top < 0 ? parts.length : top;
+    const idxs = new Set([first, parts.length]);
+    for (let i = first + 1; i < parts.length; i++) idxs.add(i);
+    for (const i of idxs) {
+      if (i >= parts.length) add('stack', parts.length, T.X(0), T.Y(lay.rows.length ? lay.rows[0].y0 : 0) + 18, 'bottom of stack');
+      else {
+        const r = rowOf.get(parts[i].id);
+        if (r) add('stack', i, T.X(0), T.Y(r.y1), i === first && payIdx >= 0 ? 'directly under payload' : 'insert here');
+      }
+    }
+  }
+  return out;
+}
+
+function drawNodes(c) {
+  c.font = '11px system-ui, sans-serif';
+  for (const n of curNodes) {
+    const hot = n.key === hovKey, rad = hot ? 11 : 8;
+    c.beginPath(); c.arc(n.sx, n.sy, rad, 0, Math.PI * 2);
+    c.fillStyle = hot ? '#3FB950' : 'rgba(63,185,80,0.28)'; c.fill();
+    c.strokeStyle = '#3FB950'; c.lineWidth = 2; c.stroke();
+    if (hot) {
+      const w = c.measureText(n.label).width + 14;
+      c.fillStyle = 'rgba(19,25,34,0.95)'; c.fillRect(n.sx + 16, n.sy - 10, w, 20);
+      c.fillStyle = '#E4E9F0'; c.fillText(n.label, n.sx + 23, n.sy + 4);
+    }
+  }
+}
+
+function drawGhost(c) {
+  const T2 = { thumb: false, s: view.s, X: x => pointer.x + x * view.s, Y: y => pointer.y - y * view.s };
+  c.save(); c.globalAlpha = 0.5; drawGhostShape(c, holdPart, T2); c.restore();
+}
+
+function draw2D() {
+  frame = 0;
+  if (!cw || !ch || !an) return;
+  if (view.auto) fitView();
+  const T = { s: view.s, ox: view.ox, oy: view.oy,
+              X: x => view.ox + x * view.s, Y: y => view.oy - y * view.s };
+  ctx.setTransform(dpr(), 0, 0, dpr(), 0, 0);
+  ctx.clearRect(0, 0, cw, ch);
+  drawBackdrop(ctx, T);
+  const right = drawVehicle(ctx, T);
+  drawBrackets(ctx, T, right);
+  curNodes = holdPart ? computeNodes(holdPart, T) : [];
+  drawNodes(ctx);
+  if (holdPart && pointer) drawGhost(ctx);
+  el.empty.hidden = asm.parts.length > 0 || !!asm.boosters;
+  el.cv.style.cursor = holdPart ? 'crosshair' : hov ? 'pointer' : 'default';
+}
+
+function resize() {
+  const r = el.center.getBoundingClientRect();
+  cw = r.width; ch = r.height;
+  const k = dpr();
+  el.cv.width = Math.max(1, Math.round(cw * k)); el.cv.height = Math.max(1, Math.round(ch * k));
+  if (R3) R3.resize();
+  draw();
+}
+
+function hitPart(p) {
+  for (let i = hitBoxes.length - 1; i >= 0; i--) {
+    const b = hitBoxes[i];
+    if (p.x >= b.l && p.x <= b.r && p.y >= b.t && p.y <= b.b) return b;
+  }
+  return null;
+}
+
+function hitNode(p) { return curNodes.find(n => Math.hypot(n.sx - p.x, n.sy - p.y) <= 14) || null; }
+
+// ================================================================ edits
+function persist() { try { localStorage.setItem(STORE_KEY, JSON.stringify(asm)); } catch (e) {} }
+
+// One place every change goes through: recompute, persist, redraw, re-evaluate.
+function afterChange(opts = {}) {
+  touch(); persist();
+  if (opts.inspector !== false) renderInspector(); else updateDerived();
+  renderSide(); updateChrome(); requestDraw(); scheduleEval();
+}
+
+// Replace asm with `next` as one undo step. Edits sharing a `coalesce` key
+// within 1.5 s (a slider drag, typing) merge into the step already open.
+function commit(next, opts = {}) {
+  const before = JSON.stringify(asm), after = JSON.stringify(next);
+  if (before === after) return false;
+  const now = performance.now();
+  const merge = opts.coalesce && coalesce && coalesce.key === opts.coalesce && now - coalesce.t < 1500;
+  if (!merge) { undoS.push(before); if (undoS.length > 200) undoS.shift(); redoS = []; }
+  coalesce = opts.coalesce ? { key: opts.coalesce, t: now } : null;
+  asm = JSON.parse(after);
+  afterChange({ inspector: !opts.fromIns });
+  return true;
+}
+
+// Edit a deep copy; the callback returning false cancels the edit.
+function mutate(fn, opts = {}) {
+  const next = JSON.parse(JSON.stringify(asm));
+  if (fn(next) === false) return false;
+  return commit(next, opts);
+}
+
+function undo() {
+  if (!undoS.length) return;
+  redoS.push(JSON.stringify(asm)); asm = JSON.parse(undoS.pop()); coalesce = null;
+  afterChange();
+}
+function redo() {
+  if (!redoS.length) return;
+  undoS.push(JSON.stringify(asm)); asm = JSON.parse(redoS.pop()); coalesce = null;
+  afterChange();
+}
+
+// A stack part goes at index idx (top to bottom). A tank placed directly
+// under an engine gets a decoupler first, so the engine stays at a stage's bottom.
+function insertStack(next, idx, p) {
+  const above = next.parts[idx - 1];
+  const items = [];
+  if (p.type === 'tank' && above && above.type === 'engine') items.push(withId({ type: 'decoupler' }));
+  items.push(p);
+  next.parts.splice(idx, 0, ...items);
+}
+
+// Payload, fairing and boosters have fixed places; they replace what is there.
+function placeSpecial(next, p) {
+  if (p.type === 'payload') { next.parts = next.parts.filter(q => q.type !== 'payload'); next.parts.unshift(p); }
+  else if (p.type === 'fairing') {
+    next.parts = next.parts.filter(q => q.type !== 'fairing');
+    const pi = next.parts.findIndex(q => q.type === 'payload');
+    next.parts.splice(pi + 1, 0, p);
+  } else if (p.type === 'boosters') next.boosters = { ...p };
+}
+
+function placeAt(node) {
+  const part0 = holdPart, p = part0.type === 'boosters' ? part0 : withId(part0);
+  sel = part0.type === 'boosters' ? BOOSTERS : p.id;
+  mutate(next => {
+    if (node.kind === 'stack') insertStack(next, node.idx, p);
+    else placeSpecial(next, p);
+  });
+  cancelHold();
+}
+
+function quickAdd(item) {
+  const part0 = item.make(), p = part0.type === 'boosters' ? part0 : withId(part0);
+  sel = part0.type === 'boosters' ? BOOSTERS : p.id;
+  mutate(next => {
+    if (isFixed(p) || p.type === 'boosters') placeSpecial(next, p);
+    else insertStack(next, next.parts.length, p);
+  });
+}
+
+function removePart(id) {
+  if (sel === id) sel = null;
+  mutate(next => { if (id === BOOSTERS) next.boosters = null; else next.parts = next.parts.filter(p => p.id !== id); });
+  renderInspector();
+}
+
+function moveSel(dir) {
+  const id = sel;
+  mutate(next => {
+    const i = next.parts.findIndex(p => p.id === id), j = i + dir;
+    if (i < 0 || j < 0 || j >= next.parts.length) return false;
+    const a = next.parts[i], b = next.parts[j];
+    if (isFixed(a) || isFixed(b)) return false;
+    next.parts[i] = b; next.parts[j] = a;
+  });
+}
+
+function duplicateSel() {
+  const id = sel;
+  mutate(next => {
+    const i = next.parts.findIndex(p => p.id === id);
+    if (i < 0 || next.parts[i].type !== 'tank') return false;
+    const c = withId({ ...next.parts[i], id: null });
+    sel = c.id;
+    next.parts.splice(i, 0, c);
+  });
+}
+
+// ================================================================ hold
+function startHold(item) { holdItem = item; holdPart = item.make(); setHoldUI(); requestDraw(); }
+function cancelHold() { holdItem = null; holdPart = null; hovKey = null; setHoldUI(); requestDraw(); }
+function setHoldUI() {
+  if (holdPart) {
+    el.hold.hidden = false;
+    el.hold.innerHTML = `Placing <b>${esc(holdItem.label)}</b> — click a green node · Esc or right-click cancels`;
+  } else el.hold.hidden = true;
+  $$('.part', el.grid).forEach(b => b.classList.toggle('on', !!holdItem && b.dataset.key === holdItem.key));
+}
+
+function handleClick(p) {
+  draw();                                          // hit boxes and nodes must match what is on screen
+  if (holdPart) { const n = hitNode(p); if (n) placeAt(n); return; }
+  const h = hitPart(p);
+  sel = h ? h.id : null;
+  renderInspector();
+}
+
+// ================================================================ inspector
+const fld = (label, input, unit = '') =>
+  `<label class="fld"><span>${label}</span><span class="inp">${input}${unit ? `<em>${unit}</em>` : ''}</span></label>`;
+const numIn = (f, v, attrs = '', k = '') =>
+  `<input type="number" step="any" data-f="${f}"${k ? ` data-k="${k}"` : ''} value="${esc(v)}" ${attrs}>`;
+function pickIn(f, opts, cur, k = '') {
+  const cs = String(cur ?? '');
+  const list = opts.some(([v]) => String(v) === cs) ? opts : [[cs, cs], ...opts];
+  return `<select data-f="${f}"${k ? ` data-k="${k}"` : ''}>${list.map(([v, l]) =>
+    `<option value="${esc(v)}"${String(v) === cs ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+}
+function engineIn(f, cur) {
+  const opt = e => `<option value="${esc(e.id)}"${e.id === cur ? ' selected' : ''}>${esc(e.label)} · ${
+    e.thrust_kn >= 1000 ? (e.thrust_kn / 1000).toFixed(2) + ' MN' : Math.round(e.thrust_kn) + ' kN'} · ${e.isp_vac} s</option>`;
+  const list = engineList(catalogue);
+  const current = sel === BOOSTERS ? asm.boosters : part(sel);
+  if (cur === 'manual' && current?.custom) list.push(current.custom);
+  return `<select data-f="${f}"><optgroup label="Catalogue">${list.filter(e => !e.generic).map(opt).join('')}</optgroup>` +
+         `<optgroup label="Generic (estimated)">${list.filter(e => e.generic).map(opt).join('')}</optgroup></select>`;
+}
+
+function inspectorFor(id) {
+  const isB = id === BOOSTERS;
+  const p = isB ? asm.boosters : part(id);
+  if (!p) return '';
+  let title = '', body = '';
+  if (isB) {
+    title = 'Radial boosters';
+    body = `<div class="seg">${[2, 3, 4, 6, 8].map(v => `<button data-act="bcount" data-v="${v}" class="${p.count === v ? 'on' : ''}">${v}</button>`).join('')}</div>`
+      + fld('Diameter', numIn('bdia', p.diameter, 'min="0.3" step="0.05"'), 'm')
+      + fld('Length', numIn('blen', p.length, 'min="1" step="0.5"'), 'm')
+      + fld('Engine', engineIn('beng', p.engine))
+      + fld('Engines each', numIn('bengines', p.engines, 'min="1" max="9" step="1"'))
+      + fld('Core throttle', numIn('bthr', p.throttle ?? 100, 'min="0" max="100" step="5"'), '%')
+      + fld('Ignition delay', numIn('bign', p.ign ?? 0, 'min="0" step="1"'), 's')
+      + fld('Separation delay', numIn('bsep', p.sep ?? 0, 'min="0" step="1"'), 's')
+      + `<p class="derived" data-derived="booster"></p>`;
+  } else if (p.type === 'payload' && p.kind === 'capsule') {
+    title = `Crew capsule · ${p.name}`;
+    body = fld('Design', pickIn('cap', CAPSULES.map(([n, m]) => [n, `${n} · ${fmtT(m)}`]), p.name))
+      + fld('Mass', numIn('mass', p.mass, 'min="1" step="10"'), 'kg')
+      + fld('Diameter', numIn('dia', p.diameter, 'min="0.5" step="0.01"'), 'm')
+      + `<label class="chk"><input type="checkbox" data-f="crewed"${p.crewed !== false ? ' checked' : ''}> Crewed</label>`
+      + fld('Cargo', numIn('cargo', p.cargo || 0, 'min="0" step="10"'), 'kg');
+  } else if (p.type === 'payload' && p.kind === 'bus') {
+    title = `Probe core · ${p.name}`;
+    body = fld('Design', pickIn('probe', PROBES.map(([n, m]) => [n, `${n} · ${m} kg`]), p.name))
+      + fld('Mass', numIn('mass', p.mass, 'min="1" step="10"'), 'kg')
+      + fld('Cargo', numIn('cargo', p.cargo || 0, 'min="0" step="10"'), 'kg');
+  } else if (p.type === 'payload') {
+    const L = p.lander;
+    title = `Lunar lander · ${p.name}`;
+    body = fld('Design', pickIn('lnd', LANDERS.map(([n]) => [n, n]), p.name))
+      + [['dry', 'Dry mass', 'kg', 'min="0" step="50"'], ['prop', 'Propellant', 'kg', 'min="0" step="100"'],
+         ['thrust_kn', 'Thrust', 'kN', 'min="1" step="1"'], ['isp', 'Isp', 's', 'min="100" step="1"'],
+         ['throttle_min', 'Throttle floor', '%', 'min="0" max="100" step="1"'],
+         ['diameter', 'Deployed diameter', 'm', 'min="1" step="0.1"']]
+        .map(([k, lab, u, a]) => fld(lab, numIn('lk', L[k], a, k), u)).join('')
+      + `<p class="derived" data-derived="lander"></p>`;
+  } else if (p.type === 'tank') {
+    title = `Fuel tank · ⌀${p.diameter} m`;
+    body = fld('Diameter', pickIn('tdia', TANK_DIAMETERS.map(d => [d, `⌀${d} m · ${TANK_CLASS[d]}`]), p.diameter))
+      + `<label class="fld"><span>Length</span><span class="lenrow">`
+      + `<input type="range" min="0.5" max="60" step="0.1" data-f="tlen" value="${p.length}">`
+      + `<input type="number" min="0.5" max="60" step="0.1" data-f="tlen" value="${p.length}">`
+      + `<em>m</em></span></label>`
+      + `<p class="derived" data-derived="tank"></p>`;
+  } else if (p.type === 'engine') {
+    title = 'Engine cluster';
+    body = fld('Engine', engineIn('eng', p.engine))
+      + `<div class="fld"><span>Cluster</span><div class="stepper">`
+      + `<button data-act="estep" data-d="-1" aria-label="fewer engines">−</button>`
+      + `<input type="number" min="1" max="33" step="1" data-f="ecount" value="${p.count}">`
+      + `<button data-act="estep" data-d="1" aria-label="more engines">+</button></div></div>`
+      + fld('Dry mass', numIn('edry', p.dry ?? '', 'min="0" step="100" placeholder="auto"'), 'kg')
+      + `<p class="hint">Blank dry mass is estimated from the propellant and the engine.</p>`
+      + `<p class="derived" data-derived="engine"></p>`;
+  } else if (p.type === 'decoupler') {
+    title = 'Stage decoupler';
+    body = `<p class="hint">Splits the stack into stages. Stage 1 is the bottom one and fires first. A tank placed directly under an engine gets one of these automatically.</p>`;
+  } else if (p.type === 'fairing') {
+    title = 'Payload fairing';
+    body = fld('Mass', numIn('mass', p.mass, 'min="0" step="10"'), 'kg')
+      + `<p class="hint">Sits directly under the payload and is jettisoned at 120 km.</p>`;
+  }
+  const idx = isB ? -1 : asm.parts.findIndex(q => q.id === id);
+  const canMove = d => !isB && !isFixed(p) && idx + d >= 0 && idx + d < asm.parts.length && !isFixed(asm.parts[idx + d]);
+  const foot = isB
+    ? `<button class="danger" data-act="del">Remove boosters</button>`
+    : `${isFixed(p) ? '' : `<button data-act="up" ${canMove(-1) ? '' : 'disabled'}>Move up</button>`
+      + `<button data-act="down" ${canMove(1) ? '' : 'disabled'}>Move down</button>`}`
+      + `${p.type === 'tank' ? '<button data-act="dup">Duplicate</button>' : ''}`
+      + `<button class="danger" data-act="del">Remove</button>`;
+  return `<header class="ins-h"><span class="u-label">${esc(title)}</span>`
+    + `<button class="x" data-act="close" aria-label="Close">×</button></header>`
+    + `<div class="ins-b">${body}</div><footer class="ins-f">${foot}</footer>`;
+}
+
+function renderInspector() {
+  const html = sel ? inspectorFor(sel) : '';
+  el.ins.innerHTML = html;
+  el.ins.hidden = !html;
+  updateDerived();
+  requestDraw();
+}
+
+// Read-outs that follow the numbers as they are typed.
+function derivedFor(kind) {
+  const p = sel === BOOSTERS ? null : part(sel);
+  if (kind === 'lander' && an.payload?.kind === 'lander') {
+    const l = an.payload.lander, m0 = l.dry, m1 = l.dry + l.prop;
+    return `Δv ${f1(l.isp * G0 * Math.log(m1 / m0) / 1000, 2)} km/s · lunar TWR ${f1(l.thrust_kn * 1000 / (m1 * 1.62), 2)}`;
+  }
+  if (kind === 'tank' && p) {
+    const prop = propOf.get(p.id) || 'kerolox';
+    return `this tank alone holds ${fmtT(propFromLength(p.length, p.diameter, prop))} of ${prop}`;
+  }
+  if (kind === 'engine' && p) {
+    const e = engineForPart(catalogue, p);
+    return e ? `${p.count} × ${Math.round(e.thrust_kn)} kN = ${Math.round(p.count * e.thrust_kn)} kN · ${e.prop}` : '';
+  }
+  if (kind === 'booster' && an.boosters) {
+    const b = an.boosters;
+    return `${fmtT(b.mprop)} ${b.prop} per set · ${b.count} sets of ${b.n} engines`;
+  }
+  return '';
+}
+function updateDerived() {
+  el.ins.querySelectorAll('[data-derived]').forEach(n => { n.textContent = derivedFor(n.dataset.derived); });
+}
+
+// Field values to the model. Returns false when the value is not usable.
+function setField(next, id, f, k, raw) {
+  const tgt = id === BOOSTERS ? next.boosters : next.parts.find(p => p.id === id);
+  if (!tgt) return false;
+  const n = Number(raw), ok = Number.isFinite(n), str = String(raw);
+  switch (f) {
+    case 'cap': { const c = CAPSULES.find(x => x[0] === raw); if (!c) return false; Object.assign(tgt, { name: c[0], mass: c[1], diameter: c[2] }); return true; }
+    case 'probe': { const q = PROBES.find(x => x[0] === raw); if (!q) return false; Object.assign(tgt, { name: q[0], mass: q[1] }); return true; }
+    case 'lnd': { const l = LANDERS.find(x => x[0] === raw); if (!l) return false; Object.assign(tgt, { name: l[0], lander: { ...l[1] } }); return true; }
+    case 'lk': if (!ok || n < 0) return false; tgt.lander[k] = n; return true;
+    case 'mass': if (!ok || n < 0) return false; tgt.mass = n; return true;
+    case 'cargo': if (!ok || n < 0) return false; tgt.cargo = n; return true;
+    case 'dia': case 'tdia': case 'bdia': if (!(n > 0)) return false; tgt.diameter = n; return true;
+    case 'blen': if (!(n > 0)) return false; tgt.length = n; return true;
+    case 'crewed': tgt.crewed = raw === true; return true;
+    case 'tlen': if (!ok) return false; tgt.length = Math.round(clamp(n, 0.5, 60) * 10) / 10; return true;
+    case 'eng': case 'beng': tgt.engine = str; return true;
+    case 'ecount': if (!ok) return false; tgt.count = clamp(Math.round(n), 1, 33); return true;
+    case 'edry': if (str.trim() === '') { tgt.dry = null; return true; } if (!(n > 0)) return false; tgt.dry = n; return true;
+    case 'bengines': if (!ok) return false; tgt.engines = clamp(Math.round(n), 1, 9); return true;
+    case 'bthr': if (!ok) return false; tgt.throttle = clamp(n, 0, 100); return true;
+    case 'bign': if (!ok) return false; tgt.ign = clamp(n, 0, 3600); return true;
+    case 'bsep': if (!ok) return false; tgt.sep = clamp(n, 0, 3600); return true;
+    default: return false;
+  }
+}
+
+// evt: 'input' while typing or dragging (coalesced into one undo step) or 'change'.
+function applyField(t, evt) {
+  if (!sel || !t.dataset.f) return;
+  const f = t.dataset.f, k = t.dataset.k || '';
+  const raw = t.type === 'checkbox' ? t.checked : t.value;
+  const structural = t.tagName === 'SELECT' || t.type === 'checkbox';
+  const key = evt === 'input' && !structural ? `${sel}:${f}:${k}` : null;
+  mutate(next => setField(next, sel, f, k, raw), { coalesce: key, fromIns: !structural });
+}
+
+el.ins.addEventListener('input', e => {
+  const t = e.target;
+  if (!t.dataset || !t.dataset.f) return;
+  if (t.dataset.f === 'tlen') el.ins.querySelectorAll('[data-f="tlen"]').forEach(o => { if (o !== t) o.value = t.value; });
+  applyField(t, 'input');
+});
+el.ins.addEventListener('change', e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.f) applyField(t, 'change');
+});
+el.ins.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'close') { sel = null; renderInspector(); }
+  else if (act === 'up') moveSel(-1);
+  else if (act === 'down') moveSel(1);
+  else if (act === 'dup') duplicateSel();
+  else if (act === 'del') removePart(sel);
+  else if (act === 'estep') mutate(next => {
+    const p = next.parts.find(q => q.id === sel);
+    if (!p) return false;
+    p.count = clamp(p.count + Number(b.dataset.d), 1, 33);
+  });
+  else if (act === 'bcount') mutate(next => {
+    if (!next.boosters) return false;
+    next.boosters.count = Number(b.dataset.v);
+  });
+});
+
+// ================================================================ side panels
+const bells = n => `<span class="bells" aria-hidden="true">${'<i></i>'.repeat(Math.min(n, 9))}${n > 9 ? `<b>+${n - 9}</b>` : ''}</span>`;
+
+function stageCard(s, g) {
+  const b = s.k === 1 ? an.boosters : null;
+  const gb = b ? geo?.boosters?.[0] : null;
+  const twr = g ? g.twr : null;
+  const eng = s.e ? s.e.label : s.engine;
+  const prop = g ? fmtT(g.prop_kg) : s.mprop ? fmtT(s.mprop) : '—';
+  const dry = g ? fmtT(g.dry_kg) : s.dry ? fmtT(s.dry) : 'auto';
+  return `<article class="stage" style="--sc:${STAGE_COLORS[s.k - 1] || '#999'}">
+    <header><span class="sn">S${s.k}</span><h3>Stage ${s.k}${b ? ` + ${b.count} booster${b.count > 1 ? 's' : ''}` : ''}</h3></header>
+    <div class="eng">${s.e ? bells(s.n) : ''}<span>${s.e ? `${s.n} × ${esc(eng)}` : 'no engine yet — add one at the bottom of this stage'}</span></div>
+    <dl class="stats">
+      <div><dt>Δv</dt><dd>${g ? fmtDv(g.dv_mps) : '—'}</dd></div>
+      <div><dt>TWR${s.k === 1 ? '' : ' vac'}</dt><dd class="${s.k === 1 && twr != null ? twrClass(twr) : ''}">${f1(twr, 2)}</dd></div>
+      <div><dt>burn</dt><dd>${g ? f1(g.burn_s, 0) + ' s' : '—'}</dd></div>
+    </dl>
+    <p class="mass">prop ${prop} · dry ${dry}</p>
+    ${gb ? `<p class="boost">Boosters ×${b.count}: Δv ${fmtDv(gb.dv_mps)} · burn ${f1(gb.burn_s, 0)} s · ${fmtT(gb.set_mass_kg)} per set</p>` : ''}
+  </article>`;
+}
+
+function payloadCard(g) {
+  const p = an.payload;
+  if (!p) return `<article class="stage"><header><span class="sn">P</span><h3>No payload</h3></header>`
+    + `<p class="mass">Hold a capsule, probe core or lander onto the top of the stack.</p></article>`;
+  const mass = g?.payload?.mass_kg ?? (p.kind === 'lander' ? p.lander.dry + p.lander.prop : p.mass + (p.cargo || 0));
+  const fair = an.fairing ? ` · fairing ${fmtT(an.fairing.mass ?? 150)}` : '';
+  return `<article class="stage" style="--sc:#8B97A8"><header><span class="sn">P</span><h3>${esc(p.name)}</h3></header>`
+    + `<p class="mass">${fmtT(mass)}${fair}</p></article>`;
+}
+
+function stagingHTML() {
+  const none = an.stages.length ? '' : '<p class="hint">No stages yet. Hold a tank, then an engine, onto the stack below the payload.</p>';
+  return none + an.stages.map(s => stageCard(s, geo?.stages?.[s.k - 1])).join('') + payloadCard(geo);
+}
+
+function reportHTML() {
+  const g = geo;
+  const err = geoErr ? `<p class="bad">Geometry failed: ${esc(geoErr)}</p>` : '';
+  const liftoff = g?.liftoff_mass_kg, twr = g?.liftoff_twr;
+  const dvk = g ? g.total_dv_mps / 1000 : null;
+  const pay = g?.payload?.mass_kg;
+  const frac = liftoff && pay ? pay / liftoff : null;
+  const kv = (k, v) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
+  const rows = kv('Liftoff mass', liftoff ? fmtT(liftoff) : '—')
+    + kv('Height', g ? f1(g.length, 1) + ' m' : '—')
+    + kv('Pad TWR', `<span class="${twr != null ? twrClass(twr) : ''}">${f1(twr, 2)}</span>`)
+    + kv('Total Δv', dvk != null ? `${f1(dvk, 2)} km/s` : '—')
+    + kv('Payload fraction', frac != null ? (frac * 100).toFixed(2) + ' %' : '—');
+  let lander = '';
+  if (an.payload?.kind === 'lander') {
+    const l = an.payload.lander, m0 = l.dry, m1 = l.dry + l.prop;
+    const twrL = l.thrust_kn * 1000 / (m1 * 1.62);
+    lander = kv('Lander Δv', `${f1(l.isp * G0 * Math.log(m1 / m0) / 1000, 2)} km/s`)
+      + kv('Lunar TWR', `<span class="${twrClass(twrL)}">${f1(twrL, 2)}</span>`);
+  }
+  // only the missions this payload can fly: a lander does not fly a hop
+  const MS = an && an.payload ? MISSIONS.filter(m => missionsFor(an.payload).includes(m.mode)) : MISSIONS;
+  const budget = `<p class="u-label" style="margin-top:14px">Δv budget</p>`
+    + `<div class="budget">${dvk != null ? `<div class="fill" style="width:${clamp(dvk / 16 * 100, 0, 100)}%"></div>` : ''}`
+    + MS.map(m => `<i class="tick${dvk != null && dvk >= m.dv ? ' ok' : ''}" style="left:${m.dv / 16 * 100}%" title="${esc(m.label)} · ${m.dv} km/s"></i>`).join('')
+    + `</div><div class="axis"><span>0</span><span>4</span><span>8</span><span>12</span><span>16 km/s</span></div>`;
+  const reach = MS.map(m => {
+    const ok = dvk != null && dvk >= m.dv;
+    return `<li class="${ok ? 'good' : ''}"><span>${ok ? '✓' : ''}</span>${esc(m.label)}<em>${m.dv}</em></li>`;
+  }).join('');
+  return `${err}${rows}${lander}${budget}<ul class="reach">${reach}</ul>`
+    + `<p class="caption">typical from-pad budgets including ascent losses — the flight itself is simulated</p>`;
+}
+
+function issuesHTML() {
+  if (!an.issues.length) return '<li class="ok">Nothing to fix. The stack maps onto a vehicle the simulator will fly.</li>';
+  return an.issues.map(i => `<li class="${i.level}"${i.partId ? ` data-part="${esc(i.partId)}"` : ''}>`
+    + `<b>${i.level === 'error' ? 'Error' : 'Warning'}</b>${esc(i.msg)}</li>`).join('');
+}
+
+function renderSide() {
+  const live = an.ok && geo && geoKey === JSON.stringify(asm);
+  el.staging.className = live ? '' : 'dim';
+  el.staging.innerHTML = stagingHTML();
+  el.report.className = live ? '' : 'dim';
+  el.report.innerHTML = reportHTML();
+  el.issues.innerHTML = issuesHTML();
+  const e = an.issues.filter(i => i.level === 'error').length, w = an.issues.length - e;
+  el.issueCount.textContent = an.issues.length ? `${e} error${e === 1 ? '' : 's'} · ${w} warning${w === 1 ? '' : 's'}` : 'clear';
+  el.issueCount.className = e ? 'bad' : w ? 'warn' : 'good';
+}
+
+el.issues.addEventListener('click', e => {
+  const li = e.target.closest('[data-part]');
+  if (!li || !li.dataset.part) return;
+  sel = li.dataset.part;
+  renderInspector();
+});
+
+function updateChrome() {
+  el.undo.disabled = !undoS.length;
+  el.redo.disabled = !redoS.length;
+  el.launch.disabled = !an.ok;
+  el.launch.title = an.ok ? 'Choose a mission and fly it'
+    : (an.issues.find(i => i.level === 'error')?.msg || 'The vehicle has errors');
+  if (document.activeElement !== el.name) el.name.value = asm.name || '';
+}
+
+// ================================================================ palette
+function buildCats() {
+  el.cats.innerHTML = cats.map(c => `<button class="cat" data-cat="${c.id}" aria-pressed="${c.id === curCat}">${esc(SHORT[c.id] || c.label)}</button>`).join('');
+}
+
+function buildGrid() {
+  const q = query.trim().toLowerCase();
+  const items = q
+    ? cats.flatMap(c => c.parts).filter(it => (it.label + ' ' + it.sub).toLowerCase().includes(q))
+    : (cats.find(c => c.id === curCat)?.parts || []);
+  el.grid.innerHTML = items.map(it => `<button class="part" data-key="${esc(it.key)}">`
+    + `<canvas class="thumb"></canvas><span class="pn">${esc(it.label)}</span><span class="ps">${esc(it.sub)}</span></button>`).join('')
+    || '<p class="hint">No parts match.</p>';
+  requestAnimationFrame(() => $$('.part', el.grid).forEach(b => drawThumb(b.querySelector('canvas'), ITEMS.get(b.dataset.key))));
+  setHoldUI();
+}
+
+// Stats for the tooltip, built from a fresh instance of the palette item.
+function itemStats(item) {
+  const p = item.make(), rows = [];
+  const add = (k, v) => rows.push(`<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`);
+  if (p.type === 'payload' && p.kind === 'lander') {
+    const l = p.lander;
+    add('dry', fmtT(l.dry)); add('propellant', fmtT(l.prop)); add('thrust', `${l.thrust_kn} kN`);
+    add('Isp', `${l.isp} s`); add('throttle floor', `${l.throttle_min} %`);
+    add('lunar Δv', `${f1(l.isp * G0 * Math.log((l.dry + l.prop) / l.dry) / 1000, 2)} km/s`);
+    add('deployed Ø', `${l.diameter} m`);
+  } else if (p.type === 'payload') {
+    add('mass', fmtT(p.mass));
+    if (p.kind === 'capsule') { add('diameter', `${p.diameter} m`); add('crew', 'crewed'); }
+    else add('role', 'uncrewed probe core');
+  } else if (p.type === 'tank') {
+    add('diameter', `${p.diameter} m · class ${TANK_CLASS[p.diameter]}`);
+    add('default length', `${p.length} m`);
+    add('kerolox at default', fmtT(propFromLength(p.length, p.diameter, 'kerolox')));
+  } else if (p.type === 'engine') {
+    const e = engineForPart(catalogue, p) || {};
+    add('thrust', e.thrust_kn >= 1000 ? `${(e.thrust_kn / 1000).toFixed(2)} MN` : `${Math.round(e.thrust_kn)} kN`);
+    add('Isp vac', `${e.isp_vac} s`);
+    if (e.isp_sl) add('Isp sea level', `${Math.round(e.isp_sl)} s`);
+    add('propellant', e.prop);
+    add('mass each', `${fmtN(e.mass_kg)} kg`);
+    if (e.generic) add('note', e.note);
+  } else if (p.type === 'decoupler') add('effect', 'splits the stack into stages');
+  else if (p.type === 'fairing') { add('mass', fmtT(p.mass)); add('jettison', '120 km'); }
+  else if (p.type === 'boosters') {
+    add('sets', `${p.count} × ⌀${p.diameter} m × ${p.length} m`);
+    add('engine', engineForPart(catalogue, p)?.label || p.engine);
+    add('engines each', p.engines);
+  }
+  return `<dl>${rows.join('')}</dl>`;
+}
+
+function showTip(btn) {
+  const it = ITEMS.get(btn.dataset.key);
+  if (!it) return;
+  const r = btn.getBoundingClientRect();
+  el.tip.innerHTML = `<b>${esc(it.label)}</b><span>${esc(it.sub)}</span>${itemStats(it)}`;
+  el.tip.hidden = false;
+  el.tip.style.left = Math.min(r.right + 10, innerWidth - 250) + 'px';
+  el.tip.style.top = Math.max(8, Math.min(r.top, innerHeight - el.tip.offsetHeight - 8)) + 'px';
+}
+
+// ================================================================ presets and sites
+function buildPresets() {
+  el.presetMenu.innerHTML = Object.keys(PRESETS).map(k => `<button data-preset="${esc(k)}">${esc(k)}</button>`).join('');
+}
+function toggleMenu(open) {
+  el.presetMenu.hidden = !open;
+  el.presetBtn.setAttribute('aria-expanded', String(open));
+}
+function buildSites() {
+  const q = new URLSearchParams(location.search);
+  el.lSite.innerHTML = LAUNCH_SITES.map(([k, n, lat]) => `<option value="${k}">${esc(n)} · ${lat}°</option>`).join('');
+  if (LAUNCH_SITES.some(([k]) => k === q.get('site'))) el.lSite.value = q.get('site');
+  // Default to a mid-morning launch at whichever site is picked, until the
+  // time is typed: launch_h is measured from Greenwich noon, so the same
+  // number is dawn at the Cape and dusk at Baikonur.
+  let timeTyped = false;
+  const morning = () => { if (timeTyped) return;
+    const s = LAUNCH_SITES.find(x => x[0] === el.lSite.value) || LAUNCH_SITES[0];
+    el.lTime.value = launchHourFor(s[3]); };
+  el.lTime.addEventListener('input', () => { timeTyped = true; });
+  el.lSite.addEventListener('change', morning);
+  morning();
+  if (q.has('launch_h') && q.get('launch_h').trim() !== '' && Number.isFinite(Number(q.get('launch_h')))) {
+    el.lTime.value = clamp(Number(q.get('launch_h')), 0, 24);
+    timeTyped = true;
+  }
+  el.lLand.innerHTML = LANDING_SITES.map(([k, n]) => `<option value="${k}">${esc(n)}</option>`).join('');
+  if (LANDING_SITES.some(([k]) => k === q.get('target'))) el.lLand.value = q.get('target');
+}
+
+// ================================================================ evaluation
+// Ask the simulator for the vehicle's numbers after edits settle, and publish
+// valid vehicles to mission control. Stale replies are dropped by sequence.
+function scheduleEval(delay = 150) { clearTimeout(evalTimer); evalTimer = setTimeout(evaluate, delay); }
+
+async function evaluate() {
+  if (!an.ok) { renderSide(); return; }             // keep the last numbers, greyed
+  const key = JSON.stringify(asm);
+  let params;
+  try { params = toParams(asm, catalogue); }
+  catch (err) { geoErr = err.message; renderSide(); return; }
+  params.set('mode', an.payload?.kind === 'lander' ? 'landing' : 'flyby');
+  vehicle.save(params);
+  vehicle.markDirty('the vehicle changed in the assembly building');
+  const seq = ++geoSeq;
+  try {
+    const g = await api.geometry(params);
+    if (seq !== geoSeq) return;
+    geo = g; geoKey = key; geoErr = null;
+  } catch (err) {
+    if (seq !== geoSeq) return;
+    geoErr = err.message || String(err);
+  }
+  renderSide(); requestDraw();
+}
+
+// ================================================================ launch
+function showLErr(msg) { el.lErr.textContent = msg; el.lErr.hidden = false; }
+
+function openLaunch() {
+  if (!an.ok) return;
+  const avail = m => missionsFor(an.payload).includes(m.mode);
+  const cur = MISSIONS.find(m => m.id === mission);
+  if (!cur || !avail(cur)) mission = (MISSIONS.find(avail) || MISSIONS[0]).id;
+  el.lKick.checked = asm.opt_kick !== false;
+  el.lErr.hidden = true;
+  renderMissions();
+  renderLaunchSide();
+  el.dlg.showModal();
+}
+
+function renderMissions() {
+  const avail = m => missionsFor(an.payload).includes(m.mode);
+  const groups = [...new Set(MISSIONS.map(m => m.group))];
+  el.missions.innerHTML = groups.map(g => `<h3 class="u-label">${esc(g)}</h3>` + MISSIONS.filter(m => m.group === g).map(m => {
+    const ok = avail(m), on = m.id === mission;
+    const why = m.mode === 'landing' ? 'needs a lander' : 'needs a capsule or probe core';
+    return `<button class="mission${on ? ' on' : ''}" data-m="${m.id}" aria-pressed="${on}" ${ok ? '' : 'disabled'}>`
+      + `<span class="mn">${esc(m.label)}</span><span class="md">${esc(m.desc)}</span>`
+      + `<span class="mdv">Δv ${m.dv} km/s${ok ? '' : ` · <i class="why">${why}</i>`}</span></button>`;
+  }).join('')).join('');
+}
+
+function renderLaunchSide() {
+  const m = MISSIONS.find(x => x.id === mission);
+  el.mDesc.textContent = m.desc;
+  el.lLandWrap.hidden = m.mode !== 'landing';
+  const total = geo ? geo.total_dv_mps / 1000 : null;
+  el.dvCheck.innerHTML = total == null ? 'Waiting for the vehicle’s Δv…'
+    : total >= m.dv ? `<span class="good">✓ ${total.toFixed(2)} km/s against ${m.dv} km/s — ${(total - m.dv).toFixed(2)} km/s to spare</span>`
+    : `<span class="bad">${total.toFixed(2)} km/s against ${m.dv} km/s — short by ${(m.dv - total).toFixed(2)} km/s</span>`;
+}
+
+async function launch() {
+  const m = MISSIONS.find(x => x.id === mission);
+  let params;
+  try { params = toParams(asm, catalogue); }
+  catch (err) { showLErr(err.message); return; }
+  for (const [k, v] of Object.entries(m.params)) params.set(k, String(v));
+  params.set('site', el.lSite.value);
+  params.set('launch_h', String(clamp(Number(el.lTime.value) || 0, 0, 24)));
+  if (m.mode === 'landing') params.set('target', el.lLand.value);
+  params.set('opt_kick', el.lKick.checked ? '1' : '0');
+  vehicle.save(params);
+  el.dlg.close();
+  const controller = new AbortController();
+  const done = busy('designing and flying the mission…', { onCancel: () => controller.abort(), cancelLabel: api.cancelLabel });
+  try {
+    const j = await api.run(params, { onProgress: done.progress, signal: controller.signal });
+    done();
+    location.href = 'launch_page.html?run=' + encodeURIComponent(j.id);
+  } catch (err) {
+    done();
+    el.dlg.showModal();
+    if (err.name === 'AbortError') { showLErr('Cancelled.'); return; }
+    showLErr(err.message || String(err));
+    fail(err, 'mission');
+  }
+}
+
+// ================================================================ start-up
+// Where the vehicle comes from, in order: ?preset=; a vehicle in the query
+// (mission control links here with its whole form); the assembly last edited
+// here, but only while it is still the vehicle mission control holds — a
+// preset applied over there since must not be hidden behind a stale hangar;
+// the stored vehicle itself; the Sable reference.
+function sameVehicle(a, qs) {
+  try {
+    const mine = toParams(a, catalogue), theirs = new URLSearchParams(qs);
+    for (const [k, v] of mine) {
+      const w = theirs.get(k);
+      if (w === null) return false;
+      const x = Number(v), y = Number(w);
+      if (Number.isFinite(x) && Number.isFinite(y) ? Math.abs(x - y) > 1e-6 * Math.max(1, Math.abs(x)) : v !== w) return false;
+    }
+    return true;
+  } catch (e) { return false; }
+}
+function missionFromQuery(q) {
+  const m = q.get('mode');
+  if (m === 'landing') return 'landing';
+  if (m === 'flyby') return 'flyby';
+  if (m === 'suborbital') return q.get('sub_profile') === 'downrange' ? 'shot' : 'hop';
+  if (m === 'orbit') {
+    const o = q.get('orbit') || 'leo';
+    return o === 'leo' ? (['1', 'true', 'on'].includes(q.get('deorbit')) ? 'leo_ret' : 'leo')
+         : MISSIONS.some(x => x.id === o) ? o : 'leo';
+  }
+  return null;
+}
+function startAssembly() {
+  const stripIds = a => { a.parts = a.parts.map(p => withId({ ...p, id: null })); return a; };
+  const q = new URLSearchParams(location.search);
+  const fromQ = missionFromQuery(q);
+  if (fromQ) mission = fromQ;
+  try {
+    const name = q.get('preset');
+    if (name && PRESETS[name]) return fromParams(PRESETS[name], catalogue);
+  } catch (e) {}
+  try { if ([...q.keys()].some(vehicle.own)) return fromParams(q, catalogue); } catch (e) {}
+  const stored = (() => { try { return vehicle.load(); } catch (e) { return ''; } })();
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) {
+      const o = JSON.parse(raw);
+      if (o && Array.isArray(o.parts) && (!stored || sameVehicle(o, stored))) return stripIds(o);
+    }
+  } catch (e) {}
+  try { if (stored) return fromParams(stored, catalogue); } catch (e) {}
+  return fromParams(PRESETS['Sable'], catalogue);
+}
+
+function bind() {
+  el.name.addEventListener('input', () => mutate(n => { n.name = el.name.value; }, { coalesce: 'name', fromIns: true }));
+  el.undo.onclick = undo;
+  el.redo.onclick = redo;
+  el.presetBtn.onclick = e => { e.stopPropagation(); toggleMenu(el.presetMenu.hidden); };
+  el.presetMenu.onclick = e => {
+    const b = e.target.closest('[data-preset]');
+    if (!b) return;
+    toggleMenu(false); cancelHold(); sel = null;
+    commit(fromParams(PRESETS[b.dataset.preset], catalogue));
+  };
+  document.addEventListener('click', e => { if (!e.target.closest('.menu-wrap')) toggleMenu(false); });
+  $('#bNew').onclick = () => { cancelHold(); sel = null; commit(emptyAssembly('Untitled')); };
+  $('#bFit').onclick = () => { if (use3d && R3) { autoFit3 = true; lastFitH = -1; } else view.auto = true; requestDraw(); };
+  $('#tPal').onclick = () => document.body.classList.toggle('show-left');
+  $('#tRep').onclick = () => document.body.classList.toggle('show-right');
+
+  el.search.addEventListener('input', () => { query = el.search.value; buildGrid(); });
+  el.cats.onclick = e => {
+    const b = e.target.closest('.cat');
+    if (!b) return;
+    curCat = b.dataset.cat; query = ''; el.search.value = '';
+    buildCats(); buildGrid();
+  };
+  el.grid.addEventListener('click', e => {
+    const b = e.target.closest('.part');
+    if (!b) return;
+    const it = ITEMS.get(b.dataset.key);
+    if (holdItem && holdItem.key === it.key) cancelHold(); else startHold(it);
+  });
+  el.grid.addEventListener('dblclick', e => {
+    const b = e.target.closest('.part');
+    if (!b) return;
+    cancelHold();
+    quickAdd(ITEMS.get(b.dataset.key));
+  });
+  el.grid.addEventListener('pointerover', e => { const b = e.target.closest('.part'); if (b) showTip(b); });
+  el.grid.addEventListener('pointerleave', () => { el.tip.hidden = true; });
+
+  const cv = el.cv;
+  cv.addEventListener('pointerdown', e => {
+    if (e.button !== 0 && e.button !== 2) return;
+    const p = pos(e);
+    press = { x: p.x, y: p.y, moved: false, button: e.button, pan: e.button === 2 || e.shiftKey };
+    cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener('pointermove', e => {
+    const p = pos(e);
+    pointer = p;
+    if (press) {
+      if (!press.moved && Math.hypot(p.x - press.x, p.y - press.y) > 4) press.moved = true;
+      if (press.moved) {
+        if (use3d && R3) {
+          autoFit3 = false;
+          const c = cam3();
+          if (press.pan) c.target[1] += e.movementY * c.dist * 0.0022;
+          else {
+            c.yaw -= e.movementX * 0.006;
+            c.pitch = clamp(c.pitch + e.movementY * 0.005, -5 * DEG, 60 * DEG);
+          }
+        } else if (press.button === 0) { view.auto = false; view.ox += e.movementX; view.oy += e.movementY; }
+      }
+    }
+    if (use3d && R3) {
+      if (holdPart) { const n = hitNode3(p); hovKey = n ? n.key : null; hov = null; }
+      else if (!press || !press.moved) hov = R3.pickPart(p.x, p.y) || null;
+    } else if (holdPart) { const n = hitNode(p); hovKey = n ? n.key : null; }
+    else { const h = hitPart(p); hov = h ? h.id : null; }
+    requestDraw();
+  });
+  cv.addEventListener('pointerup', e => {
+    if (press && !press.moved) {
+      if (press.button === 2) { if (holdPart) cancelHold(); }
+      else if (use3d && R3) handleClick3(pos(e));
+      else handleClick(pos(e));
+    }
+    press = null;
+    requestDraw();
+  });
+  cv.addEventListener('pointerleave', () => { pointer = null; hov = null; hovKey = null; requestDraw(); });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (use3d && R3) {
+      autoFit3 = false;
+      const p = pos(e), f = Math.exp(e.deltaY * 0.0012), yc = R3.heightAt(p.x, p.y), c = cam3();
+      if (yc !== null && f < 1) c.target[1] += (yc - c.target[1]) * (1 - f) * 0.6;
+      c.dist = clamp(c.dist * f, 1.5, 3000);
+      requestDraw();
+      return;
+    }
+    const p = pos(e), ns = clamp(view.s * Math.exp(-e.deltaY * 0.0015), 2, 400), k = ns / view.s;
+    view.ox = p.x - (p.x - view.ox) * k;
+    view.oy = p.y - (p.y - view.oy) * k;
+    view.s = ns; view.auto = false;
+    requestDraw();
+  }, { passive: false });
+  cv.addEventListener('dblclick', () => {
+    if (use3d && R3) { autoFit3 = true; lastFitH = -1; } else view.auto = true;
+    requestDraw();
+  });
+  cv.addEventListener('contextmenu', e => { e.preventDefault(); });
+
+
+  document.addEventListener('keydown', e => {
+    if (el.dlg.open) return;
+    if (e.key === 'Escape') {
+      if (!el.presetMenu.hidden) toggleMenu(false);
+      else if (holdPart) cancelHold();
+      else if (sel) { sel = null; renderInspector(); }
+      return;
+    }
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || '')) return;
+    const mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+    if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+    else if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
+    else if ((e.key === 'Delete' || e.key === 'Backspace') && sel) { e.preventDefault(); removePart(sel); }
+  });
+
+  el.launch.onclick = openLaunch;
+  el.missions.onclick = e => {
+    const b = e.target.closest('[data-m]');
+    if (!b || b.disabled) return;
+    mission = b.dataset.m;
+    renderMissions(); renderLaunchSide();
+  };
+  el.lGo.onclick = launch;
+  $('#lCancel').onclick = () => el.dlg.close();
+  $('#dlgClose').onclick = () => el.dlg.close();
+  new ResizeObserver(resize).observe(el.center);
+}
+
+
+// ================================================================ 3D view
+// The WebGL hangar draws the vehicle; the 2D overlay (#cv) draws attach nodes,
+// stage brackets and labels on top of it, and receives all pointer input.
+let R3 = null, use3d = true, autoFit3 = true, lastFitH = -1, curNodes3 = [];
+const cam3 = () => R3.camera;
+const DEG = Math.PI / 180;
+
+function initRenderer() {
+  try { R3 = createVabRenderer($('#gl')); } catch (e) { R3 = null; }
+  $$('#viewTog [data-v]').forEach(b => { b.onclick = () => setView3(b.dataset.v === '3d'); });
+  if (!R3) { use3d = false; $('#viewTog').hidden = true; $('#gl').hidden = true; resize(); return; }
+  setView3(true);
+}
+
+function setView3(on) {
+  use3d = !!R3 && on;
+  $('#gl').hidden = !use3d;
+  $$('#viewTog [data-v]').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.v === '3d') === use3d)));
+  if (use3d) { autoFit3 = true; lastFitH = -1; }
+  resize();
+}
+
+// Attach points in world space. Same rules as the 2D nodes (computeNodes).
+function nodes3D(p) {
+  const out = [], parts = asm.parts, payIdx = parts.findIndex(q => q.type === 'payload'), H = lay.height;
+  const add = (kind, idx, x, y, z, label, key) => out.push({ kind, idx, x, y, z, label, key: key || kind + ':' + idx });
+  if (p.type === 'payload') add('payload', 0, 0, H + 1.6, 0, payIdx >= 0 ? 'replace payload' : 'top of stack');
+  else if (p.type === 'fairing') {
+    const pr = payIdx >= 0 ? rowOf.get(parts[payIdx].id) : null;
+    add('fairing', payIdx + 1, 0, pr ? pr.y0 : H + 1.6, 0, 'around payload');
+  } else if (p.type === 'boosters') {
+    const sp = stageSpan(1);
+    if (sp && an.stages[0]) {
+      const reach = an.stages[0].diameter / 2 + p.diameter + 0.9, y = (sp.y0 + sp.y1) / 2;
+      add('boosters', -1, reach, y, 0, 'radial boosters', 'boosters:+');
+      add('boosters', -1, -reach, y, 0, 'radial boosters', 'boosters:-');
+    }
+  } else {
+    const top = parts.findIndex(q => !isFixed(q)), first = top < 0 ? parts.length : top;
+    const idxs = new Set([first, parts.length]);
+    for (let i = first + 1; i < parts.length; i++) idxs.add(i);
+    const low = lay.rows.length ? lay.rows[0].y0 : 0;
+    for (const i of idxs) {
+      if (i >= parts.length) add('stack', parts.length, 0, low - 1.5, 0, 'bottom of stack');
+      else {
+        const r = rowOf.get(parts[i].id);
+        if (r) add('stack', i, 0, r.y1, 0, i === first && payIdx >= 0 ? 'directly under payload' : 'insert here');
+      }
+    }
+  }
+  return out;
+}
+
+// Size and material of a held part, for the renderer's ghost.
+function ghostDims(p) {
+  const core = an.stages[0] ? an.stages[0].diameter : 1.8;
+  if (p.type === 'payload') {
+    if (p.kind === 'capsule') return { d: p.diameter, h: 0.85 * p.diameter, prop: 'kerolox', n: 1, core };
+    if (p.kind === 'bus') { const d = Math.max(0.8, 0.5 * Math.cbrt(p.mass)); return { d, h: 0.8 * d, prop: 'kerolox', n: 1, core }; }
+    return { d: p.lander.diameter, h: 0.9 * p.lander.diameter, prop: 'kerolox', n: 1, core };
+  }
+  if (p.type === 'tank') return { d: p.diameter, h: p.length, prop: 'kerolox', n: 1, core };
+  if (p.type === 'engine') {
+    const e = engineForPart(catalogue, p), per = e ? e.thrust_kn : 100;
+    const h = Math.max(0.6, Math.min(5.5, 0.75 * Math.sqrt(per / 100) + 0.4)) * Math.min(1, 1.8 / 1.2 + 0.2);
+    return { d: core, h, prop: e ? e.prop : 'kerolox', n: p.count, core };
+  }
+  if (p.type === 'decoupler') return { d: core, h: 0.25, prop: 'kerolox', n: 1, core };
+  if (p.type === 'fairing') return { d: 2.6, h: 4, prop: 'kerolox', n: 1, core };
+  const e = engineForPart(catalogue, p);
+  return { d: p.diameter, h: p.length, core, prop: e ? e.prop : 'kerolox', n: p.engines || 1 };
+}
+
+// The ghost sits at the hovered attach point; nothing shows until one is hovered.
+function ghost3() {
+  if (!holdPart || !hovKey) return null;
+  const n = curNodes3.find(q => q.key === hovKey);
+  if (!n) return null;
+  const g = ghostDims(holdPart);
+  if (n.kind === 'boosters') return { part: holdPart, d: g.d, h: g.h, y: 0, radial: true, core: g.core, prop: g.prop, n: g.n };
+  const base = n.kind === 'payload' || n.kind === 'fairing' ? n.y : n.y - g.h / 2;
+  return { part: holdPart, d: g.d, h: g.h, y: base, radial: false, core: g.core, prop: g.prop, n: g.n };
+}
+
+function scene3() {
+  return { lay, asm, catalogue, selectedId: sel, hoverId: hov, boostersId: BOOSTERS, ghost: ghost3() };
+}
+
+function draw() {
+  frame = 0;
+  if (!cw || !ch || !an) return;
+  if (use3d && R3) draw3D(); else draw2D();
+}
+
+function draw3D() {
+  if (autoFit3 && Math.abs(ext.height - lastFitH) > 0.01) { R3.fit(ext.height, ext.halfW); lastFitH = ext.height; }
+  curNodes3 = holdPart ? nodes3D(holdPart) : [];
+  R3.draw(scene3());
+  draw3DOverlay();
+  el.empty.hidden = asm.parts.length > 0 || !!asm.boosters;
+  el.cv.style.cursor = holdPart ? 'crosshair' : hov ? 'pointer' : 'grab';
+}
+
+// Screen x of a cylinder's silhouette at height y, measured on the camera's
+// right-hand side. With g, also the radial booster set around the axis.
+function silhouetteX(R, y, g = null) {
+  const yaw = R3.camera.yaw, rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  let x = -Infinity;
+  for (const s of [-1, 1]) x = Math.max(x, R3.project([s * R * rx, y, s * R * rz]).x);
+  if (g) for (let i = 0; i < g.count; i++) {
+    const t = Math.PI * 2 * i / g.count, cx = g.off * Math.cos(t), cz = g.off * Math.sin(t), rb = g.bd / 2;
+    x = Math.max(x, R3.project([cx + rb * rx, y, cz + rb * rz]).x, R3.project([cx - rb * rx, y, cz - rb * rz]).x);
+  }
+  return x;
+}
+
+function draw3DOverlay() {
+  const c = ctx, k = dpr();
+  c.setTransform(k, 0, 0, k, 0, 0);
+  c.clearRect(0, 0, cw, ch);
+  c.font = '11px system-ui, sans-serif';
+  if (holdPart) for (const n of curNodes3) {
+    const p = R3.project([n.x, n.y, n.z]);
+    n.sx = p.x; n.sy = p.y;
+    if (!p.visible) continue;
+    const hot = n.key === hovKey, rad = hot ? 11 : 8;
+    c.beginPath(); c.arc(p.x, p.y, rad, 0, Math.PI * 2);
+    c.fillStyle = hot ? '#3FB950' : 'rgba(63,185,80,0.28)'; c.fill();
+    c.strokeStyle = '#3FB950'; c.lineWidth = 2; c.stroke();
+    if (hot) {
+      const w = c.measureText(n.label).width + 14;
+      c.fillStyle = 'rgba(19,25,34,0.95)'; c.fillRect(p.x + 16, p.y - 10, w, 20);
+      c.fillStyle = '#E4E9F0'; c.fillText(n.label, p.x + 23, p.y + 4);
+    }
+  }
+  // stage brackets, just right of the vehicle's silhouette
+  an.stages.forEach(s => {
+    const sp = stageSpan(s.k);
+    if (!sp) return;
+    let xr = -Infinity;
+    for (const r of lay.rows) if (r.stage === s.k) for (const y of [r.y0, r.y1]) xr = Math.max(xr, silhouetteX(r.d / 2, y));
+    const gb = s.k === 1 ? boosterGeom() : null;
+    if (gb) for (const y of [sp.y0 + 0.5, sp.y1 - 0.5]) xr = Math.max(xr, silhouetteX(0, y, gb));
+    if (!isFinite(xr)) return;
+    const x = xr + 16, a = R3.project([0, sp.y0, 0]), b = R3.project([0, sp.y1, 0]);
+    const top = Math.min(a.y, b.y), hgt = Math.max(2, Math.abs(a.y - b.y)), g = geo?.stages?.[s.k - 1];
+    c.fillStyle = STAGE_COLORS[s.k - 1] || '#999';
+    c.fillRect(x, top, 4, hgt);
+    c.font = '600 11px ui-monospace, Consolas, monospace';
+    c.fillText(`S${s.k}`, x + 10, top + hgt / 2 + (g ? -2 : 4));
+    if (g) {
+      c.fillStyle = '#8B97A8'; c.font = '10px ui-monospace, Consolas, monospace';
+      c.fillText(`${(g.dv_mps / 1000).toFixed(2)} km/s`, x + 10, top + hgt / 2 + 11);
+    }
+  });
+}
+
+function hitNode3(p) {
+  let best = null, bd = 14;
+  for (const n of curNodes3) {
+    const q = R3.project([n.x, n.y, n.z]);
+    if (!q.visible) continue;
+    const d = Math.hypot(q.x - p.x, q.y - p.y);
+    if (d <= bd) { best = n; bd = d; }
+  }
+  return best;
+}
+
+function handleClick3(p) {
+  if (holdPart) { const n = hitNode3(p); if (n) placeAt(n); return; }
+  sel = R3.pickPart(p.x, p.y) || null;
+  renderInspector();
+}
+
+async function init() {
+  reportUncaught();
+  catalogue = await api.catalogue();
+  cats = palette(catalogue);
+  cats.forEach(c => c.parts.forEach(it => ITEMS.set(it.key, it)));
+  asm = startAssembly();
+  touch();
+  initRenderer();
+  buildCats(); buildPresets(); buildSites(); bind(); buildGrid();
+  resize();
+  renderInspector(); renderSide(); updateChrome();
+  scheduleEval(0);
+}
+
+init();
+</script>
+</body>
+</html>
