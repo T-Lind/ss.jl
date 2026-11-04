@@ -1489,10 +1489,10 @@ function issuesHTML() {
 function updateChrome() {
   el.undo.disabled = !undoS.length;
   el.redo.disabled = !redoS.length;
-  const pre = preflight(liveGeo(), preMode()).find(w => w.level === 'error');
-  el.launch.disabled = !an.ok || !!pre;
+  const g = liveGeo(), pre = preflight(g, preMode()).find(w => w.level === 'error');
+  el.launch.disabled = !an.ok || !g || !!pre;
   el.launch.title = !an.ok ? (an.issues.find(i => i.level === 'error')?.msg || 'The vehicle has errors')
-    : pre ? pre.msg : 'Choose a mission and fly it';
+    : pre ? pre.msg : !g ? (geoErr || 'Waiting for the current vehicle’s pre-flight check…') : 'Choose a mission and fly it';
   if (document.activeElement !== el.name) el.name.value = asm.name || '';
 }
 
@@ -1500,17 +1500,27 @@ function renderLaunchSide() {
   const m = MISSIONS.find(x => x.id === mission);
   el.mDesc.textContent = m.desc;
   el.lLandWrap.hidden = m.mode !== 'landing';
-  const total = geo ? geo.total_dv_mps / 1000 : null;
+  const g = liveGeo();
+  const total = g ? g.total_dv_mps / 1000 : null;
   el.dvCheck.innerHTML = total == null ? 'Waiting for the vehicle’s Δv…'
     : total >= m.dv ? `<span class="good">✓ ${total.toFixed(2)} km/s against ${m.dv} km/s — ${(total - m.dv).toFixed(2)} km/s to spare</span>`
     : `<span class="bad">${total.toFixed(2)} km/s against ${m.dv} km/s — short by ${(m.dv - total).toFixed(2)} km/s</span>`;
-  const pre = preflight(liveGeo(), m.mode);
+  const pre = preflight(g, m.mode);
+  el.lGo.disabled = !an.ok || !g || pre.some(w => w.level === 'error');
   $('#lPre').hidden = !pre.length;
   $('#lPre').innerHTML = pre.map(w => `<p class="pre-${w.level}"><b>${w.level === 'error' ? 'Error' : 'Warning'}</b> ${esc(w.msg)}</p>`).join('');
 }
 
 async function launch() {
   const m = MISSIONS.find(x => x.id === mission);
+  const g = liveGeo();
+  if (!g) {
+    showLErr(geoErr || 'Waiting for the current vehicle’s pre-flight check…');
+    scheduleEval(0);
+    return;
+  }
+  const blocked = preflight(g, m.mode).find(w => w.level === 'error');
+  if (blocked) { showLErr(blocked.msg); return; }
   let params;
   try { params = toParams(asm, catalogue); }
   catch (err) { showLErr(err.message); return; }
@@ -1527,7 +1537,7 @@ async function launch() {
   try {
     const j = await api.run(params, { onProgress: done.progress, signal: controller.signal });
     done();
-    const x = explainOutcome(j, geo);
+    const x = explainOutcome(j, g);
     if (x.ok) { location.href = 'launch_page.html?run=' + encodeURIComponent(j.id); return; }
     el.dlg.showModal();
     showResult(x, j.id);
@@ -1678,9 +1688,12 @@ function renderSide() {
   el.report.className = live ? '' : 'dim';
   el.report.innerHTML = reportHTML();
   el.issues.innerHTML = issuesHTML();
-  const e = an.issues.filter(i => i.level === 'error').length, w = an.issues.length - e;
-  el.issueCount.textContent = an.issues.length ? `${e} error${e === 1 ? '' : 's'} · ${w} warning${w === 1 ? '' : 's'}` : 'clear';
+  const checks = [...an.issues, ...preflight(liveGeo(), preMode())];
+  const e = checks.filter(i => i.level === 'error').length, w = checks.length - e;
+  el.issueCount.textContent = checks.length ? `${e} error${e === 1 ? '' : 's'} · ${w} warning${w === 1 ? '' : 's'}` : 'clear';
   el.issueCount.className = e ? 'bad' : w ? 'warn' : 'good';
+  updateChrome();
+  if (el.dlg.open) renderLaunchSide();
 }
 
 el.issues.addEventListener('click', e => {
