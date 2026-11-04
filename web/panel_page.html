@@ -250,6 +250,8 @@
             0-24 walks the launch site once around the globe and shifts the
             ascent and the ground track beneath it">launch time [h]</label>
           <input id="launch_h" value="0" min="0" max="24" step="0.25"></div>
+          <!-- the vehicle's paint, set in the vehicle builder; cosmetic, carried into runs -->
+          <input type="hidden" id="livery" value="">
       </div>
       <!-- Presets were their own card, which made choosing a mission a
            two-card decision: the mode here, the preset below it. They are one
@@ -568,7 +570,7 @@ import { suite, report, requested } from './static/selftest.js';
 reportUncaught();
 
 const $ = id => document.getElementById(id);
-const BASE_FIELDS =['pod_mass','payload_kind','bus_mass','cargo_mass',
+const BASE_FIELDS =['livery','pod_mass','payload_kind','bus_mass','cargo_mass',
   'pod_dia','crewed','h_park_km','incl_deg','hp_moon_km','hp_return_km',
   'fairing','fairing_on','diameter','nstages','nboost','opt_kick','kick_deg',
   'tli_mag_err_pct','tli_point_err_deg','launch_h','site'];

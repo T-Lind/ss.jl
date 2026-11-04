@@ -91,6 +91,7 @@
            opacity: 0; transition: opacity .4s; white-space: nowrap; }
   #cams { left: 20px; bottom: 20px; display: flex; gap: 6px; }
   #speed { right: 20px; bottom: 20px; display: flex; gap: 6px; align-items: center; }
+  #viewopts { right: 20px; bottom: 52px; display: flex; gap: 6px; }
   #backlink { top: 20px; right: 20px; font: 12px system-ui; }
   #backlink a { color: var(--dim); text-decoration: none; }
   #backlink a:hover { color: var(--ink); }
@@ -127,6 +128,13 @@
     #overlay table { font-size: 11px; }
     #overlay td { padding: 3px 6px; }
   }
+  #overlay h1.fail { color: var(--failed, #F85149); }
+  #overlay .sub { max-width: min(760px, calc(100vw - 32px)); line-height: 1.6; }
+  .ov_det, .ov_adv ul { margin: 8px 0 0 18px; text-align: left; color: var(--dim);
+    font: 13px/1.55 system-ui; max-width: min(680px, calc(100vw - 48px)); }
+  .ov_adv { margin-top: 12px; text-align: left; max-width: min(700px, calc(100vw - 40px)); }
+  .ov_adv b { font: 600 11px system-ui; letter-spacing: 3px; color: var(--acc);
+    text-transform: uppercase; }
   #err { color: #e08080; font: 13px ui-monospace, monospace; max-width: 600px; }
   /* the empty state: pick a flight, or go and make one */
   .emptyruns { display: flex; flex-direction: column; gap: 6px;
@@ -166,7 +174,7 @@
      to it. It still needs to reach both other pages, though — a view you can
      only leave one way is what made three tabs feel scattered. -->
 <div id="keys" class="show">
-  <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>v</b> eva · <b>h</b> for all controls</div>
+  <div><b>space</b> pause · <b>&#8592;</b> <b>&#8594;</b> scrub · <b>1</b>–<b>6</b> cameras · drag to look · <b>v</b> eva · <b>t</b> path · <b>h</b> for all controls</div>
 </div>
 <div id="help" class="hidden">
   <h2>Controls</h2>
@@ -175,6 +183,7 @@
     <tr><td><b>&#8592;</b> <b>&#8594;</b></td><td>scrub the clock — hold to accelerate</td></tr>
     <tr><td><b>1</b>–<b>6</b></td><td>cameras · <b>[</b> <b>]</b> zoom, <b>\</b> reset</td></tr>
     <tr><td><b>m</b> · <b>p</b> · <b>h</b></td><td>mute · frame time · this list</td></tr>
+    <tr><td><b>t</b> · <b>n</b></td><td>trajectory overlay — dashed where a body hides it · minimise the instruments</td></tr>
     <tr><td colspan="2" class="sec">Flying the vehicle — strapped in, coasting, at &times;1</td></tr>
     <tr><td><b>w a s d</b></td><td>pitch and yaw · lander RCS / capsule attitude control</td></tr>
     <tr><td><b>q</b> <b>e</b> · <b>x</b></td><td>roll · kill rotation</td></tr>
@@ -200,6 +209,7 @@
 </div>
 <div class="hud" id="cams"></div>
 <div class="hud" id="speed"></div>
+<div class="hud" id="viewopts"></div>
 <div id="cabtip" class="hidden"></div>
 <canvas id="seek"></canvas>
 <div id="overlay">
@@ -218,11 +228,13 @@
 import { fin } from '/static/fmt.js';
 import { sunEci, sunAtSite, launchHours, earthAngle, daylight, sunVisibility, lunarSun, lunarEarthMatrix } from '/static/celestial.js';
 import { successfulTouchdown, lunarEndLabel, lunarHatchReason, landingEndTime, landingSummary } from '/static/flight_state.js';
+import { probeExterior } from '/static/probe_model.js';
 import { landerLayout, landerExterior, landerInterior, landerDisplay, clampLanderEye } from '/static/lander_model.js';
 import { engineCluster, stageBells } from '/static/engine_layout.js';
 import { createFlightHud } from '/static/flight_hud.js';
 import { createLanderHud } from '/static/lander_hud.js';
-import { PROP_COLORS } from '/static/vab_parts.js';
+import { PROP_COLORS, parseLivery } from '/static/vab_parts.js';
+import { explainOutcome } from '/static/flight_outcome.js';
 import * as api from '/static/api.js';
 import { allowsShortcut, keyboardAction } from '/static/ui.js';
 import * as runs from '/static/runs.js';
@@ -1479,6 +1491,12 @@ let run = null, geo = null;
 // configured vehicle's name; old servers and empty builder names fall back to
 // the reference launcher.
 let VEHNAME = 'SABLE';
+// The vehicle's paint, from the builder's `livery` parameter (null = the
+// house scheme). Cosmetic only: it recolours skin, it moves no numbers.
+let LIV = null;
+const hexRGB = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)/255);
+const paintOr = (key, def) => LIV && LIV[key] ? hexRGB(LIV[key].c) : def;
+const lumOf = h => { const [r, g, b] = hexRGB(h); return 0.2126*r + 0.7152*g + 0.0722*b; };
 function vehName(s) {
   const raw = String(s == null ? '' : s).replace(/\s*\([^)]*\)\s*$/, '').trim();
   return (raw || 'Sable').toUpperCase();
@@ -1530,6 +1548,11 @@ const EVNAME = {
 const EVSUF = { sep: 'SEPARATION', ignition: 'IGNITION', deploy: 'DEPLOY',
                 jettison: 'JETTISON', burnout: 'BURNOUT' };
 function eventLabel(name) {
+  // A cutoff only inserts into an orbit when the flight was going to one: a
+  // hop's SECO is the engines stopping on the way up an arc, and a failed
+  // ascent's SECO inserted it into nothing.
+  if (name === 'seco' && run && (run.mode === 'suborbital' || run.outcome === 'ascent_failed'))
+    return 'SECO — ENGINE CUTOFF';
   if (EVNAME[name]) return EVNAME[name];
   const pretty = s => s.replace(/_/g, ' ').toUpperCase();
   const m = /^(sep|ignition|deploy|jettison|burnout)_(.+)$/.exec(name);
@@ -1727,6 +1750,17 @@ function buildData() {
     const time = Math.min(e ? e.t : Infinity, coreSep ? coreSep.t : Infinity);
     if (isFinite(time)) dropT['booster' + (i+1)] = time;
   });
+  // A flight with no coast world — a suborbital hop or shot — goes straight
+  // from the pad world into the entry world, and only the capsule exists over
+  // there. Anything still attached at that switch used to vanish in one frame.
+  // The capsule comes off the stack just after cutoff, as it does on a real
+  // hop, so whatever is left visibly falls away before the world changes.
+  if (!hasCis && hasEnt) {
+    const tOff = secoT + 1.5;
+    const names = [...stageNames, 'fairing', ...BNAMES.map((_, i) => 'booster' + (i + 1))];
+    for (const nm of names)
+      if (geo.sections.some(s => s.name === nm) && !(dropT[nm] <= tOff)) dropT[nm] = tOff;
+  }
 
   // --- every event the run reported, plus derived max-q --------------------
   EVS = run.events.filter(e => isFinite(e.t))
@@ -1872,8 +1906,13 @@ function state(t) {
   const tl = A.t[A.t.length-1];
   if (tc > tl) {
     const g0 = samp(A.t, A.gvis, tl);
-    dr += v*Math.cos(g0)*(tc - tl);
-    h += v*Math.sin(g0)*(tc - tl);
+    // straight-line hold past the log, for the seconds before the next world
+    // takes over — but never through the ground: a run that ended in a dive
+    // otherwise read out a negative altitude on its end card
+    const dt = h + v*Math.sin(g0)*(tc - tl) < 0 && Math.sin(g0) < 0
+      ? Math.max(0, -h/(v*Math.sin(g0))) : tc - tl;
+    dr += v*Math.cos(g0)*dt;
+    h = Math.max(0, h + v*Math.sin(g0)*dt);
   }
   let gam = samp(A.t, A.gvis, tc);
   if (tc < pitchT) gam = Math.PI/2;
@@ -2561,18 +2600,18 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
     else if (cx < 0.30*D) c = [0.16,0.15,0.14];                   // engine skirt
     else if (rad > r*1.001) c = [0.35,0.34,0.33];                 // raceway
     else if (cx > s.x1 - 0.45) c = [0.20,0.21,0.24];              // interstage band
-    else c = [0.93,0.93,0.90];
+    else c = paintOr('s1', [0.93,0.93,0.90]);
   } else if (/^stage\d+$/.test(s.name) && s.name !== LASTST) {
     if (cx < s.x0 + 0.05*D) c = [0.30,0.29,0.28];                 // vacuum bell
     else if (cx < s.x0 + 0.11*D) c = [0.20,0.21,0.24];            // collar
     else if (rad > r*1.001) c = [0.35,0.34,0.33];
-    else c = [0.90,0.90,0.86];
+    else c = paintOr('s' + s.name.slice(5), [0.90,0.90,0.86]);
   } else if (s.name === LASTST) {                                 // kick stage
     if (cx < s.x0 + 0.05*D) c = [0.30,0.29,0.28];
     else if (cx < s.x0 + 0.11*D) c = [0.20,0.21,0.24];
     else if (rad > r*1.001) c = [0.55,0.53,0.35];                 // RCS pods
     else if (cx > s.x1 - 0.14*D) c = [0.62,0.62,0.60];            // adapter cone
-    else c = [0.82,0.82,0.77];
+    else c = paintOr('s' + s.name.slice(5), [0.82,0.82,0.77]);
   } else if (/^booster\d+$/.test(s.name)) {
     const B = BAX[+/^booster(\d+)$/.exec(s.name)[1] - 1];
     const rb = B ? B.rb : r, D2 = 2*rb;
@@ -2587,9 +2626,9 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
     }
     if (cx < 0.02*D2) c = [0.30,0.29,0.28];                       // bells + plate
     else if (cx < 0.30*D2) c = [0.16,0.15,0.14];                  // engine skirt
-    else if (cx > s.x1 - 1.80*rb) c = [0.85,0.85,0.82];           // nose cone
+    else if (cx > s.x1 - 1.80*rb) c = LIV && LIV.b ? hexRGB(LIV.b.a) : [0.85,0.85,0.82];   // nose cone
     else if (lr < 0.55*rb) c = [0.30,0.29,0.28];                  // inside the bell
-    else c = [0.66,0.64,0.60];                                    // booster skin
+    else c = paintOr('b', [0.66,0.64,0.60]);                      // booster skin
   } else if (s.name === 'lander') {
     if (cx < s.x0 + 0.18*D) c = [0.30,0.28,0.23];
     else if (rad > 0.34*D) c = [0.76,0.62,0.30];
@@ -2606,7 +2645,7 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
     else if (inWin && u > K.xb0 + 0.30*K.Lc && u < K.xb0 + 0.62*K.Lc)
       c = [0.07,0.10,0.15];                                       // window glass
     else if (rad < rc - 0.03*K.rp) c = [0.24,0.26,0.30];          // inner wall
-    else c = [0.72,0.73,0.76];                                    // afterbody
+    else c = paintOr('pay', [0.72,0.73,0.76]);                    // afterbody
   } else if (s.name === 'glass') {
     c = [0.06,0.09,0.14];                                           // window pane
   } else if (s.name === 'cabin') {
@@ -2693,7 +2732,7 @@ function rocketColor(sec, cx, rad, cy, cz, secRad) {
       c = [0.13,0.14,0.16];                                       // controller grip
     else c = [0.29,0.32,0.38];                                    // crew couch
   } else {                                                        // fairing
-    c = cx < s.x0 + 0.10 ? [0.55,0.55,0.53] : [0.96,0.96,0.93];
+    c = cx < s.x0 + 0.10 ? [0.55,0.55,0.53] : paintOr('fair', [0.96,0.96,0.93]);
   }
   return [c[0]*j, c[1]*j, c[2]*j];
 }
@@ -2749,20 +2788,47 @@ function buildLiveryTex() {
     g.fillText(str, 0, 0);
     g.restore();
   };
-  const INK = '#15171c', RED = '#c0392b', NAVY = '#1b3a6b';
+  const RED = '#c0392b', NAVY = '#1b3a6b';
+  // markings read against whatever the stage was painted
+  const inkOn = key => LIV && LIV[key] && lumOf(LIV[key].c) < 0.42 ? '#eef0f2' : '#15171c';
+  const INK = inkOn('s1');
   // Longer names shrink rather than running off the available hull station.
   const NH = Math.min(1, 5/Math.max(VEHNAME.length, 1));
   g.clearRect(0, 0, W, H);
 
   const stages = geo.sections.filter(s => /^stage\d+$/.test(s.name));
   const s1 = stages[0], fair = geo.sections.find(s => s.name === 'fairing');
+  // a painted section's own pattern, in its accent colour, under the markings
+  const pattern = (sec, key) => {
+    const q = LIV && LIV[key];
+    if (!sec || !q || q.p === 'solid') return;
+    const L = sec.x1 - sec.x0, A = q.a;
+    if (q.p === 'bands') {
+      band(sec.x0 + 0.06*L, sec.x0 + 0.09*L, -0.5, 0.5, A);
+      band(sec.x1 - 0.09*L, sec.x1 - 0.06*L, -0.5, 0.5, A);
+    } else if (q.p === 'roll') {
+      for (const [xa, xb] of [[sec.x0 + 0.10*L, sec.x0 + 0.20*L], [sec.x1 - 0.20*L, sec.x1 - 0.10*L]])
+        for (const f of [-0.5, 0.0]) band(xa, xb, f, f + 0.25, A);
+    } else if (q.p === 'checker') {
+      const n = Math.max(2, Math.round(L/(Math.PI*DIA/4)));
+      for (let i = 0; i < n; i++)
+        for (let j = 0; j < 4; j++)
+          if ((i + j) % 2) band(sec.x0 + i*L/n, sec.x0 + (i + 1)*L/n, -0.5 + j*0.25, -0.25 + j*0.25, A);
+    } else if (q.p === 'stripe') {
+      band(sec.x0, sec.x1, -0.035, 0.035, A);
+      band(sec.x0, sec.x1, 0.465, 0.5, A); band(sec.x0, sec.x1, -0.5, -0.465, A);
+    }
+  };
+  stages.forEach((sec, i) => pattern(sec, 's' + (i + 1)));
+  pattern(fair, 'fair');
   if (s1) {
     const L = s1.x1 - s1.x0;
     // roll pattern: alternating quadrants top and bottom of the booster, the
     // classic marking that makes roll visible from the ground
-    for (const [xa, xb] of [[s1.x0 + 0.10*L, s1.x0 + 0.17*L],
-                            [s1.x1 - 0.13*L, s1.x1 - 0.06*L]])
-      for (const f of [-0.5, 0.0]) band(xa, xb, f, f + 0.25, INK);
+    if (!(LIV && LIV.s1))                    // the house roll pattern, unless repainted
+      for (const [xa, xb] of [[s1.x0 + 0.10*L, s1.x0 + 0.17*L],
+                              [s1.x1 - 0.13*L, s1.x1 - 0.06*L]])
+        for (const f of [-0.5, 0.0]) band(xa, xb, f, f + 0.25, INK);
     band(s1.x1 - 0.045*L, s1.x1 - 0.015*L, -0.5, 0.5, RED);   // interstage trim
     label(VEHNAME, s1.x0 + 0.30*L, -0.24, 1.05*NH, INK);
     label(VEHNAME, s1.x0 + 0.30*L,  0.26, 1.05*NH, INK);
@@ -2778,13 +2844,13 @@ function buildLiveryTex() {
   }
   for (let k = 1; k < stages.length; k++) {
     const s = stages[k], L = s.x1 - s.x0;
-    band(s.x0 + 0.10*L, s.x0 + 0.14*L, -0.5, 0.5, INK);
-    if (L > 3) label(String(k + 1), s.x0 + 0.30*L, 0.0, 0.75, INK);
+    band(s.x0 + 0.10*L, s.x0 + 0.14*L, -0.5, 0.5, inkOn('s' + (k + 1)));
+    if (L > 3) label(String(k + 1), s.x0 + 0.30*L, 0.0, 0.75, inkOn('s' + (k + 1)));
   }
   if (fair) {
     const L = fair.x1 - fair.x0;
-    band(fair.x0 + 0.02*L, fair.x0 + 0.05*L, -0.5, 0.5, INK);
-    label(VEHNAME, fair.x0 + 0.18*L, 0.0, 0.85*NH, INK);
+    band(fair.x0 + 0.02*L, fair.x0 + 0.05*L, -0.5, 0.5, inkOn('fair'));
+    label(VEHNAME, fair.x0 + 0.18*L, 0.0, 0.85*NH, inkOn('fair'));
     // fairing split line runs down the z = 0 plane, i.e. roll ±90 degrees
     for (const v of [-0.25, 0.25]) band(fair.x0, fair.x1, v - 0.004, v + 0.004, '#8c8c86');
   }
@@ -2854,6 +2920,22 @@ function buildRocket() {
       const data = landerExterior(d);
       const topD = +geo.stages?.at(-1)?.diameter_m || DIA;
       const xb = s.x0 + .13*topD + .02;
+      for (let i=0;i<data.length;i+=VST)
+        verts.push(xb+data[i+1],-data[i],data[i+2],data[i+4],-data[i+3],data[i+5],
+                   data[i+6],data[i+7],data[i+8],0,0,0);
+    } else if (s.name === 'pod' && geo.payload?.kind === 'bus') {
+      // An uncrewed bus is drawn from the detailed render model (gold foil,
+      // dish, folded arrays) rather than the engineering envelope, the same
+      // way the lander is. The envelope still decides its size: its radius is
+      // measured off the section's own triangles, so the render model fills
+      // exactly the space the simulator gave the bus.
+      let rp = 0;
+      for (let k = s.t0-1; k < s.t1; k++) {
+        const t = geo.tris[k];
+        for (const j of [0, 3, 6]) rp = Math.max(rp, Math.hypot(t[j+1], t[j+2]));
+      }
+      const topD = +geo.stages?.at(-1)?.diameter_m || DIA;
+      const xb = s.x0 + .13*topD + .02, data = probeExterior(Math.max(0.2, rp));
       for (let i=0;i<data.length;i+=VST)
         verts.push(xb+data[i+1],-data[i],data[i+2],data[i+4],-data[i+3],data[i+5],
                    data[i+6],data[i+7],data[i+8],0,0,0);
@@ -4021,6 +4103,137 @@ function drawTether(sc, view, proj) {
   gl.disableVertexAttribArray(aP);
 }
 
+// ------------------------------------------------------------- trajectory --
+// The whole flown path of the current world, drawn over the scene: what is
+// behind the vehicle in a muted line, what is still to come in the accent,
+// and any stretch hidden behind the Earth or the Moon dashed. It is the same
+// sampled trajectory the vehicle rides — nothing is predicted here that the
+// simulator did not fly.
+//
+// The planets are ray-marched in a background pass and never write depth, so
+// occlusion is decided analytically: the sight line from the eye to each
+// point is tested against each body's sphere. Ribbons, not GL lines, for the
+// reason given at drawTether.
+let pathOn = (() => { try { return localStorage.getItem('ssjl.path') === '1'; } catch (e) { return false; } })();
+let pathBuf = null;
+const PATHS = {};
+function pathSamples(world) {
+  if (PATHS[world]) return PATHS[world];
+  const pts = [], add = (t, p) => { if (p && p.every(Number.isFinite)) pts.push({ t, p }); };
+  const every = (n, cap) => Math.max(1, Math.floor(n/cap));
+  if (world === 'pad' && A) {
+    const T = A.t, n = T.length;
+    for (let i = 0; i < n; i += every(n, 1500)) add(T[i], state(T[i]).pos);
+    add(T[n-1], state(T[n-1]).pos);
+  } else if (world === 'eci' && CIS) {
+    for (let i = 0; i < CIS.n; i += every(CIS.n, 4000)) add(CIS.t[i], [CIS.x[i], CIS.y[i], CIS.z[i]]);
+    add(CIS.t[CIS.n-1], [CIS.x[CIS.n-1], CIS.y[CIS.n-1], CIS.z[CIS.n-1]]);
+  } else if (world === 'entry' && ENT) {
+    const T = ENT.t, n = T.length;
+    for (let i = 0; i < n; i += every(n, 1500)) add(T[i], entState(T[i]).pos);
+  } else if (world === 'moon' && MD && MS) {
+    const T = MD.t, n = T.length;
+    for (let i = 0; i < n; i += every(n, 1500)) add(MS.t_pdi + T[i], moonState(MS.t_pdi + T[i]).pos);
+  }
+  return (PATHS[world] = pts);
+}
+function pathBodies(sc) {
+  if (sc.world === 'moon') return [{ c: [0, -RM, 0], r: RM }];
+  const b = [{ c: sc.earthC || [0, 0, 0], r: RE }];
+  if (sc.moonC) b.push({ c: sc.moonC, r: RM });
+  return b;
+}
+function hidden(eye, p, bodies) {
+  const d = V.sub(p, eye), L = V.len(d);
+  if (L < 1) return false;
+  const u = V.scale(d, 1/L);
+  for (const { c, r } of bodies) {
+    const oc = V.sub(eye, c), b = V.dot(oc, u), q = V.dot(oc, oc) - r*r;
+    const disc = b*b - q;
+    if (disc <= 0) continue;
+    const t1 = -b - Math.sqrt(disc);
+    if (t1 > 0 && t1 < L*(1 - 1e-7)) return true;
+  }
+  return false;
+}
+function drawPath(sc, view, proj) {
+  if (!pathOn) return;
+  const pts = pathSamples(sc.world);
+  if (pts.length < 2) return;
+  const W = cv.width || 1, H = cv.height || 1, dpr = window.devicePixelRatio || 1;
+  const eye = sc.cam.eye, bodies = pathBodies(sc);
+  const proj1 = p => {
+    const v = mApply(view, p);
+    if (v[2] > -0.5) return null;
+    const c = mApply4(proj, v);
+    if (c[3] <= 0.01) return null;
+    return { x: (c[0]/c[3]*0.5 + 0.5)*W, y: (0.5 - c[1]/c[3]*0.5)*H };
+  };
+  // four batches: past/future x visible/hidden; hidden ones are dashed
+  const out = [[], [], [], []];
+  const dash = 10*dpr, gap = 7*dpr;
+  let hw = 1.6*dpr;
+  let run = 0, prev = proj1(pts[0].p);
+  const quad = (arr, a, b) => {
+    const dx = b.x - a.x, dy = b.y - a.y, l = Math.hypot(dx, dy);
+    if (l < 0.01) return;
+    const nx = -dy/l*hw, ny = dx/l*hw;
+    const c = (x, y) => [x/W*2 - 1, 1 - y/H*2, 0, 1];
+    const A0 = c(a.x + nx, a.y + ny), A1 = c(a.x - nx, a.y - ny);
+    const B0 = c(b.x + nx, b.y + ny), B1 = c(b.x - nx, b.y - ny);
+    arr.push(...A0, ...A1, ...B1, ...A0, ...B1, ...B0);
+  };
+  for (let i = 1; i < pts.length; i++) {
+    const cur = proj1(pts[i].p);
+    if (prev && cur && Math.abs(cur.x - prev.x) + Math.abs(cur.y - prev.y) < 4*(W + H)) {
+      const mid = V.scale(V.add(pts[i-1].p, pts[i].p), 0.5);
+      const occ = hidden(eye, mid, bodies);
+      const fut = (pts[i-1].t + pts[i].t)/2 > simT;
+      const arr = out[(fut ? 2 : 0) + (occ ? 1 : 0)];
+      hw = (fut ? 1.7 : 1.2)*dpr;
+      if (!occ) quad(arr, prev, cur);
+      else {
+        // walk the dash pattern along this segment's screen length
+        const l = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+        let s0 = 0;
+        while (s0 < l) {
+          const ph = run % (dash + gap), on = ph < dash;
+          const step = Math.min(l - s0, on ? dash - ph : dash + gap - ph);
+          if (on) {
+            const f0 = s0/l, f1 = (s0 + step)/l;
+            quad(arr, { x: prev.x + (cur.x - prev.x)*f0, y: prev.y + (cur.y - prev.y)*f0 },
+                      { x: prev.x + (cur.x - prev.x)*f1, y: prev.y + (cur.y - prev.y)*f1 });
+          }
+          s0 += step; run += step;
+        }
+      }
+    }
+    prev = cur;
+  }
+  if (!pathBuf) pathBuf = gl.createBuffer();
+  gl.useProgram(LINE.p);
+  gl.bindBuffer(gl.ARRAY_BUFFER, pathBuf);
+  const aP = LINE.a.aP;
+  gl.enableVertexAttribArray(aP);
+  gl.disable(gl.DEPTH_TEST);
+  gl.depthMask(false);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  const COLS = [[0.70, 0.78, 0.88, 0.62], [0.70, 0.78, 0.88, 0.45],
+                [1.00, 0.70, 0.08, 0.95], [1.00, 0.70, 0.08, 0.70]];
+  out.forEach((arr, k) => {
+    if (!arr.length) return;
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.DYNAMIC_DRAW);
+    gl.vertexAttribPointer(aP, 4, gl.FLOAT, false, 0, 0);
+    gl.uniform4fv(LINE.u.uC, COLS[k]);
+    gl.drawArrays(gl.TRIANGLES, 0, arr.length/4);
+  });
+  gl.disable(gl.BLEND);
+  gl.depthMask(true);
+  gl.enable(gl.DEPTH_TEST);
+  gl.disableVertexAttribArray(aP);
+}
+
 // ------------------------------------------------------------- detachables --
 const debris = [];
 // The rate the DRAWN position moves, which is not the log's speed. `v` is the
@@ -4871,7 +5084,7 @@ const cameraModes = () =>
   : curWorld === 'eci' && curLander ? withLmCabin(CAMS())
   : CAMS();
 function refreshCams(world, lander) {
-  if (world) curWorld = world;
+  if (world && world !== curWorld) { curWorld = world; syncViewOpts(); }   // chip follows the world's HUD
   if (lander !== undefined) curLander = lander;
   const cl = cameraModes();
   const sig = cl.join(',');
@@ -7142,6 +7355,7 @@ function drawScene(sc) {
                 sc.world === 'moon' ? [0.60, 0.58, 0.54] : undefined,
                 sc.world === 'entry' && sc.es ? heatOf(sc.es.q) : 0);
   drawTether(sc, view, proj);
+  drawPath(sc, view, proj);
   cabinPanel(sc, view, proj, cv.clientWidth, cv.clientHeight);
 }
 // The drawn deck and the planet pass's own cloud shell are the same clouds at
@@ -8578,12 +8792,40 @@ function warpStep(dir) {
   sfxTick();
   return manualWarp === 0 ? 'AUTO' : warpLabel(manualWarp).toUpperCase();
 }
+// The two view toggles: the trajectory overlay (T) and the instruments (N),
+// which fold the attitude ball — or the descent console — into a small pill.
+function togglePath() {
+  pathOn = !pathOn;
+  try { localStorage.setItem('ssjl.path', pathOn ? '1' : '0'); } catch (e) {}
+  syncViewOpts();
+}
+function toggleInstruments() {
+  const hud = curWorld === 'moon' ? LH : FH;
+  hud.toggleMinimized?.();
+  syncViewOpts();
+}
+function syncViewOpts() {
+  const el = $('viewopts');
+  el.innerHTML = '';
+  const hud = curWorld === 'moon' ? LH : FH;
+  for (const [label, on, fn, key] of [['trajectory', pathOn, togglePath, 'T'],
+      ['instruments', !(hud.isMinimized?.()), toggleInstruments, 'N']]) {
+    const c = keyboardAction(document.createElement('span'));
+    c.className = 'chip' + (on ? ' on' : '');
+    c.setAttribute('aria-pressed', String(on));
+    c.title = `${label} (${key})`;
+    c.textContent = label;
+    c.onclick = fn;
+    el.appendChild(c);
+  }
+}
 function initControls() {
   $('hatch_action').addEventListener('click', () => evaToggle(phaseAt(simT)));
   refreshCams('pad');
   syncHelp();
   // the hint has done its job by the time the vehicle is off the pad
   setTimeout(() => $('keys').classList.remove('show'), 9000);
+  syncViewOpts();
   for (const el of [$('cams'), $('speed')]) {
     el.addEventListener('pointerenter', () => $('keys').classList.add('show'));
     el.addEventListener('pointerleave', () => $('keys').classList.remove('show'));
@@ -8680,6 +8922,8 @@ function initControls() {
       chipRow($('cams'), cl, camMode, m => camMode = m);
     }
     if (e.key === 'm') audioMute(!muted);
+    if (e.key === 't') togglePath();
+    if (e.key === 'n') toggleInstruments();
     if (e.key === 'p') perfShow = !perfShow;
     // Manual lens on top of whatever the camera computed: ] tightens, [ opens,
     // \ goes back to the rig's own framing. A multiplier rather than an
@@ -8764,10 +9008,21 @@ function showEndCard() {
   row(successfulTouchdown(run) ? 'landing coordinates' : 'descent endpoint', MS && fin(m.land_lat), `${(+m.land_lat || 0).toFixed(2)}°, ${(+m.land_lon || 0).toFixed(2)}°`);
   row('descent sink · lateral', MS && fin(m.touchdown_v), `${(+m.touchdown_v || 0).toFixed(1)} · ${(+m.touchdown_vh || 0).toFixed(1)} m/s`);
   row('lander propellant left', MS && fin(m.prop_left_kg), `${(+m.prop_left_kg || 0).toFixed(0)} kg`);
-  $('ov_title').textContent = MS ? lunarEndLabel(run) : isFinite(tSplash) ? 'SPLASHDOWN' : 'END OF MISSION';
-  $('ov_sub').textContent = MS ? (successfulTouchdown(run) ? 'touchdown confirmed — mission complete' : landingSummary(run)) : isFinite(tSplash) ?
+  // A run that stopped early says WHY, in words: the simulator flew what the
+  // vehicle could do and ended there, and a bare "END OF MISSION" over the
+  // last event's name read as the viewer giving up.
+  const why = !MS ? explainOutcome(run, geo) : null;
+  const failed = why && !why.ok;
+  $('ov_title').textContent = MS ? lunarEndLabel(run) : failed ? why.state
+    : isFinite(tSplash) ? 'SPLASHDOWN' : 'END OF MISSION';
+  $('ov_title').classList.toggle('fail', !!failed);
+  $('ov_sub').textContent = MS ? (successfulTouchdown(run) ? 'touchdown confirmed — mission complete' : landingSummary(run))
+    : failed ? why.why : isFinite(tSplash) ?
     'pod recovered — mission complete' : (EVS.length ? EVS[EVS.length-1].s : '');
-  $('ov_body').innerHTML = `<table>${rows.join('')}</table>`;
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  const notes = failed ? (why.details.length ? `<ul class="ov_det">${why.details.map(d => `<li>${esc(d)}</li>`).join('')}</ul>` : '')
+    + (why.advice.length ? `<div class="ov_adv"><b>to fix it</b><ul>${why.advice.map(d => `<li>${esc(d)}</li>`).join('')}</ul></div>` : '') : '';
+  $('ov_body').innerHTML = `<table>${rows.join('')}</table>${notes}`;
   $('ov_go').textContent = 'REPLAY';
   $('ov_go').classList.remove('hidden');
   $('ov_close').textContent = MS && successfulTouchdown(run) ? 'EXPLORE SURFACE' : 'INSPECT FLIGHT';
@@ -10560,6 +10815,7 @@ async function boot() {
     await step('plotting the trajectory…');
     buildData();
     await step('painting the vehicle…');
+    LIV = parseLivery(run.params?.livery);
     buildLiveryTex();
     buildRocket();
     await step('fitting out the cabin…');

@@ -25,6 +25,8 @@ export const own = k =>
   // builder's payload silently reverts on the next page load
   k === 'payload_kind' || k === 'bus_mass' || k === 'cargo_mass' ||
   k === 'kick_deg' || k === 'opt_kick' ||
+  // paint: cosmetic, but it is the vehicle's, so it travels with it
+  k === 'livery' ||
   /^l_/.test(k) || /^s\d+_/.test(k) || /^b_/.test(k);
 
 /** Narrow a full form to just the vehicle keys. */

@@ -26,8 +26,10 @@ for path in / /build /launch /api/catalogue; do
 done
 
 # The first real mission is deliberately cold. Validate API semantics after
-# compilation, not just that the port accepts a TCP connection.
-curl --silent --show-error --fail --max-time 180 \
+# compilation, not just that the port accepts a TCP connection. At 0.1 CPU,
+# main already needs about 157 s for this cold request; allow runner variance
+# without dropping the concurrent-health or successful-mission assertions.
+curl --silent --show-error --fail --max-time 300 \
   --data 'mode=orbit&orbit=leo' http://127.0.0.1:10000/api/run > /tmp/ssjl-mission.json &
 mission_pid=$!
 sleep 2

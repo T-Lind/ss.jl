@@ -24,7 +24,7 @@ const ROUTES = {
   '/': '/panel_page.html',
   '/panel': '/panel_page.html',
   '/launch': '/launch_page.html',
-  '/build': '/build_page.html',
+  '/build': '/vab_page.html',
   '/vab': '/vab_page.html',
   '/models': '/models_page.html',
   '/analysis': '/analysis_page.html',

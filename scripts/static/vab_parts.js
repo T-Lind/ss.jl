@@ -197,6 +197,58 @@ export function palette(catalogue) {
 
 // ----------------------------------------------------------------- assembly --
 
+// ------------------------------------------------------------------ paint --
+// Paint is cosmetic and changes nothing the simulator flies. A part may carry
+// `paint: {c, a, p}` — base colour, accent colour, pattern. The launch view
+// paints per SECTION (each stage, the strap-on set, the fairing, the
+// payload), so a stage takes the paint of its first painted tank. It travels
+// as one `livery` parameter: JSON keyed s1..s5, b, fair, pay.
+export const PATTERNS = [
+  ['solid', 'Solid'], ['bands', 'Bands'], ['roll', 'Roll pattern'],
+  ['checker', 'Checker'], ['stripe', 'Racing stripe'],
+];
+export const SWATCHES = [
+  ['#e9ebee', 'White'], ['#1c1f24', 'Black'], ['#b9c0c8', 'Bare steel'],
+  ['#d9772b', 'Foam orange'], ['#c9a24a', 'Gold foil'], ['#2a4b7c', 'Navy'],
+  ['#b8322a', 'Red'], ['#3f7d4e', 'Green'], ['#f0c419', 'Yellow'], ['#6b6f76', 'Graphite'],
+];
+/** Ready-made liveries: a function of the stage index (1 = bottom). */
+export const LIVERIES = {
+  'Classic white': () => ({ c: '#e9ebee', a: '#1c1f24', p: 'solid' }),
+  'Roll pattern': k => ({ c: '#e9ebee', a: '#1c1f24', p: k === 1 ? 'roll' : 'bands' }),
+  'Stealth': () => ({ c: '#1c1f24', a: '#6b6f76', p: 'solid' }),
+  'Foam & steel': k => k === 1 ? { c: '#d9772b', a: '#b9c0c8', p: 'solid' }
+                               : { c: '#b9c0c8', a: '#1c1f24', p: 'bands' },
+  'Racer': () => ({ c: '#e9ebee', a: '#b8322a', p: 'stripe' }),
+};
+const HEX = /^#[0-9a-f]{6}$/i;
+const cleanPaint = q => q && HEX.test(q.c || '') ? { c: q.c.toLowerCase(),
+  a: HEX.test(q.a || '') ? q.a.toLowerCase() : '#1c1f24',
+  p: PATTERNS.some(([k]) => k === q.p) ? q.p : 'solid' } : null;
+
+/** The livery of an assembly, per launch-view section, or null if unpainted. */
+export function liveryOf(asm, catalogue) {
+  const a = analyse(asm, catalogue), out = {};
+  a.stages.forEach(s => {
+    const t = s.tanks.find(t => cleanPaint(t.paint));
+    if (t) out['s' + s.k] = cleanPaint(t.paint);
+  });
+  if (cleanPaint(asm.boosters?.paint)) out.b = cleanPaint(asm.boosters.paint);
+  if (cleanPaint(a.fairing?.paint)) out.fair = cleanPaint(a.fairing.paint);
+  if (cleanPaint(a.payload?.paint)) out.pay = cleanPaint(a.payload.paint);
+  return Object.keys(out).length ? out : null;
+}
+/** Parse a `livery` parameter; null when absent or malformed. */
+export function parseLivery(str) {
+  if (!str) return null;
+  try {
+    const o = JSON.parse(str), out = {};
+    for (const [k, v] of Object.entries(o || {}))
+      if (/^(s[1-5]|b|fair|pay)$/.test(k) && cleanPaint(v)) out[k] = cleanPaint(v);
+    return Object.keys(out).length ? out : null;
+  } catch (e) { return null; }
+}
+
 let SEQ = 0;
 const pid = () => 'p' + (++SEQ).toString(36);
 /** Give a part instance an id (parts from palette().make() come without). */
@@ -348,6 +400,8 @@ export function toParams(asm, catalogue) {
     set('pod_dia', p.kind === 'capsule' ? p.diameter : 0);
     set('crewed', p.kind === 'capsule' && p.crewed !== false ? '1' : '0');
   }
+  const liv = liveryOf(asm, catalogue);
+  if (liv) set('livery', JSON.stringify(liv));
   return u;
 }
 
@@ -393,6 +447,7 @@ export function fromParams(input, catalogue) {
   const tankLen = (pre, def, d, prop) => g(pre + 'size_by', 'prop') === 'length'
     ? Math.max(f(pre + 'len', 10), 0.95 * d)
     : lengthFromProp(f(pre + 'prop', def.prop), d, prop);
+  const LIV = parseLivery(q.get('livery'));
   const stack = [];
   for (let k = nst; k >= 1; k--) {
     const role = k === 1 ? 'booster' : k === nst ? 'kick' : 'upper';
@@ -403,7 +458,8 @@ export function fromParams(input, catalogue) {
     const d = f(pre + 'diameter', coreD);
     const { e, part } = enginePart(pre, def);
     if (k !== nst) stack.push({ type: 'decoupler' });
-    stack.push({ type: 'tank', diameter: d, length: tankLen(pre, def, d, e?.prop || def.ptype) });
+    stack.push({ type: 'tank', diameter: d, length: tankLen(pre, def, d, e?.prop || def.ptype),
+                 ...(LIV?.['s' + k] ? { paint: LIV['s' + k] } : {}) });
     stack.push(part);
   }
   const top = [];
@@ -421,7 +477,8 @@ export function fromParams(input, catalogue) {
                diameter: f('pod_dia', 0) || (named ? named[2] : 2 * 0.086 * Math.cbrt(m)),
                crewed: b('crewed', true), cargo: f('cargo_mass', 0) });
   }
-  if (b('fairing_on', true)) top.push({ type: 'fairing', mass: f('fairing', 150) });
+  if (b('fairing_on', true)) top.push({ type: 'fairing', mass: f('fairing', 150), ...(LIV?.fair ? { paint: LIV.fair } : {}) });
+  if (LIV?.pay && top[0]) top[0].paint = LIV.pay;
   asm.parts = [...top, ...stack].map(withId);
   const nb = Math.round(f('nboost', 0));
   if (nb > 0) {
@@ -431,7 +488,8 @@ export function fromParams(input, catalogue) {
     asm.boosters = { type: 'boosters', count: Math.min(8, Math.max(2, nb)), diameter: d,
       length: tankLen('b_', BR, d, e?.prop || BR.ptype), engine: part.engine, engines: part.count,
       ...(part.custom ? { custom: part.custom } : {}),
-      throttle: f('b_throttle', 100), ign: f('b_ign_delay', 0), sep: f('b_sep_delay', 0), dry: part.dry };
+      throttle: f('b_throttle', 100), ign: f('b_ign_delay', 0), sep: f('b_sep_delay', 0), dry: part.dry,
+      ...(LIV?.b ? { paint: LIV.b } : {}) };
   }
   return asm;
 }
