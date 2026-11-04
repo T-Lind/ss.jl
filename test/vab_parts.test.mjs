@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { panelCatalogue, panelGeometry } from '../web/src/panel.js';
-import { PRESETS, fromParams, toParams, analyse, withId, stageMass } from '../web/static/vab_parts.js';
+import { PRESETS, fromParams, toParams, analyse, withId, stageMass,
+  LAUNCH_SITES, LANDING_SITES, launchHourFor } from '../web/static/vab_parts.js';
 
 const catalogue = panelCatalogue();
 const close = (a, b) => assert.ok(Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b)), `${a} != ${b}`);
@@ -61,4 +63,20 @@ test('unknown engines are actionable assembly errors', () => {
 test('both frontends ship the same vehicle translation', () => {
   assert.equal(readFileSync(new URL('../scripts/static/vab_parts.js', import.meta.url), 'utf8'),
     readFileSync(new URL('../web/static/vab_parts.js', import.meta.url), 'utf8'));
+});
+
+test('launch dialog retains the requested launch site, epoch and lunar landing site', () => {
+  for (const tree of ['web', 'scripts']) {
+    const source = readFileSync(new URL(`../${tree}/vab_page.html`, import.meta.url), 'utf8');
+    const buildSites = source.slice(source.indexOf('function buildSites()'), source.indexOf('// ================================================================ evaluation'));
+    const field = value => ({ value, addEventListener() {} });
+    const el = { lSite: field('cape'), lLand: field('auto'), lTime: field('3.5') };
+    const context = { el, URLSearchParams, LAUNCH_SITES, LANDING_SITES, launchHourFor,
+      location: { search: '?site=mahia&target=aitken&launch_h=21.25' }, esc: String,
+      clamp: (v, a, b) => Math.min(b, Math.max(a, v)) };
+    runInNewContext(buildSites + '\nbuildSites();', context);
+    assert.equal(el.lSite.value, 'mahia');
+    assert.equal(el.lLand.value, 'aitken');
+    assert.equal(+el.lTime.value, 21.25);
+  }
 });

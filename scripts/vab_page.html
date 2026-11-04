@@ -1317,7 +1317,9 @@ function toggleMenu(open) {
   el.presetBtn.setAttribute('aria-expanded', String(open));
 }
 function buildSites() {
+  const q = new URLSearchParams(location.search);
   el.lSite.innerHTML = LAUNCH_SITES.map(([k, n, lat]) => `<option value="${k}">${esc(n)} · ${lat}°</option>`).join('');
+  if (LAUNCH_SITES.some(([k]) => k === q.get('site'))) el.lSite.value = q.get('site');
   // Default to a mid-morning launch at whichever site is picked, until the
   // time is typed: launch_h is measured from Greenwich noon, so the same
   // number is dawn at the Cape and dusk at Baikonur.
@@ -1328,7 +1330,12 @@ function buildSites() {
   el.lTime.addEventListener('input', () => { timeTyped = true; });
   el.lSite.addEventListener('change', morning);
   morning();
+  if (q.has('launch_h') && q.get('launch_h').trim() !== '' && Number.isFinite(Number(q.get('launch_h')))) {
+    el.lTime.value = clamp(Number(q.get('launch_h')), 0, 24);
+    timeTyped = true;
+  }
   el.lLand.innerHTML = LANDING_SITES.map(([k, n]) => `<option value="${k}">${esc(n)}</option>`).join('');
+  if (LANDING_SITES.some(([k]) => k === q.get('target'))) el.lLand.value = q.get('target');
 }
 
 // ================================================================ evaluation
