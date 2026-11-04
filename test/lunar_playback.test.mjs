@@ -157,7 +157,7 @@ test('analysis does not invent high gate or a terminal phase for a braking failu
 
 test('terminal card inspection cannot accidentally restart playback', () => {
   const elements=new Map(), $=id=>{
-    if(!elements.has(id))elements.set(id,{classList:{remove(){},add(){}},style:{}});
+    if(!elements.has(id))elements.set(id,{classList:{remove(){},add(){},toggle(){}},style:{}});
     return elements.get(id);
   };
   let replayed=0;

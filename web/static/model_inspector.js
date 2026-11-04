@@ -1,4 +1,5 @@
 import {landerLayout,landerExterior,landerInterior,landerDisplay} from './lander_model.js';
+import {probeExterior,probeLength} from './probe_model.js';
 import {capsulePreview} from './capsule_preview.js';
 import * as api from './api.js';
 import * as vehicle from './vehicle.js';
@@ -48,14 +49,15 @@ function start() {
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
   const buf=gl.createBuffer(),vp=gl.getUniformLocation(prog,'vp'),eyeLoc=gl.getUniformLocation(prog,'eye'),cabLoc=gl.getUniformLocation(prog,'cabin');
   let vertices=0,L,kind='exterior',craft='capsule',yaw=.60,pitch=.17,dist=11,zoom=1,drag=null,request=0;
-  const dimensions={capsule:3.66,lander:4.2};
+  const dimensions={capsule:3.66,lander:4.2,probe:1.5};
+  const minFor=c=>c==='capsule'?1.1:c==='probe'?.5:1;
   const sub=(a,b)=>a.map((v,i)=>v-b[i]),dot=(a,b)=>a.reduce((v,x,i)=>v+x*b[i],0);
   const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],unit=a=>a.map(x=>x/Math.hypot(...a));
   const mul=(a,b)=>Array.from({length:16},(_,i)=>{const r=i%4,c=Math.floor(i/4);return a[r]*b[c*4]+a[4+r]*b[c*4+1]+a[8+r]*b[c*4+2]+a[12+r]*b[c*4+3];});
-  function reset() { yaw=kind==='cabin'?0:.60;pitch=kind==='cabin'?0:.17;zoom=1;dist=2.65*L.diameter;render(); }
+  function reset() { yaw=kind==='cabin'?0:.60;pitch=kind==='cabin'?0:.17;zoom=1;dist=2.65*(L.frame||L.diameter);render(); }
   async function rebuild(resetCamera=false) {
-    const id=++request, nextKind=$('model').value, nextCraft=$('craft').value;
-    const raw=Number($('diameter').value), minimum=nextCraft==='capsule'?1.1:1;
+    const id=++request, nextCraft=$('craft').value, nextKind=nextCraft==='probe'?'exterior':$('model').value;
+    const raw=Number($('diameter').value), minimum=minFor(nextCraft);
     $('export').disabled=true;
     if(!(Number.isFinite(raw)&&raw>=minimum&&raw<=20)) {
       $('error').textContent=`Enter a diameter from ${minimum} to 20 m.`;return;
@@ -70,6 +72,10 @@ function start() {
         const geo=await api.geometry(params.toString());
         if(id!==request)return;
         const preview=capsulePreview(geo,nextKind==='cabin');data=preview.vertices;layout=preview.layout;
+      } else if(nextCraft==='probe') {
+        const dep=$('arrays').value==='deployed', r=raw/2;
+        layout={s:r,diameter:raw,frame:(dep?4.6:2)*r,target:[0,.675*r,0],seats:[],displays:[]};
+        data=probeExterior(r,{deployed:dep});
       } else {
         layout=landerLayout(raw);
         layout.seats=layout.crew.map(z=>({eye:[layout.eyeX,layout.eyeY,z],target:[layout.panel.x,layout.panel.yc+.20*layout.s,z],up:[0,1,0]}));
@@ -90,13 +96,14 @@ function start() {
       }
       kind=nextKind;craft=nextCraft;L=layout;dimensions[craft]=raw;
       $('station_field').hidden=kind!=='cabin';
-      const selected=$('station').value===''?Math.floor((L.seats.length-1)/2):Math.min(+$('station').value||0,L.seats.length-1);
+      $('array_field').hidden=craft!=='probe';
+      const selected=!L.seats.length?0:$('station').value===''?Math.floor((L.seats.length-1)/2):Math.min(+$('station').value||0,L.seats.length-1);
       $('station').replaceChildren(...L.seats.map((_,i)=>{
         const option=document.createElement('option');option.value=i;
         option.textContent=craft==='lander'?(i?'Pilot':'Commander'):`Couch ${i+1}`;return option;
       }));$('station').value=selected;
       vertices=data.length/12;gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
-      $('status').textContent=`${craft==='lander'?'Deployed envelope':'Body diameter'} ${raw.toFixed(2)} m · ${L.seats.length} crew stations · ${kind==='cabin'?'cockpit preview':'exterior'}`;
+      $('status').textContent=craft==='probe'?`Body diameter ${raw.toFixed(2)} m · stowed length ${probeLength(raw/2).toFixed(2)} m · arrays ${$('arrays').value} · exterior`:`${craft==='lander'?'Deployed envelope':'Body diameter'} ${raw.toFixed(2)} m · ${L.seats.length} crew stations · ${kind==='cabin'?'cockpit preview':'exterior'}`;
       $('export').disabled=false;
       if(resetCamera)reset();else render();
       window.__modelInspector={kind,craft,vertices,layout:L,error:()=>gl.getError()};
@@ -132,10 +139,11 @@ function start() {
     gl.drawArrays(gl.TRIANGLES,0,vertices);
   }
   $('craft').addEventListener('change',()=>{
-    const craft=$('craft').value;$('diameter').min=craft==='capsule'?1.1:1;
+    const craft=$('craft').value;$('diameter').min=minFor(craft);$('model').querySelector('[value=cabin]').disabled=craft==='probe';if(craft==='probe')$('model').value='exterior';$('array_field').hidden=craft!=='probe';
     $('diameter').value=dimensions[craft];$('diameter_label').textContent=craft==='lander'?'Deployed envelope (m)':'Body diameter (m)';rebuild(true);
   });
   $('model').addEventListener('change',()=>rebuild(true));
+  $('arrays').addEventListener('change',()=>rebuild(true));
   $('diameter').addEventListener('input',()=>rebuild(true));
   $('station').addEventListener('change',()=>{if(L)reset();});
   $('reset').addEventListener('click',()=>{if(L)reset();});
@@ -157,11 +165,11 @@ function start() {
   const query=new URLSearchParams(location.search),saved=new URLSearchParams(vehicle.load());
   const requested=query.get('view');
   const initialCraft=query.get('craft')||(['lander','cabin'].includes(requested)?'lander':'capsule');
-  $('craft').value=initialCraft==='lander'?'lander':'capsule';
+  $('craft').value=['lander','probe'].includes(initialCraft)?initialCraft:'capsule';
   $('model').value=requested==='cabin'?'cabin':'exterior';
-  const selectedCraft=$('craft').value,stored=Number(saved.get(selectedCraft==='lander'?'l_diameter':'pod_dia'));
-  $('diameter').value=query.get('diameter')||(stored>=(selectedCraft==='capsule'?1.1:1)?stored:dimensions[selectedCraft]);
-  $('diameter').min=selectedCraft==='capsule'?1.1:1;
+  const selectedCraft=$('craft').value,stored=selectedCraft==='probe'?NaN:Number(saved.get(selectedCraft==='lander'?'l_diameter':'pod_dia'));
+  $('diameter').value=query.get('diameter')||(stored>=minFor(selectedCraft)?stored:dimensions[selectedCraft]);
+  $('diameter').min=minFor(selectedCraft);
   $('diameter_label').textContent=selectedCraft==='lander'?'Deployed envelope (m)':'Body diameter (m)';
   rebuild(true);
 }

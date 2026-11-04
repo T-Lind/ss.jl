@@ -41,9 +41,9 @@ const CELLS = [
 ];
 
 const CSS = `
-.lh-root{position:fixed;left:50%;bottom:56px;transform:translateX(-50%);width:min(760px,60vw);z-index:2;pointer-events:none;box-sizing:border-box;font-family:var(--sans,system-ui,sans-serif);color:var(--text,#E4E9F0);transition:opacity .35s ease}
+.lh-root{position:fixed;left:50%;bottom:56px;transform:translateX(-50%) translate(var(--lh-dx,0px),var(--lh-dy,0px));width:min(760px,60vw);z-index:2;pointer-events:none;box-sizing:border-box;font-family:var(--sans,system-ui,sans-serif);color:var(--text,#E4E9F0);transition:opacity .35s ease}
 .lh-root.lh-off{opacity:0;visibility:hidden}
-.lh-console{position:relative;box-sizing:border-box;height:252px;display:flex;flex-direction:column;gap:8px;padding:10px 14px;background:rgba(10,13,18,.74);border:1px solid rgba(255,255,255,.12);border-radius:12px;backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px);box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .6s,box-shadow .6s}
+.lh-console{position:relative;box-sizing:border-box;height:252px;display:flex;flex-direction:column;gap:8px;padding:20px 14px 10px;background:rgba(10,13,18,.74);border:1px solid rgba(255,255,255,.12);border-radius:12px;backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px);box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .6s,box-shadow .6s}
 .lh-console.lh-term{border-color:rgba(240,165,0,.34);box-shadow:0 0 28px rgba(240,165,0,.10),0 10px 30px rgba(0,0,0,.35)}
 .lh-console.lh-abort{border-color:rgba(248,81,73,.62);box-shadow:0 0 30px rgba(248,81,73,.26),0 10px 30px rgba(0,0,0,.35)}
 .lh-top{flex:none;display:flex;align-items:center;gap:12px;min-height:24px}
@@ -105,7 +105,7 @@ const CSS = `
 @keyframes lh-big-in{0%{opacity:0;transform:translate(-50%,6px) scale(.97)}8%{opacity:1;transform:translate(-50%,0) scale(1)}70%{opacity:1}100%{opacity:0}}
 @media (max-width:1066px){
   .lh-root{width:min(600px,calc(100vw - 260px))}
-  .lh-console{height:236px;padding:9px 12px}
+  .lh-console{height:236px;padding:19px 12px 9px}
   .lh-main{grid-template-columns:84px 168px minmax(0,1fr) 84px;gap:10px}
   .lh-pitch canvas{width:34px}
   .lh-phase{width:124px;font-size:10px}
@@ -114,7 +114,7 @@ const CSS = `
   .lh-cell.big .v{font-size:18px}
 }
 @media (max-width:819px){
-  .lh-root{left:16px;right:16px;bottom:56px;transform:none;width:auto}
+  .lh-root{left:16px;right:16px;bottom:56px;transform:translate(var(--lh-dx,0px),var(--lh-dy,0px));width:auto}
 }
 @media (max-width:519px){
   .lh-console{height:auto;gap:8px}
@@ -129,11 +129,85 @@ const CSS = `
   .lh-cell{min-height:30px}
   .lh-prof{height:38px}
 }
+.lh-root .lh-grip,.lh-root .lh-gbtn,.lh-root .lh-mini{pointer-events:auto}
+.lh-grip{position:absolute;left:0;right:0;top:0;height:14px;box-sizing:border-box;display:flex;align-items:center;cursor:grab;touch-action:none;border-radius:12px 12px 0 0;background-image:radial-gradient(circle,rgba(228,233,240,.30) .8px,transparent 1.2px);background-size:6px 4px;background-position:center}
+.lh-grip:active{cursor:grabbing}
+.lh-gbtn{box-sizing:border-box;margin-left:auto;width:16px;height:11px;padding:0;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,.18);border-radius:3px;background:rgba(10,13,18,.85);color:var(--text-2,#8B97A8);font:700 10px/1 var(--mono,monospace);cursor:pointer}
+.lh-gbtn:hover{color:var(--text,#E4E9F0);border-color:rgba(255,255,255,.35)}
+.lh-mini{display:none;align-items:center;gap:8px;height:30px;box-sizing:border-box;padding:0 6px 0 10px;border-radius:15px;background:rgba(10,13,18,.74);border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px);cursor:grab;touch-action:none;white-space:nowrap;font:600 11px/1 var(--mono,monospace);font-variant-numeric:tabular-nums;color:var(--text,#E4E9F0)}
+.lh-mini:active{cursor:grabbing}
+.lh-mini .lh-mp{color:var(--amber,#F0A500);letter-spacing:.14em;text-transform:uppercase}
+.lh-mini .lh-ms{color:var(--text-3,#5A6675)}
+.lh-mini .lh-mv{color:var(--text-2,#8B97A8)}
+.lh-root.lh-min{width:auto;left:50%;right:auto;bottom:56px;transform:translateX(-50%) translate(var(--lh-dx,0px),var(--lh-dy,0px))}
+.lh-root.lh-min .lh-console{display:none}
+.lh-root.lh-min .lh-mini{display:flex}
 @media (prefers-reduced-motion:reduce){
   .lh-lamp.blink.on,.lh-lamp.flash,.lh-big.on{animation:none}
   .lh-big.on{opacity:1}
 }
 `;
+
+const KEY_LANDER = 'ssjl.hud.lander';
+
+function readState(key) {
+  try {
+    const o = JSON.parse(window.localStorage.getItem(key) || 'null');
+    return o && typeof o === 'object' ? o : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeState(key, v) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(v));
+  } catch (e) {
+    // storage blocked or full: the console still works, it just forgets
+  }
+}
+
+// Pointer drag for a panel handle. While dragging, the handle holds the pointer
+// and the event stops there, so the 3D camera underneath never sees the gesture.
+// Buttons inside the handle keep their own clicks.
+function bindDrag(handle, o) {
+  let st = null;
+  const onButton = e => !!(e.target && e.target.closest && e.target.closest('button'));
+  const down = e => {
+    if (e.button !== 0 || onButton(e)) return;
+    e.stopPropagation();
+    e.preventDefault();
+    st = { id: e.pointerId, x: e.clientX, y: e.clientY, dx: o.getDx(), dy: o.getDy(), moved: false };
+    try { handle.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
+  };
+  const move = e => {
+    e.stopPropagation();
+    if (!st || e.pointerId !== st.id) return;
+    e.preventDefault();
+    const ddx = e.clientX - st.x, ddy = e.clientY - st.y;
+    if (!st.moved && Math.hypot(ddx, ddy) < 4) return;
+    st.moved = true;
+    o.onDrag(st.dx + ddx, st.dy + ddy);
+  };
+  const up = e => {
+    e.stopPropagation();
+    if (!st || e.pointerId !== st.id) return;
+    const moved = st.moved;
+    st = null;
+    try { handle.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+    if (moved) { if (o.onDrop) o.onDrop(); } else if (o.onTap) o.onTap();
+  };
+  handle.addEventListener('pointerdown', down);
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', up);
+  handle.addEventListener('pointercancel', up);
+  return () => {
+    handle.removeEventListener('pointerdown', down);
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', up);
+    handle.removeEventListener('pointercancel', up);
+  };
+}
 
 let styleEl = null;
 let styleRefs = 0;
@@ -229,7 +303,7 @@ export function createLanderHud(container) {
   root.setAttribute('aria-hidden', 'true');
   root.innerHTML = `
     <div class="lh-big" data-r="big"></div>
-    <div class="lh-console" data-r="console">
+    <div class="lh-console" data-r="console"><div class="lh-grip" data-r="grip"><button class="lh-gbtn" type="button" data-r="minBtn" aria-label="Minimise descent console">–</button></div>
       <div class="lh-top">
         <div class="lh-phase" data-r="phase">${DASH}</div>
         <div class="lh-ann">${LAMPS.map(([k, label, cls]) =>
@@ -268,7 +342,8 @@ export function createLanderHud(container) {
         </section>
       </div>
       <div class="lh-prof"><canvas class="lh-cv" data-cv="prof"></canvas></div>
-    </div>`;
+    </div>
+    <div class="lh-mini" data-r="mini"><span class="lh-mp" data-r="miniPhase">${DASH}</span><span class="lh-mv" data-r="miniAlt">${DASH}</span><span class="lh-ms">·</span><span class="lh-mv" data-r="miniVs">${DASH}</span><span class="lh-ms">·</span><span class="lh-mv" data-r="miniProp">${DASH}</span><button class="lh-gbtn" type="button" data-r="plusBtn" aria-label="Restore descent console">+</button></div>`;
   host.appendChild(root);
 
   // ---- cached references ----------------------------------------------
@@ -290,6 +365,8 @@ export function createLanderHud(container) {
   let S = { alt: null, vs: null, vfwd: null, vlat: null, pitch: null, profile: null, pi: null };
   let pal = null;
   let visible = true;
+  let minimised = false;
+  const pos = { dx: 0, dy: 0 };
   let destroyed = false;
   const tape = { idx: 0 }, sink = { idx: 0 }, xp = { idx: 0 };
   let dirty = new Set();
@@ -658,7 +735,7 @@ export function createLanderHud(container) {
 
   // ---- scheduling -------------------------------------------------------
   function schedule() {
-    if (!raf && !destroyed && visible) raf = requestAnimationFrame(frame);
+    if (!raf && !destroyed && visible && !minimised) raf = requestAnimationFrame(frame);
   }
 
   function markDirty(names) {
@@ -772,6 +849,10 @@ export function createLanderHud(container) {
     setStyle(E.propF, 'propF', 'height', ((pf === null ? 0 : pf) * 100).toFixed(1) + '%');
     setCls(E.propF, 'propF.c', 'lh-fill' + (pf === null ? '' : pf < 0.08 ? ' r' : pf < 0.2 ? ' a' : ' g'));
     put(E.prop, 'prop', propKg === null ? DASH : Math.round(propKg) + ' kg');
+    put(E.miniPhase, 'miniPhase', phase || DASH);
+    put(E.miniAlt, 'miniAlt', 'ALT ' + an + (au ? ' ' + au : ''));
+    put(E.miniVs, 'miniVs', 'VS ' + (vs === null ? DASH : sgn(vs, 1, true)));
+    put(E.miniProp, 'miniProp', 'PROP ' + (pf === null ? DASH : Math.round(pf * 100) + '%'));
 
     // annunciators
     for (const [key] of LAMPS) {
@@ -808,6 +889,7 @@ export function createLanderHud(container) {
     if (visible) {
       readPalette();
       markAll();
+      clampPos();
     }
   }
 
@@ -818,10 +900,92 @@ export function createLanderHud(container) {
     raf = 0;
     clearTimeout(bigTimer);
     if (ro) ro.disconnect();
+    window.removeEventListener('resize', onResize);
+    for (const off of disposers) off();
+    E.grip.removeEventListener('dblclick', onDock);
     root.remove();
     releaseStyle();
   }
 
+  // ---- position, minimise, persistence -----------------------------------
+  const applyPos = () => {
+    root.style.setProperty('--lh-dx', pos.dx + 'px');
+    root.style.setProperty('--lh-dy', pos.dy + 'px');
+  };
+
+  // Keep the whole console inside the viewport; measures the rendered box, so
+  // it works for the pill too, and does nothing while hidden or not laid out.
+  function clampPos() {
+    if (destroyed) return;
+    applyPos();
+    if (!visible) return;
+    const r = root.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const L = Math.max(0, Math.min(r.left, window.innerWidth - r.width));
+    const T = Math.max(0, Math.min(r.top, window.innerHeight - r.height));
+    pos.dx += L - r.left;
+    pos.dy += T - r.top;
+    applyPos();
+  }
+
+  function save() {
+    writeState(KEY_LANDER, { dx: pos.dx, dy: pos.dy, min: minimised });
+  }
+
+  function setMinimized(b) {
+    if (destroyed) return;
+    const on = !!b;
+    if (on !== minimised) {
+      minimised = on;
+      root.classList.toggle('lh-min', on);
+      clampPos();
+      if (!on) markAll();
+    }
+    save();
+  }
+
+  function resetPosition() {
+    if (destroyed) return;
+    pos.dx = 0;
+    pos.dy = 0;
+    clampPos();
+    save();
+  }
+
+  const dragOpts = {
+    getDx: () => pos.dx,
+    getDy: () => pos.dy,
+    onDrag: (x, y) => { pos.dx = x; pos.dy = y; clampPos(); },
+    onDrop: save,
+  };
+  const disposers = [
+    bindDrag(E.grip, dragOpts),
+    bindDrag(E.mini, Object.assign({}, dragOpts, { onTap: () => setMinimized(false) })),
+  ];
+  const onDock = e => { if (e.target !== E.minBtn) resetPosition(); };
+  E.grip.addEventListener('dblclick', onDock);
+  E.minBtn.addEventListener('click', () => setMinimized(true));
+  E.plusBtn.addEventListener('click', () => setMinimized(false));
+  const onResize = () => clampPos();
+  window.addEventListener('resize', onResize);
+
+  const saved = readState(KEY_LANDER);
+  if (saved) {
+    if (isNum(saved.dx)) pos.dx = saved.dx;
+    if (isNum(saved.dy)) pos.dy = saved.dy;
+    minimised = saved.min === true;
+    root.classList.toggle('lh-min', minimised);
+  }
+  clampPos();
+
   markAll();
-  return { update, setVisible, destroy };
+  return {
+    update,
+    setVisible,
+    destroy,
+    toggleMinimized: () => setMinimized(!minimised),
+    setMinimized,
+    isMinimized: () => minimised,
+    resetPosition,
+  };
 }

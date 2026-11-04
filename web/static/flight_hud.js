@@ -50,8 +50,8 @@ const CSS = `
 .fh-root{position:fixed;inset:0;z-index:2;pointer-events:none;--fh-d:${FULL_D}px;
   font-family:var(--sans,system-ui,sans-serif);color:var(--text,#E4E9F0)}
 .fh-root *{pointer-events:none}
-.fh-attitude{position:fixed;left:50%;bottom:30px;transform:translateX(-50%);box-sizing:border-box;
-  min-width:280px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 14px 12px;
+.fh-attitude{position:fixed;left:50%;bottom:30px;transform:translateX(-50%) translate(var(--fh-dx,0px),var(--fh-dy,0px));box-sizing:border-box;
+  min-width:280px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:20px 14px 12px;
   background:rgba(10,13,18,.72);border:1px solid rgba(255,255,255,.12);border-radius:10px;
   backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
 .fh-speed{display:flex;flex-direction:column;align-items:center;gap:3px;width:100%}
@@ -99,6 +99,18 @@ const CSS = `
 .fh-gauge[data-lvl=na] .fh-gval{color:var(--text-3,#5A6675)}
 .fh-stack{position:fixed;left:20px;bottom:72px;width:168px;display:flex;flex-direction:column-reverse;gap:6px}
 .fh-root.fh-compact .fh-stack{display:none}
+.fh-root .fh-grip,.fh-root .fh-gbtn,.fh-root .fh-mini{pointer-events:auto}
+.fh-grip{position:absolute;left:0;right:0;top:0;height:14px;box-sizing:border-box;display:flex;align-items:center;cursor:grab;touch-action:none;border-radius:10px 10px 0 0;background-image:radial-gradient(circle,rgba(228,233,240,.30) .8px,transparent 1.2px);background-size:6px 4px;background-position:center}
+.fh-grip:active{cursor:grabbing}
+.fh-gbtn{box-sizing:border-box;margin-left:auto;width:16px;height:11px;padding:0;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,.18);border-radius:3px;background:rgba(10,13,18,.85);color:var(--text-2,#8B97A8);font:700 10px/1 var(--mono,ui-monospace,Consolas,monospace);cursor:pointer}
+.fh-gbtn:hover{color:var(--text,#E4E9F0);border-color:rgba(255,255,255,.35)}
+.fh-mini{display:none;align-items:center;gap:7px;height:26px;box-sizing:border-box;cursor:grab;touch-action:none;white-space:nowrap;font:600 11px/1 var(--mono,ui-monospace,Consolas,monospace);font-variant-numeric:tabular-nums;color:var(--text,#E4E9F0)}
+.fh-mini:active{cursor:grabbing}
+.fh-mini-m{color:var(--text-2,#8B97A8);letter-spacing:.14em;text-transform:uppercase}
+.fh-mini-s{color:var(--text-3,#5A6675)}
+.fh-attitude.fh-min{min-width:0;flex-direction:row;gap:0;padding:0 6px 0 10px;height:30px;border-radius:15px;align-items:center}
+.fh-attitude.fh-min .fh-speed,.fh-attitude.fh-min .fh-row,.fh-attitude.fh-min .fh-grip{display:none}
+.fh-attitude.fh-min .fh-mini{display:flex}
 .fh-stage{position:relative;box-sizing:border-box;width:168px;height:34px;display:flex;align-items:center;gap:8px;
   padding:0 9px 0 7px;border-radius:4px;overflow:hidden;background:rgba(10,13,18,.72);
   border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);
@@ -127,6 +139,67 @@ const CSS = `
 `;
 
 let liveCount = 0;
+
+const KEY_FLIGHT = 'ssjl.hud.flight';
+
+function readState(key) {
+  try {
+    const o = JSON.parse(window.localStorage.getItem(key) || 'null');
+    return o && typeof o === 'object' ? o : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeState(key, v) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(v));
+  } catch (e) {
+    // storage blocked or full: the panel still works, it just forgets
+  }
+}
+
+// Pointer drag for a panel handle. While dragging, the handle holds the pointer
+// and the event stops there, so the 3D camera underneath never sees the gesture.
+// Buttons inside the handle keep their own clicks.
+function bindDrag(handle, o) {
+  let st = null;
+  const onButton = e => !!(e.target && e.target.closest && e.target.closest('button'));
+  const down = e => {
+    if (e.button !== 0 || onButton(e)) return;
+    e.stopPropagation();
+    e.preventDefault();
+    st = { id: e.pointerId, x: e.clientX, y: e.clientY, dx: o.getDx(), dy: o.getDy(), moved: false };
+    try { handle.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
+  };
+  const move = e => {
+    e.stopPropagation();
+    if (!st || e.pointerId !== st.id) return;
+    e.preventDefault();
+    const ddx = e.clientX - st.x, ddy = e.clientY - st.y;
+    if (!st.moved && Math.hypot(ddx, ddy) < 4) return;
+    st.moved = true;
+    o.onDrag(st.dx + ddx, st.dy + ddy);
+  };
+  const up = e => {
+    e.stopPropagation();
+    if (!st || e.pointerId !== st.id) return;
+    const moved = st.moved;
+    st = null;
+    try { handle.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+    if (moved) { if (o.onDrop) o.onDrop(); } else if (o.onTap) o.onTap();
+  };
+  handle.addEventListener('pointerdown', down);
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', up);
+  handle.addEventListener('pointercancel', up);
+  return () => {
+    handle.removeEventListener('pointerdown', down);
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', up);
+    handle.removeEventListener('pointercancel', up);
+  };
+}
 
 // ---------------------------------------------------------------- helpers
 
@@ -358,10 +431,92 @@ class Hud {
     this.amber = cssVar('--amber', '#F0A500');
     this.stages = new Map();   // id -> card
     this.leaving = new Map();  // id -> removal timer
+    this.pos = { dx: 0, dy: 0 };
+    this.minimised = false;
     this.buildDom(host);
-    this.onResize = () => this.applyMode();
+    this.loadState();
+    this.bindPanel();
+    this.onResize = () => { this.applyMode(); this.clampPos(); };
     window.addEventListener('resize', this.onResize);
     this.applyMode();
+    this.clampPos();
+  }
+
+  // ------------------------------------------------------------ panel position
+
+  bindPanel() {
+    const opts = {
+      getDx: () => this.pos.dx,
+      getDy: () => this.pos.dy,
+      onDrag: (x, y) => { this.pos.dx = x; this.pos.dy = y; this.clampPos(); },
+      onDrop: () => this.save(),
+    };
+    this.disposers = [
+      bindDrag(this.grip, opts),
+      bindDrag(this.mini, Object.assign({}, opts, { onTap: () => this.setMinimized(false) })),
+    ];
+    this.onDock = e => { if (e.target !== this.minBtn) this.resetPosition(); };
+    this.grip.addEventListener('dblclick', this.onDock);
+    this.minBtn.addEventListener('click', () => this.setMinimized(true));
+    this.miniPlus.addEventListener('click', () => this.setMinimized(false));
+  }
+
+  applyPos() {
+    this.att.style.setProperty('--fh-dx', this.pos.dx + 'px');
+    this.att.style.setProperty('--fh-dy', this.pos.dy + 'px');
+  }
+
+  // Keep the whole panel inside the viewport. Measures the rendered box, so it
+  // also works for the pill; does nothing while hidden or not laid out.
+  clampPos() {
+    if (this.dead) return;
+    this.applyPos();
+    if (!this.visible) return;
+    const r = this.att.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const L = Math.max(0, Math.min(r.left, window.innerWidth - r.width));
+    const T = Math.max(0, Math.min(r.top, window.innerHeight - r.height));
+    this.pos.dx += L - r.left;
+    this.pos.dy += T - r.top;
+    this.applyPos();
+  }
+
+  resetPosition() {
+    if (this.dead) return;
+    this.pos.dx = 0;
+    this.pos.dy = 0;
+    this.clampPos();
+    this.save();
+  }
+
+  isMinimized() { return this.minimised; }
+
+  toggleMinimized() { this.setMinimized(!this.minimised); }
+
+  setMinimized(b) {
+    if (this.dead) return;
+    const on = !!b;
+    if (on !== this.minimised) {
+      this.minimised = on;
+      this.att.classList.toggle('fh-min', on);
+      this.clampPos();
+      this.drawnKey = null;
+      this.schedule();
+    }
+    this.save();
+  }
+
+  loadState() {
+    const o = readState(KEY_FLIGHT);
+    if (!o) return;
+    if (isNum(o.dx)) this.pos.dx = o.dx;
+    if (isNum(o.dy)) this.pos.dy = o.dy;
+    this.minimised = o.min === true;
+    this.att.classList.toggle('fh-min', this.minimised);
+  }
+
+  save() {
+    writeState(KEY_FLIGHT, { dx: this.pos.dx, dy: this.pos.dy, min: this.minimised });
   }
 
   buildDom(host) {
@@ -405,7 +560,22 @@ class Hud {
     this.baseCtx = this.base.getContext('2d');
 
     row.append(this.thr.root, ball, this.gg.root);
-    this.att.append(speed, row);
+
+    // grip (drag handle + minimise) and the minimised pill
+    this.grip = mk('div', 'fh-grip');
+    this.minBtn = mk('button', 'fh-gbtn', '\u2013');
+    this.minBtn.type = 'button';
+    this.minBtn.setAttribute('aria-label', 'Minimise flight HUD');
+    this.grip.append(this.minBtn);
+    this.mini = mk('div', 'fh-mini');
+    this.miniMode = mk('span', 'fh-mini-m');
+    this.miniSpd = mk('span');
+    this.miniAlt = mk('span');
+    this.miniPlus = mk('button', 'fh-gbtn', '+');
+    this.miniPlus.type = 'button';
+    this.miniPlus.setAttribute('aria-label', 'Restore flight HUD');
+    this.mini.append(this.miniMode, this.miniSpd, mk('span', 'fh-mini-s', '\u00b7'), this.miniAlt, this.miniPlus);
+    this.att.append(this.grip, speed, row, this.mini);
 
     this.stack = mk('div', 'fh-stack');
     this.root.append(this.att, this.stack);
@@ -471,6 +641,7 @@ class Hud {
     this.root.style.display = this.visible ? '' : 'none';
     if (this.visible) {
       this.drawnKey = null;
+      this.clampPos();
       this.schedule();
     }
   }
@@ -485,7 +656,7 @@ class Hud {
 
   draw() {
     this.timer = 0;
-    if (this.dead || !this.visible || !this.grid) return;
+    if (this.dead || !this.visible || this.minimised || !this.grid) return;
     this.lastDraw = performance.now();
     if ((window.devicePixelRatio || 1) !== this.dpr) { this.setSize(this.d); return; }
 
@@ -740,6 +911,9 @@ class Hud {
     const vs = fmtVs(s.vs);
     setText(this.elVsV, vs[0]);
     setData(this.elVs, 'd', vs[1]);
+    setText(this.miniMode, typeof s.speedMode === 'string' ? s.speedMode : '');
+    setText(this.miniSpd, sp[1] ? sp[0] + ' ' + sp[1] : sp[0]);
+    setText(this.miniAlt, al[1] ? al[0] + ' ' + al[1] : al[0]);
 
     const th = isNum(s.throttle) ? clamp(s.throttle, 0, 1) : null;
     this.setGauge(this.thr, th, th == null ? '—' : String(Math.round(th * 100)),
@@ -773,6 +947,8 @@ class Hud {
     for (const t of this.leaving.values()) clearTimeout(t);
     this.leaving.clear();
     window.removeEventListener('resize', this.onResize);
+    for (const off of this.disposers) off();
+    this.grip.removeEventListener('dblclick', this.onDock);
     this.root.remove();
     this.stages.clear();
     liveCount = Math.max(0, liveCount - 1);
@@ -802,6 +978,10 @@ export function createFlightHud(container) {
     update: state => hud.update(state),
     setVisible: b => hud.setVisible(b),
     setMode: m => hud.setMode(m),
+    toggleMinimized: () => hud.toggleMinimized(),
+    setMinimized: b => hud.setMinimized(b),
+    isMinimized: () => hud.isMinimized(),
+    resetPosition: () => hud.resetPosition(),
     destroy: () => hud.destroy(),
   };
 }
