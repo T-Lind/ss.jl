@@ -410,7 +410,7 @@ function buildStack(scene) {
       else if (p.kind === 'bus') buildBus(B, r.y0, r.y1, r.d, 0, 0, paint);
       else buildLander(B, r.y0, r.y1, r.d, 0, 0, paint);
     }
-    if (j > 0 && rows[j - 1].d > 0 && r.d > 0 && Math.abs(r.d - rows[j - 1].d) > 0.05) {
+    if (j > 0 && r.y0 === rows[j - 1].y1 && rows[j - 1].d > 0 && r.d > 0 && Math.abs(r.d - rows[j - 1].d) > 0.05) {
       const adH = Math.min(1.2, 0.25 * Math.max(rows[j - 1].d, r.d) + 0.1);
       buildAdapter(B, rows[j - 1].d, r.d, r.y0, r.y0 + adH, 0, 0);
     }
@@ -620,7 +620,7 @@ export function createVabRenderer(canvas) {
   }
 
   function sync(scene) {
-    const key = JSON.stringify([scene.asm.parts, scene.asm.boosters]);
+    const key = JSON.stringify([scene.asm.parts, scene.asm.boosters, scene.lay.height]);
     if (key !== state.key) { rebuild(scene); state.key = key; }
     const gh = scene.ghost;
     const gkey = gh ? JSON.stringify([gh.part, gh.d, gh.h, gh.radial, gh.core, gh.prop, gh.n]) : '';
@@ -764,12 +764,14 @@ export function createVabRenderer(canvas) {
     pickPart(sx, sy) {
       if (!state.scene) return null;
       const { o, d } = ray(sx, sy);
-      let best = null, bt = Infinity;
+      let best = null, bt = Infinity, shroud = null;
       for (const m of state.meshes) for (const c of m.cyl) {
         const t = hitCyl(o, d, c);
-        if (t !== null && t < bt) { bt = t; best = m.id; }
+        if (t === null) continue;
+        if (m.fair && state.scene.pickThrough) shroud = m.id;
+        else if (t < bt) { bt = t; best = m.id; }
       }
-      return best;
+      return best ?? shroud;
     },
     // Height where the view ray passes closest to the vehicle axis, or null.
     heightAt(sx, sy) {

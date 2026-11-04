@@ -78,10 +78,10 @@ Fly one suborbital attempt at a given commanded target, without correction.
 Returns the ascent, the arc, and what it achieved.
 """
 function _subfly(lv::LaunchVehicle, guid::AscentGuidance, pod_mass::Float64,
-                 theta_g0::Float64)
-    asc = simulate_ascent(lv, guid; t_max = 2.0e3)
+                 pod_diameter::Float64, theta_g0::Float64)
+    asc = simulate_ascent(lv, guid; t_max = 2.0e3, theta_g0 = theta_g0)
     cut = findlast(e -> e.name === :seco, asc.events)
-    pod = default_reentry_pod(mass = pod_mass)
+    pod = default_reentry_pod(mass = pod_mass, diameter = pod_diameter)
     # Straight up, the capsule is flying backwards through its own wake at
     # apogee and there is no meaningful angle of attack to seed; the pitch
     # dynamics need something non-degenerate, so it is seeded small either way.
@@ -114,6 +114,7 @@ Under `strict = false` a vehicle that cannot meet its target returns with
 function suborbital(; profile::Symbol = :hop,
                     lv::Union{Nothing,LaunchVehicle} = nothing,
                     pod_mass::Float64 = 350.0,
+                    pod_diameter::Float64 = 1.5,
                     apogee::Float64 = 100.0e3,
                     downrange::Float64 = 250.0e3,
                     loft::Float64 = deg2rad_(40.0),
@@ -122,7 +123,7 @@ function suborbital(; profile::Symbol = :hop,
                     theta_g0::Float64 = 0.0,
                     site_lat::Float64 = deg2rad_(28.5),
                     site_lon::Float64 = deg2rad_(-80.6),
-                    iterations::Int = 3,
+                    iterations::Int = 5,
                     strict::Bool = true,
                     verbose::Bool = false)
     profile in (:hop, :downrange) ||
@@ -162,7 +163,7 @@ function suborbital(; profile::Symbol = :hop,
     for it in 1:max(iterations, 1)
         g = profile === :hop ? _reguid(base; apogee_target = cmd) :
                                _reguid(base; range_target = cmd)
-        f = _subfly(lv, g, pod_mass, theta_g0)
+        f = _subfly(lv, g, pod_mass, pod_diameter, theta_g0)
         err = isfinite(got(f)) ? got(f) - goal : NaN
         verbose && @info "suborbital" it cmd_km = cmd/1e3 got_km = got(f)/1e3 err_km = err/1e3
         if best === nothing || (isfinite(err) &&

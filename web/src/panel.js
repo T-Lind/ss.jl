@@ -248,7 +248,7 @@ function flyby_idx(L, n, { near = 2.0e7 } = {}) {
 }
 
 // Shared 3D-scene payload: the pad-to-wherever track in true ECI geometry.
-function scene_payload(asc, cis) {
+function scene_payload(asc, cis, theta_g0) {
   let cisd = null;
   if (cis !== null && cis !== undefined) {
     const L = cis.log;
@@ -265,7 +265,7 @@ function scene_payload(asc, cis) {
       mx.push(L.mx[i] / 1e6); my.push(L.my[i] / 1e6); mz.push(L.mz[i] / 1e6);
       tt.push(L.t[i]); pp.push(L.phase[i]);
       const [la, lo] = geodetic_from_ecef(
-        rot_z([L.rx[i], L.ry[i], L.rz[i]], earth_rotation_angle(0.0, L.t[i])));
+        rot_z([L.rx[i], L.ry[i], L.rz[i]], earth_rotation_angle(theta_g0, L.t[i])));
       lat.push(rad2deg_(la)); lon.push(rad2deg_(lo));
     }
     cisd = { t: tt, x: px, y: py, z: pz, vx, vy, vz, dm, mx, my, mz, ph: pp,
@@ -369,7 +369,7 @@ const terrain_payload = tr => tr === null || tr === undefined
 
 // Ascent events, named by the vehicle's own stages.
 const ascent_events = asc => asc.events.map(e =>
-  ({ phase: 'ascent', name: String(e.name), t: e.t }));
+  ({ phase: 'ascent', name: String(e.name), t: e.t, h_km: e.h / 1000, v_mps: e.vrel, mass_kg: e.m }));
 
 // Launch time of day. `theta_g0` is the Greenwich sidereal angle at liftoff,
 // so one hour on the clock is OMEGA_EARTH * 3600 rad of Earth rotation. Zero
@@ -448,7 +448,7 @@ function panel_landing(p, onProgress) {
     Math.sin(ls.lat_land) * Math.sin(deg2rad_(ts.lat)) +
     Math.cos(ls.lat_land) * Math.cos(deg2rad_(ts.lat)) * Math.cos(ls.lon_land - deg2rad_(ts.lon))))) : NaN;
   const el = asc.elements;
-  const sc = scene_payload(asc, cis);
+  const sc = scene_payload(asc, cis, launch_theta(p));
 
   const O = ls.orbit;
   const oidx = deci_idx(O.t.length, 900);
@@ -556,13 +556,13 @@ function panel_landing(p, onProgress) {
 }
 
 // The entry leg's payload blocks, shared by every mission that ends in one.
-function entry_payload(out, metrics, events, ent) {
+function entry_payload(out, metrics, events, ent, theta_g0) {
   const EL = ent.log;
   const eidx = deci_idx(EL.t.length, 500);
   const ex3 = [], ey3 = [], ez3 = [], et3 = [];
   for (const i of eidx) {
     const re_ = ecef_from_geodetic(EL.lat[i], EL.lon[i], EL.h[i]);
-    const th = earth_rotation_angle(0.0, EL.t[i]);
+    const th = earth_rotation_angle(theta_g0, EL.t[i]);
     const reci = rot_z(re_, -th);
     ex3.push(reci[0] / 1e6); ey3.push(reci[1] / 1e6); ez3.push(reci[2] / 1e6);
     et3.push(EL.t[i]);
@@ -606,6 +606,7 @@ function panel_orbit(p, onProgress) {
     target: tkey,
     lv: lv_from_params(p),
     pod_mass: payload_total(p),
+    pod_diameter: pod_diameter(p, spacecraft_mass(p)),
     h_park: getf(p, 'h_park_km', 200.0) * 1e3,
     perigee_alt: tkey === 'custom'
       ? Math.min(100000.0, Math.max(100.0, getf(p, 'orbit_perigee_km', 200.0))) * 1e3 : NaN,
@@ -627,7 +628,7 @@ function panel_orbit(p, onProgress) {
   const asc = eo.ascent, ent = eo.entry;
   const el = asc.elements;
   const haslog = eo.log.t.length > 2;
-  const sc = scene_payload(asc, haslog ? { log: eo.log } : null);
+  const sc = scene_payload(asc, haslog ? { log: eo.log } : null, launch_theta(p));
 
   const events = ascent_events(asc);
   for (const b of eo.burns) {
@@ -681,7 +682,7 @@ function panel_orbit(p, onProgress) {
     },
   };
   if (haslog) { out.cis = sc.cis; out.rcs = rcs; }
-  if (ent !== null) entry_payload(out, metrics, events, ent);
+  if (ent !== null) entry_payload(out, metrics, events, ent, launch_theta(p));
   return out;
 }
 
@@ -692,6 +693,7 @@ function panel_suborbital(p, onProgress) {
     profile: prof,
     lv: lv_from_params(p),
     pod_mass: payload_total(p),
+    pod_diameter: pod_diameter(p, spacecraft_mass(p)),
     apogee: Math.min(3000.0, Math.max(5.0, getf(p, 'sub_apogee_km', 100.0))) * 1e3,
     downrange: Math.min(12000.0, Math.max(10.0, getf(p, 'sub_range_km', 400.0))) * 1e3,
     loft: deg2rad_(Math.min(85.0, Math.max(5.0, getf(p, 'sub_loft_deg', 40.0)))),
@@ -704,7 +706,7 @@ function panel_suborbital(p, onProgress) {
     strict: false,
   });
   const asc = sb.ascent, ent = sb.entry;
-  const sc = scene_payload(asc, null);
+  const sc = scene_payload(asc, null, launch_theta(p));
   const events = ascent_events(asc);
 
   const metrics = {
@@ -737,7 +739,7 @@ function panel_suborbital(p, onProgress) {
                   range_km: sb.range / 1e3 },
   };
   if (ent !== null) {
-    entry_payload(out, metrics, events, ent);
+    entry_payload(out, metrics, events, ent, launch_theta(p));
     const EL = ent.log;
     let top = 0;
     for (let i = 1; i < EL.h.length; i++) if (EL.h[i] > EL.h[top]) top = i;
@@ -776,7 +778,7 @@ export function panel_mission(p, onProgress) {
   });
   const asc = ms.ascent, cis = ms.cislunar, ent = ms.entry;
   const el = asc.elements;
-  const sc = scene_payload(asc, cis);
+  const sc = scene_payload(asc, cis, launch_theta(p));
 
   const events = ascent_events(asc);
   const metrics = {
@@ -846,7 +848,7 @@ export function panel_mission(p, onProgress) {
     metrics.on_target = false;
   }
 
-  if (ent !== null) entry_payload(out, metrics, events, ent);
+  if (ent !== null) entry_payload(out, metrics, events, ent, launch_theta(p));
   return out;
 }
 

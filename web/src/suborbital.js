@@ -32,10 +32,10 @@ function _ground_range(lat0, lon0, lat1, lon1) {
 }
 
 // Fly one suborbital attempt at a given commanded target, without correction.
-function _subfly(lv, guid, pod_mass, theta_g0) {
-  const asc = simulate_ascent(lv, guid, { t_max: 2.0e3 });
+function _subfly(lv, guid, pod_mass, pod_diameter, theta_g0) {
+  const asc = simulate_ascent(lv, guid, { t_max: 2.0e3, theta_g0 });
   const cut = asc.events.some(e => e.name === 'seco');
-  const pod = default_reentry_pod({ mass: pod_mass });
+  const pod = default_reentry_pod({ mass: pod_mass, diameter: pod_diameter });
   const scn = scenario({ vehicle: pod, r0: asc.r, v0: asc.v, t0: asc.t,
                          t_max: asc.t + 6.0e3, theta_g0, alpha0: deg2rad_(2.0) });
   const arc = simulate(scn);
@@ -46,10 +46,10 @@ function _subfly(lv, guid, pod_mass, theta_g0) {
 
 export function suborbital(opts = {}) {
   const { profile = 'hop', lv: lvIn = null, pod_mass: pod_mass0 = 350.0,
-          apogee = 100.0e3, downrange = 250.0e3, loft = deg2rad_(40.0),
+          pod_diameter = 1.5, apogee = 100.0e3, downrange = 250.0e3, loft = deg2rad_(40.0),
           azimuth = deg2rad_(90.0), kick_angle = deg2rad_(8.0),
           theta_g0 = 0.0, site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
-          onProgress = null, iterations = 3, strict = true, verbose = false } = opts;
+          onProgress = null, iterations = 5, strict = true, verbose = false } = opts;
   if (!(profile === 'hop' || profile === 'downrange'))
     throw new Error(`unknown suborbital profile ${profile}; have hop, downrange`);
   if (!(apogee > 0)) throw new Error('apogee must be positive');
@@ -78,7 +78,7 @@ export function suborbital(opts = {}) {
     const g = profile === 'hop'
       ? ascentGuidance({ ...base, apogee_target: cmd })
       : ascentGuidance({ ...base, range_target: cmd });
-    const f = _subfly(lv, g, pod_mass, theta_g0);
+    const f = _subfly(lv, g, pod_mass, pod_diameter, theta_g0);
     const err = Number.isFinite(got(f)) ? got(f) - goal : NaN;
     if (best === null ||
         (Number.isFinite(err) && (!Number.isFinite(best.err) || Math.abs(err) < Math.abs(best.err))))

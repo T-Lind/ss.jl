@@ -144,6 +144,18 @@
              font: 12px ui-monospace, Consolas, monospace; text-decoration: none;
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .runpick:hover { border-color: var(--acc); color: var(--acc); }
+  #eventLog { color: var(--ink); background: #151922; border: 1px solid #47505d; border-radius: 10px;
+    width: min(520px, 90vw); max-height: min(70vh, 640px); padding: 16px; }
+  #eventLog::backdrop { background: rgba(5, 9, 14, .55); }
+  #eventLog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  #eventLog h2 { font: 600 20px system-ui; margin: 0; }
+  #eventLog p { font: 13px system-ui; color: var(--dim); }
+  #eventRows { display: grid; gap: 4px; }
+  #eventRows button { background: #202733; color: var(--ink); border: 1px solid transparent; border-radius: 4px;
+    display: grid; grid-template-columns: 112px 1fr; gap: 3px 8px; padding: 9px; text-align: left; cursor: pointer; }
+  #eventRows button:is(:hover, :focus-visible) { border-color: var(--acc); }
+  #eventRows time { font: 12px ui-monospace, monospace; color: var(--acc); }
+  #eventRows small { grid-column: 2; color: var(--dim); }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -211,6 +223,10 @@
 <div class="hud" id="speed"></div>
 <div class="hud" id="viewopts"></div>
 <div id="cabtip" class="hidden"></div>
+<dialog id="eventLog" aria-labelledby="eventTitle">
+  <header><h2 id="eventTitle">Flight events</h2><form method="dialog"><button class="chip">Close</button></form></header>
+  <p>Select an event to pause there. Press Space to resume.</p><div id="eventRows"></div>
+</dialog>
 <canvas id="seek"></canvas>
 <div id="overlay">
   <h1 id="ov_title">SABLE</h1>
@@ -1763,13 +1779,13 @@ function buildData() {
   }
 
   // --- every event the run reported, plus derived max-q --------------------
-  EVS = run.events.filter(e => isFinite(e.t))
-    .map(e => ({ t: e.t, phase: e.phase, name: e.name, s: eventLabel(e.name) }));
+  EVS = run.events.filter(e => Number.isFinite(e.t))
+    .map(e => ({ ...e, s: eventLabel(e.name) }));
   const pk = run.metrics && run.metrics.perilune_km;
   if (isFinite(pk)) for (const e of EVS)
     if (e.name === 'perilune') e.s = `PERILUNE — ${Math.round(pk)} KM`;
   if (isFinite(tMaxQ)) EVS.push({ t: tMaxQ, phase: 'ascent', name: 'max_q',
-                                  s: 'MAX-Q' });
+                                  s: 'MAX-Q', q_kpa: A.qbar[iq] });
   EVS.sort((a, b) => a.t - b.t);
 
   // --- phase table: only the phases this trajectory actually flies ---------
@@ -6728,7 +6744,7 @@ function frame(now) {
   drawHUD(scene, ph);
   drawSeek();
 
-  if (!ended && simT >= tEnd) { ended = true; running = false; showEndCard(); }
+  if (!ended && running && simT >= tEnd) { ended = true; running = false; showEndCard(); }
 }
 
 // assemble everything the renderer needs for the current instant
@@ -8720,8 +8736,8 @@ seekCv.onclick = e => {
 // caption and its fade timeout linger from the abandoned timeline, the pad
 // camera's tilt-lag filter swings in from wherever it was, and frame's phase
 // memo would misfire the transition warp snap.
-function jumpTo(t) {
-  simT = Math.max(-15, Math.min(t, tEnd - 0.5));
+function jumpTo(t, limit = tEnd - 0.5) {
+  simT = Math.max(-15, Math.min(t, limit));
   for (const q of toasts) q.done = simT >= q.t;
   parts.length = 0; debris.length = 0;
   // Hand-flown ATTITUDE does not survive a seek — the trajectory owns the
@@ -8804,6 +8820,37 @@ function toggleInstruments() {
   hud.toggleMinimized?.();
   syncViewOpts();
 }
+function openEventLog() {
+  const dialog = $('eventLog'), rows = $('eventRows');
+  if (!started || dialog.open) return;
+  let resume = running;
+  running = false;
+  rows.replaceChildren();
+  const events = EVS.filter(e => e.t >= -15 && e.t <= tEnd);
+  for (const e of events) {
+    const row = document.createElement('button'), time = document.createElement('time');
+    const name = document.createElement('strong'), detail = document.createElement('small');
+    time.textContent = fmtClock(e.t);
+    name.textContent = e.s;
+    const readings = [e.phase];
+    if (fin(e.h_km)) readings.push(e.h_km.toFixed(1) + ' km');
+    if (fin(e.v_mps)) readings.push(Math.round(e.v_mps) + ' m/s');
+    if (fin(e.mass_kg)) readings.push((e.mass_kg / 1000).toFixed(1) + ' t');
+    if (fin(e.q_kpa)) readings.push(e.q_kpa.toFixed(1) + ' kPa');
+    detail.textContent = readings.filter(Boolean).join(' · ');
+    row.append(time, name, detail);
+    row.onclick = () => {
+      resume = false;
+      jumpTo(e.t, tEnd);
+      dialog.close();
+    };
+    rows.append(row);
+  }
+  if (!events.length) rows.textContent = 'This flight contains no recorded events.';
+  dialog.onclose = () => { running = resume; $('eventButton')?.blur(); };
+  dialog.showModal();
+}
+
 function syncViewOpts() {
   const el = $('viewopts');
   el.innerHTML = '';
@@ -8818,6 +8865,11 @@ function syncViewOpts() {
     c.onclick = fn;
     el.appendChild(c);
   }
+  const log = document.createElement('button');
+  log.id = 'eventButton'; log.className = 'chip'; log.textContent = 'events';
+  log.setAttribute('aria-haspopup', 'dialog');
+  log.onclick = openEventLog;
+  el.appendChild(log);
 }
 function initControls() {
   $('hatch_action').addEventListener('click', () => evaToggle(phaseAt(simT)));
@@ -8996,7 +9048,12 @@ function showEndCard() {
   // the card reports whatever this trajectory actually produced
   const rows = [];
   const row = (k, ok, v) => { if (ok) rows.push(`<tr><td>${k}</td><td>${v}</td></tr>`); };
-  row('mission elapsed', fin(m.t_days), `${(m.t_days || 0).toFixed(2)} days`);
+  row('mission elapsed', fin(m.t_days), m.t_days < 1 ? `${((m.t_days || 0)*1440).toFixed(1)} min` : `${(m.t_days || 0).toFixed(2)} days`);
+  if (run.mode === 'suborbital') {
+    const shot = run.suborbital?.profile === 'downrange';
+    const actual = shot ? m.range_km : m.apogee_km, target = shot ? m.target_range_km : m.target_apogee_km;
+    if (fin(actual) && fin(target)) row(shot ? 'range / target' : 'apogee / target', true, `${actual.toFixed(2)} / ${target.toFixed(2)} km`);
+  }
   row('perilune', fin(m.perilune_km),
       `${(m.perilune_km || 0).toFixed(0)} km (day ${(m.t_perilune_d || 0).toFixed(1)})`);
   row('entry interface', fin(m.ei_v_ms), `${((m.ei_v_ms || 0)/1000).toFixed(2)} km/s`);
@@ -9011,13 +9068,13 @@ function showEndCard() {
   // A run that stopped early says WHY, in words: the simulator flew what the
   // vehicle could do and ended there, and a bare "END OF MISSION" over the
   // last event's name read as the viewer giving up.
-  const why = !MS ? explainOutcome(run, geo) : null;
+  const why = !MS || successfulTouchdown(run) && m.on_target === false ? explainOutcome(run, geo) : null;
   const failed = why && !why.ok;
-  $('ov_title').textContent = MS ? lunarEndLabel(run) : failed ? why.state
+  $('ov_title').textContent = failed ? why.state : MS ? lunarEndLabel(run)
     : isFinite(tSplash) ? 'SPLASHDOWN' : 'END OF MISSION';
   $('ov_title').classList.toggle('fail', !!failed);
-  $('ov_sub').textContent = MS ? (successfulTouchdown(run) ? 'touchdown confirmed — mission complete' : landingSummary(run))
-    : failed ? why.why : isFinite(tSplash) ?
+  $('ov_sub').textContent = failed ? why.why : MS ? (successfulTouchdown(run) ? 'touchdown confirmed — mission complete' : landingSummary(run))
+    : isFinite(tSplash) ?
     'pod recovered — mission complete' : (EVS.length ? EVS[EVS.length-1].s : '');
   const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
   const notes = failed ? (why.details.length ? `<ul class="ov_det">${why.details.map(d => `<li>${esc(d)}</li>`).join('')}</ul>` : '')
@@ -10871,9 +10928,7 @@ async function boot() {
     const offTarget = oc === 'nominal' && M.on_target === false;
     $('ov_sub').textContent =
       offTarget ?
-      `${mass}${LEN.toFixed(1)} m — flown, but OFF TARGET: the trajectory ` +
-      `missed the perilune it was aimed at` +
-      (fin(M.perilune_km) ? ` (${(M.perilune_km).toFixed(0)} km)` : '') :
+      `${mass}${LEN.toFixed(1)} m — ${explainOutcome(run, geo).why}` :
       oc && oc !== 'nominal' ?
       `${mass}${LEN.toFixed(1)} m — this flight ends where the simulation ` +
       `ended: ${oc === 'ascent_failed' ? 'the ascent never reached orbit'

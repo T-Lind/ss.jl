@@ -273,6 +273,7 @@ Under `strict = false` a failed ascent returns with `outcome =
 function earthorbit(; target::Symbol = :leo,
                     lv::Union{Nothing,LaunchVehicle} = nothing,
                     pod_mass::Float64 = 350.0,
+                    pod_diameter::Float64 = 1.5,
                     h_park::Float64 = 200.0e3,
                     perigee_alt::Float64 = NaN,
                     apogee_alt::Float64 = NaN,
@@ -470,7 +471,7 @@ function earthorbit(; target::Symbol = :leo,
                       dv_plan = pland, dv = dvd))
         dry |= dryd
         if !dryd
-            pod = default_reentry_pod(mass = pod_mass)
+            pod = default_reentry_pod(mass = pod_mass, diameter = pod_diameter)
             entry_scn = Scenario(vehicle = pod, r0 = r, v0 = v, t0 = t,
                                  t_max = t + 3.0e4, theta_g0 = theta_g0,
                                  alpha0 = deg2rad_(5.0))

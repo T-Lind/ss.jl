@@ -14,6 +14,29 @@ function fn(name, text = source) {
   assert.ok(start >= 0, `missing ${name}`);
   return text.slice(start, text.indexOf('\n}', start) + 2);
 }
+test('flight events seek to the chosen instant and distinguish inspecting from dismissing', () => {
+  const rows = { children: [], replaceChildren() { this.children = []; }, append(row) { this.children.push(row); } };
+  const dialog = { showModal() { this.open = true; }, close() { this.open = false; this.onclose(); } };
+  const c = createContext({ started: true, running: true, fin, tEnd: 99, fmtClock: String,
+    EVS: [{ t: 2, phase: 'ascent', s: 'IGNITION', mass_kg: 2000, h_km: 0, v_mps: 0 },
+          { t: 20, phase: 'ascent', s: 'SEPARATION' }, { t: 100, s: 'OUTSIDE PLAYBACK' }],
+    document: { createElement: () => ({ append(...items) { this.children = items; } }) },
+    $: id => ({ eventLog: dialog, eventRows: rows })[id],
+    jumpTo(t) { c.at = t; },
+  });
+  runInContext(fn('openEventLog'), c);
+  c.openEventLog();
+  assert.equal(c.running, false);
+  assert.equal(rows.children.length, 2);
+  assert.match(rows.children[0].children[2].textContent, /0.0 km · 0 m\/s · 2.0 t/);
+  dialog.close();
+  assert.equal(c.running, true);
+  c.openEventLog();
+  rows.children[1].onclick();
+  assert.equal(c.at, 20);
+  assert.equal(c.running, false);
+});
+
 function scene() {
   const c = createContext({ Math, Number, Float32Array, RM: 1737400, VST: 12,
     MS: {u:[1,0,0], ed:[0,1,0], ec:[0,0,1], terrain:{}},

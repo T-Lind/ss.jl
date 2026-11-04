@@ -494,7 +494,7 @@ Shared 3D-scene payload: the pad-to-wherever track in true ECI geometry,
 units of 1000 km, decimated for the wire. Both missions fly the same launch
 and trans-lunar legs, so both scenes are built from the same code.
 """
-function scene_payload(asc, cis)
+function scene_payload(asc, cis, theta_g0)
     # a mission whose ascent failed has no cislunar leg at all; the ascent
     # still flew and is still worth the wire
     cisd = nothing
@@ -519,7 +519,7 @@ function scene_payload(asc, cis)
             # the business of reimplementing geodesy in JavaScript.
             la, lo, _ = SatelliteSim.geodetic_from_ecef(
                 SatelliteSim.rot_z((L.rx[i], L.ry[i], L.rz[i]),
-                                   SatelliteSim.earth_rotation_angle(0.0, L.t[i])))
+                                   SatelliteSim.earth_rotation_angle(theta_g0, L.t[i])))
             push!(lat, rad2deg_(la)); push!(lon, rad2deg_(lo))
         end
         cisd = Dict("t" => tt, "x" => px, "y" => py, "z" => pz,
@@ -682,7 +682,8 @@ terrain_payload(tr::Union{Nothing,LunarTerrain}) =
 
 "Ascent events, named by the vehicle's own stages."
 ascent_events(asc) = Any[Dict("phase" => "ascent", "name" => string(e.name),
-                              "t" => e.t) for e in asc.events]
+                              "t" => e.t, "h_km" => e.h / 1000, "v_mps" => e.vrel,
+                              "mass_kg" => e.m) for e in asc.events]
 
 # Launch time of day. `theta_g0` is the Greenwich sidereal angle at liftoff,
 # so one hour on the clock is OMEGA_EARTH * 3600 rad of Earth rotation. Zero is
@@ -762,7 +763,7 @@ function panel_landing(p)::Dict{String,Any}
     )
     asc, cis, d = ls.ascent, ls.cislunar, ls.descent
     el = asc.elements
-    sc = scene_payload(asc, cis)
+    sc = scene_payload(asc, cis, launch_theta(p))
 
     # Moon-centred tracks, in km: the parking orbit, the descent ellipse and
     # the powered descent itself
@@ -892,14 +893,14 @@ function panel_landing(p)::Dict{String,Any}
 end
 
 # the entry leg's payload blocks, shared by every mission that ends in one
-function entry_payload!(out, metrics, events, ent)
+function entry_payload!(out, metrics, events, ent, theta_g0)
     EL = ent.log
     eidx = deci_idx(length(EL.t), 500)
     # the entry log is geodetic — rebuild ECI so it joins the same scene
     ex3 = Float64[]; ey3 = Float64[]; ez3 = Float64[]; et3 = Float64[]
     for i in eidx
         re_ = ecef_from_geodetic(EL.lat[i], EL.lon[i], EL.h[i])
-        th = SatelliteSim.earth_rotation_angle(0.0, EL.t[i])
+        th = SatelliteSim.earth_rotation_angle(theta_g0, EL.t[i])
         reci = SatelliteSim.rot_z(re_, -th)
         push!(ex3, reci[1] / 1e6); push!(ey3, reci[2] / 1e6); push!(ez3, reci[3] / 1e6)
         push!(et3, EL.t[i])
@@ -948,6 +949,7 @@ function panel_orbit(p)::Dict{String,Any}
         target = tkey,
         lv = lv_from_params(p),
         pod_mass = payload_total(p),
+        pod_diameter = pod_diameter(p, spacecraft_mass(p)),
         h_park = getf(p, "h_park_km", 200.0) * 1e3,
         perigee_alt = tkey === :custom ?
             clamp(getf(p, "orbit_perigee_km", 200.0), 100.0, 100000.0) * 1e3 : NaN,
@@ -968,7 +970,7 @@ function panel_orbit(p)::Dict{String,Any}
     asc, ent = eo.ascent, eo.entry
     el = asc.elements
     haslog = length(eo.log.t) > 2
-    sc = scene_payload(asc, haslog ? (log = eo.log,) : nothing)
+    sc = scene_payload(asc, haslog ? (log = eo.log,) : nothing, launch_theta(p))
 
     events = ascent_events(asc)
     for b in eo.burns
@@ -1037,7 +1039,7 @@ function panel_orbit(p)::Dict{String,Any}
         out["cis"] = sc.cis
         out["rcs"] = rcs
     end
-    ent !== nothing && entry_payload!(out, metrics, events, ent)
+    ent !== nothing && entry_payload!(out, metrics, events, ent, launch_theta(p))
     out
 end
 
@@ -1054,6 +1056,7 @@ function panel_suborbital(p)::Dict{String,Any}
         profile = prof,
         lv = lv_from_params(p),
         pod_mass = payload_total(p),
+        pod_diameter = pod_diameter(p, spacecraft_mass(p)),
         apogee = clamp(getf(p, "sub_apogee_km", 100.0), 5.0, 3000.0) * 1e3,
         downrange = clamp(getf(p, "sub_range_km", 400.0), 10.0, 12000.0) * 1e3,
         loft = deg2rad_(clamp(getf(p, "sub_loft_deg", 40.0), 5.0, 85.0)),
@@ -1065,7 +1068,7 @@ function panel_suborbital(p)::Dict{String,Any}
         strict = false,
     )
     asc, ent = sb.ascent, sb.entry
-    sc = scene_payload(asc, nothing)
+    sc = scene_payload(asc, nothing, launch_theta(p))
     events = ascent_events(asc)
 
     metrics = Dict{String,Any}(
@@ -1114,7 +1117,7 @@ function panel_suborbital(p)::Dict{String,Any}
         ),
     )
     if ent !== nothing
-        entry_payload!(out, metrics, events, ent)
+        entry_payload!(out, metrics, events, ent, launch_theta(p))
         # The arc starts below the entry interface and going UP, so the entry
         # simulator never crosses 120 km downward from outside and never emits
         # the event the viewers frame their ENTRY phase on. It is still a real
@@ -1171,7 +1174,7 @@ function panel_mission(p)::Dict{String,Any}
     # simulated is served, and "outcome" says where the flight stopped
     # ("nominal", "ascent_failed", or the cislunar outcome such as "timeout").
     # The browser flies whatever is here.
-    sc = scene_payload(asc, cis)
+    sc = scene_payload(asc, cis, launch_theta(p))
 
     events = ascent_events(asc)
     metrics = Dict{String,Any}(
@@ -1289,7 +1292,7 @@ function panel_mission(p)::Dict{String,Any}
         metrics["on_target"] = false
     end
 
-    ent !== nothing && entry_payload!(out, metrics, events, ent)
+    ent !== nothing && entry_payload!(out, metrics, events, ent, launch_theta(p))
     out
 end
 

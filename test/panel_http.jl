@@ -9,6 +9,20 @@ using Test
 using Sockets
 
 include(joinpath(@__DIR__, "..", "scripts", "panelapp.jl"))
+using SatelliteSim
+
+@testset "suborbital launch epoch and inertial handoff" begin
+    fly(hour) = PanelApp.panel_suborbital(Dict("sub_profile" => "downrange", "sub_range_km" => "400",
+                                              "pod_dia" => "1.5", "launch_h" => hour))
+    noon, evening = fly("0"), fly("6")
+    @test evening["metrics"]["on_target"]
+    @test isapprox(noon["metrics"]["range_km"], evening["metrics"]["range_km"]; atol = 0.001)
+    @test isapprox(noon["metrics"]["splash_lon"], evening["metrics"]["splash_lon"]; atol = 0.0001)
+    for key in ("x", "y", "z")
+        @test abs(evening["asc3d"][key][end] - evening["ent3d"][key][1]) < 1e-6
+    end
+    @test any(e -> get(e, "mass_kg", 0) > 0, evening["events"])
+end
 
 @testset "panel serialization and numeric inputs" begin
     @test PanelApp.json("\t\r\n\b\f\0") == "\"\\u0009\\u000d\\u000a\\u0008\\u000c\\u0000\""

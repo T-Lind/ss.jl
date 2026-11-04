@@ -249,6 +249,31 @@ export function parseLivery(str) {
   } catch (e) { return null; }
 }
 
+/** Duplicate or reorder an axial stage. The radial set stays on S1. */
+export function editStage(asm, catalogue, k, action) {
+  const stages = analyse(asm, catalogue).stages;
+  const group = stages[k - 1]?.seg;
+  if (!group) return false;
+  const parts = asm.parts, start = parts.indexOf(group[0]), end = start + group.length;
+  if (!group.every((p, i) => parts[start + i] === p)) return false;
+  if (action === 'copy') {
+    if (stages.length >= 5) return false;
+    const copy = group.map(p => withId({ ...structuredClone(p), id: null }));
+    parts.splice(start, 0, ...copy, withId({ type: 'decoupler' }));
+  } else if (action === 'earlier' || action === 'later') {
+    const adjacent = stages[k - 1 + (action === 'earlier' ? -1 : 1)]?.seg;
+    if (!adjacent) return false;
+    const other = parts.indexOf(adjacent[0]);
+    if (!adjacent.every((p, i) => parts[other + i] === p)) return false;
+    const left = Math.min(start, other), right = Math.max(end, other + adjacent.length);
+    const gap = parts.slice(Math.min(end, other + adjacent.length), Math.max(start, other));
+    if (!gap.length || !gap.every(p => p.type === 'decoupler')) return false;
+    const reordered = start < other ? [...adjacent, ...gap, ...group] : [...group, ...gap, ...adjacent];
+    parts.splice(left, right - left, ...reordered);
+  } else return false;
+  return true;
+}
+
 let SEQ = 0;
 const pid = () => 'p' + (++SEQ).toString(36);
 /** Give a part instance an id (parts from palette().make() come without). */
@@ -543,11 +568,14 @@ export const PRESETS = {
 
 /** Mission catalogue for the flight-plan dialog: mission keys only. */
 export const MISSIONS = [
-  { id: 'hop', mode: 'suborbital', group: 'Suborbital', label: 'Kármán line hop',
-    desc: 'Straight up past 100 km and back down under parachutes.', dv: 2.0,
+  { id: 'hop', mode: 'suborbital', group: 'Suborbital', label: 'Vertical hop',
+    desc: 'Climb to the selected apogee and return under parachutes.', dv: 2.0,
+    fields: [['sub_apogee_km', 'Target apogee (km)', 5, 3000, 100]],
     params: { mode: 'suborbital', sub_profile: 'hop', sub_apogee_km: 100 } },
-  { id: 'shot', mode: 'suborbital', group: 'Suborbital', label: 'Downrange 400 km',
-    desc: 'A lofted ballistic arc to a splashdown 400 km out.', dv: 2.6,
+  { id: 'shot', mode: 'suborbital', group: 'Suborbital', label: 'Downrange shot',
+    desc: 'Fly a lofted ballistic arc to the selected splashdown range.', dv: 2.6,
+    fields: [['sub_range_km', 'Ground range (km)', 10, 12000, 400], ['sub_loft_deg', 'Loft angle (°)', 5, 85, 40],
+             ['sub_azimuth_deg', 'Launch azimuth (°)', 0, 360, 90]],
     params: { mode: 'suborbital', sub_profile: 'downrange', sub_range_km: 400, sub_loft_deg: 40 } },
   { id: 'leo', mode: 'orbit', group: 'Earth orbit', label: 'Low Earth orbit',
     desc: 'Insertion into a 200 km parking orbit, then circularise.', dv: 9.3,
@@ -555,6 +583,12 @@ export const MISSIONS = [
   { id: 'leo_ret', mode: 'orbit', group: 'Earth orbit', label: 'LEO and home',
     desc: 'Three revolutions, a deorbit burn, entry and splashdown.', dv: 9.5,
     params: { mode: 'orbit', orbit: 'leo', n_orbits: 3, deorbit: 1 } },
+  { id: 'custom', mode: 'orbit', group: 'Earth orbit', label: 'Custom Earth orbit',
+    desc: 'Define both apsides and the inclination, then coast for the selected number of orbits.',
+    params: { mode: 'orbit', orbit: 'custom' },
+    fields: [['orbit_perigee_km', 'Perigee altitude (km)', 100, 100000, 200],
+             ['orbit_apogee_km', 'Apogee altitude (km)', 100, 100000, 400],
+             ['orbit_incl_deg', 'Inclination (°)', 0, 180, 28.5], ['n_orbits', 'Coast (orbits)', 0.25, 16, 2]] },
   { id: 'polar', mode: 'orbit', group: 'Earth orbit', label: 'Polar orbit',
     desc: 'A 90° inclination orbit — launch azimuth due north.', dv: 9.6,
     params: { mode: 'orbit', orbit: 'polar', n_orbits: 2, deorbit: 0 } },
@@ -598,7 +632,7 @@ export const LANDING_SITES = [
  *  metres (y = 0 at the bottom of stage 1, growing up), its diameter, and
  *  the stage it belongs to. Engines are drawn with a bell whose size follows
  *  thrust; decouplers are thin rings. Purely visual. */
-export function layout(asm, catalogue) {
+export function layout(asm, catalogue, exploded = false) {
   const a = analyse(asm, catalogue);
   const rows = [];
   const stageOf = new Map();
@@ -623,6 +657,8 @@ export function layout(asm, catalogue) {
       else if (p.kind === 'bus') { d = Math.max(0.8, 0.5 * Math.cbrt(p.mass)); h = 0.8 * d; }
       else { d = p.diameter; h = 0.85 * d; }
     } else continue;
+    if (exploded && below && (p.type === 'decoupler' || p.type === 'payload' || rows.at(-1).part.type === 'decoupler'))
+      y += Math.max(0.8, Math.max(d, below.d) * 0.7);
     rows.push({ part: p, y0: y, y1: y + h, d, stage: stageOf.get(p.id) || 0 });
     below = { d };
     y += h;

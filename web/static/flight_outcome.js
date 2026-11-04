@@ -6,7 +6,7 @@
 // functions turn the run's own outcome, metrics and events — and the vehicle's
 // geometry — into a sentence and some advice, so the builder can warn before
 // launch and the launch view can explain after.
-import { landingSummary } from './flight_state.js';
+import { landingSummary, successfulTouchdown } from './flight_state.js';
 
 const fin = v => typeof v === 'number' && Number.isFinite(v);
 const km = v => `${Math.round(v).toLocaleString('en-US')} km`;
@@ -46,9 +46,33 @@ export function explainOutcome(run, geo) {
   const has = n => ev.some(e => e.name === n);
   const at = n => (ev.find(e => e.name === n) || {}).t;
   const details = [], advice = [];
-  if (run?.mode === 'landing' && out === 'nominal' && m.on_target === false)
-    return { ok: false, state: 'DESCENT FAILED', why: landingSummary(run), details, advice };
+  if (out === 'nominal' && m.on_target === false) {
+    let why = 'The flight finished outside the requested target.';
+    if (run.mode === 'suborbital') {
+      const shot = run.suborbital?.profile === 'downrange';
+      const actual = shot ? m.range_km : m.apogee_km, target = shot ? m.target_range_km : m.target_apogee_km;
+      if (fin(actual) && fin(target))
+        why = `${shot ? 'Splashdown range' : 'Apogee'} was ${actual.toFixed(2)} km against a target of ${target.toFixed(2)} km.`;
+    } else if (run.mode === 'orbit') {
+      why = 'The vehicle did not reach the requested orbital elements.';
+      const o = run.orbit;
+      if (fin(o?.target_rp_km) && fin(o?.target_ra_km) && fin(o?.target_incl_deg))
+        details.push(`Target orbit ${km(o.target_rp_km)} × ${km(o.target_ra_km)} at ${o.target_incl_deg.toFixed(1)}°.`);
+    } else if (run.mode === 'landing') {
+      if (!successfulTouchdown(run))
+        return { ok: false, state: 'DESCENT FAILED', why: landingSummary(run), details, advice };
+      why = fin(m.target_miss_km) ? `The lander touched down ${km(m.target_miss_km)} from its target.` : 'The lander touched down outside the target area.';
+    } else if (run.mode === 'flyby') {
+      why = 'The trajectory missed its lunar flyby or Earth-return target.';
+      if (fin(m.perilune_km)) details.push(`Closest approach to the Moon was ${km(m.perilune_km)} above the surface.`);
+    }
+    return { ok: false, state: 'OFF TARGET', why, details, advice };
+  }
   if (!out || out === 'nominal') return { ok: true, state: 'NOMINAL', why: '', details, advice };
+
+  if (run.mode === 'suborbital' && out === 'short')
+    return { ok: false, state: 'TARGET OUT OF REACH', why: 'The ascent ended before the commanded ballistic cutoff.',
+      details, advice: ['reduce the target distance or add usable ascent Δv'] };
 
   if (out === 'ascent_failed') {
     const twr = +geo?.liftoff_twr;

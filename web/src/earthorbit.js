@@ -181,7 +181,7 @@ function _eo_plane_dir(r, v_now, inc) {
 
 export function earthorbit(opts = {}) {
   const { target = 'leo', lv: lvIn = null, pod_mass: pod_mass0 = 350.0,
-          h_park = 200.0e3, perigee_alt = NaN, apogee_alt = NaN,
+          pod_diameter = 1.5, h_park = 200.0e3, perigee_alt = NaN, apogee_alt = NaN,
           inclination = NaN, n_orbits = 2.0, deorbit = false,
           hp_entry = 25.0e3, kick_angle = deg2rad_(8.0), optimize_kick = false,
           theta_g0 = 0.0, site_lat = deg2rad_(28.5), site_lon = deg2rad_(-80.6),
@@ -335,7 +335,7 @@ export function earthorbit(opts = {}) {
     burns.push({ name: 'deorbit', t_ign: t - durd, duration: durd, dv_plan: pland, dv: dvd });
     dry = dry || dryd;
     if (!dryd) {
-      const pod = default_reentry_pod({ mass: pod_mass });
+      const pod = default_reentry_pod({ mass: pod_mass, diameter: pod_diameter });
       if (onProgress) onProgress({ ok: true, stage: 'entry',
     detail: 'propagating atmospheric entry', current: 5, total: 6 });
   entry_scn = scenario({ vehicle: pod, r0: r, v0: v, t0: t,

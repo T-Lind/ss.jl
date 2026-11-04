@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { panelCatalogue, panelGeometry } from '../web/src/panel.js';
-import { PRESETS, fromParams, toParams, analyse, withId, stageMass,
+import { PRESETS, fromParams, toParams, analyse, withId, stageMass, editStage, layout,
   LAUNCH_SITES, LANDING_SITES, launchHourFor } from '../web/static/vab_parts.js';
 
 const catalogue = panelCatalogue();
@@ -21,6 +21,40 @@ for (const [name, preset] of Object.entries(PRESETS)) {
     });
   });
 }
+
+test('stage moves preserve the parts and put their performance in the new firing order', () => {
+  const asm = fromParams(PRESETS['Sable Heavy (4 strap-ons)'], catalogue);
+  const before = structuredClone(asm), g = panelGeometry(Object.fromEntries(toParams(asm, catalogue)));
+  assert.equal(editStage(asm, catalogue, 1, 'earlier'), false);
+  assert.equal(editStage(asm, catalogue, 1, 'later'), true);
+  const moved = panelGeometry(Object.fromEntries(toParams(asm, catalogue)));
+  close(moved.stages[0].prop_kg, g.stages[1].prop_kg);
+  close(moved.stages[1].thrust_kn, g.stages[0].thrust_kn);
+  assert.deepEqual(asm.boosters, before.boosters);
+  assert.equal(editStage(asm, catalogue, 2, 'earlier'), true);
+  assert.deepEqual(asm, before);
+  assert.equal(editStage(asm, catalogue, 2, 'copy'), true);
+  assert.equal(analyse(asm, catalogue).ok, true);
+  assert.equal(new Set(asm.parts.map(p => p.id)).size, asm.parts.length);
+  const stages = analyse(asm, catalogue).stages;
+  assert.equal(stages[2].mprop, stages[1].mprop);
+  stages[2].tanks[0].length += 1;
+  assert.notEqual(stages[2].tanks[0].length, stages[1].tanks[0].length);
+  assert.equal(editStage(asm, catalogue, 1, 'copy'), true);
+  assert.equal(editStage(asm, catalogue, 1, 'copy'), false);
+});
+
+test('exploded layout separates stages and keeps the fairing with its payload', () => {
+  const asm = fromParams(PRESETS.Sable, catalogue), params = toParams(asm, catalogue).toString();
+  const normal = layout(asm, catalogue), exploded = layout(asm, catalogue, true);
+  assert.ok(exploded.height > normal.height);
+  for (const [i, r] of exploded.rows.entries()) {
+    close(r.y1 - r.y0, normal.rows[i].y1 - normal.rows[i].y0);
+    if (r.part.type === 'decoupler') assert.ok(r.y0 > exploded.rows[i-1].y1);
+  }
+  close(exploded.fairing.y0, exploded.rows.at(-1).y0);
+  assert.equal(toParams(asm, catalogue).toString(), params);
+});
 
 test('custom manual core and booster performance survives import and subsequent edits', () => {
   const p = { ...PRESETS['Sable Heavy (4 strap-ons)'], s1_thrust_kn: 812.345, s1_isp: 299.5,

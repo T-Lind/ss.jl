@@ -9,7 +9,23 @@ import { default_reentry_pod } from '../web/src/vehicle.js';
 import { RE_EQ } from '../web/src/constants.js';
 import { deorbitElements, target_deorbit, scenario_from_elements } from '../web/src/scenarios.js';
 
+import { panelRun } from '../web/src/panel.js';
+
 const distance = (a, b) => Math.hypot(...a.map((x, i) => x - b[i]));
+
+test('suborbital ground range and the inertial entry handoff share the launch epoch', () => {
+  const fly = (hour, diameter = 1.5) => panelRun({ sub_profile: 'downrange', sub_range_km: 400,
+    launch_h: hour, pod_dia: diameter }, 'suborbital');
+  const noon = fly(0), evening = fly(6);
+  assert.equal(evening.metrics.on_target, true);
+  assert.ok(Math.abs(noon.metrics.range_km - evening.metrics.range_km) < 0.001);
+  assert.ok(Math.abs(noon.metrics.splash_lon - evening.metrics.splash_lon) < 0.0001);
+  for (const k of ['x', 'y', 'z']) assert.ok(Math.abs(evening.asc3d[k].at(-1) - evening.ent3d[k][0]) < 1e-6);
+  assert.ok(evening.events.some(e => e.phase === 'ascent' && e.mass_kg > 0 && Number.isFinite(e.h_km)));
+  assert.ok(Math.abs(fly(6, 2.5).metrics.peak_g - evening.metrics.peak_g) > 0.01);
+  const longer = panelRun({ sub_profile: 'downrange', sub_range_km: 500, pod_mass: 350 }, 'suborbital');
+  assert.equal(longer.metrics.on_target, true, 'the inferred capsule diameter reaches the 500 km target');
+});
 
 test('circular and equatorial element conversions preserve orbital phase', () => {
   for (const e of [0, 0.3]) for (const i of [0, 1e-15, 0.5, Math.PI])
