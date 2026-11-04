@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 import { preflight, explainOutcome } from '../web/static/flight_outcome.js';
-import { MISSIONS } from '../web/static/vab_parts.js';
+import { MISSIONS, missionsFor } from '../web/static/vab_parts.js';
 
 test('off-target flight reports identify the target for the flown mission', () => {
   const why = explainOutcome({ mode: 'suborbital', outcome: 'nominal', suborbital: { profile: 'downrange' },
@@ -25,7 +25,7 @@ for (const tree of ['scripts', 'web']) {
   const geometry = twr => ({ liftoff_twr: twr, total_dv_mps: 12000, stages: [{ dv_mps: 6000 }, { dv_mps: 6000, burn_s: 200 }] });
   function setup() {
     const fields = new Map(), $ = id => {
-      if (!fields.has(id)) fields.set(id, {});
+      if (!fields.has(id)) fields.set(id, { setAttribute() {} });
       return fields.get(id);
     };
     const asm = { name: 'Test' };
@@ -36,14 +36,14 @@ for (const tree of ['scripts', 'web']) {
     const c = createContext({ $, el, asm, an: { ok: true, issues: [] }, geo: geometry(0.8),
       geoKey: JSON.stringify(asm), geoErr: null, geoSeq: 0, catalogue: {}, undoS: [], redoS: [],
       mission: 'orbit', MISSIONS: [{ id: 'orbit', mode: 'orbit', desc: 'Orbit', dv: 9, params: { mode: 'orbit' } }],
-      preflight, preMode: () => 'orbit', document: {}, esc: String, stagingHTML: () => '', reportHTML: () => '',
+      flightBase: null, basePinned: false, holdPart: null, missionsFor, preflight, preMode: () => 'orbit', document: {}, esc: String, stagingHTML: () => '', reportHTML: () => '',
       toParams: () => new URLSearchParams(), URLSearchParams, AbortController,
       vehicle: { save() {}, markDirty() {} }, location: {}, scheduleEval() {}, requestDraw() {},
       busy: () => Object.assign(() => {}, { progress() {} }), resetDlg() {},
       explainOutcome: () => ({ ok: true }), fail: err => { throw err; },
       clamp: (v, a, b) => Math.max(a, Math.min(b, v)),
     });
-    for (const name of ['liveGeo', 'issuesHTML', 'updateChrome', 'renderLaunchSide', 'renderSide', 'showLErr']) load(c, name);
+    for (const name of ['liveGeo', 'flightDesignKey', 'designLabel', 'renderImpact', 'signedDelta', 'updateComparisonChoice', 'issuesHTML', 'updateChrome', 'renderLaunchSide', 'renderSide', 'showLErr']) load(c, name);
     load(c, 'evaluate', true); load(c, 'launch', true);
     return c;
   }
@@ -66,6 +66,35 @@ for (const tree of ['scripts', 'web']) {
     await c.launch();
     assert.equal(params.get('orbit'), 'custom');
     for (const [key, value] of Object.entries(draft)) assert.equal(params.get(key), key === 'deorbit' ? '1' : value);
+  });
+
+  test(`${tree}: both flights use their own booster set with the same edited mission target and launch conditions`, async () => {
+    const c = setup(), base = c.asm;
+    const capsule = { kind: 'capsule' };
+    Object.assign(c, { flightBase: { assembly: base, key: 'nboost=0', geometry: geometry(1.2), payload: capsule },
+      asm: { name: 'Edited', boosters: { count: 4 } }, mission: 'hop', MISSIONS,
+      targetDrafts: new Map([['hop', { sub_apogee_km: '130' }]]), geo: geometry(1.8),
+      toParams: a => new URLSearchParams({ nboost: a.boosters?.count ?? 0 }), });
+    c.geoKey = JSON.stringify(c.asm);
+    load(c, 'targetIssue'); load(c, 'applyTargets');
+    c.renderLaunchSide();
+    assert.equal(c.$('#flyBoth').disabled, false);
+    c.$('#flyBoth').checked = true;
+    const flights = [];
+    c.api = { run: async p => { flights.push(Object.fromEntries(p)); return { id: 'r' + flights.length }; } };
+    let comparison;
+    c.showComparison = (a, b) => { comparison = [a.id, b.id]; };
+    await c.launch();
+    assert.deepEqual(comparison, ['r1','r2']);
+    assert.deepEqual(flights.map(p => p.nboost), ['0','4']);
+    assert.equal(flights[0].sub_apogee_km, '130');
+    assert.deepEqual(flights[0], { ...flights[1], nboost: '0' });
+    assert.equal(c.location.href, undefined);
+    c.flightBase.payload = { kind: 'lander' }; c.renderLaunchSide();
+    assert.equal(c.$('#flyBoth').checked, false);
+    assert.equal(c.$('#flyBoth').disabled, true);
+    c.asm = { name: 'Repainted reference' }; c.renderLaunchSide();
+    assert.equal(c.$('#compareChoice').hidden, true, 'an unchanged flight design does not offer duplicate runs');
   });
 
   test(`${tree}: geometry results refresh both launch guards and issue counts`, async () => {

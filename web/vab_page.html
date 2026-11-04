@@ -86,6 +86,23 @@
   .hold-banner { position: absolute; top: 52px; left: 50%; transform: translateX(-50%); z-index: 5;
                  background: rgba(19,25,34,.94); border: 1px solid var(--line); border-radius: 20px;
                  padding: 6px 14px; font-size: 12.5px; white-space: nowrap; pointer-events: none; }
+  .hold-banner.radial { width: max-content; max-width: calc(100% - 20px); box-sizing: border-box; padding: 10px 12px; border-radius: 7px; white-space: normal; pointer-events: auto; }
+  .radial-head, .mount-controls, .impact-head { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+  .radial-head { margin-bottom: 7px; }
+  .radial-head svg { width: 33px; height: 33px; flex-shrink: 0; }
+  .mount-controls select { font: inherit; color: var(--text); background: var(--ground); border: 1px solid var(--line); padding: 5px; }
+  .mount-controls button, .impact-head button { font-size: 11px; padding: 5px 8px; }
+  .mount-controls .attach { border-color: var(--nominal); }
+  .impact-head { justify-content: space-between; }
+  .impact-head h2 { margin: 0; }
+  .impact-metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 4px; }
+  .impact-metrics div { border-left: 2px solid var(--line); padding-left: 5px; }
+  .impact-metrics span, .impact-metrics small { display: block; color: var(--text-2); font-size: 10px; }
+  .impact-metrics b { font: 600 13px var(--mono); }
+  .compare-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .compare-table th, .compare-table td { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: right; }
+  .compare-table :first-child { text-align: left; }
+  .lres-btns { flex-wrap: wrap; }
   .hold-banner b { color: var(--nominal); }
   .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
            text-align: center; color: var(--text-2); pointer-events: none; padding: 24px; }
@@ -312,6 +329,7 @@
 
   <aside class="right" id="right" aria-label="Staging, report and engineering">
     <nav class="rtabs" role="tablist"><button data-tab="stg" role="tab" aria-selected="true">Staging</button><button data-tab="eng" role="tab" aria-selected="false">Engineering</button></nav>
+    <section class="sec" id="flightImpact"><div class="impact-head"><h2>Flight impact</h2><button class="btn" id="pinBase" type="button" aria-pressed="false">Pin reference</button></div><p class="hint" id="impactNote"></p><div class="impact-metrics" id="impactMetrics"></div></section>
     <div id="tabStg">
       <section class="sec"><h2>Staging</h2><div id="staging"></div></section>
       <section class="sec"><h2>Engineer's report</h2><div id="report"></div></section>
@@ -338,6 +356,8 @@
       <label class="fld"><span>Launch time [h after Greenwich noon]</span><input type="number" id="lTime" min="0" max="24" step="0.25" value="3.5"></label>
       <label class="chk" id="lKickWrap"><input type="checkbox" id="lKick"> Search for the best pitch kick</label>
       <p class="dvcheck" id="dvCheck"></p>
+      <label class="chk" id="compareChoice" hidden><input type="checkbox" id="flyBoth"> Also fly the reference on this mission</label>
+      <p class="hint" id="compareNote"></p>
       <div class="pre" id="lPre" hidden></div>
       <p class="err" id="lErr" hidden></p>
     </div>
@@ -353,7 +373,7 @@
 // ================================================================ imports
 import {
   palette, withId, emptyAssembly, analyse, layout, toParams, fromParams, missionsFor, editStage,
-  engineForPart, engineList, PRESETS, MISSIONS, LAUNCH_SITES, launchHourFor, LANDING_SITES, TANK_DIAMETERS,
+  boosterClearance, engineForPart, engineList, PRESETS, MISSIONS, LAUNCH_SITES, launchHourFor, LANDING_SITES, TANK_DIAMETERS,
   TANK_CLASS, CAPSULES, PROBES, LANDERS, PROP_COLORS, propFromLength, G0,
 } from './static/vab_parts.js';
 import * as api from './static/api.js';
@@ -365,6 +385,7 @@ import { preflight, explainOutcome } from './static/flight_outcome.js';
 
 // ================================================================ state
 const STORE_KEY = 'ssjl.vab';
+const PIN_KEY = 'ssjl.vab.reference';
 const BOOSTERS = '__boosters';          // the radial set has no part id
 const SHORT = { pods: 'Payload', tanks: 'Tanks', engines: 'Engines', struct: 'Struct', radial: 'Boosters' };
 const STAGE_COLORS = ['#4A9EFF', '#37C7A8', '#C77DFF', '#E88A5A', '#F2D16B'];
@@ -395,6 +416,9 @@ let curNodes = [];                      // attach nodes for the held part
 let undoS = [], redoS = [], coalesce = null;
 let sel = null, hov = null, hovKey = null, pointer = null;
 let holdPart = null, holdItem = null;
+let flightBase = null, basePinned = false, symmetry = 2;
+let previewRevision = 0, previewTimer = 0;
+const symmetryCounts = [2, 3, 4, 5, 6, 7, 8];
 let curCat = 'pods', query = '';
 let geo = null, geoKey = '', geoSeq = 0, geoErr = null, evalTimer = 0;
 let view = { auto: true, s: 40, ox: 0, oy: 0 };
@@ -615,7 +639,7 @@ function boosterGeom() {
   if (!b || !an.stages.length) return null;
   const d1 = an.stages[0].diameter;
   return { count: b.count, bd: b.diameter, L: b.length, bellH: Math.max(1.2, 0.9 * b.diameter),
-           off: d1 / 2 + b.diameter / 2 + 0.1, prop: b.prop, n: b.n };
+           off: (d1 + b.diameter) / 2, prop: b.prop, n: b.n };
 }
 
 function stageSpan(k) {
@@ -696,8 +720,12 @@ function drawBackdrop(c, T) {
 function drawVehicle(c, T) {
   hitBoxes = [];
   let right = T.X(0);
-  const g = boosterGeom();
+  const placing = holdPart?.type === 'boosters' && stageSpan(1);
+  const preview = placing ? ghostDims(holdPart) : null;
+  const g = placing ? { count: holdPart.count, bd: preview.d, L: preview.h, n: preview.n, prop: preview.prop,
+    off: (preview.core + preview.d) / 2, bellH: Math.max(1.2, 0.9 * preview.d) } : boosterGeom();
   if (g) {
+    c.save(); if (placing) c.globalAlpha = 0.5;
     const top = T.Y(g.bellH + g.L + 0.7 * g.bd);
     for (const sg of [-1, 1]) {
       const cx = sg * g.off;
@@ -710,6 +738,7 @@ function drawVehicle(c, T) {
       c.fillStyle = '#E4E9F0'; c.font = '600 11px ui-monospace, Consolas, monospace'; c.textAlign = 'center';
       c.fillText(`×${g.count}`, T.X(g.off), top - 6); c.textAlign = 'start';
     }
+    c.restore();
   }
   for (const r of lay.rows) {
     drawRow(c, rowDraw(r), T);
@@ -823,7 +852,7 @@ function draw2D() {
   drawBrackets(ctx, T, right);
   curNodes = holdPart ? computeNodes(holdPart, T) : [];
   drawNodes(ctx);
-  if (holdPart && pointer) drawGhost(ctx);
+  if (holdPart && pointer && holdPart.type !== 'boosters') drawGhost(ctx);
   el.empty.hidden = asm.parts.length > 0 || !!asm.boosters;
   el.cv.style.cursor = holdPart ? 'crosshair' : hov ? 'pointer' : 'default';
 }
@@ -866,6 +895,7 @@ function commit(next, opts = {}) {
   if (before === after) return false;
   const now = performance.now();
   const merge = opts.coalesce && coalesce && coalesce.key === opts.coalesce && now - coalesce.t < 1500;
+  if (!merge) rememberReference();
   if (!merge) { undoS.push(before); if (undoS.length > 200) undoS.shift(); redoS = []; }
   coalesce = opts.coalesce ? { key: opts.coalesce, t: now } : null;
   asm = JSON.parse(after);
@@ -882,11 +912,13 @@ function mutate(fn, opts = {}) {
 
 function undo() {
   if (!undoS.length) return;
+  rememberReference();
   redoS.push(JSON.stringify(asm)); asm = JSON.parse(undoS.pop()); coalesce = null;
   afterChange();
 }
 function redo() {
   if (!redoS.length) return;
+  rememberReference();
   undoS.push(JSON.stringify(asm)); asm = JSON.parse(redoS.pop()); coalesce = null;
   afterChange();
 }
@@ -923,6 +955,10 @@ function placeAt(node) {
 
 function quickAdd(item) {
   const part0 = item.make(), p = part0.type === 'boosters' ? part0 : withId(part0);
+  if (p.type === 'boosters') {
+    if (!stageSpan(1)) { startHold(item); return; }
+    p.count = asm.boosters?.count ?? symmetry;
+  }
   sel = part0.type === 'boosters' ? BOOSTERS : p.id;
   mutate(next => {
     if (isFixed(p) || p.type === 'boosters') placeSpecial(next, p);
@@ -959,14 +995,59 @@ function duplicateSel() {
 }
 
 // ================================================================ hold
-function startHold(item) { holdItem = item; holdPart = item.make(); setDrawer(null); setHoldUI(); requestDraw(); }
+function startHold(item) {
+  holdItem = item; holdPart = item.make();
+  if (holdPart.type === 'boosters') {
+    holdPart.count = asm.boosters?.count ?? symmetry;
+    sel = null; renderInspector();
+  }
+  setDrawer(null); setHoldUI(); requestDraw();
+}
 function cancelHold() { holdItem = null; holdPart = null; hovKey = null; setHoldUI(); requestDraw(); }
 function setHoldUI() {
-  if (holdPart) {
+  clearTimeout(previewTimer);
+  const revision = ++previewRevision;
+  const radial = holdPart?.type === 'boosters';
+  el.hold.classList.toggle('radial', radial);
+  if (radial) {
+    const count = holdPart.count, ready = !!stageSpan(1);
+    const dots = Array.from({length: count}, (_, i) => {
+      const angle = 2 * Math.PI * i / count;
+      return '<circle cx="' + (20 + 13 * Math.cos(angle)) + '" cy="' + (20 + 13 * Math.sin(angle)) + '" r="4" fill="var(--nominal)"/>';
+    }).join('');
+    const spacing = +(360 / count).toFixed(1);
+    el.hold.hidden = false;
+    el.hold.innerHTML = '<div class="radial-head"><svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="8" fill="var(--text-3)"/>' + dots + '</svg>'
+      + '<span><b>' + esc(holdItem.label) + '</b><br>' + (ready ? count + ' boosters · ' + spacing + '° apart' : 'Build stage 1 before mounting boosters.') + '</span></div>'
+      + '<div class="mount-controls"><label>Symmetry <select id="symmetryCount">' + symmetryCounts.map(v => '<option ' + (v === count ? 'selected' : '') + ' value="' + v + '">' + v + '×</option>').join('') + '</select></label>'
+      + '<button class="btn attach" data-mount ' + (ready ? '' : 'disabled') + '>' + (asm.boosters ? 'Replace on S1' : 'Attach to S1') + '</button><button class="btn" data-cancel-hold>Cancel</button></div>';
+    if (ready && boosterClearance(an.stages[0].diameter, holdPart) < -0.001)
+      el.hold.insertAdjacentHTML('beforeend', '<p class="warn">Boosters overlap. Try fewer boosters or a wider core.</p>');
+    if (ready && liveGeo()) {
+      el.hold.insertAdjacentHTML('beforeend', '<p class="hint" id="mountForecast" role="status">Checking this set…</p>');
+      previewTimer = setTimeout(() => forecastMount(revision), 100);
+    }
+  } else if (holdPart) {
     el.hold.hidden = false;
     el.hold.innerHTML = `Placing <b>${esc(holdItem.label)}</b> — click a green node · Esc or right-click cancels`;
   } else el.hold.hidden = true;
   $$('.part', el.grid).forEach(b => b.classList.toggle('on', !!holdItem && b.dataset.key === holdItem.key));
+}
+
+async function forecastMount(revision) {
+  if (revision !== previewRevision || holdPart?.type !== 'boosters') return;
+  const before = liveGeo(), design = asm, note = $('#mountForecast');
+  if (!before || !note) return;
+  try {
+    const proposed = { ...design, boosters: { ...holdPart } };
+    const g = await api.geometry(toParams(proposed, catalogue));
+    if (revision !== previewRevision || design !== asm) return;
+    note.textContent = 'If attached: ' + signedDelta(g.liftoff_twr, before.liftoff_twr, 2) + ' TWR · '
+      + signedDelta(g.liftoff_mass_kg / 1000, before.liftoff_mass_kg / 1000, 1) + ' t · '
+      + signedDelta(g.total_dv_mps, before.total_dv_mps, 0) + ' m/s Δv';
+  } catch {
+    if (revision === previewRevision) note.textContent = 'Performance preview unavailable.';
+  }
 }
 
 function handleClick(p) {
@@ -1030,7 +1111,7 @@ function inspectorFor(id) {
   let title = '', body = '', paint = false;
   if (isB) {
     title = 'Radial boosters';
-    body = `<div class="seg">${[2, 3, 4, 6, 8].map(v => `<button data-act="bcount" data-v="${v}" class="${p.count === v ? 'on' : ''}">${v}</button>`).join('')}</div>`
+    body = `<span class="hint">Radial symmetry · ${+(360 / p.count).toFixed(1)}° spacing</span><div class="seg">${symmetryCounts.map(v => `<button aria-pressed="${p.count === v}" data-act="bcount" data-v="${v}" class="${p.count === v ? 'on' : ''}">${v}</button>`).join('')}</div>`
       + fld('Diameter', numIn('bdia', p.diameter, 'min="0.3" step="0.05"'), 'm')
       + fld('Length', numIn('blen', p.length, 'min="1" step="0.5"'), 'm')
       + fld('Engine', engineIn('beng', p.engine))
@@ -1442,6 +1523,37 @@ function insDock() {
 function resetDlg() {
   $('#lBody').hidden = false; $('#lFoot').hidden = false; $('#lResult').hidden = true;
 }
+function showComparison(referenceRun, editedRun, reference, checked, missionName) {
+  $('#lBody').hidden = true; $('#lFoot').hidden = true;
+  const before = referenceRun.metrics || {}, after = editedRun.metrics || {};
+  const refOutcome = explainOutcome(referenceRun, reference.geometry);
+  const nowOutcome = explainOutcome(editedRun, checked);
+  const rows = [];
+  function row(label, a, b, digits, unit) {
+    if (!Number.isFinite(a) && !Number.isFinite(b)) return;
+    const value = n => Number.isFinite(n) ? n.toFixed(digits) + unit : '—';
+    rows.push('<tr><th scope="row">' + label + '</th><td>' + value(a) + '</td><td>' + value(b) + '</td><td>'
+      + (Number.isFinite(a) && Number.isFinite(b) ? signedDelta(b, a, digits) + unit : '—') + '</td></tr>');
+  }
+  const maxQ = run => run.ascent?.qbar?.filter(Number.isFinite).reduce((peak, q) => Math.max(peak, q), -Infinity);
+  row('Peak ascent pressure', maxQ(referenceRun), maxQ(editedRun), 1, ' kPa');
+  for (const [label, key, digits, unit] of [
+    ['Achieved apogee', 'apogee_km', 2, ' km'], ['Downrange', 'range_km', 1, ' km'],
+    ['Orbit perigee', 'orbit_rp_km', 1, ' km'], ['Orbit apogee', 'orbit_ra_km', 1, ' km'],
+    ['Parking apogee', 'park_apogee_km', 1, ' km'], ['Landing site miss', 'target_miss_km', 1, ' km'],
+    ['Propellant margin', 'prop_margin_kg', 0, ' kg'], ['Peak entry load', 'peak_g', 1, ' g'],
+  ]) row(label, before[key], after[key], digits, unit);
+  $('#lResult').innerHTML = '<div class="lres-card"><p class="u-label">Flight comparison</p><h2 style="color:var(--text)">' + esc(missionName)
+    + '</h2><p>Reference: ' + esc(designLabel(reference.assembly)) + ' · ' + esc(refOutcome.state)
+    + '<br>Edited: ' + esc(designLabel(asm)) + ' · ' + esc(nowOutcome.state) + '</p>'
+    + '<table class="compare-table"><thead><tr><th>Flight metric</th><th>Reference</th><th>Edited</th><th>Change</th></tr></thead><tbody>'
+    + rows.join('') + '</tbody></table>'
+    + (nowOutcome.why ? '<p>' + esc(nowOutcome.why) + '</p>' : '')
+    + '<div class="lres-btns"><button class="btn" data-res="back">Back to hangar</button>'
+    + '<button class="launch" data-res="watch" data-run="' + esc(editedRun.id) + '">Watch edited flight</button></div></div>';
+  $('#lResult').hidden = false;
+}
+
 function showResult(x, id) {
   $('#lBody').hidden = true; $('#lFoot').hidden = true;
   const li = a => a.map(s => `<li>${esc(s)}</li>`).join('');
@@ -1456,6 +1568,26 @@ function showResult(x, id) {
 
 // ================================================================ extra wiring
 function bindExtra() {
+  el.hold.addEventListener('change', e => {
+    if (e.target.id !== 'symmetryCount' || holdPart?.type !== 'boosters') return;
+    symmetry = holdPart.count = Number(e.target.value);
+    setHoldUI(); $('#symmetryCount').focus(); requestDraw();
+  });
+  el.hold.addEventListener('click', e => {
+    if (e.target.closest('[data-cancel-hold]')) cancelHold();
+    if (e.target.closest('[data-mount]') && holdPart?.type === 'boosters' && stageSpan(1))
+      placeAt({ kind: 'boosters' });
+  });
+  $('#pinBase').onclick = () => {
+    if (basePinned) {
+      basePinned = false; flightBase = null;
+      try { sessionStorage.removeItem(PIN_KEY); } catch {}
+    } else if (liveGeo()) {
+      rememberReference(); basePinned = true;
+      try { sessionStorage.setItem(PIN_KEY, JSON.stringify(asm)); } catch {}
+    }
+    renderSide();
+  };
   $$('.rtabs [data-tab]').forEach(b => { b.onclick = () => showRightTab(b.dataset.tab); });
   $('#xrayBtn').onclick = () => { xrayOn = !xrayOn; $('#xrayBtn').setAttribute('aria-pressed', String(xrayOn)); requestDraw(); };
   $('#explodeBtn').onclick = () => {
@@ -1506,6 +1638,7 @@ function scene3() {
 
 function afterChange(opts = {}) {
   touch(); persist();
+  if (holdPart) setHoldUI();
   if (opts.inspector !== false) renderInspector(); else updateDerived();
   renderSide(); updateChrome();
   if (!$('#tabEng').hidden && !$('#eng').contains(document.activeElement)) renderEng();
@@ -1530,6 +1663,20 @@ function updateChrome() {
   if (document.activeElement !== el.name) el.name.value = asm.name || '';
 }
 
+function updateComparisonChoice(m) {
+  const choice = $('#flyBoth');
+  const changed = flightBase && an.ok && flightBase.key !== flightDesignKey(asm);
+  $('#compareChoice').hidden = !changed;
+  let reason = '';
+  if (changed) {
+    if (!missionsFor(flightBase.payload).includes(m.mode)) reason = 'The reference payload cannot fly this mission.';
+    else reason = preflight(flightBase.geometry, m.mode).find(w => w.level === 'error')?.msg || '';
+  }
+  if (!changed || reason) choice.checked = false;
+  choice.disabled = !changed || !!reason;
+  $('#compareNote').textContent = changed ? (reason || 'Reference: ' + designLabel(flightBase.assembly) + '. Same target, site and launch time.') : '';
+}
+
 function renderLaunchSide() {
   const m = MISSIONS.find(x => x.id === mission);
   el.mDesc.textContent = m.desc;
@@ -1544,6 +1691,7 @@ function renderLaunchSide() {
   const pre = preflight(g, m.mode);
   const targetError = m.fields ? targetIssue(m) : '';
   if (m.fields) $('#lTargetError').textContent = targetError;
+  updateComparisonChoice(m);
   el.lGo.disabled = !an.ok || !g || !!targetError || pre.some(w => w.level === 'error');
   $('#lPre').hidden = !pre.length;
   $('#lPre').innerHTML = pre.map(w => `<p class="pre-${w.level}"><b>${w.level === 'error' ? 'Error' : 'Warning'}</b> ${esc(w.msg)}</p>`).join('');
@@ -1559,24 +1707,42 @@ async function launch() {
   }
   const blocked = preflight(g, m.mode).find(w => w.level === 'error');
   if (blocked) { showLErr(blocked.msg); return; }
-  let params;
-  try { params = toParams(asm, catalogue); }
-  catch (err) { showLErr(err.message); return; }
-  for (const [k, v] of Object.entries(m.params)) params.set(k, String(v));
-  if (m.fields && !applyTargets(m, params)) return;
-  params.set('site', el.lSite.value);
-  params.set('launch_h', String(clamp(Number(el.lTime.value) || 0, 0, 24)));
-  if (m.mode === 'landing') params.set('target', el.lLand.value);
-  params.set('opt_kick', el.lKick.checked ? '1' : '0');
+  const settings = new URLSearchParams(m.params);
+  if (m.fields && !applyTargets(m, settings)) return;
+  settings.set('site', el.lSite.value);
+  settings.set('launch_h', String(clamp(Number(el.lTime.value) || 0, 0, 24)));
+  if (m.mode === 'landing') settings.set('target', el.lLand.value);
+  settings.set('opt_kick', el.lKick.checked ? '1' : '0');
+  const forMission = design => {
+    const p = toParams(design, catalogue);
+    for (const [key, value] of settings) p.set(key, value);
+    return p;
+  };
+  let params, referenceParams;
+  const comparison = $('#flyBoth').checked && !$('#flyBoth').disabled ? flightBase : null;
+  try {
+    params = forMission(asm);
+    if (comparison) referenceParams = forMission(comparison.assembly);
+  } catch (err) { showLErr(err.message); return; }
+
   vehicle.save(params);
   el.dlg.close();
   resetDlg();
   const controller = new AbortController();
   const done = busy('designing and flying the mission…', { onCancel: () => controller.abort(), cancelLabel: api.cancelLabel });
   try {
-    const j = await api.run(params, { onProgress: done.progress, signal: controller.signal });
+    // Simulate the reference first so the edited flight is always newest in history.
+    const runDesign = (p, label) => api.run(p, { signal: controller.signal, onProgress: progress =>
+      done.progress(comparison ? { ...progress, stage: label + ' · ' + (progress.stage || 'simulating') } : progress) });
+    const previous = comparison ? await runDesign(referenceParams, 'Reference') : null;
+    if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+    const j = await runDesign(params, 'Edited');
     done();
     const x = explainOutcome(j, g);
+    if (previous) {
+      showComparison(previous, j, comparison, g, m.label);
+      el.dlg.showModal(); return;
+    }
     if (x.ok) { location.href = 'launch_page.html?run=' + encodeURIComponent(j.id); return; }
     el.dlg.showModal();
     showResult(x, j.id);
@@ -1692,6 +1858,70 @@ function stagingHTML() {
   return none + an.stages.map(s => stageCard(s, g?.stages?.[s.k - 1])).join('') + payloadCard(g);
 }
 
+function flightDesignKey(design) {
+  const params = toParams(design, catalogue);
+  // Cosmetic edits and the shared mission optimizer don't change this comparison.
+  for (const key of ['vname', 'livery', 'opt_kick']) params.delete(key);
+  return params.toString();
+}
+
+function rememberReference() {
+  const checked = liveGeo();
+  if (checked && !basePinned) {
+    // Edits replace the assembly object, leaving this checked design intact.
+    flightBase = { assembly: asm, geometry: checked, payload: an.payload, key: flightDesignKey(asm) };
+  }
+}
+
+async function restoreReference() {
+  try {
+    const saved = sessionStorage.getItem(PIN_KEY);
+    if (!saved) return;
+    const assembly = JSON.parse(saved), state = analyse(assembly, catalogue);
+    if (!state.ok) return;
+    const geometry = await api.geometry(toParams(assembly, catalogue));
+    if (sessionStorage.getItem(PIN_KEY) !== saved || basePinned) return;
+    flightBase = { assembly, geometry, payload: state.payload, key: flightDesignKey(assembly) };
+    basePinned = true; renderSide();
+  } catch { /* A missing or obsolete reference doesn't prevent opening the hangar. */ }
+}
+
+function designLabel(assembly) {
+  const n = assembly.boosters?.count || 0;
+  return (assembly.name || 'Untitled') + ' · ' + (n ? n + ' boosters' : 'no boosters');
+}
+
+function signedDelta(current, before, precision) {
+  if (!Number.isFinite(current) || !Number.isFinite(before)) return '—';
+  const difference = current - before;
+  let digits = precision;
+  // Preserve small changes between nearly equal rounded readouts.
+  while (difference && !Number(difference.toFixed(digits)) && digits < precision + 2) digits++;
+  const rounded = Number(difference.toFixed(digits));
+  return (rounded > 0 ? '+' : '') + rounded.toFixed(digits);
+}
+
+function renderImpact() {
+  const g = liveGeo(), ref = flightBase?.geometry;
+  const button = $('#pinBase');
+  button.disabled = !g && !basePinned;
+  button.textContent = basePinned ? 'Unpin' : 'Pin reference';
+  button.setAttribute('aria-pressed', String(basePinned));
+  const note = flightBase ? (basePinned ? 'Pinned' : 'Before edit') + ' · ' + designLabel(flightBase.assembly)
+    : 'Edit the vehicle to see the difference, or pin it for several edits.';
+  $('#impactNote').textContent = note;
+  if (!g) {
+    $('#impactMetrics').textContent = an.ok ? (geoErr ? 'Check unavailable.' : 'Checking design…') : 'Complete the stack to check performance.';
+    return;
+  }
+  const rows = [['Pad TWR', g.liftoff_twr, ref?.liftoff_twr, 2, ''],
+    ['Mass', g.liftoff_mass_kg / 1000, ref?.liftoff_mass_kg / 1000, 1, ' t'],
+    ['Ideal Δv', g.total_dv_mps, ref?.total_dv_mps, 0, ' m/s']];
+  $('#impactMetrics').innerHTML = rows.map(([label, current, before, digits, unit]) =>
+    '<div><span>' + label + '</span><b>' + (Number.isFinite(current) ? current.toFixed(digits) : '—') + unit + '</b>'
+    + (ref ? '<small>Δ ' + signedDelta(current, before, digits) + unit + '</small>' : '') + '</div>').join('');
+}
+
 function reportHTML() {
   const g = liveGeo();
   const err = geoErr ? `<p class="bad">Geometry failed: ${esc(geoErr)}</p>` : '';
@@ -1733,6 +1963,7 @@ function renderSide() {
   el.staging.innerHTML = stagingHTML();
   el.report.className = live ? '' : 'dim';
   el.report.innerHTML = reportHTML();
+  renderImpact();
   el.issues.innerHTML = issuesHTML();
   const checks = [...an.issues, ...preflight(liveGeo(), preMode())];
   const e = checks.filter(i => i.level === 'error').length, w = checks.length - e;
@@ -1867,6 +2098,7 @@ async function evaluate() {
     geoErr = err.message || String(err);
   }
   renderSide(); requestDraw();
+  if (holdPart?.type === 'boosters' && !$('#mountForecast') && liveGeo()) setHoldUI();
 }
 
 // ================================================================ launch
@@ -1915,6 +2147,7 @@ function openLaunch() {
   const avail = m => missionsFor(an.payload).includes(m.mode);
   const cur = MISSIONS.find(m => m.id === mission);
   if (!cur || !avail(cur)) mission = (MISSIONS.find(avail) || MISSIONS[0]).id;
+  $('#flyBoth').checked = false;
   el.lKick.checked = asm.opt_kick !== false;
   el.lErr.hidden = true;
   renderMissions();
@@ -2218,8 +2451,10 @@ function nodes3D(p) {
     const sp = stageSpan(1);
     if (sp && an.stages[0]) {
       const reach = an.stages[0].diameter / 2 + p.diameter + 0.9, y = (sp.y0 + sp.y1) / 2;
-      add('boosters', -1, reach, y, 0, 'radial boosters', 'boosters:+');
-      add('boosters', -1, -reach, y, 0, 'radial boosters', 'boosters:-');
+      for (let i = 0; i < p.count; i++) {
+        const angle = 2 * Math.PI * i / p.count;
+        add('boosters', -1, reach * Math.cos(angle), y, reach * Math.sin(angle), 'Mount ' + p.count + ' on S1', 'boosters:' + i);
+      }
     }
   } else {
     const top = parts.findIndex(q => !isFixed(q)), first = top < 0 ? parts.length : top;
@@ -2259,6 +2494,8 @@ function ghostDims(p) {
 // The ghost sits at the hovered attach point; nothing shows until one is hovered.
 let enginePreview = null;
 function ghost3() {
+  if (holdPart?.type === 'boosters' && stageSpan(1))
+    return { ...ghostDims(holdPart), part: holdPart, radial: true, y: 0 };
   if (!holdPart || !hovKey) return null;
   const n = curNodes3.find(q => q.key === hovKey);
   if (!n) return null;
@@ -2276,7 +2513,6 @@ function ghost3() {
     const { d, h, stage, count } = enginePreview;
     return { ...g, part: holdPart, d, h, stage, count, y: n.y - h / 2 };
   }
-  if (n.kind === 'boosters') return { part: holdPart, d: g.d, h: g.h, y: 0, radial: true, core: g.core, prop: g.prop, n: g.n };
   const base = n.kind === 'payload' || n.kind === 'fairing' ? n.y : n.y - g.h / 2;
   return { part: holdPart, d: g.d, h: g.h, y: base, radial: false, core: g.core, prop: g.prop, n: g.n };
 }
@@ -2289,7 +2525,11 @@ function draw() {
 }
 
 function draw3D() {
-  if (autoFit3) R3.fit(ext.height, ext.halfW);
+  if (autoFit3) {
+    const radius = holdPart?.type === 'boosters' && an.stages.length
+      ? an.stages[0].diameter / 2 + holdPart.diameter : 0;
+    R3.fit(ext.height, Math.max(ext.halfW, radius));
+  }
   curNodes3 = holdPart ? nodes3D(holdPart) : [];
   R3.draw(scene3());
   draw3DOverlay();
@@ -2393,6 +2633,7 @@ async function init() {
   resize();
   renderInspector(); renderSide(); updateChrome();
   scheduleEval(0);
+  restoreReference();
 }
 
 init();

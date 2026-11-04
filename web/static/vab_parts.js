@@ -285,6 +285,11 @@ export function emptyAssembly(name = 'Untitled') {
   return { name, parts: [], boosters: null, kick_deg: 8, opt_kick: true };
 }
 
+// Clearance between adjacent cylinders on the flight mesh's mounting circle.
+export function boosterClearance(coreDiameter, booster) {
+  return (coreDiameter + booster.diameter) * Math.sin(Math.PI / booster.count) - booster.diameter;
+}
+
 /** Split the stack into stages, bottom first (index 0 = s1), with the
  *  payload and fairing found above them. Every problem is reported in
  *  `issues` ({level: 'error'|'warn', msg, partId?}); an assembly with no
@@ -353,7 +358,9 @@ export function analyse(asm, catalogue) {
     else if (e && !e.generic) dryAuto = true;
     else if (e) dry = stageMass(e, n, mprop, b.diameter);
     boosters = { ...b, e, prop, mprop, n, dry, dryAuto };
-    if (b.count < 2 || b.count > 8) issues.push({ level: 'error', msg: 'a booster set is 2–8 in symmetry' });
+    if (stages.length && boosterClearance(stages[0].diameter, b) < -0.001)
+      issues.push({ level: 'warn', msg: 'Adjacent boosters overlap. Reduce symmetry or booster diameter, or widen stage 1.' });
+    if (!Number.isInteger(b.count) || b.count < 2 || b.count > 8) issues.push({ level: 'error', msg: 'a booster set is 2–8 in symmetry' });
   }
   return { payload, fairing, stages, boosters, issues,
            ok: !issues.some(i => i.level === 'error') };

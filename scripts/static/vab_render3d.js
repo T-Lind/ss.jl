@@ -6,7 +6,7 @@
 // is handed. Units are metres, y up, the vehicle axis on x = z = 0.
 //
 // Use the flight mesh's nozzle positions for the hangar and placement preview.
-import { stageBells } from './engine_layout.js';
+import { engineCluster, stageBells } from './engine_layout.js';
 
 const TAU = Math.PI * 2;
 const FOV = 35 * Math.PI / 180;
@@ -221,12 +221,12 @@ function prismCrinkle(B, sides, R, y0, y1, rot, col, col2, ox = 0, oz = 0) {
   }
 }
 
-function buildEngine(B, y0, y1, d, n, ox, oz, stage = 1, count = 2) {
+function buildEngine(B, y0, y1, d, n, ox, oz, stage = 1, count = 2, radial = false) {
   const h = y1 - y0, plateH = Math.min(0.6, Math.max(0.25, 0.2 * h)), top = y1 - plateH, Rp = 0.49 * d;
   lathe(B, [{ r: 0, y: top, c: C.dark }, { r: Rp, y: top, c: C.dark },
             { r: Rp, y: y1, c: C.dark }, { r: 0, y: y1, c: C.dark }], 40, ox, oz);
   const bh = top - y0;
-  const bells = stageBells(n, d, stage - 1, count);
+  const bells = radial ? boosterBells(n, d) : stageBells(n, d, stage - 1, count);
   for (const [dx, dz, exit] of bells.pts) {
     const cx = ox + dx, cz = oz + dz, throat = bells.throatRadius;
     const bellH = Math.min(bh * 0.82, bells.length), lip = y0 + bellH * 0.035;
@@ -364,9 +364,15 @@ function buildFairing(B, y0, y1, d, paint = null) {
   lathe(B, P, 48);
 }
 
+// Match the radial nozzles in the flight mesh and its exhaust anchors.
+function boosterBells(n, diameter) {
+  const pts = engineCluster(n, 0.39 * diameter, 0.105 * diameter);
+  return { pts, length: 3.6 * pts[0][2], throatRadius: 0.46 * pts[0][2] };
+}
+
 // The radial set: count boosters evenly around stage 1, bottom-aligned with it.
 function buildBoosters(B, cfg) {
-  const rb = cfg.bd / 2, R = cfg.core / 2 + rb + 0.05;
+  const rb = cfg.bd / 2, R = cfg.core / 2 + rb;
   const bellH = Math.max(1.2, 0.9 * cfg.bd), y1 = bellH + cfg.L, nh = 0.7 * cfg.bd;
   for (let i = 0; i < cfg.count; i++) {
     const t = TAU * i / cfg.count, ox = R * Math.cos(t), oz = R * Math.sin(t);
@@ -374,7 +380,7 @@ function buildBoosters(B, cfg) {
     const P = [];
     for (let k = 0; k <= 10; k++) { const u = k / 10; P.push({ r: rb * Math.sqrt(1 - u * u), y: y1 + nh * u, c: cfg.paint ? hex(cfg.paint.c) : C.white }); }
     lathe(B, P, 40, ox, oz);
-    buildEngine(B, 0, bellH, cfg.bd, cfg.n, ox, oz);
+    buildEngine(B, 0, bellH, cfg.bd, cfg.n, ox, oz, 1, 1, true);
     B.cyl.push({ cx: ox, cz: oz, r: rb, y0: 0, y1: y1 + nh });
   }
 }
@@ -697,7 +703,10 @@ export function createVabRenderer(canvas) {
       return { tint: [0, 0, 0], tintK: 0 };
     };
     const off = [0, 0, 0], xr = !!(s && s.xray);
-    for (const m of state.meshes) if (!m.fair) drawMesh(m, { off, alpha: 1, ...tintFor(m.id), ghost: false });
+    for (const m of state.meshes) {
+      if (m.fair || (s?.ghost?.radial && m.id === s.boostersId)) continue;
+      drawMesh(m, { off, alpha: 1, ...tintFor(m.id), ghost: false });
+    }
     // the fairing is a painted part; X-ray turns it into glass so the payload shows
     for (const m of state.meshes) if (m.fair) {
       const t = tintFor(m.id);

@@ -22,6 +22,17 @@ for (const [name, preset] of Object.entries(PRESETS)) {
   });
 }
 
+test('booster packing checks the actual core diameter and retains the chosen count in flight', () => {
+  const asm = fromParams(PRESETS['Sable Heavy (4 strap-ons)'], catalogue);
+  asm.boosters.count = 4;
+  assert.ok(!analyse(asm, catalogue).issues.some(i => i.msg.includes('overlap')));
+  asm.boosters.count = 8;
+  assert.ok(analyse(asm, catalogue).issues.some(i => i.level === 'warn' && i.msg.includes('overlap')));
+  assert.equal(toParams(asm, catalogue).get('nboost'), '8');
+  asm.boosters.diameter = 0.8;
+  assert.ok(!analyse(asm, catalogue).issues.some(i => i.msg.includes('overlap')));
+});
+
 test('stage moves preserve the parts and put their performance in the new firing order', () => {
   const asm = fromParams(PRESETS['Sable Heavy (4 strap-ons)'], catalogue);
   const before = structuredClone(asm), g = panelGeometry(Object.fromEntries(toParams(asm, catalogue)));
