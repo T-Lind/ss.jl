@@ -91,6 +91,7 @@
   .empty p { max-width: 380px; }
   .fit { position: absolute; top: 10px; right: 12px; z-index: 5; background: var(--raise); border: 1px solid var(--line);
          border-radius: 4px; padding: 5px 10px; font-size: 12px; }
+  .stale-banner { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); z-index: 80; background: var(--marginal-d); border: 1px solid var(--marginal); color: var(--marginal); padding: 8px 14px; border-radius: 6px; font-size: 12.5px; }
   .canvas-hint { position: absolute; right: 12px; bottom: 10px; font: 10.5px var(--mono); color: var(--text-3); pointer-events: none; }
   .inspector { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 6; width: min(600px, calc(100% - 28px));
                max-height: calc(100% - 28px); overflow: auto; background: rgba(19,25,34,.97); border: 1px solid var(--line);
@@ -204,6 +205,37 @@
     .dlg-body { grid-template-columns: 1fr; }
     .dlg-side { border-left: 0; border-top: 1px solid var(--line); }
   }
+  .inspector.collapsed .ins-b, .inspector.collapsed .ins-f { display: none; }
+  .inspector .ins-h { cursor: move; user-select: none; }
+  .rtabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+  .rtabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 7px 10px; color: var(--text-2); font: 600 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+  .rtabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--amber); }
+  .eng-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .eng-table th, .eng-table td { padding: 5px 4px; border-bottom: 1px solid #1c2431; text-align: left; font-weight: 500; }
+  .eng-table thead th { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+  .eng-table input, .eng-table select { width: 100%; background: var(--ground); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; font: 12px var(--mono); color: var(--text); }
+  .eng-table tr.sub td { padding-top: 2px; }
+  .customrow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 11px; color: var(--text-2); }
+  .customrow label { display: grid; gap: 2px; }
+  .customrow input, .customrow select { width: 100%; background: var(--ground); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; color: var(--text); font: 11.5px var(--mono); }
+  .vehblock { margin-top: 16px; display: grid; gap: 8px; }
+  .vehblock .fld input, .vehblock .fld select { width: 100%; background: var(--ground); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; color: var(--text); font: 12px var(--mono); }
+  .paint { display: grid; gap: 8px; grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 10px; }
+  .swatches { display: flex; flex-wrap: wrap; gap: 5px; }
+  .sw { width: 22px; height: 22px; border-radius: 4px; border: 1px solid rgba(255,255,255,.25); padding: 0; }
+  .sw:hover { outline: 2px solid var(--text-2); }
+  .paint input[type=color] { width: 100%; height: 28px; padding: 0; background: none; border: 1px solid var(--line); border-radius: 4px; }
+  .pbtns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pbtns button { background: var(--raise); border: 1px solid var(--line); border-radius: 4px; padding: 5px 9px; font-size: 12px; }
+  .pre { display: grid; gap: 6px; }
+  .pre p { margin: 0; font-size: 12px; padding: 6px 9px; border-left: 3px solid var(--marginal); background: var(--raise); border-radius: 4px; }
+  .pre .pre-error { border-color: var(--failed); }
+  .lres { padding: 18px 20px; overflow: auto; flex: 1; }
+  .lres-card h2 { margin: 2px 0 8px; font: 700 20px var(--mono); letter-spacing: .04em; color: var(--failed); }
+  .lres-why { font-size: 14px; margin: 0 0 10px; }
+  .lres-card h3 { margin: 12px 0 4px; }
+  .lres-list { margin: 0; padding-left: 18px; font-size: 13px; color: var(--text-2); display: grid; gap: 4px; }
+  .lres-btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 </style>
 </head>
 <body>
@@ -235,7 +267,10 @@
       <button class="btn" id="bUndo" title="Undo (Ctrl+Z)">Undo</button>
       <button class="btn" id="bRedo" title="Redo (Ctrl+Shift+Z)">Redo</button>
     </div>
-    <a class="btn link" id="bEng" href="build_page.html">Engineering editor</a>
+    <div class="menu-wrap">
+      <button class="btn" id="bLivery" aria-haspopup="true" aria-expanded="false">Livery ▾</button>
+      <div class="menu" id="liveryMenu" hidden></div>
+    </div>
     <span class="tb-spacer"></span>
     <button class="btn drawer-btn" id="tPal">Parts</button>
     <button class="btn drawer-btn" id="tRep">Report</button>
@@ -253,7 +288,7 @@
   <main class="center" id="center">
     <canvas id="gl" aria-label="Vehicle assembly, 3D view"></canvas>
     <canvas id="cv" aria-label="Vehicle assembly drawing"></canvas>
-    <div class="viewtog" id="viewTog" role="group" aria-label="View mode"><button data-v="3d" aria-pressed="true">3D</button><button data-v="2d" aria-pressed="false">Blueprint</button></div>
+    <div class="viewtog" id="viewTog" role="group" aria-label="View mode"><button data-v="3d" aria-pressed="true">3D</button><button data-v="2d" aria-pressed="false">Blueprint</button><button id="xrayBtn" aria-pressed="false" title="Show the payload through the fairing">X-ray</button></div>
     <div class="hold-banner" id="holdBanner" hidden></div>
     <div class="empty" id="emptyMsg" hidden><p>Hold a payload from the palette, then click the top of the stack. Double-click any part to add it straight away.</p></div>
     <button class="fit" id="bFit">Fit</button>
@@ -261,19 +296,14 @@
     <section class="inspector" id="inspector" hidden></section>
   </main>
 
-  <aside class="right" id="right" aria-label="Staging and report">
-    <section class="sec">
-      <h2>Staging</h2>
-      <div id="staging"></div>
-    </section>
-    <section class="sec">
-      <h2>Engineer's report</h2>
-      <div id="report"></div>
-    </section>
-    <section class="sec">
-      <h2>Issues <span id="issueCount"></span></h2>
-      <ul class="issues" id="issues"></ul>
-    </section>
+  <aside class="right" id="right" aria-label="Staging, report and engineering">
+    <nav class="rtabs" role="tablist"><button data-tab="stg" role="tab" aria-selected="true">Staging</button><button data-tab="eng" role="tab" aria-selected="false">Engineering</button></nav>
+    <div id="tabStg">
+      <section class="sec"><h2>Staging</h2><div id="staging"></div></section>
+      <section class="sec"><h2>Engineer's report</h2><div id="report"></div></section>
+      <section class="sec"><h2>Issues <span id="issueCount"></span></h2><ul class="issues" id="issues"></ul></section>
+    </div>
+    <div id="tabEng" hidden><section class="sec"><h2>Engineering</h2><div id="eng"></div></section></div>
   </aside>
 </div>
 
@@ -284,7 +314,7 @@
     <div><h1 id="dlgTitle">Fly this vehicle</h1><p>Pick a mission. The flight is simulated on the vehicle exactly as assembled.</p></div>
     <button id="dlgClose" aria-label="Close">×</button>
   </header>
-  <div class="dlg-body">
+  <div class="dlg-body" id="lBody">
     <div class="missions" id="missions"></div>
     <div class="dlg-side">
       <p class="md" id="mDesc"></p>
@@ -293,10 +323,12 @@
       <label class="fld"><span>Launch time [h after Greenwich noon]</span><input type="number" id="lTime" min="0" max="24" step="0.25" value="3.5"></label>
       <label class="chk"><input type="checkbox" id="lKick"> Search for the best pitch kick</label>
       <p class="dvcheck" id="dvCheck"></p>
+      <div class="pre" id="lPre" hidden></div>
       <p class="err" id="lErr" hidden></p>
     </div>
   </div>
-  <footer class="dlg-foot">
+  <section class="lres" id="lResult" hidden></section>
+  <footer class="dlg-foot" id="lFoot">
     <button class="btn" id="lCancel">Cancel</button>
     <button class="launch" id="lGo">LAUNCH ▸</button>
   </footer>
@@ -313,6 +345,8 @@ import * as api from './static/api.js';
 import * as vehicle from './static/vehicle.js';
 import { busy, fail, reportUncaught } from './static/busy.js';
 import { createVabRenderer } from './static/vab_render3d.js';
+import { lengthFromProp, LIVERIES, SWATCHES, PATTERNS } from './static/vab_parts.js';
+import { preflight, explainOutcome } from './static/flight_outcome.js';
 
 // ================================================================ state
 const STORE_KEY = 'ssjl.vab';
@@ -379,24 +413,6 @@ function metalGrad(c, T, d) {
   return g;
 }
 
-function drawTank(c, r, T) {
-  const l = T.X(-r.d / 2), w = len(T, r.d), top = T.Y(r.y1), h = T.Y(r.y0) - top;
-  c.fillStyle = metalGrad(c, T, r.d);
-  c.fillRect(l, top, w, h);
-  if (!T.thumb) {                                   // panel seams every 2 m
-    c.strokeStyle = 'rgba(30,40,55,0.18)'; c.lineWidth = 1;
-    for (let y = Math.floor(r.y0 / 2) * 2 + 2; y < r.y1; y += 2) {
-      const sy = Math.round(T.Y(y)) + 0.5;
-      c.beginPath(); c.moveTo(l, sy); c.lineTo(l + w, sy); c.stroke();
-    }
-  }
-  const by = top + (T.thumb ? 4 : Math.max(4, 0.35 * T.s));
-  const bh = T.thumb ? 4 : Math.max(3, 0.22 * T.s);
-  c.globalAlpha = 0.92; c.fillStyle = PROP_COLORS[r.prop] || '#888'; c.fillRect(l, by, w, bh); c.globalAlpha = 1;
-  c.beginPath(); c.ellipse(T.X(0), top, w / 2, Math.max(1.5, 0.06 * w), 0, 0, Math.PI * 2);
-  c.fillStyle = '#f1f4f7'; c.fill();
-  c.strokeStyle = 'rgba(20,28,40,0.35)'; c.lineWidth = 1; c.strokeRect(l + 0.5, top, w - 1, h);
-}
 
 function drawEngine(c, r, T) {
   const d = r.d, y0 = r.y0, y1 = r.y1, h = y1 - y0;
@@ -596,6 +612,7 @@ function stageSpan(k) {
 function touch() {
   an = analyse(asm, catalogue);
   lay = layout(asm, catalogue);
+  encloseFairing();
   propOf = new Map();
   an.stages.forEach(s => s.tanks.forEach(t => propOf.set(t.id, s.prop)));
   rowOf = new Map(lay.rows.map(r => [r.part.id, r]));
@@ -609,11 +626,6 @@ function touch() {
   ext = { halfW, height };
 }
 
-const rowDraw = r => {
-  const p = r.part;
-  return { kind: p.type === 'payload' ? p.kind : p.type, d: r.d, y0: r.y0, y1: r.y1,
-           prop: propOf.get(p.id) || 'kerolox', n: p.count || 1, crewed: p.crewed !== false };
-};
 
 // ================================================================ view
 function fitView() {
@@ -817,11 +829,6 @@ function hitNode(p) { return curNodes.find(n => Math.hypot(n.sx - p.x, n.sy - p.
 function persist() { try { localStorage.setItem(STORE_KEY, JSON.stringify(asm)); } catch (e) {} }
 
 // One place every change goes through: recompute, persist, redraw, re-evaluate.
-function afterChange(opts = {}) {
-  touch(); persist();
-  if (opts.inspector !== false) renderInspector(); else updateDerived();
-  renderSide(); updateChrome(); requestDraw(); scheduleEval();
-}
 
 // Replace asm with `next` as one undo step. Edits sharing a `coalesce` key
 // within 1.5 s (a slider drag, typing) merge into the step already open.
@@ -941,11 +948,14 @@ function handleClick(p) {
   renderInspector();
 }
 
+let xrayOn = false;
+let missionChosen = false;              // a mission picked in the dialog, or named in the URL                    // the canvas X-ray toggle
 // ================================================================ inspector
 const fld = (label, input, unit = '') =>
   `<label class="fld"><span>${label}</span><span class="inp">${input}${unit ? `<em>${unit}</em>` : ''}</span></label>`;
+const shownNum = v => (typeof v === 'number' && Number.isFinite(v) ? +v.toFixed(3) : v);
 const numIn = (f, v, attrs = '', k = '') =>
-  `<input type="number" step="any" data-f="${f}"${k ? ` data-k="${k}"` : ''} value="${esc(v)}" ${attrs}>`;
+  `<input type="number" step="any" data-f="${f}"${k ? ` data-k="${k}"` : ''} value="${esc(shownNum(v))}" ${attrs}>`;
 function pickIn(f, opts, cur, k = '') {
   const cs = String(cur ?? '');
   const list = opts.some(([v]) => String(v) === cs) ? opts : [[cs, cs], ...opts];
@@ -961,23 +971,47 @@ function engineIn(f, cur) {
   return `<select data-f="${f}"><optgroup label="Catalogue">${list.filter(e => !e.generic).map(opt).join('')}</optgroup>` +
          `<optgroup label="Generic (estimated)">${list.filter(e => e.generic).map(opt).join('')}</optgroup></select>`;
 }
+// Paint controls: swatches, base and accent colours, pattern, and scope buttons.
+function paintBlock(p, stageIdx) {
+  const pt = p.paint || { c: '#e9ebee', a: '#1c1f24', p: 'solid' };
+  const sw = SWATCHES.map(([c, label]) => `<button class="sw" style="background:${c}" data-act="swatch" data-v="${c}" title="${esc(label)}" aria-label="${esc(label)}"></button>`).join('');
+  const scope = stageIdx ? `<button data-act="paintStage" data-k="${stageIdx}">Apply to this stage</button>` : '';
+  return `<div class="paint"><span class="u-label">Paint</span><div class="swatches">${sw}</div>`
+    + `<label class="fld"><span>Base</span><input type="color" data-paint="c" value="${pt.c}"></label>`
+    + `<label class="fld"><span>Accent</span><input type="color" data-paint="a" value="${pt.a}"></label>`
+    + `<label class="fld"><span>Pattern</span><select data-paint="p">${PATTERNS.map(([k, l]) =>
+        `<option value="${k}"${k === pt.p ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`
+    + `<div class="pbtns">${scope}<button data-act="paintAll">Apply to whole vehicle</button></div></div>`;
+}
+// The custom engine's own figures, edited on the engine part.
+function customBlock(p) {
+  const c = customOf(p);
+  return fld('Thrust per engine', numIn('cthr', c.thrust_kn, 'min="1" step="1"'), 'kN')
+    + fld('Vacuum Isp', numIn('cisp', c.isp_vac, 'min="50" step="1"'), 's')
+    + fld('Propellant', pickIn('cprop', [['kerolox', 'kerolox'], ['hydrolox', 'hydrolox'], ['methalox', 'methalox'],
+                                          ['hypergolic', 'hypergolic'], ['solid', 'solid']], c.prop))
+    + fld('Mass each', numIn('cmass', c.mass_kg, 'min="1" step="10"'), 'kg');
+}
 
 function inspectorFor(id) {
   const isB = id === BOOSTERS;
   const p = isB ? asm.boosters : part(id);
   if (!p) return '';
-  let title = '', body = '';
+  const stageIdx = !isB && p.type === 'tank' ? stageOfTank(id) : 0;
+  let title = '', body = '', paint = false;
   if (isB) {
     title = 'Radial boosters';
     body = `<div class="seg">${[2, 3, 4, 6, 8].map(v => `<button data-act="bcount" data-v="${v}" class="${p.count === v ? 'on' : ''}">${v}</button>`).join('')}</div>`
       + fld('Diameter', numIn('bdia', p.diameter, 'min="0.3" step="0.05"'), 'm')
       + fld('Length', numIn('blen', p.length, 'min="1" step="0.5"'), 'm')
       + fld('Engine', engineIn('beng', p.engine))
+      + (p.engine === 'manual' ? customBlock(p) : '')
       + fld('Engines each', numIn('bengines', p.engines, 'min="1" max="9" step="1"'))
       + fld('Core throttle', numIn('bthr', p.throttle ?? 100, 'min="0" max="100" step="5"'), '%')
       + fld('Ignition delay', numIn('bign', p.ign ?? 0, 'min="0" step="1"'), 's')
       + fld('Separation delay', numIn('bsep', p.sep ?? 0, 'min="0" step="1"'), 's')
       + `<p class="derived" data-derived="booster"></p>`;
+    paint = true;
   } else if (p.type === 'payload' && p.kind === 'capsule') {
     title = `Crew capsule · ${p.name}`;
     body = fld('Design', pickIn('cap', CAPSULES.map(([n, m]) => [n, `${n} · ${fmtT(m)}`]), p.name))
@@ -985,11 +1019,13 @@ function inspectorFor(id) {
       + fld('Diameter', numIn('dia', p.diameter, 'min="0.5" step="0.01"'), 'm')
       + `<label class="chk"><input type="checkbox" data-f="crewed"${p.crewed !== false ? ' checked' : ''}> Crewed</label>`
       + fld('Cargo', numIn('cargo', p.cargo || 0, 'min="0" step="10"'), 'kg');
+    paint = true;
   } else if (p.type === 'payload' && p.kind === 'bus') {
     title = `Probe core · ${p.name}`;
     body = fld('Design', pickIn('probe', PROBES.map(([n, m]) => [n, `${n} · ${m} kg`]), p.name))
       + fld('Mass', numIn('mass', p.mass, 'min="1" step="10"'), 'kg')
       + fld('Cargo', numIn('cargo', p.cargo || 0, 'min="0" step="10"'), 'kg');
+    paint = true;
   } else if (p.type === 'payload') {
     const L = p.lander;
     title = `Lunar lander · ${p.name}`;
@@ -1000,17 +1036,20 @@ function inspectorFor(id) {
          ['diameter', 'Deployed diameter', 'm', 'min="1" step="0.1"']]
         .map(([k, lab, u, a]) => fld(lab, numIn('lk', L[k], a, k), u)).join('')
       + `<p class="derived" data-derived="lander"></p>`;
+    paint = true;
   } else if (p.type === 'tank') {
     title = `Fuel tank · ⌀${p.diameter} m`;
     body = fld('Diameter', pickIn('tdia', TANK_DIAMETERS.map(d => [d, `⌀${d} m · ${TANK_CLASS[d]}`]), p.diameter))
       + `<label class="fld"><span>Length</span><span class="lenrow">`
-      + `<input type="range" min="0.5" max="60" step="0.1" data-f="tlen" value="${p.length}">`
-      + `<input type="number" min="0.5" max="60" step="0.1" data-f="tlen" value="${p.length}">`
+      + `<input type="range" min="0.5" max="60" step="0.1" data-f="tlen" value="${+p.length.toFixed(2)}">`
+      + `<input type="number" min="0.5" max="60" step="0.1" data-f="tlen" value="${+p.length.toFixed(2)}">`
       + `<em>m</em></span></label>`
       + `<p class="derived" data-derived="tank"></p>`;
+    paint = true;
   } else if (p.type === 'engine') {
-    title = 'Engine cluster';
+    title = p.engine === 'manual' ? 'Custom engine' : 'Engine cluster';
     body = fld('Engine', engineIn('eng', p.engine))
+      + (p.engine === 'manual' ? customBlock(p) : '')
       + `<div class="fld"><span>Cluster</span><div class="stepper">`
       + `<button data-act="estep" data-d="-1" aria-label="fewer engines">−</button>`
       + `<input type="number" min="1" max="33" step="1" data-f="ecount" value="${p.count}">`
@@ -1024,8 +1063,10 @@ function inspectorFor(id) {
   } else if (p.type === 'fairing') {
     title = 'Payload fairing';
     body = fld('Mass', numIn('mass', p.mass, 'min="0" step="10"'), 'kg')
-      + `<p class="hint">Sits directly under the payload and is jettisoned at 120 km.</p>`;
+      + `<p class="hint">Sits flush on the top stage and encloses the payload; jettisoned at 120 km.</p>`;
+    paint = true;
   }
+  if (paint) body += paintBlock(p, stageIdx);
   const idx = isB ? -1 : asm.parts.findIndex(q => q.id === id);
   const canMove = d => !isB && !isFixed(p) && idx + d >= 0 && idx + d < asm.parts.length && !isFixed(asm.parts[idx + d]);
   const foot = isB
@@ -1034,15 +1075,28 @@ function inspectorFor(id) {
       + `<button data-act="down" ${canMove(1) ? '' : 'disabled'}>Move down</button>`}`
       + `${p.type === 'tank' ? '<button data-act="dup">Duplicate</button>' : ''}`
       + `<button class="danger" data-act="del">Remove</button>`;
-  return `<header class="ins-h"><span class="u-label">${esc(title)}</span>`
+  return `<header class="ins-h" title="Drag to move · double-click to dock"><span class="u-label">${esc(title)}</span>`
+    + `<button class="x" data-act="collapse" aria-label="Collapse" title="Collapse">–</button>`
     + `<button class="x" data-act="close" aria-label="Close">×</button></header>`
     + `<div class="ins-b">${body}</div><footer class="ins-f">${foot}</footer>`;
+}
+
+// Stage number (1 = bottom) of a tank, or 0 when it is in no stage.
+function stageOfTank(id) {
+  const s = an.stages.find(st => st.tanks.some(t => t.id === id));
+  return s ? s.k : 0;
+}
+// The custom engine figures of a part, created with defaults when missing.
+function customOf(p) {
+  if (!p.custom) p.custom = { id: 'manual', label: 'Custom engine', prop: 'kerolox', thrust_kn: 200, isp_vac: 300, mass_kg: 204, generic: true };
+  return p.custom;
 }
 
 function renderInspector() {
   const html = sel ? inspectorFor(sel) : '';
   el.ins.innerHTML = html;
   el.ins.hidden = !html;
+  if (html && !el.ins.style.left) insRestorePos();
   updateDerived();
   requestDraw();
 }
@@ -1088,15 +1142,31 @@ function setField(next, id, f, k, raw) {
     case 'blen': if (!(n > 0)) return false; tgt.length = n; return true;
     case 'crewed': tgt.crewed = raw === true; return true;
     case 'tlen': if (!ok) return false; tgt.length = Math.round(clamp(n, 0.5, 60) * 10) / 10; return true;
-    case 'eng': case 'beng': tgt.engine = str; return true;
+    case 'eng': case 'beng':
+      tgt.engine = str;
+      if (str === 'manual') customOf(tgt); else delete tgt.custom;
+      return true;
     case 'ecount': if (!ok) return false; tgt.count = clamp(Math.round(n), 1, 33); return true;
     case 'edry': if (str.trim() === '') { tgt.dry = null; return true; } if (!(n > 0)) return false; tgt.dry = n; return true;
     case 'bengines': if (!ok) return false; tgt.engines = clamp(Math.round(n), 1, 9); return true;
     case 'bthr': if (!ok) return false; tgt.throttle = clamp(n, 0, 100); return true;
     case 'bign': if (!ok) return false; tgt.ign = clamp(n, 0, 3600); return true;
     case 'bsep': if (!ok) return false; tgt.sep = clamp(n, 0, 3600); return true;
+    case 'cthr': if (!(n > 0)) return false; customOf(tgt).thrust_kn = n; return true;
+    case 'cisp': if (!(n > 0)) return false; customOf(tgt).isp_vac = n; return true;
+    case 'cprop': customOf(tgt).prop = str; return true;
+    case 'cmass': if (!(n > 0)) return false; customOf(tgt).mass_kg = n; return true;
     default: return false;
   }
+}
+
+// Paint is set on the given parts (BOOSTERS for the strap-on set).
+function setPaintOn(next, ids, patch) {
+  for (const id of ids) {
+    const tgt = id === BOOSTERS ? next.boosters : next.parts.find(p => p.id === id);
+    if (tgt) tgt.paint = { c: '#e9ebee', a: '#1c1f24', p: 'solid', ...(tgt.paint || {}), ...patch };
+  }
+  return true;
 }
 
 // evt: 'input' while typing or dragging (coalesced into one undo step) or 'change'.
@@ -1111,12 +1181,14 @@ function applyField(t, evt) {
 
 el.ins.addEventListener('input', e => {
   const t = e.target;
+  if (t.dataset && t.dataset.paint) { mutate(n => setPaintOn(n, [sel], { [t.dataset.paint]: t.value }), { coalesce: `${sel}:paint:${t.dataset.paint}`, fromIns: true }); return; }
   if (!t.dataset || !t.dataset.f) return;
   if (t.dataset.f === 'tlen') el.ins.querySelectorAll('[data-f="tlen"]').forEach(o => { if (o !== t) o.value = t.value; });
   applyField(t, 'input');
 });
 el.ins.addEventListener('change', e => {
   const t = e.target;
+  if (t.dataset && t.dataset.paint) { mutate(n => setPaintOn(n, [sel], { [t.dataset.paint]: t.value }), { fromIns: false }); return; }
   if (t.dataset && t.dataset.f) applyField(t, 'change');
 });
 el.ins.addEventListener('click', e => {
@@ -1124,10 +1196,17 @@ el.ins.addEventListener('click', e => {
   if (!b) return;
   const act = b.dataset.act;
   if (act === 'close') { sel = null; renderInspector(); }
+  else if (act === 'collapse') el.ins.classList.toggle('collapsed');
   else if (act === 'up') moveSel(-1);
   else if (act === 'down') moveSel(1);
   else if (act === 'dup') duplicateSel();
   else if (act === 'del') removePart(sel);
+  else if (act === 'swatch') mutate(next => setPaintOn(next, [sel], { c: b.dataset.v }));
+  else if (act === 'paintStage') {
+    const k = Number(b.dataset.k), s = an.stages[k - 1];
+    if (s) mutate(next => setPaintOn(next, s.tanks.map(t => t.id), { c: part(sel)?.paint?.c ?? '#e9ebee', a: part(sel)?.paint?.a ?? '#1c1f24', p: part(sel)?.paint?.p ?? 'solid' }));
+  }
+  else if (act === 'paintAll') paintWhole(part(sel)?.paint || (sel === BOOSTERS ? asm.boosters?.paint : null));
   else if (act === 'estep') mutate(next => {
     const p = next.parts.find(q => q.id === sel);
     if (!p) return false;
@@ -1138,6 +1217,386 @@ el.ins.addEventListener('click', e => {
     next.boosters.count = Number(b.dataset.v);
   });
 });
+
+// ================================================================ fairing
+// The fairing sits flush on the top stage and encloses the payload with a
+// margin: its radius clears the payload and its nose clears the payload's top.
+function encloseFairing() {
+  const f = lay.fairing, pr = lay.rows.find(r => r.part.type === 'payload');
+  if (!f || !pr) return;
+  const Rp = Math.max(...lay.rows.filter(r => r.part.type === 'payload').map(r => r.d / 2));
+  const R = Math.max(f.d / 2, Rp * 1.12);
+  f.d = 2 * R;
+  f.y0 = pr.y0;
+  f.y1 = Math.max(f.y1, pr.y1 + 1.2 * R, f.y0 + 2.4 * R);
+  lay.height = Math.max(lay.height, f.y1);
+}
+
+// ================================================================ pre-flight
+// The mode the design is checked against: a lander flies the landing mode,
+// anything else the selected mission's mode (orbit when none is chosen).
+function preMode() {
+  if (an.payload?.kind === 'lander') return 'landing';
+  return missionChosen ? (MISSIONS.find(m => m.id === mission)?.mode || 'orbit') : 'orbit';
+}
+// Geometry only counts when it describes the vehicle on screen.
+function liveGeo() { return an.ok && geo && geoKey === JSON.stringify(asm) ? geo : null; }
+
+// ================================================================ engineering tab
+function showRightTab(t) {
+  $$('.rtabs [data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === t)));
+  $('#tabStg').hidden = t !== 'stg';
+  $('#tabEng').hidden = t !== 'eng';
+  if (t === 'eng') renderEng();
+}
+
+function renderEng() {
+  const host = $('#eng');
+  if (!host || !an) return;
+  const stageRows = an.stages.map(s => {
+    const ep = s.engine, e = s.e, custom = ep && ep.engine === 'manual' && ep.custom;
+    const dry = ep && ep.dry != null ? (ep.dry / 1000).toFixed(2) : '';
+    return `<tr><th>S${s.k}</th><td>${e ? `${s.n} × ${esc(e.label)}` : '<span class="bad">no engine</span>'}</td>`
+      + `<td><input type="number" step="0.1" min="0.1" data-eng="prop" data-k="${s.k}" value="${(s.mprop / 1000).toFixed(1)}"></td>`
+      + `<td><input type="number" step="0.1" min="0" data-eng="dry" data-k="${s.k}" value="${dry}" placeholder="auto"></td>`
+      + `<td><input type="number" min="1" max="33" step="1" data-eng="count" data-k="${s.k}" value="${s.n}"></td></tr>`
+      + (custom ? `<tr class="sub"><td colspan="5"><div class="customrow">`
+        + `<label>thrust each <input type="number" step="1" data-eng="cthr" data-k="${s.k}" value="${custom.thrust_kn}"><em>kN</em></label>`
+        + `<label>Isp <input type="number" step="1" data-eng="cisp" data-k="${s.k}" value="${custom.isp_vac}"><em>s</em></label>`
+        + `<label>propellant <select data-eng="cprop" data-k="${s.k}">${['kerolox', 'hydrolox', 'methalox', 'hypergolic', 'solid']
+            .map(x => `<option${x === custom.prop ? ' selected' : ''}>${x}</option>`).join('')}</select></label>`
+        + `<label>mass each <input type="number" step="10" data-eng="cmass" data-k="${s.k}" value="${custom.mass_kg}"><em>kg</em></label>`
+        + `</div></td></tr>` : '');
+  }).join('');
+  const p = an.payload;
+  const veh = `<div class="vehblock"><h3 class="u-label">Vehicle</h3>`
+    + `<label class="fld"><span>Pitch-over kick</span><span class="inp"><input type="number" step="0.5" min="0" max="30" data-veh="kick" value="${asm.kick_deg ?? 8}"><em>°</em></span></label>`
+    + `<label class="chk"><input type="checkbox" data-veh="optkick"${asm.opt_kick !== false ? ' checked' : ''}> Search for the best kick</label>`
+    + (an.fairing ? fld('Fairing mass', `<input type="number" step="10" min="0" data-veh="fair" value="${an.fairing.mass ?? 150}">`, 'kg') : '')
+    + (p?.kind === 'capsule' ? fld('Payload diameter', `<input type="number" step="0.01" min="0.5" data-veh="pdia" value="${+p.diameter.toFixed(2)}">`, 'm')
+        + fld('Cargo', `<input type="number" step="10" min="0" data-veh="cargo" value="${p.cargo || 0}">`, 'kg') : '')
+    + (asm.boosters ? fld('Core throttle', `<input type="number" step="5" min="0" max="100" data-veh="bthr" value="${asm.boosters.throttle ?? 100}">`, '%')
+        + fld('Ignition delay', `<input type="number" step="1" min="0" data-veh="bign" value="${asm.boosters.ign ?? 0}">`, 's')
+        + fld('Separation delay', `<input type="number" step="1" min="0" data-veh="bsep" value="${asm.boosters.sep ?? 0}">`, 's') : '')
+    + `</div>`;
+  host.innerHTML = `<table class="eng-table"><thead><tr><th></th><th>Engine</th><th>Propellant t</th><th>Dry t</th><th>Engines</th></tr></thead>`
+    + `<tbody>${stageRows || '<tr><td colspan="5" class="hint">No stages yet.</td></tr>'}</tbody></table>`
+    + `<p class="hint">Propellant scales every tank of the stage together. Dry mass blank = estimated.</p>` + veh;
+}
+
+// Set a stage's propellant (tonnes): every tank of the stage keeps its domes and
+// has its barrel scaled by the same factor, using the simulator's own volume rule.
+function setStageProp(k, tons, coal) {
+  const s = an.stages[k - 1];
+  if (!s || !s.tanks.length) return false;
+  const D = s.diameter;
+  const barrel = s.tanks.reduce((a, t) => a + Math.max(0, t.length - 0.9 * t.diameter) * (t.diameter / D) ** 2, 0);
+  const want = lengthFromProp(tons * 1000, D, s.prop) - 0.9 * D;
+  if (!(barrel > 0) || !(want > 0)) return false;
+  const f = want / barrel, ids = new Set(s.tanks.map(t => t.id));
+  mutate(next => {
+    for (const p of next.parts) if (ids.has(p.id)) {
+      const b = Math.max(0, p.length - 0.9 * p.diameter);
+      p.length = Math.round(Math.max(0.5, 0.9 * p.diameter + b * f) * 100) / 100;
+    }
+  }, { coalesce: coal });
+  return true;
+}
+
+function setEngField(next, k, key, raw) {
+  const id = an.stages[k - 1]?.engine?.id, p = next.parts.find(q => q.id === id);
+  if (!p) return false;
+  const n = Number(raw), str = String(raw);
+  switch (key) {
+    case 'dry': if (str.trim() === '') { p.dry = null; return true; } if (!(n > 0)) return false; p.dry = n * 1000; return true;
+    case 'count': if (!Number.isFinite(n)) return false; p.count = clamp(Math.round(n), 1, 33); return true;
+    case 'cthr': if (!(n > 0)) return false; customOf(p).thrust_kn = n; return true;
+    case 'cisp': if (!(n > 0)) return false; customOf(p).isp_vac = n; return true;
+    case 'cmass': if (!(n > 0)) return false; customOf(p).mass_kg = n; return true;
+    case 'cprop': customOf(p).prop = str; return true;
+    default: return false;
+  }
+}
+
+function setVeh(next, key, raw) {
+  const n = Number(raw), ok = Number.isFinite(n);
+  const fair = next.parts.find(q => q.type === 'fairing'), pay = next.parts.find(q => q.type === 'payload');
+  switch (key) {
+    case 'kick': if (!ok) return false; next.kick_deg = clamp(n, 0, 30); return true;
+    case 'optkick': next.opt_kick = raw === true; return true;
+    case 'fair': if (!fair || !ok || n < 0) return false; fair.mass = n; return true;
+    case 'pdia': if (!pay || pay.kind !== 'capsule' || !(n > 0)) return false; pay.diameter = n; return true;
+    case 'cargo': if (!pay || !ok || n < 0) return false; pay.cargo = n; return true;
+    case 'bthr': if (!next.boosters || !ok) return false; next.boosters.throttle = clamp(n, 0, 100); return true;
+    case 'bign': if (!next.boosters || !ok) return false; next.boosters.ign = clamp(n, 0, 3600); return true;
+    case 'bsep': if (!next.boosters || !ok) return false; next.boosters.sep = clamp(n, 0, 3600); return true;
+    default: return false;
+  }
+}
+
+function engEvent(t, evt) {
+  const coal = evt === 'input' ? `eng:${t.dataset.eng || t.dataset.veh}:${t.dataset.k || ''}` : null;
+  const raw = t.type === 'checkbox' ? t.checked : t.value;
+  if (t.dataset.veh) { mutate(next => setVeh(next, t.dataset.veh, raw), { coalesce: coal }); return; }
+  const k = Number(t.dataset.k), key = t.dataset.eng;
+  if (key === 'prop') { const v = Number(raw); if (v > 0) setStageProp(k, v, coal); return; }
+  mutate(next => setEngField(next, k, key, raw), { coalesce: coal });
+}
+
+// A custom engine card in the Engines palette: its figures are edited in the inspector.
+function buildCustomCard() {
+  const eng = cats.find(c => c.id === 'engines');
+  if (!eng) return;
+  const it = { key: 'eng:custom', label: 'Custom engine', sub: 'your own thrust, Isp and propellant', make: () => ({
+    type: 'engine', engine: 'manual', count: 1, dry: null,
+    custom: { id: 'manual', label: 'Custom engine', prop: 'kerolox', thrust_kn: 200, isp_vac: 300, mass_kg: 204, generic: true } }) };
+  eng.parts.push(it);
+  ITEMS.set(it.key, it);
+}
+
+// ================================================================ liveries
+function buildLivery() {
+  $('#liveryMenu').innerHTML = Object.keys(LIVERIES).map(k => `<button data-livery="${esc(k)}">${esc(k)}</button>`).join('');
+}
+function toggleLivery(open) {
+  $('#liveryMenu').hidden = !open;
+  $('#bLivery').setAttribute('aria-expanded', String(open));
+}
+// A livery preset over the whole vehicle: each stage by its own index, the
+// strap-ons as stage 1, and the fairing and payload as the top stage.
+function applyLivery(name) {
+  const f = LIVERIES[name];
+  if (!f || !an) return;
+  const top = Math.max(1, an.stages.length);
+  const stageOf = new Map();
+  an.stages.forEach(s => s.tanks.forEach(t => stageOf.set(t.id, s.k)));
+  mutate(next => {
+    for (const p of next.parts) {
+      if (p.type === 'tank' && stageOf.has(p.id)) p.paint = f(stageOf.get(p.id));
+      else if (p.type === 'fairing' || p.type === 'payload') p.paint = f(top);
+    }
+    if (next.boosters) next.boosters.paint = f(1);
+  });
+  toggleLivery(false);
+}
+// The same paint on every painted part: tanks, boosters, fairing and payload.
+function paintWhole(paint) {
+  const pt = paint || { c: '#e9ebee', a: '#1c1f24', p: 'solid' };
+  const ids = an.stages.flatMap(s => s.tanks.map(t => t.id));
+  if (an.fairing) ids.push(an.fairing.id);
+  if (an.payload) ids.push(an.payload.id);
+  if (asm.boosters) ids.push(BOOSTERS);
+  mutate(next => setPaintOn(next, ids, pt));
+}
+
+// ================================================================ inspector placement
+const INS_KEY = 'ssjl.insPos';
+let insDrag = null;
+function insPlace(x, y) {
+  const w = el.ins.offsetWidth, h = el.ins.offsetHeight;
+  el.ins.style.left = clamp(x, 0, Math.max(0, el.center.clientWidth - w)) + 'px';
+  el.ins.style.top = clamp(y, 0, Math.max(0, el.center.clientHeight - h)) + 'px';
+  el.ins.style.bottom = 'auto';
+  el.ins.style.transform = 'none';
+}
+function insRestorePos() {
+  let p = null;
+  try { p = JSON.parse(localStorage.getItem(INS_KEY) || 'null'); } catch (e) {}
+  if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) insPlace(p.x, p.y);
+}
+function insDock() {
+  el.ins.removeAttribute('style');
+  try { localStorage.removeItem(INS_KEY); } catch (e) {}
+}
+
+// ================================================================ launch outcome
+function resetDlg() {
+  $('#lBody').hidden = false; $('#lFoot').hidden = false; $('#lResult').hidden = true;
+}
+function showResult(x, id) {
+  $('#lBody').hidden = true; $('#lFoot').hidden = true;
+  const li = a => a.map(s => `<li>${esc(s)}</li>`).join('');
+  $('#lResult').innerHTML = `<div class="lres-card"><p class="u-label">Flight result</p>`
+    + `<h2 class="lres-state">${esc(x.state)}</h2><p class="lres-why">${esc(x.why)}</p>`
+    + (x.details.length ? `<h3 class="u-label">Details</h3><ul class="lres-list">${li(x.details)}</ul>` : '')
+    + (x.advice.length ? `<h3 class="u-label">Advice</h3><ul class="lres-list">${li(x.advice)}</ul>` : '')
+    + `<div class="lres-btns"><button class="btn" data-res="back">Back to the hangar</button>`
+    + `<button class="launch" data-res="watch" data-run="${esc(id)}">Watch the flight anyway</button></div></div>`;
+  $('#lResult').hidden = false;
+}
+
+// ================================================================ extra wiring
+function bindExtra() {
+  $$('.rtabs [data-tab]').forEach(b => { b.onclick = () => showRightTab(b.dataset.tab); });
+  $('#xrayBtn').onclick = () => { xrayOn = !xrayOn; $('#xrayBtn').setAttribute('aria-pressed', String(xrayOn)); requestDraw(); };
+  $('#bLivery').onclick = e => { e.stopPropagation(); toggleLivery($('#liveryMenu').hidden); };
+  $('#liveryMenu').onclick = e => { const b = e.target.closest('[data-livery]'); if (b) applyLivery(b.dataset.livery); };
+  const eng = $('#eng');
+  eng.addEventListener('input', e => { if (e.target.dataset && (e.target.dataset.eng || e.target.dataset.veh)) engEvent(e.target, 'input'); });
+  eng.addEventListener('change', e => { if (e.target.dataset && (e.target.dataset.eng || e.target.dataset.veh)) engEvent(e.target, 'change'); });
+  el.ins.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || e.target.closest('button,input,select,label')) return;
+    const hd = e.target.closest('.ins-h');
+    if (!hd) return;
+    const r = el.ins.getBoundingClientRect(), c = el.center.getBoundingClientRect();
+    insDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top, cx: c.left, cy: c.top };
+    hd.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  el.ins.addEventListener('pointermove', e => {
+    if (insDrag) insPlace(e.clientX - insDrag.cx - insDrag.dx, e.clientY - insDrag.cy - insDrag.dy);
+  });
+  el.ins.addEventListener('pointerup', () => {
+    if (!insDrag) return;
+    insDrag = null;
+    const r = el.ins.getBoundingClientRect(), c = el.center.getBoundingClientRect();
+    try { localStorage.setItem(INS_KEY, JSON.stringify({ x: r.left - c.left, y: r.top - c.top })); } catch (e) {}
+  });
+  el.ins.addEventListener('dblclick', e => { if (e.target.closest('.ins-h') && !e.target.closest('button')) insDock(); });
+  $('#lResult').addEventListener('click', e => {
+    const b = e.target.closest('[data-res]');
+    if (!b) return;
+    if (b.dataset.res === 'watch') location.href = 'launch_page.html?run=' + encodeURIComponent(b.dataset.run);
+    else { el.dlg.close(); resetDlg(); }
+  });
+  window.addEventListener('resize', () => { if (!el.ins.hidden && el.ins.style.left) insPlace(parseFloat(el.ins.style.left), parseFloat(el.ins.style.top)); });
+}
+
+// ================================================================ replacements
+// Each of these replaces a function of the same name from earlier in the page.
+function scene3() {
+  const fid = an.fairing?.id, pid = an.payload?.id;
+  const xr = xrayOn || [sel, hov].some(id => id && (id === fid || id === pid));
+  return { lay, asm, catalogue, selectedId: sel, hoverId: hov, boostersId: BOOSTERS, ghost: ghost3(), xray: xr };
+}
+
+function afterChange(opts = {}) {
+  touch(); persist();
+  if (opts.inspector !== false) renderInspector(); else updateDerived();
+  renderSide(); updateChrome();
+  if (!$('#tabEng').hidden && !$('#eng').contains(document.activeElement)) renderEng();
+  requestDraw(); scheduleEval();
+}
+
+function issuesHTML() {
+  const rows = [...an.issues.map(i => ({ ...i, pre: false })),
+                ...preflight(liveGeo(), preMode()).map(w => ({ ...w, pre: true }))];
+  if (!rows.length) return '<li class="ok">Nothing to fix. The stack maps onto a vehicle the simulator will fly.</li>';
+  return rows.map(i => `<li class="${i.level}"${i.partId ? ` data-part="${esc(i.partId)}"` : ''}>`
+    + `<b>${i.pre ? 'Pre-flight' : i.level === 'error' ? 'Error' : 'Warning'}</b>${esc(i.msg)}</li>`).join('');
+}
+
+function updateChrome() {
+  el.undo.disabled = !undoS.length;
+  el.redo.disabled = !redoS.length;
+  const pre = preflight(liveGeo(), preMode()).find(w => w.level === 'error');
+  el.launch.disabled = !an.ok || !!pre;
+  el.launch.title = !an.ok ? (an.issues.find(i => i.level === 'error')?.msg || 'The vehicle has errors')
+    : pre ? pre.msg : 'Choose a mission and fly it';
+  if (document.activeElement !== el.name) el.name.value = asm.name || '';
+}
+
+function renderLaunchSide() {
+  const m = MISSIONS.find(x => x.id === mission);
+  el.mDesc.textContent = m.desc;
+  el.lLandWrap.hidden = m.mode !== 'landing';
+  const total = geo ? geo.total_dv_mps / 1000 : null;
+  el.dvCheck.innerHTML = total == null ? 'Waiting for the vehicle’s Δv…'
+    : total >= m.dv ? `<span class="good">✓ ${total.toFixed(2)} km/s against ${m.dv} km/s — ${(total - m.dv).toFixed(2)} km/s to spare</span>`
+    : `<span class="bad">${total.toFixed(2)} km/s against ${m.dv} km/s — short by ${(m.dv - total).toFixed(2)} km/s</span>`;
+  const pre = preflight(liveGeo(), m.mode);
+  $('#lPre').hidden = !pre.length;
+  $('#lPre').innerHTML = pre.map(w => `<p class="pre-${w.level}"><b>${w.level === 'error' ? 'Error' : 'Warning'}</b> ${esc(w.msg)}</p>`).join('');
+}
+
+async function launch() {
+  const m = MISSIONS.find(x => x.id === mission);
+  let params;
+  try { params = toParams(asm, catalogue); }
+  catch (err) { showLErr(err.message); return; }
+  for (const [k, v] of Object.entries(m.params)) params.set(k, String(v));
+  params.set('site', el.lSite.value);
+  params.set('launch_h', String(clamp(Number(el.lTime.value) || 0, 0, 24)));
+  if (m.mode === 'landing') params.set('target', el.lLand.value);
+  params.set('opt_kick', el.lKick.checked ? '1' : '0');
+  vehicle.save(params);
+  el.dlg.close();
+  resetDlg();
+  const controller = new AbortController();
+  const done = busy('designing and flying the mission…', { onCancel: () => controller.abort(), cancelLabel: api.cancelLabel });
+  try {
+    const j = await api.run(params, { onProgress: done.progress, signal: controller.signal });
+    done();
+    const x = explainOutcome(j, geo);
+    if (x.ok) { location.href = 'launch_page.html?run=' + encodeURIComponent(j.id); return; }
+    el.dlg.showModal();
+    showResult(x, j.id);
+  } catch (err) {
+    done();
+    resetDlg();
+    el.dlg.showModal();
+    if (err.name === 'AbortError') { showLErr('Cancelled.'); return; }
+    showLErr(err.message || String(err));
+    fail(err, 'mission');
+  }
+}
+
+// Blueprint paint: a base gradient and the pattern drawn over the skin.
+function mixHex(a, b, t) {
+  const p = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const A = p(a), B = p(b);
+  return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(',')})`;
+}
+function pattern2D(c, pt, l, w, top, h) {
+  const acc = pt.a;
+  if (pt.p === 'bands') {
+    c.fillStyle = acc;
+    for (const f of [0.36, 0.62]) c.fillRect(l, top + h * f, w, Math.max(2, h * 0.03));
+  } else if (pt.p === 'roll') {
+    for (const [f, flip] of [[0.16, 0], [0.5, 1]]) {
+      const y = top + h * f, hh = h * 0.18;
+      c.fillStyle = (flip ? pt.c : acc); c.fillRect(l, y, w / 2, hh);
+      c.fillStyle = (flip ? acc : pt.c); c.fillRect(l + w / 2, y, w / 2, hh);
+    }
+  } else if (pt.p === 'checker') {
+    c.fillStyle = acc; c.globalAlpha = 0.85;
+    for (let col = 0; col < 4; col++) for (let row = 0; row < 8; row++)
+      if ((col + row) % 2) c.fillRect(l + w * col / 4, top + h * row / 8, w / 4, h / 8);
+    c.globalAlpha = 1;
+  } else if (pt.p === 'stripe') {
+    c.fillStyle = acc; c.fillRect(l + w * 0.44, top, w * 0.12, h);
+  }
+}
+function drawTank(c, r, T) {
+  const l = T.X(-r.d / 2), w = len(T, r.d), top = T.Y(r.y1), h = T.Y(r.y0) - top;
+  const pt = r.paint;
+  if (pt) {
+    const g = c.createLinearGradient(l, 0, l + w, 0);
+    g.addColorStop(0, mixHex(pt.c, '#000000', 0.5)); g.addColorStop(0.3, mixHex(pt.c, '#ffffff', 0.3));
+    g.addColorStop(0.6, pt.c); g.addColorStop(1, mixHex(pt.c, '#000000', 0.55));
+    c.fillStyle = g;
+  } else c.fillStyle = metalGrad(c, T, r.d);
+  c.fillRect(l, top, w, h);
+  if (pt && !T.thumb) pattern2D(c, pt, l, w, top, h);
+  if (!T.thumb) {
+    c.strokeStyle = 'rgba(30,40,55,0.18)'; c.lineWidth = 1;
+    for (let y = Math.floor(r.y0 / 2) * 2 + 2; y < r.y1; y += 2) {
+      const sy = Math.round(T.Y(y)) + 0.5;
+      c.beginPath(); c.moveTo(l, sy); c.lineTo(l + w, sy); c.stroke();
+    }
+  }
+  const by = top + (T.thumb ? 4 : Math.max(4, 0.35 * T.s));
+  const bh = T.thumb ? 4 : Math.max(3, 0.22 * T.s);
+  c.globalAlpha = 0.92; c.fillStyle = PROP_COLORS[r.prop] || '#888'; c.fillRect(l, by, w, bh); c.globalAlpha = 1;
+  c.beginPath(); c.ellipse(T.X(0), top, w / 2, Math.max(1.5, 0.06 * w), 0, 0, Math.PI * 2);
+  c.fillStyle = pt ? pt.c : '#f1f4f7'; c.fill();
+  c.strokeStyle = 'rgba(20,28,40,0.35)'; c.lineWidth = 1; c.strokeRect(l + 0.5, top, w - 1, h);
+}
+const rowDraw = r => {
+  const p = r.part;
+  return { kind: p.type === 'payload' ? p.kind : p.type, d: r.d, y0: r.y0, y1: r.y1,
+           prop: propOf.get(p.id) || 'kerolox', n: p.count || 1, crewed: p.crewed !== false, paint: p.paint || null };
+};
 
 // ================================================================ side panels
 const bells = n => `<span class="bells" aria-hidden="true">${'<i></i>'.repeat(Math.min(n, 9))}${n > 9 ? `<b>+${n - 9}</b>` : ''}</span>`;
@@ -1211,11 +1670,6 @@ function reportHTML() {
     + `<p class="caption">typical from-pad budgets including ascent losses — the flight itself is simulated</p>`;
 }
 
-function issuesHTML() {
-  if (!an.issues.length) return '<li class="ok">Nothing to fix. The stack maps onto a vehicle the simulator will fly.</li>';
-  return an.issues.map(i => `<li class="${i.level}"${i.partId ? ` data-part="${esc(i.partId)}"` : ''}>`
-    + `<b>${i.level === 'error' ? 'Error' : 'Warning'}</b>${esc(i.msg)}</li>`).join('');
-}
 
 function renderSide() {
   const live = an.ok && geo && geoKey === JSON.stringify(asm);
@@ -1236,14 +1690,6 @@ el.issues.addEventListener('click', e => {
   renderInspector();
 });
 
-function updateChrome() {
-  el.undo.disabled = !undoS.length;
-  el.redo.disabled = !redoS.length;
-  el.launch.disabled = !an.ok;
-  el.launch.title = an.ok ? 'Choose a mission and fly it'
-    : (an.issues.find(i => i.level === 'error')?.msg || 'The vehicle has errors');
-  if (document.activeElement !== el.name) el.name.value = asm.name || '';
-}
 
 // ================================================================ palette
 function buildCats() {
@@ -1391,42 +1837,7 @@ function renderMissions() {
   }).join('')).join('');
 }
 
-function renderLaunchSide() {
-  const m = MISSIONS.find(x => x.id === mission);
-  el.mDesc.textContent = m.desc;
-  el.lLandWrap.hidden = m.mode !== 'landing';
-  const total = geo ? geo.total_dv_mps / 1000 : null;
-  el.dvCheck.innerHTML = total == null ? 'Waiting for the vehicle’s Δv…'
-    : total >= m.dv ? `<span class="good">✓ ${total.toFixed(2)} km/s against ${m.dv} km/s — ${(total - m.dv).toFixed(2)} km/s to spare</span>`
-    : `<span class="bad">${total.toFixed(2)} km/s against ${m.dv} km/s — short by ${(m.dv - total).toFixed(2)} km/s</span>`;
-}
 
-async function launch() {
-  const m = MISSIONS.find(x => x.id === mission);
-  let params;
-  try { params = toParams(asm, catalogue); }
-  catch (err) { showLErr(err.message); return; }
-  for (const [k, v] of Object.entries(m.params)) params.set(k, String(v));
-  params.set('site', el.lSite.value);
-  params.set('launch_h', String(clamp(Number(el.lTime.value) || 0, 0, 24)));
-  if (m.mode === 'landing') params.set('target', el.lLand.value);
-  params.set('opt_kick', el.lKick.checked ? '1' : '0');
-  vehicle.save(params);
-  el.dlg.close();
-  const controller = new AbortController();
-  const done = busy('designing and flying the mission…', { onCancel: () => controller.abort(), cancelLabel: api.cancelLabel });
-  try {
-    const j = await api.run(params, { onProgress: done.progress, signal: controller.signal });
-    done();
-    location.href = 'launch_page.html?run=' + encodeURIComponent(j.id);
-  } catch (err) {
-    done();
-    el.dlg.showModal();
-    if (err.name === 'AbortError') { showLErr('Cancelled.'); return; }
-    showLErr(err.message || String(err));
-    fail(err, 'mission');
-  }
-}
 
 // ================================================================ start-up
 // Where the vehicle comes from, in order: ?preset=; a vehicle in the query
@@ -1565,7 +1976,7 @@ function bind() {
     if (use3d && R3) {
       autoFit3 = false;
       const p = pos(e), f = Math.exp(e.deltaY * 0.0012), yc = R3.heightAt(p.x, p.y), c = cam3();
-      if (yc !== null && f < 1) c.target[1] += (yc - c.target[1]) * (1 - f) * 0.6;
+      if (yc !== null && f < 1) c.target[1] += (yc - c.target[1]) * (1 - f);
       c.dist = clamp(c.dist * f, 1.5, 3000);
       requestDraw();
       return;
@@ -1599,6 +2010,8 @@ function bind() {
   });
 
   el.launch.onclick = openLaunch;
+  missionChosen = !!missionFromQuery(new URLSearchParams(location.search));
+  el.missions.addEventListener('click', () => { missionChosen = true; });
   el.missions.onclick = e => {
     const b = e.target.closest('[data-m]');
     if (!b || b.disabled) return;
@@ -1696,9 +2109,6 @@ function ghost3() {
   return { part: holdPart, d: g.d, h: g.h, y: base, radial: false, core: g.core, prop: g.prop, n: g.n };
 }
 
-function scene3() {
-  return { lay, asm, catalogue, selectedId: sel, hoverId: hov, boostersId: BOOSTERS, ghost: ghost3() };
-}
 
 function draw() {
   frame = 0;
@@ -1786,15 +2196,26 @@ function handleClick3(p) {
   renderInspector();
 }
 
+const NEEDS = ['fairing_on', 'crewed', 'pod_dia', 'l_diameter', 'payload_kind', 'bus_mass', 'cargo_mass'];
+
 async function init() {
   reportUncaught();
   catalogue = await api.catalogue();
+  // An older server silently drops the fields this page sends; say so instead.
+  const missing = NEEDS.filter(k => !(catalogue.features || []).includes(k));
+  if (missing.length) {
+    const b = document.createElement('div');
+    b.className = 'stale-banner';
+    b.setAttribute('role', 'alert');
+    b.textContent = 'the server is older than this page — restart it (missing: ' + missing.join(', ') + ')';
+    document.querySelector('.vab').prepend(b);
+  }
   cats = palette(catalogue);
   cats.forEach(c => c.parts.forEach(it => ITEMS.set(it.key, it)));
   asm = startAssembly();
   touch();
   initRenderer();
-  buildCats(); buildPresets(); buildSites(); bind(); buildGrid();
+  buildCustomCard(); buildLivery(); buildCats(); buildPresets(); buildSites(); bind(); bindExtra(); buildGrid();
   resize();
   renderInspector(); renderSide(); updateChrome();
   scheduleEval(0);

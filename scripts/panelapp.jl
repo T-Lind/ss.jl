@@ -18,7 +18,9 @@ using Printf
 # layer, since every shipped page always exists.
 const PAGE_PATH = Ref(joinpath(@__DIR__, "panel_page.html"))
 const LAUNCH_PATH = Ref(joinpath(@__DIR__, "launch_page.html"))
-const BUILD_PATH = Ref(joinpath(@__DIR__, "build_page.html"))
+# /build is the vehicle builder too: the numeric editor that lived there is now
+# the builder's Engineering tab, and old links keep working.
+const BUILD_PATH = Ref(joinpath(@__DIR__, "vab_page.html"))
 const VAB_PATH = Ref(joinpath(@__DIR__, "vab_page.html"))
 const MODELS_PATH = Ref(joinpath(@__DIR__, "models_page.html"))
 const ANALYSIS_PATH = Ref(joinpath(@__DIR__, "analysis_page.html"))

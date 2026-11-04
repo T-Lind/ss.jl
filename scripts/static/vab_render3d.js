@@ -64,7 +64,8 @@ function lathe(B, prof, seg, ox = 0, oz = 0) {
     const p = prof[k];
     for (let j = 0; j <= seg; j++) {
       const t = TAU * j / seg, c = Math.cos(t), s = Math.sin(t);
-      B.vert([ox + p.r * c, p.y, oz + p.r * s], [nr * c, ny, nr * s], p.c);
+      // cf: a colour that depends on the angle (paint patterns); c: a flat colour
+      B.vert([ox + p.r * c, p.y, oz + p.r * s], [nr * c, ny, nr * s], p.cf ? p.cf(t) : p.c);
     }
   }
   for (let k = 0; k < P - 1; k++) for (let j = 0; j < seg; j++) {
@@ -123,20 +124,73 @@ function tube(B, a, b, r, col, sides = 6) {
 }
 
 // ------------------------------------------------------------ part builders --
-// Tank: a cylinder with rounded ends, faint panel seams every ~2 m, and a
-// thin ring of propellant colour near the top.
-function buildTank(B, y0, y1, d, prop, ox, oz) {
-  const R = d / 2, h = y1 - y0, dome = Math.min(0.12 * R, 0.1 * h), yTop = y1 - dome;
-  const pc = PROPC[prop] || PROPC.kerolox, pb = yTop - Math.min(0.5, 0.12 * h);
-  const P = [];
-  const add = (r, y, c) => P.push({ r, y, c });
-  add(0, y0, C.tank); add(0.9 * R, y0, C.tank); add(R, y0 + dome, C.tank);
-  for (let s = Math.ceil((y0 + dome + 0.05) / 2) * 2; s < pb - 0.1; s += 2) {
-    add(R, s - 0.025, C.tank); add(R, s - 0.025, C.seam); add(R, s + 0.025, C.seam); add(R, s + 0.025, C.tank);
+// ---- paint -----------------------------------------------------------------
+// A wall is cut at every colour boundary; each interval gets the colour of the
+// last layer covering its middle. Two points at one height with different
+// colours make a hard edge, so bands and stripes stay crisp.
+function wallProfile(R, ya, yb, layers) {
+  const cuts = new Set([ya, yb]);
+  for (const L of layers) {
+    cuts.add(Math.min(yb, Math.max(ya, L.a)));
+    cuts.add(Math.min(yb, Math.max(ya, L.b)));
   }
-  if (pb > y0 + dome + 0.2) { add(R, pb, C.tank); add(R, pb, pc); add(R, yTop, pc); }
-  else add(R, yTop, C.tank);
-  add(0.9 * R, y1, C.tank); add(0, y1, C.tank);
+  const ys = [...cuts].sort((p, q) => p - q), P = [];
+  for (let i = 0; i < ys.length - 1; i++) {
+    if (ys[i + 1] - ys[i] < 1e-6) continue;
+    const m = (ys[i] + ys[i + 1]) / 2;
+    let cf = layers[0].cf;
+    for (const L of layers) if (m >= L.a && m <= L.b) cf = L.cf;
+    P.push({ r: R, y: ys[i], cf }, { r: R, y: ys[i + 1], cf });
+  }
+  return P;
+}
+
+// Pattern layers over a tank wall from R0 to R1. Colours are functions of the
+// angle t (radians around the axis): quadrants for roll and checker, a
+// single meridian for the stripe.
+function patternLayers(p, R0, R1, base, acc) {
+  const span = R1 - R0, cst = c => () => c, Q = Math.PI / 2;
+  const quad = t => Math.floor((((t % TAU) + TAU) % TAU) / Q);
+  if (p === 'bands') {
+    const th = Math.min(0.3, span * 0.04);
+    return [0.36, 0.62].map(f => ({ a: R0 + span * f, b: R0 + span * f + th, cf: cst(acc) }));
+  }
+  if (p === 'roll') return [
+    { a: R0 + span * 0.16, b: R0 + span * 0.34, cf: t => (quad(t) % 2 ? acc : base) },
+    { a: R0 + span * 0.5, b: R0 + span * 0.68, cf: t => (quad(t) % 2 ? base : acc) },
+  ];
+  if (p === 'checker') {
+    const hc = Math.min(1.6, span / 8), out = [];
+    let j = 0;
+    for (let a = R0; a < R1 - 1e-6; a += hc, j++) {
+      const jj = j;
+      out.push({ a, b: Math.min(R1, a + hc), cf: t => ((quad(t) + jj) % 2 ? acc : base) });
+    }
+    return out;
+  }
+  if (p === 'stripe') return [{ a: R0, b: R1, cf: t => {
+    const u = ((t % TAU) + TAU) % TAU, dd = Math.min(u, TAU - u);
+    return dd < 0.1 ? acc : base;
+  } }];
+  return [];
+}
+
+// Tank: rounded ends, panel seams every ~2 m, a propellant ring near the top,
+// and the livery's pattern over the skin.
+function buildTank(B, y0, y1, d, prop, ox, oz, paint = null) {
+  const R = d / 2, h = y1 - y0, dome = Math.min(0.12 * R, 0.1 * h), yTop = y1 - dome;
+  const base = paint ? hex(paint.c) : C.tank, acc = paint ? hex(paint.a) : C.dark;
+  const seamC = paint ? mix3(base, [0, 0, 0], 0.16) : C.seam;
+  const pc = PROPC[prop] || PROPC.kerolox, pb = yTop - Math.min(0.5, 0.12 * h);
+  const R0 = y0 + dome, span = yTop - R0, cst = c => () => c;
+  const layers = [{ a: R0, b: yTop, cf: cst(base) }];
+  for (let s = Math.ceil((R0 + 0.05) / 2) * 2; s < pb - 0.1; s += 2)
+    layers.push({ a: s - 0.025, b: s + 0.025, cf: cst(seamC) });
+  if (paint && span > 1) layers.push(...patternLayers(paint.p, R0, yTop, base, acc));
+  if (pb > R0 + 0.2) layers.push({ a: pb, b: yTop, cf: cst(pc) });
+  const P = [{ r: 0, y: y0, c: base }, { r: 0.9 * R, y: y0, c: base }];
+  P.push(...wallProfile(R, R0, yTop, layers));
+  P.push({ r: 0.9 * R, y: y1, c: base }, { r: 0, y: y1, c: base });
   lathe(B, P, 48, ox, oz);
 }
 
@@ -166,7 +220,32 @@ function bellLayout(n, d) {
   return [{ x: 0, z: 0, bw: 0.3 * d }];
 }
 
-// Engine cluster: a dark thrust plate on top, flared bells hanging below it.
+// A quad from four points in order, flat-shaded with normal n.
+function quadFace(B, p, n, col) {
+  const a = B.vert(p[0], n, col), b = B.vert(p[1], n, col), c = B.vert(p[2], n, col), d = B.vert(p[3], n, col);
+  B.quad(a, b, c, d);
+}
+
+// Deterministic 0..1 pseudo-random value, so crinkled foil looks the same each build.
+const jitter = (i, k) => { const s = Math.sin((i + 1) * 12.9898 + k * 78.233) * 43758.5453; return s - Math.floor(s); };
+
+// An octagonal prism whose facets are slightly crinkled (MLI foil).
+function prismCrinkle(B, sides, R, y0, y1, rot, col, col2, ox = 0, oz = 0) {
+  const p = (a, y) => [ox + R * Math.cos(a), y, oz + R * Math.sin(a)];
+  for (let i = 0; i < sides; i++) {
+    const a0 = rot + TAU * i / sides, a1 = rot + TAU * (i + 1) / sides, am = (a0 + a1) / 2;
+    const nx = Math.cos(am), nz = Math.sin(am), tilt = (jitter(i, 1) - 0.5) * 0.35;
+    const n = norm([nx - nz * tilt, tilt * 0.4, nz + nx * tilt]);
+    const c = jitter(i, 2) > 0.5 ? col : mix3(col, col2, 0.25);
+    quadFace(B, [p(a0, y0), p(a1, y0), p(a1, y1), p(a0, y1)], n, c);
+  }
+  for (const [y, ny] of [[y1, 1], [y0, -1]]) {
+    const cc = B.vert([ox, y, oz], [0, ny, 0], col2);
+    for (let i = 0; i <= sides; i++) B.vert(p(rot + TAU * i / sides, y), [0, ny, 0], col2);
+    for (let i = 0; i < sides; i++) B.tri(cc, cc + 1 + i, cc + 2 + i);
+  }
+}
+
 function buildEngine(B, y0, y1, d, n, ox, oz) {
   const h = y1 - y0, plateH = Math.min(0.6, Math.max(0.25, 0.2 * h)), top = y1 - plateH, Rp = 0.49 * d;
   lathe(B, [{ r: 0, y: top, c: C.dark }, { r: Rp, y: top, c: C.dark },
@@ -190,54 +269,113 @@ function buildDecoupler(B, y0, y1, d, ox, oz) {
             { r: R, y: y0 + 0.65 * h, c: D }, { r: R, y: y1, c: D }, { r: 0, y: y1, c: D }], 48, ox, oz);
 }
 
-// Capsule: a cone with a dark heat-shield lip and a rounded nose.
-function buildCapsule(B, y0, y1, d, ox, oz) {
+// Capsule: cone with a heat-shield lip, a docking ring at the nose, four RCS
+// quads on the shoulder and, when crewed, two windows.
+function buildCapsule(B, y0, y1, d, ox, oz, paint = null, crewed = true) {
   const R = d / 2, h = y1 - y0, Hc = 0.72 * h, yc = y0 + Hc, R1 = 0.27 * d, sh = y0 + 0.14 * h;
+  const body = paint ? hex(paint.c) : C.white;
   const rAt = y => R + (R1 - R) * ((y - y0) / Hc);
   const P = [{ r: 0, y: y0, c: C.shield }, { r: 1.02 * R, y: y0, c: C.shield },
-             { r: 1.02 * R, y: sh, c: C.shield }, { r: rAt(sh), y: sh, c: C.white }, { r: R1, y: yc, c: C.white }];
+             { r: 1.02 * R, y: sh, c: C.shield }, { r: rAt(sh), y: sh, c: body }, { r: R1, y: yc, c: body }];
   for (let k = 1; k <= 8; k++) {
     const a = (k / 8) * Math.PI / 2;
-    P.push({ r: R1 * Math.cos(a), y: yc + 0.28 * h * Math.sin(a), c: C.white });
+    P.push({ r: R1 * Math.cos(a), y: yc + 0.28 * h * Math.sin(a), c: body });
   }
   lathe(B, P, 48, ox, oz);
+  const ny = y1 - 0.06 * h;
+  lathe(B, [{ r: 0.1 * d, y: ny, c: C.gun }, { r: 0.15 * d, y: ny, c: C.gun },
+            { r: 0.15 * d, y: ny + 0.04 * h, c: C.gun }, { r: 0.1 * d, y: ny + 0.04 * h, c: C.gun }], 24, ox, oz);
+  for (let k = 0; k < 4; k++) {
+    const a = Math.PI / 4 + k * Math.PI / 2, yy = yc - 0.12 * h, rr = rAt(yy) * 1.03;
+    const cx = ox + rr * Math.cos(a), cz = oz + rr * Math.sin(a);
+    box(B, [cx - 0.05 * d, yy - 0.04 * h, cz - 0.05 * d], [cx + 0.05 * d, yy + 0.04 * h, cz + 0.05 * d], C.gun);
+  }
+  if (crewed) for (const s of [1, -1]) {
+    const yw = yc - 0.3 * h, rw = rAt(yw) * 1.004, wz = 0.09 * d;
+    box(B, s > 0 ? [ox + rw, yw - 0.05 * h, oz - wz] : [ox - rw - 0.012 * d, yw - 0.05 * h, oz - wz],
+           s > 0 ? [ox + rw + 0.012 * d, yw + 0.05 * h, oz + wz] : [ox - rw, yw + 0.05 * h, oz + wz], C.dark);
+  }
 }
 
-// Probe core: an octagonal gold-foil prism with two flat solar panels.
-function buildBus(B, y0, y1, d, ox, oz) {
-  const R = d / 2, ym = (y0 + y1) / 2, ph = 0.7 * (y1 - y0), pw = 1.25 * d, t = 0.04 * d;
-  prism(B, 8, R, y0, y1, Math.PI / 8, C.gold, ox, oz, C.goldDark);
-  box(B, [ox + R, ym - ph / 2, oz - t / 2], [ox + R + pw, ym + ph / 2, oz + t / 2], C.panel);
-  box(B, [ox - R - pw, ym - ph / 2, oz - t / 2], [ox - R, ym + ph / 2, oz + t / 2], C.panel);
+// Probe core: crinkled gold-foil octagon, a dish on a boom, two solar arrays
+// with a cell grid on booms, and small thrusters at the base.
+function buildBus(B, y0, y1, d, ox, oz, paint = null) {
+  const R = d / 2, h = y1 - y0, ym = (y0 + y1) / 2;
+  const gold = paint ? hex(paint.c) : C.gold, gold2 = mix3(gold, [0, 0, 0], 0.35);
+  prismCrinkle(B, 8, R, y0, y1, Math.PI / 8, gold, gold2, ox, oz);
+  box(B, [ox - 0.3 * R, y1, oz - 0.3 * R], [ox + 0.3 * R, y1 + 0.05 * d, oz + 0.3 * R], C.gun);
+  const dy = y1 + 0.55 * d, rd = 0.5 * d;
+  tube(B, [ox, y1 + 0.05 * d, oz], [ox, dy, oz], 0.03 * d, C.gun, 6);
+  const DP = [];
+  for (let k = 0; k <= 8; k++) { const r = rd * k / 8; DP.push({ r, y: dy + 0.35 * d * (r / rd) ** 2, c: C.metal }); }
+  lathe(B, DP, 32, ox, oz);
+  const PANEL = hex('#1b3a6b'), PANEL2 = hex('#2c5796'), tz = 0.02 * d;
+  for (const s of [1, -1]) {
+    const X = v => ox + s * v, a0 = R + 0.45 * d, a1 = a0 + 1.3 * d, ya = ym - 0.36 * h, yb = ym + 0.36 * h;
+    tube(B, [X(R), ym, oz], [X(a0), ym, oz], 0.025 * d, C.gun, 6);
+    box(B, [Math.min(X(a0), X(a1)), ya, oz - tz], [Math.max(X(a0), X(a1)), yb, oz + tz], C.gun);
+    const nxc = 4, nyc = 6, g = 0.04;
+    for (let i = 0; i < nxc; i++) for (let j = 0; j < nyc; j++) {
+      const xa = a0 + (a1 - a0) * (i + g) / nxc, xb = a0 + (a1 - a0) * (i + 1 - g) / nxc;
+      const yl = ya + (yb - ya) * (j + g) / nyc, yh = ya + (yb - ya) * (j + 1 - g) / nyc;
+      const col = (i + j) % 2 ? PANEL : PANEL2;
+      quadFace(B, [[X(xa), yl, oz + tz + 0.002 * d], [X(xb), yl, oz + tz + 0.002 * d],
+                   [X(xb), yh, oz + tz + 0.002 * d], [X(xa), yh, oz + tz + 0.002 * d]], [0, 0, 1], col);
+      quadFace(B, [[X(xa), yl, oz - tz - 0.002 * d], [X(xb), yl, oz - tz - 0.002 * d],
+                   [X(xb), yh, oz - tz - 0.002 * d], [X(xa), yh, oz - tz - 0.002 * d]], [0, 0, -1], col);
+    }
+  }
+  for (let k = 0; k < 4; k++) {
+    const a = Math.PI / 4 + k * Math.PI / 2, px = ox + 0.8 * R * Math.cos(a), pz = oz + 0.8 * R * Math.sin(a);
+    tube(B, [px, y0, pz], [px, y0 - 0.12 * d, pz], 0.03 * d, C.gun, 6);
+  }
 }
 
-// Lunar lander: octagonal gold body on four splayed legs with footpads.
-function buildLander(B, y0, y1, d, ox, oz) {
-  const R = d / 2, h = y1 - y0;
-  prism(B, 8, R, y0, y1, Math.PI / 8, C.gold, ox, oz, C.goldDark);
-  for (let i = 0; i < 4; i++) {
-    const a = Math.PI / 4 + i * Math.PI / 2, c = Math.cos(a), s = Math.sin(a);
-    const top = [ox + c * R * 0.7, y0 + 0.1 * h, oz + s * R * 0.7];
-    const foot = [ox + c * R * 1.3, y0 - 0.55 * d, oz + s * R * 1.3];
+// Lunar lander: crinkled gold descent stage, a white ascent cabin with
+// windows and RCS quads, four legs with braces and footpads, and a descent bell.
+function buildLander(B, y0, y1, d, ox, oz, paint = null) {
+  const R = d / 2, h = y1 - y0, ascY = y0 + 0.5 * h;
+  const gold = paint ? hex(paint.c) : C.gold, gold2 = mix3(gold, [0, 0, 0], 0.35);
+  prismCrinkle(B, 8, R, y0, ascY, Math.PI / 8, gold, gold2, ox, oz);
+  prism(B, 8, 0.6 * R, ascY, y1, Math.PI / 8, C.metal, ox, oz, C.white);
+  const wy = (ascY + y1) / 2, hh = 0.12 * (y1 - ascY), rc = 0.6 * R * 1.01, wd = 0.13 * R;
+  for (const a of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+    const cx = ox + rc * Math.cos(a), cz = oz + rc * Math.sin(a), tx = -Math.sin(a) * wd, tz = Math.cos(a) * wd;
+    quadFace(B, [[cx + tx, wy - hh, cz + tz], [cx - tx, wy - hh, cz - tz], [cx - tx, wy + hh, cz - tz], [cx + tx, wy + hh, cz + tz]],
+             [Math.cos(a), 0, Math.sin(a)], C.dark);
+  }
+  for (let k = 0; k < 4; k++) {
+    const a = Math.PI / 4 + k * Math.PI / 2, px = ox + 0.6 * R * Math.cos(a), pz = oz + 0.6 * R * Math.sin(a);
+    box(B, [px - 0.05 * d, y1 - 0.04 * h, pz - 0.05 * d], [px + 0.05 * d, y1, pz + 0.05 * d], C.gun);
+  }
+  for (let k = 0; k < 4; k++) {
+    const a = Math.PI / 4 + k * Math.PI / 2, c = Math.cos(a), s = Math.sin(a);
+    const top = [ox + c * 0.7 * R, y0 + 0.1 * h, oz + s * 0.7 * R];
+    const foot = [ox + c * 1.3 * R, y0 - 0.55 * d, oz + s * 1.3 * R];
     tube(B, top, foot, 0.035 * d + 0.03, C.gun, 6);
+    tube(B, [ox + c * 0.98 * R, y0 + 0.35 * h, oz + s * 0.98 * R],
+            [(top[0] + foot[0]) / 2, (top[1] + foot[1]) / 2, (top[2] + foot[2]) / 2], 0.02 * d + 0.02, C.gun, 5);
     box(B, [foot[0] - 0.2 * d, foot[1] - 0.015 * d, foot[2] - 0.2 * d],
             [foot[0] + 0.2 * d, foot[1], foot[2] + 0.2 * d], C.gun);
   }
+  for (let k = 0; k < 4; k++) {
+    const a = Math.PI / 8 + k * Math.PI / 2, yy = y0 + 0.4 * h, rr = R * 1.02;
+    const cx = ox + rr * Math.cos(a), cz = oz + rr * Math.sin(a);
+    box(B, [cx - 0.04 * d, yy - 0.04 * d, cz - 0.04 * d], [cx + 0.04 * d, yy + 0.04 * d, cz + 0.04 * d], C.gun);
+  }
+  lathe(B, [{ r: 0.2 * R, y: y0 + 0.02 * h, c: C.copperDark }, { r: 0.45 * R, y: y0 - 0.3 * d, c: C.copper },
+            { r: 0.5 * R, y: y0 - 0.3 * d, c: C.throat }, { r: 0, y: y0 - 0.3 * d, c: C.throat }], 24, ox, oz);
 }
 
-// Fairing: translucent ogive, drawn last with depth writes off.
-function buildFairing(B, y0, y1, d) {
-  const R = d / 2, H = y1 - y0, P = [];
+// Fairing: an ogive that starts flush with the top stage. Opaque by default
+// (painted like a part); the renderer makes it translucent for X-ray.
+function buildFairing(B, y0, y1, d, paint = null) {
+  const R = d / 2, H = y1 - y0, col = paint ? hex(paint.c) : C.white, P = [];
   for (let k = 0; k <= 24; k++) {
     const u = k / 24;
-    P.push({ r: R * Math.sqrt(Math.max(0, 1 - u * u)), y: y0 + u * H, c: C.white });
+    P.push({ r: R * Math.sqrt(Math.max(0, 1 - u * u)), y: y0 + u * H, c: col });
   }
   lathe(B, P, 48);
-}
-
-// Conical interstage where the diameter changes.
-function buildAdapter(B, d0, d1, y0, y1, ox, oz) {
-  lathe(B, [{ r: d0 / 2, y: y0, c: C.metal }, { r: d1 / 2, y: y1, c: C.metal }], 48, ox, oz);
 }
 
 // The radial set: count boosters evenly around stage 1, bottom-aligned with it.
@@ -246,32 +384,31 @@ function buildBoosters(B, cfg) {
   const bellH = Math.max(1.2, 0.9 * cfg.bd), y1 = bellH + cfg.L, nh = 0.7 * cfg.bd;
   for (let i = 0; i < cfg.count; i++) {
     const t = TAU * i / cfg.count, ox = R * Math.cos(t), oz = R * Math.sin(t);
-    buildTank(B, bellH, y1, cfg.bd, cfg.prop, ox, oz);
+    buildTank(B, bellH, y1, cfg.bd, cfg.prop, ox, oz, cfg.paint || null);
     const P = [];
-    for (let k = 0; k <= 10; k++) { const u = k / 10; P.push({ r: rb * Math.sqrt(1 - u * u), y: y1 + nh * u, c: C.white }); }
+    for (let k = 0; k <= 10; k++) { const u = k / 10; P.push({ r: rb * Math.sqrt(1 - u * u), y: y1 + nh * u, c: cfg.paint ? hex(cfg.paint.c) : C.white }); }
     lathe(B, P, 40, ox, oz);
     buildEngine(B, 0, bellH, cfg.bd, cfg.n, ox, oz);
     B.cyl.push({ cx: ox, cz: oz, r: rb, y0: 0, y1: y1 + nh });
   }
 }
 
-// ------------------------------------------------------------ scene --------
 // One mesh per layout row, so picking and hover work per part. An interstage
-// cone belongs to the stage above it. Fairing and ghost are drawn translucent.
+// cone belongs to the stage above it. The fairing is its own mesh (fair: true).
 function buildStack(scene) {
   const lay = scene.lay, asm = scene.asm, an = lay.analysis, rows = lay.rows;
   const propOf = new Map();
   an.stages.forEach(s => s.tanks.forEach(t => propOf.set(t.id, s.prop)));
   const meshes = [];
   rows.forEach((r, j) => {
-    const p = r.part, B = new Build(), R = r.d / 2;
-    if (p.type === 'tank') buildTank(B, r.y0, r.y1, r.d, propOf.get(p.id) || 'kerolox', 0, 0);
+    const p = r.part, B = new Build(), R = r.d / 2, paint = p.paint || null;
+    if (p.type === 'tank') buildTank(B, r.y0, r.y1, r.d, propOf.get(p.id) || 'kerolox', 0, 0, paint);
     else if (p.type === 'engine') buildEngine(B, r.y0, r.y1, r.d, Math.max(1, Math.min(33, p.count || 1)), 0, 0);
     else if (p.type === 'decoupler') buildDecoupler(B, r.y0, r.y1, r.d, 0, 0);
     else if (p.type === 'payload') {
-      if (p.kind === 'capsule') buildCapsule(B, r.y0, r.y1, r.d, 0, 0);
-      else if (p.kind === 'bus') buildBus(B, r.y0, r.y1, r.d, 0, 0);
-      else buildLander(B, r.y0, r.y1, r.d, 0, 0);
+      if (p.kind === 'capsule') buildCapsule(B, r.y0, r.y1, r.d, 0, 0, paint, p.crewed !== false);
+      else if (p.kind === 'bus') buildBus(B, r.y0, r.y1, r.d, 0, 0, paint);
+      else buildLander(B, r.y0, r.y1, r.d, 0, 0, paint);
     }
     if (j > 0 && rows[j - 1].d > 0 && r.d > 0 && Math.abs(r.d - rows[j - 1].d) > 0.05) {
       const adH = Math.min(1.2, 0.25 * Math.max(rows[j - 1].d, r.d) + 0.1);
@@ -280,24 +417,28 @@ function buildStack(scene) {
     const wide = p.type === 'payload' && p.kind === 'bus' ? 2.4 : 1;
     B.cyl.push({ cx: 0, cz: 0, r: R * wide, y0: r.y0, y1: r.y1 });
     const mat = MATERIAL[p.type === 'payload' ? p.kind : p.type] || MATERIAL.tank;
-    meshes.push({ id: p.id, B, alpha: false, metal: mat[0], shin: mat[1] });
+    meshes.push({ id: p.id, B, fair: false, metal: mat[0], shin: mat[1] });
   });
   if (lay.fairing) {
     const f = lay.fairing, B = new Build();
-    buildFairing(B, f.y0, f.y1, f.d);
+    buildFairing(B, f.y0, f.y1, f.d, f.part.paint || null);
     B.cyl.push({ cx: 0, cz: 0, r: f.d / 2, y0: f.y0, y1: f.y1 });
-    meshes.push({ id: f.part.id, B, alpha: true, metal: 0, shin: 30 });
+    meshes.push({ id: f.part.id, B, fair: true, metal: 0, shin: 40 });
   }
   const g = an.stages.length && asm.boosters ? asm.boosters : null;
   if (g) {
     const B = new Build();
     buildBoosters(B, {
       count: g.count, bd: g.diameter, L: g.length, n: an.boosters ? an.boosters.n : (g.engines || 1),
-      prop: an.boosters ? an.boosters.prop : 'kerolox', core: an.stages[0].diameter,
+      prop: an.boosters ? an.boosters.prop : 'kerolox', core: an.stages[0].diameter, paint: g.paint || null,
     });
-    meshes.push({ id: scene.boostersId || 'boosters', B, alpha: false, metal: 0.55, shin: 60 });
+    meshes.push({ id: scene.boostersId || 'boosters', B, fair: false, metal: 0.55, shin: 60 });
   }
   return meshes;
+}
+
+function buildAdapter(B, d0, d1, y0, y1, ox, oz) {
+  lathe(B, [{ r: d0 / 2, y: y0, c: C.metal }, { r: d1 / 2, y: y1, c: C.metal }], 48, ox, oz);
 }
 
 function buildGhostMesh(gh) {
@@ -565,16 +706,18 @@ export function createVabRenderer(canvas) {
       if (s && s.hoverId && id === s.hoverId) return { tint: [1, 1, 1], tintK: 0.14 };
       return { tint: [0, 0, 0], tintK: 0 };
     };
-    const off = [0, 0, 0];
-    for (const m of state.meshes) if (!m.alpha) {
+    const off = [0, 0, 0], xr = !!(s && s.xray);
+    for (const m of state.meshes) if (!m.fair) drawMesh(m, { off, alpha: 1, ...tintFor(m.id), ghost: false });
+    // the fairing is a painted part; X-ray turns it into glass so the payload shows
+    for (const m of state.meshes) if (m.fair) {
       const t = tintFor(m.id);
-      drawMesh(m, { off, alpha: 1, ...t, ghost: false });
+      if (xr) {
+        gl.depthMask(false);
+        drawMesh(m, { off, alpha: 0.2, ...t, ghost: false });
+        gl.depthMask(true);
+      } else drawMesh(m, { off, alpha: 0.94, ...t, ghost: false });
     }
     gl.depthMask(false);
-    for (const m of state.meshes) if (m.alpha) {
-      const t = tintFor(m.id);
-      drawMesh(m, { off, alpha: 0.26, ...t, ghost: false });
-    }
     if (state.ghost && s && s.ghost) {
       drawMesh(state.ghost, { off: [0, s.ghost.y, 0], alpha: 0.45, tint: [0, 0, 0], tintK: 0, ghost: true });
     }
